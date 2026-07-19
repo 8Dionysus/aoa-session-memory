@@ -841,6 +841,12 @@ def test_agent_event_taxonomy_task_episodes_and_search_routes(tmp_path: Path, mo
     assert episode_hits["ok"] is True
     assert episode_hits["result_count"] >= 1
     assert episode_hits["results"][0]["task_episode_id"] == "task-0001"
+    assert episode_hits["results"][0]["candidate_id"] == (
+        episode_hits["results"][0]["doc_id"]
+    )
+    assert episode_hits["candidate_ids"][0] == (
+        episode_hits["results"][0]["candidate_id"]
+    )
     assert episode_hits["results"][0]["match_channel"] == "episode_contextual_bm25"
     assert episode_hits["results"][0]["raw_ref"] == "raw:line:2"
     assert episode_hits["results"][0]["reading_contract"]["status"] == "candidate_navigation_only"
@@ -1804,7 +1810,9 @@ def test_fork_local_episode_admits_structured_new_task_but_not_developer_bootstr
     assert "You are an agent in a team" not in local["intent"]
 
 
-def test_fork_runtime_task_started_after_terminal_opens_distinct_delegated_lifecycles() -> None:
+def test_fork_runtime_task_started_after_terminal_opens_distinct_delegated_lifecycles(
+    tmp_path: Path,
+) -> None:
     child_session_id = "11111111-2222-4333-8444-555555555555"
     parent_session_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
     declared_timestamp = "2026-07-11T14:44:21Z"
@@ -1812,11 +1820,18 @@ def test_fork_runtime_task_started_after_terminal_opens_distinct_delegated_lifec
         declared_timestamp
     ).timestamp()
 
-    def delegated_task(ciphertext: str) -> dict[str, Any]:
+    def delegated_task(
+        ciphertext: str,
+        turn_id: str,
+        recipient: str = "/root/operational_use_wave_e",
+    ) -> dict[str, Any]:
         return {
             "type": "agent_message",
             "author": "/root",
-            "recipient": "/root/operational_use_wave_e",
+            "recipient": recipient,
+            "internal_chat_message_metadata_passthrough": {
+                "turn_id": turn_id,
+            },
             "content": [
                 {
                     "type": "input_text",
@@ -1875,7 +1890,7 @@ def test_fork_runtime_task_started_after_terminal_opens_distinct_delegated_lifec
         {
             "timestamp": "2026-07-11T14:44:23.163Z",
             "type": "response_item",
-            "payload": delegated_task("opaque-one"),
+            "payload": delegated_task("opaque-one", "turn-one"),
         },
         {
             "timestamp": "2026-07-11T14:59:51.454Z",
@@ -1907,7 +1922,7 @@ def test_fork_runtime_task_started_after_terminal_opens_distinct_delegated_lifec
         {
             "timestamp": "2026-07-11T15:00:24.108Z",
             "type": "response_item",
-            "payload": delegated_task("opaque-two"),
+            "payload": delegated_task("opaque-two", "turn-two"),
         },
         {
             "timestamp": "2026-07-11T15:04:54.736Z",
@@ -1939,7 +1954,7 @@ def test_fork_runtime_task_started_after_terminal_opens_distinct_delegated_lifec
         {
             "timestamp": "2026-07-11T15:13:23.594Z",
             "type": "response_item",
-            "payload": delegated_task("opaque-three"),
+            "payload": delegated_task("opaque-three", "turn-three"),
         },
         {
             "timestamp": "2026-07-11T15:29:33.330Z",
@@ -1968,6 +1983,11 @@ def test_fork_runtime_task_started_after_terminal_opens_distinct_delegated_lifec
         [],
         lineage=lineage,
     )
+    for episode in episodes:
+        episode["lineage"] = module.task_episode_lineage_for_range(
+            lineage,
+            episode["event_range"],
+        )
 
     assert len(episodes) == 3
     assert [episode["event_range"] for episode in episodes] == [
@@ -2033,6 +2053,135 @@ def test_fork_runtime_task_started_after_terminal_opens_distinct_delegated_lifec
         episode["semantic_continuations"] == []
         for episode in episodes
     )
+    count_query = module.episode_delegated_lifecycle_query(
+        "Сколько было NEW_TASK для /root/operational_use_wave_e? Три?"
+    )
+    path_query = module.episode_delegated_lifecycle_query(
+        "Пройди пути task_started -> NEW_TASK -> task_complete"
+    )
+    replay_query = module.episode_delegated_lifecycle_query(
+        "Почему три NEW_TASK с одинаковым task name нельзя назвать replay одного задания?"
+    )
+    assert count_query["mode"] == "count"
+    assert count_query["requested_cardinality"] == 3
+    assert count_query["target"] == "/root/operational_use_wave_e"
+    assert path_query["mode"] == "ordered_path"
+    assert replay_query["mode"] == "semantic_identity"
+    assert module.memory_query_intent(
+        "Пройди пути task_started -> NEW_TASK -> task_complete"
+    )["primary"] == "relationship_topology"
+    assert module.memory_query_intent(
+        "Почему три NEW_TASK с одинаковым task name нельзя назвать replay одного задания?"
+    )["primary"] == "relationship_topology"
+    for episode in episodes:
+        alignment = module.episode_delegated_lifecycle_alignment(
+            episode,
+            query=path_query,
+        )
+        assert alignment["status"] == (
+            "typed_delegated_lifecycle_candidate"
+        )
+        assert alignment["accepted"] is False
+
+    workspace = tmp_path / "AbyssOS"
+    workspace.mkdir()
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-delegated-lifecycle.jsonl"
+    rows[0]["payload"]["cwd"] = str(workspace)
+    transcript_rows = [
+        *rows,
+        {
+            "timestamp": "2026-07-11T15:30:00Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "task_started",
+                "turn_id": "turn-other",
+            },
+        },
+        {
+            "timestamp": "2026-07-11T15:30:01Z",
+            "type": "response_item",
+            "payload": delegated_task(
+                "opaque-other",
+                "turn-other",
+                "/root/other_worker",
+            ),
+        },
+        {
+            "timestamp": "2026-07-11T15:30:02Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "task_complete",
+                "turn_id": "turn-other",
+            },
+        },
+    ]
+    write_jsonl(transcript, transcript_rows)
+    receipt = module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": child_session_id,
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    assert receipt["ok"] is True
+    assert module.search_index_sessions(
+        aoa_root=aoa_root,
+        target="all",
+        rebuild=True,
+    )["ok"] is True
+
+    structural = module.episode_semantic_search(
+        aoa_root=aoa_root,
+        query=(
+            "Сколько было NEW_TASK для "
+            "/root/operational_use_wave_e? Три?"
+        ),
+        session=child_session_id,
+        mode="sparse",
+        limit=8,
+        explain=True,
+    )
+    gate = structural["retrieval"][
+        "delegated_lifecycle_relation_gate"
+    ]
+    assert gate["status"] == "qualified_delegated_lifecycle_group"
+    assert gate["group_selection_status"] == (
+        "exact_target_group_selected"
+    )
+    assert gate["qualified_count"] == 3
+    assert gate["candidate_count"] == 4
+    assert gate["out_of_scope_candidate_count"] == 1
+    assert gate["structural_claim_admitted"] is True
+    assert structural["answer_admission"]["admitted"] is True
+    assert structural["answer_admission"]["claim_shape"] == (
+        "delegated_lifecycle"
+    )
+    assert [
+        chain["refs"]["delegation"] for chain in gate["chains"]
+    ] == ["raw:line:4", "raw:line:9", "raw:line:14"]
+
+    replay = module.episode_semantic_search(
+        aoa_root=aoa_root,
+        query=(
+            "Почему три NEW_TASK с одинаковым task name нельзя "
+            "назвать replay одного задания?"
+        ),
+        session=child_session_id,
+        mode="sparse",
+        limit=8,
+    )
+    assert replay["answer_admission"]["admitted"] is False
+    assert replay["answer_admission"]["status"] == (
+        "delegated_lifecycle_semantic_identity_unresolved"
+    )
+    assert replay["retrieval"][
+        "delegated_lifecycle_relation_gate"
+    ]["structural_claim_admitted"] is True
 
 
 def test_inter_agent_new_task_after_terminal_is_a_semantic_fallback_without_task_started() -> None:
@@ -15948,6 +16097,10 @@ def test_memory_query_intent_separates_exact_typed_episode_temporal_graph_and_di
         "was aoa-session-memory CLI, MCP, or a session-memory skill actually invoked in this span?": "entity_usage",
         "какой terminal stack уже стоял и чего не хватало перед установкой Ghostty": "temporal_state",
         "MV3 background fix -> restart failure -> safer process selection -> successful capture": "causal_chain",
+        "что вызвало restart failure после MV3 background fix": "causal_chain",
+        "какие изменения последовали после решения добавить runtime adapter": "temporal_state",
+        "Какая recovery-цепочка последовала после Ты завис": "temporal_state",
+        "Где начинается локальная работа fork после parent history": "temporal_state",
         "как skill aoa-eval связан с MCP и owner route": "relationship_topology",
         "какие повторяющиеся ошибки и решения были во всех старых сессиях": "global_narrative",
         "почему зелёный downstream canary мог не проверить соседние репозитории": "causal_chain",
@@ -21015,6 +21168,82 @@ def test_entity_usage_lifecycle_blocks_candidate_attribution_on_registry_collisi
     ] is False
 
 
+def test_entity_usage_lifecycle_resolves_observed_skill_instance_without_merging_collision() -> None:
+    entries: dict[str, dict[str, Any]] = {}
+    for owner, digest in (
+        ("owner-a", "a" * 64),
+        ("owner-b", "b" * 64),
+    ):
+        entry = module.entity_registry_make_entry(
+            kind="skill",
+            key="colliding-skill",
+            aliases=["colliding-skill"],
+            source_refs=[
+                {
+                    "source_type": "codex_user_skills",
+                    "path": f"/fixture/{owner}/SKILL.md",
+                    "status": "active",
+                    "sha256": digest,
+                }
+            ],
+            source_surface="codex_user_skills",
+            owner=owner,
+            status="active",
+        )
+        module.entity_registry_merge_entry(entries, entry)
+    registry_entry = next(iter(entries.values()))
+    owner_b_candidate = next(
+        candidate["candidate_id"]
+        for candidate in registry_entry["identity_candidates"]
+        if candidate["source_refs"][0]["path"]
+        == "/fixture/owner-b/SKILL.md"
+    )
+    read_event = {
+        "doc_id": "event:session:001:000031",
+        "role": "usage",
+        "event_type": "FILE_READ",
+        "skill_evidence_state": "skill_read",
+        "snippet": "sed -n '1,260p' /fixture/owner-b/SKILL.md",
+        "execution_read_result_refs": {"raw": "raw:line:32"},
+        "refs": {
+            "raw": "raw:line:31",
+            "segment": "001.md#event-000031",
+        },
+    }
+    lifecycle = module.entity_usage_lifecycle_projection(
+        normalized_kind="skill",
+        requested_kind="skill",
+        registry_lookup={"entries": [registry_entry]},
+        skill_evidence={},
+        entrypoint_events=[],
+        usage_events=[read_event],
+        result_events=[],
+        outcome_events=[],
+        context_events=[],
+        consequence_events=[],
+        chains=[],
+        false_correlation_events=[],
+        truncated=False,
+        incomplete=False,
+        candidate_count_exhaustive=True,
+    )
+
+    assert lifecycle["identity"]["status"] == "ambiguous"
+    assert lifecycle["identity"]["collision_preserved"] is True
+    assert lifecycle["identity"][
+        "identity_attribution_admitted"
+    ] is False
+    assert lifecycle["identity"]["observed_instance_status"] == (
+        "resolved"
+    )
+    assert lifecycle["states"]["read"][
+        "identity_attribution_admitted"
+    ] is True
+    assert lifecycle["states"]["read"][
+        "observed_identity_candidate_ids"
+    ] == [owner_b_candidate]
+
+
 def test_entity_registry_query_reads_existing_snapshot_without_rebuild(tmp_path: Path, monkeypatch: Any, capsys: Any) -> None:
     aoa_root = tmp_path / ".aoa"
     future_epoch = time.time() + 3600
@@ -22962,6 +23191,38 @@ def test_session_scoped_skill_prompt_visibility_is_context_only(
         missing["quality"]["skill_prompt_visibility_probe"]["status"]
         == "not_present"
     )
+
+    session_dir = module.session_dir_from_record(record)
+    manifest = module.read_json(
+        session_dir / "session.manifest.json",
+        {},
+    )
+    segment_path = Path(str(manifest["segments"][0]["index"]))
+    segment_index = module.read_json(segment_path, {})
+    segment_index["route_signal_classifier_version"] = (
+        module.ROUTE_SIGNAL_CLASSIFIER_VERSION - 1
+    )
+    module.write_json(segment_path, segment_index)
+
+    stale_scan = module.session_query_source_event_scan(
+        aoa_root=aoa_root,
+        session=record["session_label"],
+    )
+    assert stale_scan["status"] == "incompatible_generation"
+    assert stale_scan["_entries"] == []
+    assert stale_scan["incompatible_segment_index_count"] == 1
+    assert stale_scan["generation_identities"]["compatible"] is False
+
+    stale_prompt_probe = module.skill_prompt_visibility_probe(
+        aoa_root=aoa_root,
+        anchor="example-visible-skill",
+        session=record["session_label"],
+    )
+    assert stale_prompt_probe["status"] == "incompatible_generation"
+    assert stale_prompt_probe["_hits"] == []
+    assert stale_prompt_probe["generation_identities"][
+        "compatible"
+    ] is False
 
 
 def test_skill_selection_admits_coordinated_targets_without_promoting_nearby_mentions() -> None:
@@ -65522,7 +65783,7 @@ def test_decision_followup_alignment_requires_typed_order_and_specificity() -> N
     )
     missing_specific = module.episode_decision_followup_alignment(positive_episode, specific_terms)
 
-    assert module.memory_query_intent(query)["primary"] == "causal_chain"
+    assert module.memory_query_intent(query)["primary"] == "temporal_state"
     assert positive["status"] == "ordered_action_result_chain"
     assert positive["chain"]["anchor"]["refs"]["raw"] == "raw:line:10"
     assert positive["chain"]["action"]["refs"]["raw"] == "raw:line:20"
@@ -77687,60 +77948,609 @@ def test_rebuild_session_labels_backfills_existing_archive(tmp_path: Path) -> No
     assert registry["sessions"][0]["session_label"] == "2026-05-13__001__backfill-readable-names"
 
 
-def test_derived_text_privacy_gate_preserves_raw_and_excludes_credential_values(
-    tmp_path: Path,
-) -> None:
-    """Synthetic reproduction derived from a manually observed real-session leak."""
-    workspace = tmp_path / "AbyssOS"
-    aoa_root = workspace / ".aoa"
-    module.copy_portable_bundle(
-        source_aoa_root=SCRIPT.parents[1],
-        target_aoa_root=aoa_root,
+def test_episode_query_scope_separates_session_date_and_slash_alternative() -> None:
+    session_id = "019eb8c7-a7b5-76f0-b66a-0eb3791305ff"
+    scoped = module.episode_semantic_query_scope(
+        "Что пользователь повторил после turn_aborted "
+        f"в сессии {session_id}?"
     )
-    transcript = (
-        tmp_path
-        / ".codex"
-        / "sessions"
-        / "2026"
-        / "07"
-        / "19"
-        / "rollout-2026-07-19T00-00-00-derived-privacy.jsonl"
+    dated = module.episode_semantic_query_scope(
+        "Найди replay/resume связи около 11 июня 2026 "
+        "для распространения evals."
     )
-    secret_label = "OVMS_EMBEDDINGS_API_KEY"
-    secret_value = "".join(
+    exact_dated = module.episode_semantic_query_scope(
+        "Какая recovery-цепочка последовала после 'Ты завис' 10 июня 2026?"
+    )
+    shape = module.literal_query_shape(
+        "Найди replay/resume связи около 11 июня 2026 "
+        "для распространения evals."
+    )
+
+    assert scoped["effective_session"] == session_id
+    assert session_id not in scoped["semantic_query_text"]
+    assert "сессии" not in scoped["semantic_query_text"]
+    assert dated["semantic_query_text"] == (
+        "Найди replay/resume связи для распространения evals."
+    )
+    assert dated["natural_calendar_date"] == "2026-06-11"
+    assert dated["natural_calendar_date_from"] == "2026-06-10"
+    assert dated["natural_calendar_date_to"] == "2026-06-12"
+    assert dated["natural_calendar_date_mode"] == (
+        "session_calendar_date_approximate_timezone_tolerant"
+    )
+    assert dated["event_time_claim_allowed"] is False
+    assert exact_dated["natural_calendar_date"] == "2026-06-10"
+    assert exact_dated["natural_calendar_date_from"] == "2026-06-09"
+    assert exact_dated["natural_calendar_date_to"] == "2026-06-11"
+    assert exact_dated["natural_calendar_date_mode"] == (
+        "session_calendar_date_timezone_tolerant"
+    )
+    assert exact_dated["event_time_claim_allowed"] is False
+    assert shape["path_anchor"] == ""
+    assert shape["primary"] != module.LITERAL_QUERY_KIND_PATH
+    assert module.literal_query_path_anchor("tools/abyss-machine-test") == (
+        "tools/abyss-machine-test"
+    )
+
+
+def test_episode_replay_alignment_requires_typed_relation_and_raw_refs() -> None:
+    prior = {
+        "text": "Надо распространить evals по остальным репозиториям",
+        "source_lane": "message_user",
+        "admission_basis": "canonical_user_intent",
+        "line": 1663,
+        "refs": {"raw": "raw:line:1663", "session": "session.json"},
+    }
+    replay = {
+        "text": "Надо распространить evals по остальным репозиториям",
+        "source_lane": "message_user",
+        "admission_basis": "canonical_user_replayed_intent",
+        "line": 1670,
+        "refs": {"raw": "raw:line:1670", "session": "session.json"},
+    }
+    episode = {
+        "event_range": {"from_line": 1663, "to_line": 1739},
+        "representations": {"intents": [prior, replay]},
+        "semantic_continuations": [
+            {
+                **replay,
+                "relation": "replayed_intent",
+                "admission_basis": "exact_normalized_prior_intent",
+            }
+        ],
+    }
+    query = (
+        "Что пользователь повторил после turn_aborted для "
+        "распространения evals?"
+    )
+    terms = module.episode_semantic_query_terms(query)
+    alignment = module.episode_replay_alignment(
+        episode,
+        terms,
+        query_text=query,
+    )
+    evidence = module.episode_semantic_candidate_evidence(
+        episode,
+        terms,
+        query_text=query,
+    )
+    source_kind = module.episode_source_kind_alignment(
+        evidence,
+        terms,
+        query_text=query,
+    )
+    relation_evidence = {"supporting_evidence": []}
+    relation_evidence["supporting_evidence"] = (
+        module.episode_relation_prioritized_support(
+            relation_evidence,
+            decision_followup={},
+            failure_recovery={},
+            replay_alignment=alignment,
+            issue_resolution={},
+        )
+    )
+    relation_source_kind = module.episode_source_kind_alignment(
+        relation_evidence,
+        terms,
+        query_text=query,
+    )
+
+    assert alignment["status"] == "typed_replayed_intent_relation"
+    assert alignment["ranking_boost"] >= 150.0
+    assert alignment["chain"]["prior_intent"]["refs"]["raw"] == (
+        "raw:line:1663"
+    )
+    assert alignment["chain"]["replayed_intent"]["refs"]["raw"] == (
+        "raw:line:1670"
+    )
+    assert alignment["accepted"] is False
+    assert alignment["claim_scope"] == (
+        "navigation_until_bounded_raw_interruption_read"
+    )
+    assert source_kind["status"] == "source_kind_aligned"
+    assert relation_source_kind["status"] == "source_kind_aligned"
+    assert relation_source_kind["evidence"]["refs"]["raw"] in {
+        "raw:line:1663",
+        "raw:line:1670",
+    }
+
+    without_relation = dict(episode)
+    without_relation["semantic_continuations"] = []
+    rejected = module.episode_replay_alignment(
+        without_relation,
+        terms,
+        query_text=query,
+    )
+    assert rejected["status"] == "replayed_intent_relation_missing"
+    assert rejected["ranking_boost"] == 0.0
+
+    replay_admission = module.episode_answer_admission(
+        {
+            "doc_id": "episode:replay-navigation",
+            "query_coverage": {
+                "coverage": 1.0,
+                "matched_term_count": len(terms),
+            },
+            "supporting_evidence": [
+                {
+                    "matched_query_terms": [
+                        term["token"] for term in terms
+                    ],
+                    "refs": {"raw": "raw:line:1670"},
+                }
+            ],
+            "replay_alignment": alignment,
+            "source_kind_alignment": source_kind,
+        },
+        query_term_count=len(terms),
+    )
+    assert replay_admission["admitted"] is False
+    assert replay_admission["status"] == (
+        "replay_interruption_evidence_requires_raw_read"
+    )
+    assert replay_admission["basis"] == (
+        "replay_requires_bounded_raw_interruption_read"
+    )
+    replay_routes = module.episode_semantic_expansion_routes(
+        session_id="replay-session",
+        episode_id="task-0013",
+        session_index_ref="session.index.json",
+        evidence={"supporting_evidence": []},
+        fallback_raw_ref="",
+        replay_alignment=alignment,
+    )
+    assert replay_routes["replay_interruption_window"] == (
+        "evidence-window replay-session raw:line:1663 "
+        "--before 1 --after 9"
+    )
+    replay_next_route = module.episode_unadmitted_relation_next_route(
         [
-            "Aa9/",
-            "Bb8+",
-            "Cc7D",
-            "Ee6/",
-            "Ff5+",
-            "Gg4H",
-            "Ii3/",
-            "Jj2+",
-            "Kk1L",
-            "Mm0/",
-            "Nn9+",
-            "Pp8Q",
-            "Rr7/",
-            "Ss6+",
-            "Tt5U",
-            "Vv4/",
-        ]
+            {
+                "replay_alignment": alignment,
+                "expansion_routes": replay_routes,
+            }
+        ],
+        replay_admission,
     )
-    assignment = f"{secret_label}={secret_value}"
+    assert replay_next_route["status"] == "ready"
+    assert replay_next_route["command"] == (
+        replay_routes["replay_interruption_window"]
+    )
+    assert replay_next_route["expected_refs"] == [
+        "raw:line:1663",
+        "raw:line:1670",
+    ]
+
+    missing_source_admission = module.episode_answer_admission(
+        {
+            "doc_id": "episode:wrong-source-kind",
+            "query_coverage": {
+                "coverage": 1.0,
+                "matched_term_count": len(terms),
+            },
+            "supporting_evidence": [
+                {
+                    "matched_query_terms": [
+                        term["token"] for term in terms
+                    ],
+                    "refs": {"raw": "raw:line:1700"},
+                }
+            ],
+            "source_kind_alignment": {
+                "active": True,
+                "status": "source_kind_evidence_missing",
+            },
+        },
+        query_term_count=len(terms),
+    )
+    assert missing_source_admission["admitted"] is False
+    assert missing_source_admission["status"] == (
+        "requested_source_kind_evidence_unresolved"
+    )
+
+
+def test_episode_lineage_alignment_ranks_boundary_and_history_sides() -> None:
+    query = "Где начинается локальная работа fork после parent history?"
+    terms = module.episode_semantic_query_terms(query)
+    lineage = {
+        "relationship": "forked_from",
+        "parent_session_id": "parent-session",
+        "lineage_evidence_ref": "raw:line:1",
+        "local_work_boundary_ref": "raw:line:3283",
+    }
+    history = {
+        "event_range": {"from_line": 3273, "to_line": 3281},
+        "lineage": {
+            **lineage,
+            "episode_scope": "pre_child_task_history_candidate",
+        },
+    }
+    first_local = {
+        "event_range": {"from_line": 3283, "to_line": 3598},
+        "lineage": {**lineage, "episode_scope": "local_fork_work"},
+    }
+    later_local = {
+        "event_range": {"from_line": 3599, "to_line": 3658},
+        "lineage": {**lineage, "episode_scope": "local_fork_work"},
+    }
+    earlier_history = {
+        "event_range": {"from_line": 2449, "to_line": 2883},
+        "lineage": {
+            **lineage,
+            "episode_scope": "pre_child_task_history_candidate",
+        },
+    }
+
+    history_alignment = module.episode_lineage_alignment(
+        history,
+        terms,
+        query_text=query,
+    )
+    first_alignment = module.episode_lineage_alignment(
+        first_local,
+        terms,
+        query_text=query,
+    )
+    later_alignment = module.episode_lineage_alignment(
+        later_local,
+        terms,
+        query_text=query,
+    )
+    earlier_alignment = module.episode_lineage_alignment(
+        earlier_history,
+        terms,
+        query_text=query,
+    )
+
+    assert first_alignment["starts_at_local_work_boundary"] is True
+    assert history_alignment["ends_at_parent_history_boundary"] is True
+    assert earlier_alignment["ends_at_parent_history_boundary"] is False
+    assert first_alignment["ranking_boost"] > history_alignment["ranking_boost"]
+    assert history_alignment["ranking_boost"] > later_alignment["ranking_boost"]
+    assert history_alignment["ranking_boost"] > earlier_alignment["ranking_boost"]
+    assert first_alignment["evidence_refs"] == {
+        "lineage": "raw:line:1",
+        "local_work_boundary": "raw:line:3283",
+    }
+
+    contrast_query = "отдели replayed parent history от local work в fork"
+    contrast_terms = module.episode_semantic_query_terms(contrast_query)
+    contrast_replay_profile = module.episode_replay_query_profile(
+        contrast_terms,
+        query_text=contrast_query,
+    )
+    contrast_first = module.episode_lineage_alignment(
+        first_local,
+        contrast_terms,
+        query_text=contrast_query,
+    )
+    contrast_history = module.episode_lineage_alignment(
+        history,
+        contrast_terms,
+        query_text=contrast_query,
+    )
+    contrast_earlier = module.episode_lineage_alignment(
+        earlier_history,
+        contrast_terms,
+        query_text=contrast_query,
+    )
+    assert contrast_first["ranking_boost"] > contrast_history["ranking_boost"]
+    assert contrast_history["ranking_boost"] > contrast_earlier["ranking_boost"]
+    assert contrast_replay_profile["lineage_history_context"] is True
+    assert contrast_replay_profile["active"] is False
+
+    lineage_admission = module.episode_answer_admission(
+        {
+            "doc_id": "episode:fork-lineage-navigation",
+            "query_coverage": {
+                "coverage": 1.0,
+                "matched_term_count": len(terms),
+            },
+            "supporting_evidence": [
+                {
+                    "matched_query_terms": [
+                        term["token"] for term in terms
+                    ],
+                    "refs": {"raw": "raw:line:3283"},
+                }
+            ],
+            "lineage_alignment": first_alignment,
+        },
+        query_term_count=len(terms),
+    )
+    assert lineage_admission["admitted"] is False
+    assert lineage_admission["status"] == (
+        "fork_lineage_comparison_evidence_unresolved"
+    )
+    lineage_routes = module.episode_semantic_expansion_routes(
+        session_id="child-session",
+        episode_id="task-0030",
+        session_index_ref="session.index.json",
+        evidence={"supporting_evidence": []},
+        fallback_raw_ref="",
+        lineage_alignment=first_alignment,
+    )
+    lineage_routes["parent_session"] = "task-episodes parent-session"
+    lineage_next_route = module.episode_unadmitted_relation_next_route(
+        [
+            {
+                "lineage_alignment": first_alignment,
+                "expansion_routes": lineage_routes,
+            }
+        ],
+        lineage_admission,
+    )
+    assert lineage_next_route["status"] == "ready"
+    assert lineage_next_route["commands"] == [
+        "evidence-window child-session raw:line:1 --before 0 --after 2",
+        (
+            "evidence-window child-session raw:line:3283 "
+            "--before 4 --after 6"
+        ),
+        "task-episodes parent-session",
+    ]
+
+
+def test_episode_failure_recovery_distinguishes_observed_sequence_from_causality() -> None:
+    episode = {
+        "semantic_continuations": [
+            {
+                "text": "Ты завис",
+                "line": 243,
+                "relation": "failure_observation",
+                "source_lane": "message_user",
+                "admission_basis": "typed_operator_conversation_act",
+                "refs": {"raw": "raw:line:243", "session": "session.json"},
+            },
+            {
+                "text": "Продолжай",
+                "line": 285,
+                "relation": "resume",
+                "source_lane": "message_user",
+                "admission_basis": "typed_operator_conversation_act",
+                "refs": {"raw": "raw:line:285", "session": "session.json"},
+            },
+        ],
+        "representations": {
+            "outcomes": [
+                {
+                    "text": "На связи. Не завис, проверяю состояние.",
+                    "line": 262,
+                    "source_lane": "message_assistant",
+                    "admission_basis": "assistant_observation",
+                    "refs": {
+                        "raw": "raw:line:262",
+                        "session": "session.json",
+                    },
+                }
+            ]
+        },
+        "failure_recovery_windows": [],
+    }
+    query = "Какая recovery-цепочка последовала после Ты завис?"
+    terms = module.episode_semantic_query_terms(query)
+    alignment = module.episode_failure_recovery_alignment(episode, terms)
+    replay_profile = module.episode_replay_query_profile(
+        terms,
+        query_text=query,
+    )
+    interval_replay_profile = module.episode_replay_query_profile(
+        module.episode_semantic_query_terms(
+            "Что произошло между сообщениями Ты завис и Продолжай?"
+        ),
+        query_text=(
+            "Что произошло между сообщениями Ты завис и Продолжай?"
+        ),
+    )
+
+    assert alignment["status"] == (
+        "ordered_observed_failure_resume_sequence"
+    )
+    assert replay_profile["resume"] is False
+    assert replay_profile["active"] is False
+    assert interval_replay_profile["resume"] is True
+    assert interval_replay_profile["active"] is False
+    assert alignment["ranking_boost"] >= 145.0
+    assert alignment["chain"]["failure_observation"]["refs"]["raw"] == (
+        "raw:line:243"
+    )
+    assert alignment["chain"]["resume_request"]["refs"]["raw"] == (
+        "raw:line:285"
+    )
+    assert alignment["accepted"] is False
+    assert alignment["sequence_admissible"] is True
+    assert alignment["claim_scope"] == (
+        "observed_temporal_sequence_not_causal_consequence"
+    )
+
+    prioritized_evidence = {"supporting_evidence": []}
+    prioritized_evidence["supporting_evidence"] = (
+        module.episode_relation_prioritized_support(
+            prioritized_evidence,
+            decision_followup={},
+            failure_recovery=alignment,
+            replay_alignment={},
+            issue_resolution={},
+        )
+    )
+    source_alignment = module.episode_source_kind_alignment(
+        prioritized_evidence,
+        module.episode_semantic_query_terms(
+            "где пользователь счёл агента зависшим, затем работа продолжилась"
+        ),
+        query_text=(
+            "где пользователь счёл агента зависшим, затем работа продолжилась"
+        ),
+    )
+    assert source_alignment["status"] == "source_kind_aligned"
+    assert source_alignment["evidence"]["refs"]["raw"] == (
+        "raw:line:243"
+    )
+
+    admission = module.episode_answer_admission(
+        {
+            "doc_id": "episode:observed-failure-resume",
+            "query_coverage": {"coverage": 0.2, "matched_term_count": 1},
+            "supporting_evidence": [],
+            "failure_recovery": alignment,
+        },
+        query_term_count=len(terms),
+    )
+    assert admission["admitted"] is True
+    assert admission["basis"] == (
+        "typed_observed_failure_resume_sequence_evidence"
+    )
+    assert admission["typed_failure_resume_sequence_admitted"] is True
+    claim_refs = module.episode_claim_evidence_refs(
+        {
+            "doc_id": "episode:observed-failure-resume",
+            "failure_recovery": alignment,
+        },
+        admission,
+    )
+    assert {
+        item["refs"]["raw"]
+        for item in claim_refs
+    } >= {"raw:line:243", "raw:line:285"}
+    assert "do not prove causal" in admission["policy"]
+
+    causal_candidates, causal_gate = (
+        module.episode_causal_claim_shape_gate(
+            [
+                {
+                    "doc_id": "episode:observed-failure-resume",
+                    "query_coverage": {
+                        "coverage": 1.0,
+                        "matched_term_count": len(terms),
+                    },
+                    "supporting_evidence": [],
+                    "failure_recovery": alignment,
+                    "causal_attribution": {
+                        "active": False,
+                        "status": "not_a_causal_attribution_query",
+                    },
+                }
+            ],
+            query_text="Почему агент завис и затем возобновил работу?",
+        )
+    )
+    causal_admission = module.episode_answer_admission(
+        causal_candidates[0],
+        query_term_count=len(terms),
+    )
+    assert causal_gate["required"] is True
+    assert causal_admission["admitted"] is False
+    assert causal_admission["status"] == (
+        "causal_relation_evidence_unresolved"
+    )
+
+
+def test_derived_text_redaction_is_idempotent_and_preserves_benign_identity() -> None:
+    known_secret = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"
+    bearer_secret = "bearerabcdefghijklmnopqrstuvwxyz0123456789"
+    cli_secret = "cliabcdefghijklmnopqrstuvwxyz0123456789"
+    assignment_secret = "assignmentabcdefghijklmnopqrstuvwxyz0123456789"
+    uri_secret = "uriabcdefghijklmnopqrstuvwxyz0123456789"
+    private_key = (
+        "-----BEGIN PRIVATE KEY-----\n"
+        "abcdefghijklmnopqrstuvwxyz0123456789\n"
+        "-----END PRIVATE KEY-----"
+    )
+    stable_id = "SAFE-STABLE-ID-7F13"
+    source = {
+        "stable_id": stable_id,
+        "known": known_secret,
+        "command": (
+            f"curl -H 'Authorization: Bearer {bearer_secret}' "
+            f"--api-key {cli_secret} https://example.test"
+        ),
+        "note": f"OVMS_API_KEY={assignment_secret}",
+        "uri": f"https://agent:{uri_secret}@example.test/path",
+        "encrypted_content": "ciphertextabcdefghijklmnopqrstuvwxyz",
+        "private_material": private_key,
+    }
+
+    redacted = module.redact_derived_value(source)
+    rendered = json.dumps(redacted, ensure_ascii=False, sort_keys=True)
+
+    for secret in (
+        known_secret,
+        bearer_secret,
+        cli_secret,
+        assignment_secret,
+        uri_secret,
+        "ciphertextabcdefghijklmnopqrstuvwxyz",
+        "abcdefghijklmnopqrstuvwxyz0123456789",
+    ):
+        assert secret not in rendered
+    assert redacted["stable_id"] == stable_id
+    assert module.DERIVED_TEXT_REDACTION_MARKER in rendered
+    assert module.DERIVED_PRIVATE_KEY_REDACTION_MARKER in rendered
+    assert module.redact_derived_value(redacted) == redacted
+    assert (
+        module.session_memory_generation_common()[
+            "derived_text_redaction_policy_version"
+        ]
+        == module.DERIVED_TEXT_REDACTION_POLICY_VERSION
+    )
+
+
+def test_generated_session_search_and_graph_views_do_not_duplicate_credentials(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-07-18T00-00-00-privacy.jsonl"
+    stable_anchor = "SAFE-ANCHOR-7F13"
+    known_secret = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"
+    bearer_secret = "bearerabcdefghijklmnopqrstuvwxyz0123456789"
+    json_secret = "jsonabcdefghijklmnopqrstuvwxyz0123456789"
+    encrypted_secret = "encryptedabcdefghijklmnopqrstuvwxyz0123456789"
+    oversized_secret = "oversizedabcdefghijklmnopqrstuvwxyz0123456789"
+    all_secrets = (
+        known_secret,
+        bearer_secret,
+        json_secret,
+        encrypted_secret,
+        oversized_secret,
+    )
     write_jsonl(
         transcript,
         [
             {
-                "timestamp": "2026-07-19T00:00:00Z",
+                "timestamp": "2026-07-18T00:00:00Z",
                 "type": "session_meta",
                 "payload": {
-                    "id": "derived-privacy-session",
-                    "cwd": str(workspace),
+                    "id": "privacy-session",
+                    "cwd": str(repo),
+                    "model": "gpt-5",
                 },
             },
             {
-                "timestamp": "2026-07-19T00:00:01Z",
+                "timestamp": "2026-07-18T00:00:01Z",
                 "type": "response_item",
                 "payload": {
                     "type": "message",
@@ -77749,44 +78559,58 @@ def test_derived_text_privacy_gate_preserves_raw_and_excludes_credential_values(
                         {
                             "type": "input_text",
                             "text": (
-                                f"Find configuration evidence for {secret_label}"
+                                f"Verify the exact identifier {stable_anchor} "
+                                "without treating credentials as memory."
                             ),
                         }
                     ],
                 },
             },
             {
-                "timestamp": "2026-07-19T00:00:02Z",
+                "timestamp": "2026-07-18T00:00:02Z",
                 "type": "response_item",
                 "payload": {
                     "type": "function_call",
                     "name": "exec_command",
-                    "call_id": "call-private-command",
+                    "call_id": "call-private",
                     "arguments": json.dumps(
                         {
                             "cmd": (
-                                f"export {assignment}; "
-                                "python3 -c 'print(\"configured\")'"
+                                "curl -H 'Authorization: Bearer "
+                                f"{bearer_secret}' --api-key {known_secret} "
+                                "https://example.test"
                             ),
-                            "workdir": str(workspace),
+                            "workdir": str(repo),
                         }
                     ),
                 },
             },
             {
-                "timestamp": "2026-07-19T00:00:03Z",
+                "timestamp": "2026-07-18T00:00:03Z",
                 "type": "response_item",
                 "payload": {
                     "type": "function_call_output",
-                    "call_id": "call-private-command",
-                    "output": (
-                        "Process exited with code 0\n"
-                        f"Output:\n{assignment}\nconfigured"
+                    "call_id": "call-private",
+                    "output": json.dumps(
+                        {
+                            "api_key": json_secret,
+                            "encrypted_content": encrypted_secret,
+                            "result": f"verified {stable_anchor}",
+                        }
                     ),
                 },
             },
             {
-                "timestamp": "2026-07-19T00:00:04Z",
+                "timestamp": "2026-07-18T00:00:04Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call-oversized",
+                    "output": oversized_secret + ("x" * 40_000),
+                },
+            },
+            {
+                "timestamp": "2026-07-18T00:00:05Z",
                 "type": "response_item",
                 "payload": {
                     "type": "message",
@@ -77794,94 +78618,55 @@ def test_derived_text_privacy_gate_preserves_raw_and_excludes_credential_values(
                     "content": [
                         {
                             "type": "output_text",
-                            "text": f"Observed {assignment} in runtime output.",
+                            "text": f"Verified benign identifier {stable_anchor}.",
                         }
-                    ],
-                },
-            },
-            {
-                "timestamp": "2026-07-19T00:00:05Z",
-                "type": "response_item",
-                "payload": {
-                    "type": "agent_message",
-                    "message_type": "MESSAGE",
-                    "author": "agent-a",
-                    "recipient": "agent-b",
-                    "content": [
-                        {
-                            "type": "input_text",
-                            "text": (
-                                "Message Type: MESSAGE\n"
-                                "Payload:\n"
-                                f"Check {assignment} without persisting it."
-                            ),
-                        }
-                    ],
-                },
-            },
-            {
-                "timestamp": "2026-07-19T00:00:06Z",
-                "type": "event_msg",
-                "payload": {
-                    "type": "exec_command_begin",
-                    "call_id": "event-private-command",
-                    "command": [
-                        "/usr/bin/zsh",
-                        "-lc",
-                        f"env {assignment} true",
                     ],
                 },
             },
         ],
     )
+    monkeypatch.setenv("AOA_SESSION_MEMORY_FULL_STOP_SYNC", "1")
 
     receipt = module.handle_hook_event(
         "Stop",
         {
-            "session_id": "derived-privacy-session",
+            "session_id": "privacy-session",
             "transcript_path": str(transcript),
-            "cwd": str(workspace),
+            "cwd": str(repo),
             "hook_event_name": "Stop",
         },
         workspace_root=workspace,
         aoa_root=aoa_root,
     )
-
     assert receipt["ok"] is True
-    record = module.resolve_session_record(
-        aoa_root,
-        "derived-privacy-session",
+    record = module.resolve_session_record(aoa_root, "privacy-session")
+    session_dir = Path(record["path"])
+    manifest = json.loads(
+        (session_dir / "session.manifest.json").read_text(encoding="utf-8")
     )
-    session_dir = module.session_dir_from_record(record)
-    raw_path = session_dir / "raw" / "session.raw.jsonl"
-    segment_markdown = next(
-        (session_dir / "segments").glob("*.md")
-    )
-    assert secret_value in transcript.read_text(encoding="utf-8")
-    assert secret_value in raw_path.read_text(encoding="utf-8")
-    assert secret_value in segment_markdown.read_text(encoding="utf-8")
-
-    derived_json_paths = [
-        session_dir / "session.manifest.json",
-        session_dir / "session.index.json",
-        *sorted((session_dir / "segments").glob("*.index.json")),
-        aoa_root / module.REGISTRY_NAME,
-        aoa_root / module.SESSION_NAME_INDEX_JSON,
-    ]
-    for path in derived_json_paths:
-        text = path.read_text(encoding="utf-8")
-        assert secret_value not in text, path
-    segment_index_text = "\n".join(
+    raw_path = module.manifest_raw_path(session_dir, manifest)
+    raw_text = raw_path.read_text(encoding="utf-8")
+    raw_block_text = "\n".join(
         path.read_text(encoding="utf-8")
         for path in sorted(
-            (session_dir / "segments").glob("*.index.json")
+            (session_dir / "raw" / "blocks").glob("*.jsonl")
         )
     )
-    assert secret_label in segment_index_text
-    assert "<redacted:credential>" in segment_index_text
-    assert (
-        '"derived_text_privacy"' in segment_index_text
+    for secret in all_secrets:
+        assert secret in raw_text
+        assert secret in raw_block_text
+
+    generated_session_text = "\n".join(
+        path.read_text(encoding="utf-8", errors="replace")
+        for path in sorted(session_dir.rglob("*"))
+        if path.is_file()
+        and "raw" not in path.relative_to(session_dir).parts
+        and path.suffix in {".json", ".jsonl", ".md"}
     )
+    for secret in all_secrets:
+        assert secret not in generated_session_text
+    assert stable_anchor in generated_session_text
+    assert "omitted_large_raw_event" in generated_session_text
 
     indexed = module.search_index_sessions(
         aoa_root=aoa_root,
@@ -77889,416 +78674,93 @@ def test_derived_text_privacy_gate_preserves_raw_and_excludes_credential_values(
         rebuild=True,
     )
     assert indexed["ok"] is True
-    maintained = module.graph_maintenance(
+    search_result = module.search_sessions(
         aoa_root=aoa_root,
-        apply=True,
-        batch_limit=10,
+        query=stable_anchor,
+        session="privacy-session",
+        include_archived_raw_fallback=False,
+        limit=10,
     )
-    assert maintained["ok"] is True
+    assert search_result["result_count"] >= 1
+    search_packet_text = json.dumps(
+        search_result,
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    assert stable_anchor in search_packet_text
+    for secret in all_secrets:
+        assert secret not in search_packet_text
 
-    def sqlite_values(path: Path) -> list[bytes]:
-        values: list[bytes] = []
+    archived_exact = module.archived_session_exact_search(
+        aoa_root=aoa_root,
+        session="privacy-session",
+        query=stable_anchor,
+        limit=10,
+    )
+    assert archived_exact["result_count"] >= 1
+    archived_exact_text = json.dumps(
+        archived_exact,
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    assert stable_anchor in archived_exact_text
+    for secret in all_secrets:
+        assert secret not in archived_exact_text
+
+    graph = module.build_session_graph(
+        aoa_root=aoa_root,
+        target="all",
+        write=True,
+        include_rows=False,
+    )
+    assert graph["ok"] is True
+
+    def decoded_sqlite_text(path: Path) -> str:
         conn = sqlite3.connect(str(path))
+        fragments: list[str] = []
         try:
-            table_names = [
+            tables = [
                 str(row[0])
                 for row in conn.execute(
                     "SELECT name FROM sqlite_master "
-                    "WHERE type='table' ORDER BY name"
+                    "WHERE type = 'table' ORDER BY name"
                 )
-                if row[0]
             ]
-            for table_name in table_names:
-                quoted = table_name.replace('"', '""')
-                try:
-                    rows = conn.execute(
-                        f'SELECT * FROM "{quoted}"'
-                    )
-                except sqlite3.Error:
-                    continue
-                for row in rows:
+            for table in tables:
+                quoted = table.replace('"', '""')
+                for row in conn.execute(f'SELECT * FROM "{quoted}"'):
                     for value in row:
                         if isinstance(value, str):
-                            values.append(value.encode("utf-8"))
+                            fragments.append(value)
                         elif isinstance(value, bytes):
-                            values.append(value)
-                            for decompress in (
-                                module.zlib.decompress,
-                                module.gzip.decompress,
-                            ):
-                                try:
-                                    values.append(decompress(value))
-                                except Exception:
-                                    pass
+                            try:
+                                decoded = module.zlib.decompress(value).decode(
+                                    "utf-8",
+                                    errors="replace",
+                                )
+                            except (module.zlib.error, UnicodeDecodeError):
+                                decoded = value.decode(
+                                    "utf-8",
+                                    errors="ignore",
+                                )
+                            fragments.append(decoded)
         finally:
             conn.close()
-        return values
+        return "\n".join(fragments)
 
-    search_db = module.search_db_path(aoa_root)
-    graph_db = module.graph_paths(aoa_root)["store"]
-    assert search_db.is_file()
-    assert graph_db.is_file()
-    for db_path in (search_db, graph_db):
-        assert all(
-            secret_value.encode("utf-8") not in value
-            for value in sqlite_values(db_path)
-        ), db_path
-
-    label_search = module.search_sessions(
-        aoa_root=aoa_root,
-        query=secret_label,
-        session="derived-privacy-session",
-        limit=10,
+    projection_text = "\n".join(
+        decoded_sqlite_text(path)
+        for path in sorted(aoa_root.rglob("*.sqlite3"))
     )
-    assert label_search["ok"] is True
-    assert label_search["result_count"] >= 1
-    assert secret_value not in json.dumps(
-        label_search,
-        ensure_ascii=False,
+    graph_paths = module.graph_paths(aoa_root)
+    graph_text = "\n".join(
+        path.read_text(encoding="utf-8", errors="replace")
+        for key, path in graph_paths.items()
+        if key != "root"
+        and path.is_file()
+        and path.suffix != ".sqlite3"
     )
-
-    exact_label = module.archived_session_exact_search(
-        aoa_root=aoa_root,
-        session="derived-privacy-session",
-        query=secret_label,
-        limit=10,
-    )
-    assert exact_label["result_count"] >= 1
-    assert secret_value not in json.dumps(
-        exact_label,
-        ensure_ascii=False,
-    )
-    exact_value = module.archived_session_exact_search(
-        aoa_root=aoa_root,
-        session="derived-privacy-session",
-        query=secret_value,
-        limit=10,
-    )
-    assert exact_value["scan"]["status"] == "blocked_before_raw_scan"
-    assert exact_value["scan"]["bytes_read"] == 0
-    assert (
-        exact_value["diagnostics"]
-        == ["sensitive_literal_query_blocked_before_raw_scan"]
-    )
-    assert secret_value not in json.dumps(
-        exact_value,
-        ensure_ascii=False,
-    )
-    live_value = module.live_tail_exact_search(
-        aoa_root=aoa_root,
-        session="derived-privacy-session",
-        query=secret_value,
-    )
-    assert live_value["scan"]["status"] == "blocked_before_raw_scan"
-    assert secret_value not in json.dumps(
-        live_value,
-        ensure_ascii=False,
-    )
-
-    preview = module.raw_semantic_preview(
-        raw_path,
-        "raw:line:3",
-    )
-    assert preview["status"] == "raw_semantic_text_redacted"
-    assert secret_label in preview["text"]
-    assert secret_value not in json.dumps(
-        preview,
-        ensure_ascii=False,
-    )
-    graph_label = module.graph_neighborhood(
-        aoa_root=aoa_root,
-        anchor=secret_label,
-        kind="entity",
-    )
-    assert secret_value not in json.dumps(
-        graph_label,
-        ensure_ascii=False,
-    )
-    graph_value = module.graph_neighborhood(
-        aoa_root=aoa_root,
-        anchor=secret_value,
-        kind="entity",
-    )
-    assert (
-        graph_value["abstention"]["status"]
-        == "sensitive_literal_query_blocked"
-    )
-    assert secret_value not in json.dumps(
-        graph_value,
-        ensure_ascii=False,
-    )
-
-    portable_root = tmp_path / "portable" / ".aoa"
-    exported = module.copy_portable_bundle(
-        source_aoa_root=aoa_root,
-        target_aoa_root=portable_root,
-    )
-    assert exported["include_sessions"] is False
-    assert exported["public_safety"]["ok"] is True
-    portable_text = b"\n".join(
-        path.read_bytes()
-        for path in portable_root.rglob("*")
-        if path.is_file()
-    )
-    assert secret_value.encode("utf-8") not in portable_text
-    assert not any(
-        path.is_dir()
-        for path in (portable_root / "sessions").iterdir()
-    )
-    with pytest.raises(
-        ValueError,
-        match="portable bundles cannot include session archives",
-    ):
-        module.copy_portable_bundle(
-            source_aoa_root=aoa_root,
-            target_aoa_root=tmp_path / "private-portable",
-            include_sessions=True,
-        )
-
-    generation = module.session_index_generation_identity()
-    assert (
-        generation["derived_text_privacy_policy_version"]
-        == module.DERIVED_TEXT_PRIVACY_POLICY_VERSION
-    )
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        "API_KEY_STATUS=configured",
-        "token_status_path=/srv/example/token-status.json",
-        "max_output_tokens=10000",
-        "tokenizer_name=cl100k_base",
-        "The API key is configured; value not shown.",
-        "${OVMS_EMBEDDINGS_API_KEY}",
-        "source_sha256=0123456789abcdef0123456789abcdef",
-    ],
-)
-def test_derived_text_privacy_gate_preserves_safe_metadata(
-    text: str,
-) -> None:
-    first = module.derived_text_privacy_projection(text)
-    second = module.derived_text_privacy_projection(text)
-
-    assert first == second
-    assert first["status"] == "unchanged"
-    assert first["text"] == text
-    assert first["redaction_count"] == 0
-
-
-def test_derived_text_privacy_metadata_rejects_value_shaped_labels() -> None:
-    secret_value = "".join(
-        [
-            "Aa9/",
-            "Bb8+",
-            "Cc7D",
-            "Ee6/",
-            "Ff5+",
-            "Gg4H",
-            "Ii3/",
-            "Jj2+",
-        ]
-    )
-
-    metadata = module.derived_text_privacy_metadata(
-        {
-            "status": "redacted",
-            "redaction_count": 1,
-            "kinds": ["credential", secret_value],
-            "labels": ["OVMS_EMBEDDINGS_API_KEY", secret_value],
-        }
-    )
-
-    assert metadata["kinds"] == ["credential"]
-    assert metadata["labels"] == ["OVMS_EMBEDDINGS_API_KEY"]
-    assert secret_value not in json.dumps(metadata, ensure_ascii=False)
-
-
-def test_portable_public_safety_audit_blocks_without_disclosing_values(
-    tmp_path: Path,
-) -> None:
-    root = tmp_path / "portable"
-    root.mkdir()
-    secret_value = "".join(
-        [
-            "Zz9/",
-            "Yy8+",
-            "Xx7W",
-            "Vv6/",
-            "Uu5+",
-            "Tt4S",
-            "Rr3/",
-            "Qq2+",
-        ]
-    )
-    private_home = "/".join(
-        ["", "home", "private-operator", "workspace", "owner.json"]
-    )
-    (root / "README.md").write_text(
-        f"API_KEY={secret_value}\nsource={private_home}\n",
-        encoding="utf-8",
-    )
-    (root / "diagnostics").mkdir()
-    (root / "diagnostics" / "latest.json").write_text(
-        "{}\n",
-        encoding="utf-8",
-    )
-    (root / "search").mkdir()
-    (root / "search" / "aoa-search.sqlite3").write_bytes(
-        b"SQLite format 3\x00"
-    )
-    session_dir = root / "sessions" / "2026-07-19__001__private"
-    session_dir.mkdir(parents=True)
-    module.write_json(
-        root / module.REGISTRY_NAME,
-        {
-            "schema_version": 1,
-            "sessions": [
-                {
-                    "session_id": "private",
-                    "path": str(session_dir),
-                }
-            ],
-        },
-    )
-
-    payload = module.portable_public_safety_audit(root)
-
-    assert payload["ok"] is False
-    assert payload["status"] == "blocked"
-    codes = {item["code"] for item in payload["issues"]}
-    assert "credential_like_value" in codes
-    assert "private_home_path" in codes
-    assert "runtime_diagnostics_surface" in codes
-    assert "runtime_search_surface" in codes
-    assert "session_archive_surface" in codes
-    assert "nonempty_session_registry" in codes
-    rendered = json.dumps(payload, ensure_ascii=False)
-    assert secret_value not in rendered
-    assert "private-operator" not in rendered
-
-
-def test_portable_public_safety_audit_accepts_bounded_clean_tree(
-    tmp_path: Path,
-) -> None:
-    root = tmp_path / "portable"
-    sessions = root / "sessions"
-    sessions.mkdir(parents=True)
-    (root / "README.md").write_text(
-        "Use /home/example/workspace or /srv/example/workspace.\n"
-        "API_KEY_STATUS=configured; API key value not shown.\n",
-        encoding="utf-8",
-    )
-    (sessions / module.SESSIONS_AGENTS_MARKDOWN).write_text(
-        "# Sessions\n",
-        encoding="utf-8",
-    )
-    module.write_json(
-        sessions / module.SESSIONS_INDEX_JSON,
-        {
-            "schema_version": 1,
-            "artifact_type": "sessions_directory_index",
-            "session_count": 0,
-        },
-    )
-    (sessions / module.SESSIONS_INDEX_MARKDOWN).write_text(
-        "# Session index\n",
-        encoding="utf-8",
-    )
-    module.write_json(
-        root / module.REGISTRY_NAME,
-        {"schema_version": 1, "sessions": []},
-    )
-
-    first = module.portable_public_safety_audit(root)
-    second = module.portable_public_safety_audit(root)
-
-    assert first["ok"] is True
-    assert first["status"] == "current"
-    assert first["issue_count"] == 0
-    assert first["issues"] == []
-    for field in ("ok", "status", "issue_count", "scanned_files"):
-        assert first[field] == second[field]
-
-
-def test_sensitive_navigation_gate_precedes_search_and_graph_reads(
-    tmp_path: Path,
-) -> None:
-    aoa_root = tmp_path / "missing-owner-root"
-    secret_value = "".join(
-        [
-            "Aa9/",
-            "Bb8+",
-            "Cc7D",
-            "Ee6/",
-            "Ff5+",
-            "Gg4H",
-            "Ii3/",
-            "Jj2+",
-        ]
-    )
-    routes = {
-        "search": lambda: module.search_sessions(
-            aoa_root=aoa_root,
-            query=secret_value,
-        ),
-        "episode": lambda: module.episode_semantic_search(
-            aoa_root=aoa_root,
-            query=secret_value,
-        ),
-        "entity_state": lambda: module.episode_entity_state_search(
-            aoa_root=aoa_root,
-            anchor=secret_value,
-        ),
-        "agent_event": lambda: module.agent_event_route_search(
-            aoa_root=aoa_root,
-            query=secret_value,
-        ),
-        "live_episode": lambda: module.live_tail_episode_search(
-            aoa_root=aoa_root,
-            session="synthetic-session",
-            query=secret_value,
-        ),
-        "neighborhood": lambda: module.graph_neighborhood(
-            aoa_root=aoa_root,
-            anchor=secret_value,
-        ),
-        "timeline": lambda: module.graph_timeline(
-            aoa_root=aoa_root,
-            anchor=secret_value,
-        ),
-        "shortest_path": lambda: module.graph_shortest_path(
-            aoa_root=aoa_root,
-            source_anchor="safe-source",
-            target_anchor=secret_value,
-        ),
-        "bridge": lambda: module.graph_bridge(
-            aoa_root=aoa_root,
-            source_anchor="safe-source",
-            target_anchor=secret_value,
-        ),
-        "cooccurrence": lambda: module.graph_cooccurrence(
-            aoa_root=aoa_root,
-            anchor=secret_value,
-        ),
-        "graphrag": lambda: module.graph_rag_packet(
-            aoa_root=aoa_root,
-            query=secret_value,
-        ),
-        "graph_explain": lambda: module.graph_explain_packet(
-            aoa_root=aoa_root,
-            intent=secret_value,
-        ),
-    }
-
-    for name, route in routes.items():
-        payload = route()
-        assert payload["abstention"]["status"] == (
-            "sensitive_literal_query_blocked"
-        ), name
-        assert payload["result_count"] == 0, name
-        assert secret_value not in json.dumps(
-            payload,
-            ensure_ascii=False,
-        ), name
-    assert not aoa_root.exists()
+    all_projection_text = f"{projection_text}\n{graph_text}"
+    assert stable_anchor in all_projection_text
+    for secret in all_secrets:
+        assert secret not in all_projection_text
