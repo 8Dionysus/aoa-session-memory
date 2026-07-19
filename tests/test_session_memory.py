@@ -48314,7 +48314,11 @@ def test_search_sqlite_compact_plans_and_stages_verified_copy(tmp_path: Path) ->
     assert dry_run["target_path_explicit"] is False
     assert "generated portable SQLite search projection" in dry_run["stop_line"]
 
-    missing_target = module.search_sqlite_compact(aoa_root=aoa_root, apply=True)
+    missing_target = module.search_sqlite_compact(
+        aoa_root=aoa_root,
+        apply=True,
+        min_free_after_gb=0,
+    )
     assert missing_target["ok"] is False
     assert "vacuum_into_target_path_required" in missing_target["diagnostics"]
     assert missing_target["mutates"] is False
@@ -48324,6 +48328,7 @@ def test_search_sqlite_compact_plans_and_stages_verified_copy(tmp_path: Path) ->
         aoa_root=aoa_root,
         apply=True,
         target_path=target,
+        min_free_after_gb=0,
         write_report=True,
     )
     assert applied["ok"] is True
@@ -48343,6 +48348,7 @@ def test_search_sqlite_compact_plans_and_stages_verified_copy(tmp_path: Path) ->
         aoa_root=aoa_root,
         apply=True,
         target_path=promote_target,
+        min_free_after_gb=0,
         backup_path=backup_path,
         promote_copy=True,
         write_report=True,
