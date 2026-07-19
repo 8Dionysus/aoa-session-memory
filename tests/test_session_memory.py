@@ -9314,6 +9314,13 @@ def test_episode_answer_admission_requires_qualified_operational_group() -> None
         "supporting_evidence": [
             {"matched_query_terms": ["eval", "skill", "bundles", "corpus"]}
         ],
+        "operational_group": {
+            "accepted": True,
+            "members": [
+                {"refs": {"raw": "raw:line:10"}},
+                {"refs": {"raw": "raw:line:11"}},
+            ],
+        },
     }
 
     rejected = module.episode_answer_admission(
@@ -9340,6 +9347,7 @@ def test_episode_answer_admission_requires_qualified_operational_group() -> None
     assert rejected["basis"] == "operational_group_unresolved"
     assert admitted["admitted"] is True
     assert admitted["basis"] == "typed_operational_group_evidence"
+    assert admitted["evidence_ref_gate"]["admitted"] is True
 
 
 def test_episode_evidence_reader_prioritizes_prior_state_over_later_install_mentions() -> None:
@@ -14521,6 +14529,11 @@ def test_episode_temporal_scoped_raw_hydration_resolves_typed_parent_message_to_
     )
     assert admission["typed_temporal_span_admitted"] is False
     assert admission["typed_temporal_interval_admitted"] is True
+    assert admission["evidence_ref_gate"]["admitted"] is True
+    assert admission["evidence_ref_gate"]["claim_evidence_ref_count"] == 7
+    assert admission["evidence_ref_gate"]["basis"] == (
+        "admitted_claim_chain_has_resolvable_refs"
+    )
 
     mention_only_qualified, _mention_only_report, mention_only_gate = run_case(
         "/root",
@@ -17167,6 +17180,168 @@ def test_session_evidence_window_reads_bounded_raw_block_and_correlated_result(
     assert corrupt["status"] == "raw_block_integrity_failed"
     assert corrupt["events"] == []
     assert corrupt["relations"] == []
+
+
+def test_common_evidence_envelope_keeps_exact_candidates_navigation_only(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    payload = {
+        "ok": True,
+        "result_count": 1,
+        "session_scope_freshness": {
+            "status": "current",
+            "scope": "session-exact",
+        },
+        "results": [
+            {
+                "doc_id": "event:session-exact:001:000010",
+                "session_id": "session-exact",
+                "refs": {
+                    "raw": "raw:line:10",
+                    "segment": "segments/001.md",
+                    "session": "session.manifest.json",
+                },
+                "freshness": {"status": "current"},
+                "reading_contract": {
+                    "status": "candidate_navigation_only",
+                },
+            }
+        ],
+    }
+
+    envelope = module.session_memory_evidence_envelope(
+        aoa_root=aoa_root,
+        query="call_exact_123",
+        payload=payload,
+        route_id="exact_or_typed_search",
+        route_reason="exact postings first",
+        route_authority="generated_search_navigation_requires_ref_read",
+    )
+
+    admission = envelope["answer_admission"]
+    assert admission["admitted"] is False
+    assert admission["status"] == "candidate_navigation_only"
+    assert admission["evidence_read_admitted"] is False
+    assert admission["retrieval_candidates_are_claims"] is False
+    assert envelope["insufficiency_reason"]
+    assert envelope["next_route"]["kind"] == "bounded_evidence_read"
+    assert "evidence-window" in envelope["next_route"]["command"]
+    assert "raw:line:10" in envelope["next_route"]["command"]
+
+
+def test_common_evidence_envelope_marks_verified_raw_read_but_not_claim(
+    tmp_path: Path,
+) -> None:
+    payload = {
+        "ok": True,
+        "result_count": 1,
+        "session_id": "session-raw",
+        "scan": {
+            "status": "complete_verified",
+            "complete": True,
+            "truncated": False,
+        },
+        "results": [
+            {
+                "doc_id": "archived-raw-event:session-raw:000010",
+                "session_id": "session-raw",
+                "refs": {
+                    "raw": "raw:line:10",
+                    "raw_block": "raw/blocks/001.raw.jsonl",
+                    "session": "session.manifest.json",
+                },
+                "freshness": {
+                    "status": "fresh",
+                    "archive_integrity": {"status": "verified"},
+                },
+            }
+        ],
+    }
+
+    envelope = module.session_memory_evidence_envelope(
+        aoa_root=tmp_path / ".aoa",
+        query="call_exact_123",
+        payload=payload,
+        route_id="archived_raw_exact_read",
+        route_reason="bounded raw read",
+        route_authority="archived_raw_session_snapshot",
+    )
+
+    admission = envelope["answer_admission"]
+    assert admission["admitted"] is False
+    assert admission["status"] == (
+        "bounded_source_evidence_ready_for_claim_shape_review"
+    )
+    assert admission["evidence_read_admitted"] is True
+    assert envelope["insufficiency_reason"]
+    assert envelope["next_route"]["kind"] == "claim_shape_review"
+
+
+def test_common_evidence_envelope_lifts_only_admitted_temporal_claim_refs(
+    tmp_path: Path,
+) -> None:
+    payload = {
+        "ok": True,
+        "result_count": 1,
+        "answer_admission": {
+            "admitted": True,
+            "basis": "typed_temporal_interval_contents_evidence",
+            "typed_temporal_interval_admitted": True,
+        },
+        "results": [
+            {
+                "doc_id": "episode:session-temporal:task-1",
+                "refs": {
+                    "raw": "raw:line:1",
+                    "session": "session.manifest.json",
+                },
+                "temporal_span": {
+                    "accepted": True,
+                    "left": {"refs": {"raw": "raw:line:10"}},
+                    "right": {"refs": {"raw": "raw:line:14"}},
+                    "interval_contents": {
+                        "events": [
+                            {"refs": {"raw": "raw:line:11"}},
+                            {"refs": {"raw": "raw:line:12"}},
+                        ],
+                        "rejected_candidates": [
+                            {"refs": {"raw": "raw:line:99"}}
+                        ],
+                    },
+                },
+            }
+        ],
+    }
+
+    envelope = module.session_memory_evidence_envelope(
+        aoa_root=tmp_path / ".aoa",
+        query="what happened between the two anchors",
+        payload=payload,
+        route_id="episode_semantic_search",
+        route_reason="typed temporal route",
+        route_authority=(
+            "generated_episode_navigation_requires_raw_ref_read"
+        ),
+    )
+
+    claim_raw_refs = {
+        item["refs"]["raw"]
+        for item in envelope["claim_evidence_refs"]
+    }
+    all_raw_refs = {
+        item["refs"]["raw"]
+        for item in envelope["evidence_refs"]
+        if item.get("refs", {}).get("raw")
+    }
+    assert claim_raw_refs == {
+        "raw:line:10",
+        "raw:line:11",
+        "raw:line:12",
+        "raw:line:14",
+    }
+    assert claim_raw_refs <= all_raw_refs
+    assert "raw:line:99" not in all_raw_refs
 
 
 def test_session_evidence_window_links_only_exact_async_cell_continuation(
