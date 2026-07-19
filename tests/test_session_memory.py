@@ -3353,6 +3353,115 @@ def test_mcp_tool_usage_chain_requires_namespace_for_colliding_bare_alias(
     assert alpha_state["results"][0]["raw_ref"] == "raw:line:2"
 
 
+def test_mcp_tool_bare_name_uses_scoped_raw_identity_without_registry_projection(
+    tmp_path: Path,
+) -> None:
+    """A bare live tool name is admissible only after raw service resolution."""
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-scoped-raw-mcp-identity.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-07-10T10:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "scoped-raw-mcp-identity",
+                    "cwd": str(workspace),
+                    "evidence_origin": "synthetic_from_manual_mcp_raw_span",
+                },
+            },
+            {
+                "timestamp": "2026-07-10T10:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "lookup",
+                    "namespace": "mcp__alpha",
+                    "call_id": "call-scoped-lookup",
+                    "arguments": '{"query":"needle"}',
+                },
+            },
+            {
+                "timestamp": "2026-07-10T10:00:02Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "mcp_tool_call_end",
+                    "call_id": "call-scoped-lookup",
+                    "invocation": {
+                        "server": "alpha",
+                        "tool": "lookup",
+                        "arguments": {"query": "needle"},
+                    },
+                    "result": {"Ok": {"content": []}},
+                },
+            },
+            {
+                "timestamp": "2026-07-10T10:00:03Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call-scoped-lookup",
+                    "output": '{"ok":true,"value":"needle"}',
+                },
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "scoped-raw-mcp-identity",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    chain = module.entity_usage_chain(
+        aoa_root=aoa_root,
+        anchor="lookup",
+        kind="mcp_tool",
+        session="scoped-raw-mcp-identity",
+        limit=8,
+        per_route_limit=8,
+        consequence_window=4,
+    )
+
+    resolution = chain["quality"]["mcp_tool_resolution"]
+    assert resolution["status"] == "resolved"
+    assert resolution["resolution_source"] == (
+        "session_scoped_structured_raw_identity"
+    )
+    assert resolution["identities"] == [
+        {
+            "service_key": "alpha_mcp",
+            "tool_key": "lookup",
+            "route_key": "mcp_alpha_lookup",
+        }
+    ]
+    probe = resolution["session_identity_probe"]
+    assert probe["source_scan"]["status"] == "complete"
+    assert probe["raw_ref_verified_count"] == 2
+    assert probe["structured_call_count"] == 1
+    assert probe["structured_receipt_count"] == 1
+    assert chain["counts"]["usage_event_count"] == 1
+    usage = chain["usage_chain"]["chains"][0]["usage_event"]
+    assert usage["refs"]["raw"] == "raw:line:2"
+    assert usage["mcp_tool_usage_admission"] == (
+        "structured_invocation_proven"
+    )
+    assert chain["usage_lifecycle"]["states"]["invoked"][
+        "positive_instance_admitted"
+    ] is True
+    assert chain["usage_lifecycle"]["states"]["completed"][
+        "positive_instance_admitted"
+    ] is True
+    assert chain["usage_lifecycle"]["states"]["verified"]["present"] is False
+
+
 def test_mcp_tool_usage_chain_keeps_parallel_same_tool_receipts_correlated(
     tmp_path: Path,
 ) -> None:
@@ -3756,6 +3865,14 @@ def test_entity_usage_test_and_validator_admission_rejects_source_inspection(
         target="all",
         rebuild=True,
     )["ok"] is True
+    assert module.entity_usage_execution_command_proves_inspection_read(
+        "sed -n '1,20p' scripts/validate_session_memory_mcp.py",
+        anchor="validate_session_memory_mcp",
+    )
+    assert not module.entity_usage_execution_command_proves_inspection_read(
+        "rg -n validate_session_memory_mcp README.md",
+        anchor="validate_session_memory_mcp",
+    )
 
     test_chain = module.entity_usage_chain(
         aoa_root=aoa_root,
@@ -3847,7 +3964,10 @@ def test_entity_usage_test_and_validator_admission_rejects_source_inspection(
     ] == "inspection_or_reference_not_invocation"
     assert validator_contexts["raw:line:28"][
         "execution_entity_usage_admission"
-    ] == "inspection_or_reference_not_invocation"
+    ] == "structured_inspection_read_proven"
+    assert validator_contexts["raw:line:28"][
+        "execution_read_result_refs"
+    ]["raw"] == "raw:line:29"
     assert validator_contexts["raw:line:28"]["usage_actions"] == ["read"]
     assert validator_chain["quality"]["execution_usage_invocation_admitted_count"] == 4
     assert validator_chain["quality"][
@@ -3879,6 +3999,15 @@ def test_entity_usage_test_and_validator_admission_rejects_source_inspection(
     assert compact_validator_chain["quality"]["action_diversity"][
         "selected_event_id"
     ] == "000028"
+    read_state = validator_chain["usage_lifecycle"]["states"]["read"]
+    assert read_state["present"] is True
+    assert read_state["positive_instance_admitted"] is True
+    assert read_state["evidence_sample"][0]["refs"]["raw"] == (
+        "raw:line:28"
+    )
+    assert read_state["evidence_sample"][0]["read_result_refs"][
+        "raw"
+    ] == "raw:line:29"
 
 
 def test_entity_usage_lifecycle_uses_owned_transport_and_test_result_proof(
@@ -13518,6 +13647,46 @@ def test_episode_search_quantitative_comparison_is_wired_to_raw_relation_gate(
         == "insufficient_quantitative_comparison_evidence"
     )
 
+    negative_usage = module.episode_semantic_search(
+        aoa_root=aoa_root,
+        query="В этой сессии вообще не запускали git?",
+        session="quantitative-integration",
+        mode="sparse",
+        limit=5,
+        explain=True,
+    )
+    assert negative_usage["result_count"] == 1
+    assert negative_usage["answer_admission"]["admitted"] is False
+    assert negative_usage["answer_admission"]["status"] == (
+        "negative_claim_scope_unresolved"
+    )
+    assert negative_usage["abstention"]["status"] == (
+        "negative_claim_scope_unresolved"
+    )
+    assert negative_usage["next_route"]["status"] == "ready"
+    assert "archived-raw-search" in negative_usage["next_command"]
+    assert negative_usage["next_route"]["seed_anchor"] == "git"
+
+    current_state = module.episode_semantic_search(
+        aoa_root=aoa_root,
+        query="Git repository aoa-sdk сейчас содержит эти mechanics changes?",
+        session="quantitative-integration",
+        mode="sparse",
+        limit=5,
+        explain=True,
+    )
+    assert current_state["result_count"] == 1
+    assert current_state["answer_admission"]["admitted"] is False
+    assert current_state["answer_admission"]["status"] == (
+        "requires_current_owner_evidence"
+    )
+    assert current_state["next_route"]["route_id"] == (
+        "external_current_owner_handoff"
+    )
+    assert current_state["next_route"]["handoff"]["owner_scope"] == (
+        "repository_owner"
+    )
+
 
 def test_episode_operational_group_raw_hydration_requires_six_parallel_reads(
     tmp_path: Path,
@@ -15874,6 +16043,56 @@ def test_memory_query_intent_preserves_negative_polarity_and_quantitative_gate(
     )
 
 
+def test_episode_claim_shape_override_blocks_negative_and_current_projection_claims(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    base_admission = {
+        "admitted": True,
+        "status": "answer_evidence_admitted",
+        "basis": "strong_lexical_evidence",
+    }
+
+    assert module.episode_negative_claim_anchor(
+        "В этой сессии вообще не запускали tmux?"
+    ) == "tmux"
+    negative = module.episode_claim_shape_admission_override(
+        aoa_root=aoa_root,
+        query="В этой сессии вообще не запускали tmux?",
+        session="negative-usage-session",
+        answer_admission=base_admission,
+    )
+    assert negative["applied"] is True
+    assert negative["answer_admission"]["admitted"] is False
+    assert negative["answer_admission"]["status"] == (
+        "negative_claim_scope_unresolved"
+    )
+    assert negative["answer_admission"][
+        "historical_candidate_assessment"
+    ]["admitted"] is True
+    assert negative["next_route"]["status"] == "ready"
+    assert negative["next_route"]["seed_anchor"] == "tmux"
+    assert "archived-raw-search" in negative["next_route"]["command"]
+
+    current = module.episode_claim_shape_admission_override(
+        aoa_root=aoa_root,
+        query="Ghostty сейчас установлен и какая сейчас версия?",
+        session="historical-session",
+        answer_admission=base_admission,
+    )
+    assert current["applied"] is True
+    assert current["answer_admission"]["admitted"] is False
+    assert current["answer_admission"]["status"] == (
+        "requires_current_owner_evidence"
+    )
+    assert current["next_route"]["route_id"] == (
+        "external_current_owner_handoff"
+    )
+    assert current["next_route"]["handoff"]["owner_scope"] == (
+        "host_runtime_or_package_manager"
+    )
+
+
 def test_memory_query_intent_keeps_short_ru_paraphrase_and_completion_question_out_of_closeout_literal_lane() -> None:
     semantic_queries = [
         "искали поля состояния и завершённости сессии через rg",
@@ -17155,8 +17374,14 @@ def test_session_evidence_window_reads_bounded_raw_block_and_correlated_result(
     )
     assert envelope["freshness"]["scoped"]["coverage"] == "complete"
     assert envelope["evidence_refs"][0]["refs"]["raw"] == "raw:line:3"
-    assert envelope["insufficiency_reason"] == ""
+    assert envelope["insufficiency_reason"] == (
+        "the bounded source read is verified, but no typed claim-shape "
+        "admission gate has been applied"
+    )
     assert envelope["answer_admission"]["evidence_read_admitted"] is True
+    assert envelope["answer_admission"][
+        "retrieval_candidates_are_claims"
+    ] is False
     assert envelope["next_route"]["kind"] == "claim_shape_review"
 
     manifest_path = Path(packet["refs"]["session"])
@@ -17192,6 +17417,7 @@ def test_common_evidence_envelope_keeps_exact_candidates_navigation_only(
         "session_scope_freshness": {
             "status": "current",
             "scope": "session-exact",
+            "coverage": "partial",
         },
         "results": [
             {
@@ -17226,6 +17452,13 @@ def test_common_evidence_envelope_keeps_exact_candidates_navigation_only(
     assert admission["retrieval_candidates_are_claims"] is False
     assert envelope["insufficiency_reason"]
     assert envelope["next_route"]["kind"] == "bounded_evidence_read"
+    assert envelope["freshness"]["scoped"]["coverage"] == "partial"
+    assert envelope["freshness"]["scoped"][
+        "derived_return_coverage"
+    ] == "complete"
+    assert envelope["freshness"]["scoped"][
+        "coverage_does_not_upgrade_explicit_scope"
+    ] is True
     assert "evidence-window" in envelope["next_route"]["command"]
     assert "raw:line:10" in envelope["next_route"]["command"]
 
@@ -23859,6 +24092,148 @@ def test_skill_usage_chain_rejects_parallel_foreign_correlation(tmp_path: Path) 
     assert unrelated_chain["skill_evidence"]["structured_skill_selection_event_count"] == 0
     assert unrelated_chain["usage_action_counts"].get("loaded", 0) == 0
     assert unrelated_chain["skill_evidence"]["dispatch_candidate_present"] is False
+
+
+def test_skill_read_query_time_probe_requires_correlation_owned_nonfailure_result(
+    tmp_path: Path,
+) -> None:
+    """A SKILL.md read survives stale/missing search only with its own result."""
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    skill_path = tmp_path / ".codex" / "skills" / "gold-route" / "SKILL.md"
+    transcript = tmp_path / "rollout-skill-read-query-time.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-07-10T11:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "skill-read-query-time",
+                    "cwd": str(workspace),
+                    "evidence_origin": "synthetic_from_manual_skill_read_span",
+                },
+            },
+            {
+                "timestamp": "2026-07-10T11:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": (
+                                "Для восстановления контекста использую "
+                                "маршрут доказательств сессионной памяти."
+                            ),
+                        }
+                    ],
+                },
+            },
+            {
+                "timestamp": "2026-07-10T11:00:02Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": "call-skill-read-ok",
+                    "arguments": json.dumps(
+                        {"cmd": f"sed -n '1,120p' {skill_path}"}
+                    ),
+                },
+            },
+            {
+                "timestamp": "2026-07-10T11:00:03Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call-skill-read-ok",
+                    "output": (
+                        "Chunk ID: read-ok\nWall time: 0.01 seconds\n"
+                        "Process exited with code 0\nFinal output:\n# gold-route"
+                    ),
+                },
+            },
+            {
+                "timestamp": "2026-07-10T11:00:04Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": "call-skill-read-failed",
+                    "arguments": json.dumps(
+                        {"cmd": f"sed -n '121,240p' {skill_path}"}
+                    ),
+                },
+            },
+            {
+                "timestamp": "2026-07-10T11:00:05Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call-skill-read-failed",
+                    "output": (
+                        "Chunk ID: read-failed\nWall time: 0.01 seconds\n"
+                        "Process exited with code 2\nFinal output:\nsed: missing"
+                    ),
+                },
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "skill-read-query-time",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    chain = module.entity_usage_chain(
+        aoa_root=aoa_root,
+        anchor="gold-route",
+        kind="skill",
+        session="skill-read-query-time",
+        limit=8,
+        per_route_limit=8,
+        consequence_window=4,
+    )
+
+    probe = chain["skill_evidence"]["query_time_source_probe"]
+    assert probe["status"] == "matched"
+    assert probe["source_scan"]["status"] == "complete"
+    assert probe["exact_candidate_count"] == 2
+    assert probe["skill_read_count"] == 1
+    assert probe["selected_count"] == 1
+    assert probe["read_result_verified_count"] == 1
+    assert probe["read_result_unverifiable_count"] == 1
+    assert chain["skill_evidence"]["state_counts"]["skill_read"] == 1
+    read_state = chain["usage_lifecycle"]["states"]["read"]
+    assert read_state["positive_instance_admitted"] is True
+    assert read_state["evidence_count"] == 1
+    assert read_state["evidence_sample"][0]["refs"]["raw"] == "raw:line:3"
+    assert read_state["evidence_sample"][0]["read_result_refs"]["raw"] == (
+        "raw:line:4"
+    )
+    selected_state = chain["usage_lifecycle"]["states"]["selected"]
+    assert selected_state["status"] == "candidate"
+    assert selected_state["evidence_sample"][0]["refs"]["raw"] == "raw:line:2"
+    assert selected_state["evidence_sample"][0]["selection_target_refs"][
+        "raw"
+    ] == "raw:line:3"
+    assert chain["usage_lifecycle"]["states"]["loaded"][
+        "positive_instance_admitted"
+    ] is True
+    assert chain["usage_lifecycle"]["states"]["invoked"]["present"] is False
+    assert all(
+        event["refs"]["raw"] != "raw:line:5"
+        for item in chain["usage_chain"]["chains"]
+        for event in [item["usage_event"]]
+    )
 
 
 def test_generic_usage_keeps_shared_consequence_edges_and_consistent_rejection_counts(
@@ -62643,6 +63018,21 @@ def test_archived_session_exact_fallback_preserves_retrieval_call_correlation_ev
         limit=5,
         explain=True,
     )
+    limited_correlation = module.archived_session_exact_search(
+        aoa_root=aoa_root,
+        session=session_id,
+        query=call_id,
+        limit=1,
+        explain=True,
+    )
+    module.attach_session_memory_evidence_envelope(
+        limited_correlation,
+        aoa_root=aoa_root,
+        query=call_id,
+        route_id="archived_raw_exact_read",
+        route_reason="bounded raw read",
+        route_authority="archived_raw_session_snapshot",
+    )
     suppressed_echo = module.archived_session_exact_search(
         aoa_root=aoa_root,
         session=session_id,
@@ -62660,6 +63050,19 @@ def test_archived_session_exact_fallback_preserves_retrieval_call_correlation_ev
         "raw:line:4",
     }
     assert all(item["correlation_id"] == call_id for item in correlation["results"])
+    assert limited_correlation["ranked_candidate_count"] == 3
+    assert limited_correlation["result_count"] == 1
+    assert limited_correlation["results_omitted"] == 2
+    assert limited_correlation["result_truncated"] is True
+    assert limited_correlation["scan"]["truncated"] is False
+    limited_bounds = limited_correlation["evidence_envelope"][
+        "boundedness"
+    ]
+    assert limited_bounds["truncated"] is True
+    assert limited_bounds["omitted_result_count"] == 2
+    assert limited_correlation["evidence_envelope"]["freshness"][
+        "scoped"
+    ]["coverage"] == "partial"
     assert suppressed_echo["raw_occurrence_count"] == 3
     assert suppressed_echo["candidate_count"] == 0
     assert suppressed_echo["result_count"] == 0
