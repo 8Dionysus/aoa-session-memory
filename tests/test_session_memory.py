@@ -35221,6 +35221,23 @@ def test_graph_maintenance_replaces_dirty_segment_contribution(tmp_path: Path) -
     assert states["maintenance_recommendation"]["route"] in {"bounded_graph_maintenance", "budgeted_graph_maintenance", "graph_event_sequence_prune"}
     assert any(item["status"] == "dirty" and item["source_type"] == "segment" for item in states["states"])
 
+    # This fixture changes a generated segment index out of band, bypassing
+    # the normal sync/reindex producer that propagates dirty state.  Publish
+    # the detector result explicitly: hot maintenance intentionally trusts
+    # the ledger and queue and leaves an unannounced source audit to deep mode.
+    detected_ledger = module.update_graph_source_state_ledger_from_states(
+        aoa_root,
+        states["states"],
+        reason="test_out_of_band_segment_drift_detected",
+    )
+    detected_queue = module.update_graph_maintenance_queue_from_states(
+        aoa_root,
+        states["states"],
+        reason="test_out_of_band_segment_drift_detected",
+    )
+    assert detected_ledger["status_counts"].get("dirty", 0) >= 1
+    assert detected_queue["queued_count"] >= 1
+
     dirty_gates = module.graph_freshness_gates(aoa_root=aoa_root, ref_sample_limit=20)
     assert dirty_gates["graph_store"]["status"] == "dirty"
     assert dirty_gates["graph_sidecar"]["status"] == "stale"
