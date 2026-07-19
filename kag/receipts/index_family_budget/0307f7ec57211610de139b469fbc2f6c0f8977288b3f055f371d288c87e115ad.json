@@ -1,0 +1,17 @@
+{
+  "allowed_bytes": 17534222,
+  "allowed_tracked_bytes": 18246477,
+  "approved_by": "repository-owner",
+  "base_ref": "2741dbaaf00af819cadcac309ea5ee6ead46db05",
+  "changed_generated_bytes": 17534222,
+  "changed_generated_files": 318,
+  "decision_ref": "aoa-kag:docs/decisions/AOA-KAG-D-0017-portable-content-addressed-repository-family.md",
+  "default_limit_bytes": 1048576,
+  "head_family_digest": "0307f7ec57211610de139b469fbc2f6c0f8977288b3f055f371d288c87e115ad",
+  "reason": "Canonical session-memory capability contracts, typed skill graph, focused skill packages, and reviewed eval artifacts intentionally expand the public source corpus; this digest-bound receipt accepts that one generated projection growth without changing standing budgets.",
+  "repo": "aoa-session-memory",
+  "schema_version": "aoa-repo-local-kag-budget-receipt-v1",
+  "scope": "generated_delta_and_tracked_size",
+  "tracked_bytes": 18246477,
+  "tracked_bytes_max": 13631488
+}
