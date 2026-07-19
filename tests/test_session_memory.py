@@ -1809,7 +1809,9 @@ def test_fork_local_episode_admits_structured_new_task_but_not_developer_bootstr
     assert "You are an agent in a team" not in local["intent"]
 
 
-def test_fork_runtime_task_started_after_terminal_opens_distinct_delegated_lifecycles() -> None:
+def test_fork_runtime_task_started_after_terminal_opens_distinct_delegated_lifecycles(
+    tmp_path: Path,
+) -> None:
     child_session_id = "11111111-2222-4333-8444-555555555555"
     parent_session_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
     declared_timestamp = "2026-07-11T14:44:21Z"
@@ -1817,11 +1819,18 @@ def test_fork_runtime_task_started_after_terminal_opens_distinct_delegated_lifec
         declared_timestamp
     ).timestamp()
 
-    def delegated_task(ciphertext: str) -> dict[str, Any]:
+    def delegated_task(
+        ciphertext: str,
+        turn_id: str,
+        recipient: str = "/root/operational_use_wave_e",
+    ) -> dict[str, Any]:
         return {
             "type": "agent_message",
             "author": "/root",
-            "recipient": "/root/operational_use_wave_e",
+            "recipient": recipient,
+            "internal_chat_message_metadata_passthrough": {
+                "turn_id": turn_id,
+            },
             "content": [
                 {
                     "type": "input_text",
@@ -1880,7 +1889,7 @@ def test_fork_runtime_task_started_after_terminal_opens_distinct_delegated_lifec
         {
             "timestamp": "2026-07-11T14:44:23.163Z",
             "type": "response_item",
-            "payload": delegated_task("opaque-one"),
+            "payload": delegated_task("opaque-one", "turn-one"),
         },
         {
             "timestamp": "2026-07-11T14:59:51.454Z",
@@ -1912,7 +1921,7 @@ def test_fork_runtime_task_started_after_terminal_opens_distinct_delegated_lifec
         {
             "timestamp": "2026-07-11T15:00:24.108Z",
             "type": "response_item",
-            "payload": delegated_task("opaque-two"),
+            "payload": delegated_task("opaque-two", "turn-two"),
         },
         {
             "timestamp": "2026-07-11T15:04:54.736Z",
@@ -1944,7 +1953,7 @@ def test_fork_runtime_task_started_after_terminal_opens_distinct_delegated_lifec
         {
             "timestamp": "2026-07-11T15:13:23.594Z",
             "type": "response_item",
-            "payload": delegated_task("opaque-three"),
+            "payload": delegated_task("opaque-three", "turn-three"),
         },
         {
             "timestamp": "2026-07-11T15:29:33.330Z",
@@ -1973,6 +1982,11 @@ def test_fork_runtime_task_started_after_terminal_opens_distinct_delegated_lifec
         [],
         lineage=lineage,
     )
+    for episode in episodes:
+        episode["lineage"] = module.task_episode_lineage_for_range(
+            lineage,
+            episode["event_range"],
+        )
 
     assert len(episodes) == 3
     assert [episode["event_range"] for episode in episodes] == [
@@ -2038,6 +2052,135 @@ def test_fork_runtime_task_started_after_terminal_opens_distinct_delegated_lifec
         episode["semantic_continuations"] == []
         for episode in episodes
     )
+    count_query = module.episode_delegated_lifecycle_query(
+        "Сколько было NEW_TASK для /root/operational_use_wave_e? Три?"
+    )
+    path_query = module.episode_delegated_lifecycle_query(
+        "Пройди пути task_started -> NEW_TASK -> task_complete"
+    )
+    replay_query = module.episode_delegated_lifecycle_query(
+        "Почему три NEW_TASK с одинаковым task name нельзя назвать replay одного задания?"
+    )
+    assert count_query["mode"] == "count"
+    assert count_query["requested_cardinality"] == 3
+    assert count_query["target"] == "/root/operational_use_wave_e"
+    assert path_query["mode"] == "ordered_path"
+    assert replay_query["mode"] == "semantic_identity"
+    assert module.memory_query_intent(
+        "Пройди пути task_started -> NEW_TASK -> task_complete"
+    )["primary"] == "relationship_topology"
+    assert module.memory_query_intent(
+        "Почему три NEW_TASK с одинаковым task name нельзя назвать replay одного задания?"
+    )["primary"] == "relationship_topology"
+    for episode in episodes:
+        alignment = module.episode_delegated_lifecycle_alignment(
+            episode,
+            query=path_query,
+        )
+        assert alignment["status"] == (
+            "typed_delegated_lifecycle_candidate"
+        )
+        assert alignment["accepted"] is False
+
+    workspace = tmp_path / "AbyssOS"
+    workspace.mkdir()
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-delegated-lifecycle.jsonl"
+    rows[0]["payload"]["cwd"] = str(workspace)
+    transcript_rows = [
+        *rows,
+        {
+            "timestamp": "2026-07-11T15:30:00Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "task_started",
+                "turn_id": "turn-other",
+            },
+        },
+        {
+            "timestamp": "2026-07-11T15:30:01Z",
+            "type": "response_item",
+            "payload": delegated_task(
+                "opaque-other",
+                "turn-other",
+                "/root/other_worker",
+            ),
+        },
+        {
+            "timestamp": "2026-07-11T15:30:02Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "task_complete",
+                "turn_id": "turn-other",
+            },
+        },
+    ]
+    write_jsonl(transcript, transcript_rows)
+    receipt = module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": child_session_id,
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    assert receipt["ok"] is True
+    assert module.search_index_sessions(
+        aoa_root=aoa_root,
+        target="all",
+        rebuild=True,
+    )["ok"] is True
+
+    structural = module.episode_semantic_search(
+        aoa_root=aoa_root,
+        query=(
+            "Сколько было NEW_TASK для "
+            "/root/operational_use_wave_e? Три?"
+        ),
+        session=child_session_id,
+        mode="sparse",
+        limit=8,
+        explain=True,
+    )
+    gate = structural["retrieval"][
+        "delegated_lifecycle_relation_gate"
+    ]
+    assert gate["status"] == "qualified_delegated_lifecycle_group"
+    assert gate["group_selection_status"] == (
+        "exact_target_group_selected"
+    )
+    assert gate["qualified_count"] == 3
+    assert gate["candidate_count"] == 4
+    assert gate["out_of_scope_candidate_count"] == 1
+    assert gate["structural_claim_admitted"] is True
+    assert structural["answer_admission"]["admitted"] is True
+    assert structural["answer_admission"]["claim_shape"] == (
+        "delegated_lifecycle"
+    )
+    assert [
+        chain["refs"]["delegation"] for chain in gate["chains"]
+    ] == ["raw:line:4", "raw:line:9", "raw:line:14"]
+
+    replay = module.episode_semantic_search(
+        aoa_root=aoa_root,
+        query=(
+            "Почему три NEW_TASK с одинаковым task name нельзя "
+            "назвать replay одного задания?"
+        ),
+        session=child_session_id,
+        mode="sparse",
+        limit=8,
+    )
+    assert replay["answer_admission"]["admitted"] is False
+    assert replay["answer_admission"]["status"] == (
+        "delegated_lifecycle_semantic_identity_unresolved"
+    )
+    assert replay["retrieval"][
+        "delegated_lifecycle_relation_gate"
+    ]["structural_claim_admitted"] is True
 
 
 def test_inter_agent_new_task_after_terminal_is_a_semantic_fallback_without_task_started() -> None:
@@ -21017,6 +21160,82 @@ def test_entity_usage_lifecycle_blocks_candidate_attribution_on_registry_collisi
     ] is False
 
 
+def test_entity_usage_lifecycle_resolves_observed_skill_instance_without_merging_collision() -> None:
+    entries: dict[str, dict[str, Any]] = {}
+    for owner, digest in (
+        ("owner-a", "a" * 64),
+        ("owner-b", "b" * 64),
+    ):
+        entry = module.entity_registry_make_entry(
+            kind="skill",
+            key="colliding-skill",
+            aliases=["colliding-skill"],
+            source_refs=[
+                {
+                    "source_type": "codex_user_skills",
+                    "path": f"/fixture/{owner}/SKILL.md",
+                    "status": "active",
+                    "sha256": digest,
+                }
+            ],
+            source_surface="codex_user_skills",
+            owner=owner,
+            status="active",
+        )
+        module.entity_registry_merge_entry(entries, entry)
+    registry_entry = next(iter(entries.values()))
+    owner_b_candidate = next(
+        candidate["candidate_id"]
+        for candidate in registry_entry["identity_candidates"]
+        if candidate["source_refs"][0]["path"]
+        == "/fixture/owner-b/SKILL.md"
+    )
+    read_event = {
+        "doc_id": "event:session:001:000031",
+        "role": "usage",
+        "event_type": "FILE_READ",
+        "skill_evidence_state": "skill_read",
+        "snippet": "sed -n '1,260p' /fixture/owner-b/SKILL.md",
+        "execution_read_result_refs": {"raw": "raw:line:32"},
+        "refs": {
+            "raw": "raw:line:31",
+            "segment": "001.md#event-000031",
+        },
+    }
+    lifecycle = module.entity_usage_lifecycle_projection(
+        normalized_kind="skill",
+        requested_kind="skill",
+        registry_lookup={"entries": [registry_entry]},
+        skill_evidence={},
+        entrypoint_events=[],
+        usage_events=[read_event],
+        result_events=[],
+        outcome_events=[],
+        context_events=[],
+        consequence_events=[],
+        chains=[],
+        false_correlation_events=[],
+        truncated=False,
+        incomplete=False,
+        candidate_count_exhaustive=True,
+    )
+
+    assert lifecycle["identity"]["status"] == "ambiguous"
+    assert lifecycle["identity"]["collision_preserved"] is True
+    assert lifecycle["identity"][
+        "identity_attribution_admitted"
+    ] is False
+    assert lifecycle["identity"]["observed_instance_status"] == (
+        "resolved"
+    )
+    assert lifecycle["states"]["read"][
+        "identity_attribution_admitted"
+    ] is True
+    assert lifecycle["states"]["read"][
+        "observed_identity_candidate_ids"
+    ] == [owner_b_candidate]
+
+
 def test_entity_registry_query_reads_existing_snapshot_without_rebuild(tmp_path: Path, monkeypatch: Any, capsys: Any) -> None:
     aoa_root = tmp_path / ".aoa"
     future_epoch = time.time() + 3600
@@ -22835,6 +23054,38 @@ def test_session_scoped_skill_prompt_visibility_is_context_only(
         missing["quality"]["skill_prompt_visibility_probe"]["status"]
         == "not_present"
     )
+
+    session_dir = module.session_dir_from_record(record)
+    manifest = module.read_json(
+        session_dir / "session.manifest.json",
+        {},
+    )
+    segment_path = Path(str(manifest["segments"][0]["index"]))
+    segment_index = module.read_json(segment_path, {})
+    segment_index["route_signal_classifier_version"] = (
+        module.ROUTE_SIGNAL_CLASSIFIER_VERSION - 1
+    )
+    module.write_json(segment_path, segment_index)
+
+    stale_scan = module.session_query_source_event_scan(
+        aoa_root=aoa_root,
+        session=record["session_label"],
+    )
+    assert stale_scan["status"] == "incompatible_generation"
+    assert stale_scan["_entries"] == []
+    assert stale_scan["incompatible_segment_index_count"] == 1
+    assert stale_scan["generation_identities"]["compatible"] is False
+
+    stale_prompt_probe = module.skill_prompt_visibility_probe(
+        aoa_root=aoa_root,
+        anchor="example-visible-skill",
+        session=record["session_label"],
+    )
+    assert stale_prompt_probe["status"] == "incompatible_generation"
+    assert stale_prompt_probe["_hits"] == []
+    assert stale_prompt_probe["generation_identities"][
+        "compatible"
+    ] is False
 
 
 def test_skill_selection_admits_coordinated_targets_without_promoting_nearby_mentions() -> None:
@@ -77515,3 +77766,304 @@ def test_episode_failure_recovery_distinguishes_observed_sequence_from_causality
     assert causal_admission["status"] == (
         "causal_relation_evidence_unresolved"
     )
+
+
+def test_derived_text_redaction_is_idempotent_and_preserves_benign_identity() -> None:
+    known_secret = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"
+    bearer_secret = "bearerabcdefghijklmnopqrstuvwxyz0123456789"
+    cli_secret = "cliabcdefghijklmnopqrstuvwxyz0123456789"
+    assignment_secret = "assignmentabcdefghijklmnopqrstuvwxyz0123456789"
+    uri_secret = "uriabcdefghijklmnopqrstuvwxyz0123456789"
+    private_key = (
+        "-----BEGIN PRIVATE KEY-----\n"
+        "abcdefghijklmnopqrstuvwxyz0123456789\n"
+        "-----END PRIVATE KEY-----"
+    )
+    stable_id = "SAFE-STABLE-ID-7F13"
+    source = {
+        "stable_id": stable_id,
+        "known": known_secret,
+        "command": (
+            f"curl -H 'Authorization: Bearer {bearer_secret}' "
+            f"--api-key {cli_secret} https://example.test"
+        ),
+        "note": f"OVMS_API_KEY={assignment_secret}",
+        "uri": f"https://agent:{uri_secret}@example.test/path",
+        "encrypted_content": "ciphertextabcdefghijklmnopqrstuvwxyz",
+        "private_material": private_key,
+    }
+
+    redacted = module.redact_derived_value(source)
+    rendered = json.dumps(redacted, ensure_ascii=False, sort_keys=True)
+
+    for secret in (
+        known_secret,
+        bearer_secret,
+        cli_secret,
+        assignment_secret,
+        uri_secret,
+        "ciphertextabcdefghijklmnopqrstuvwxyz",
+        "abcdefghijklmnopqrstuvwxyz0123456789",
+    ):
+        assert secret not in rendered
+    assert redacted["stable_id"] == stable_id
+    assert module.DERIVED_TEXT_REDACTION_MARKER in rendered
+    assert module.DERIVED_PRIVATE_KEY_REDACTION_MARKER in rendered
+    assert module.redact_derived_value(redacted) == redacted
+    assert (
+        module.session_memory_generation_common()[
+            "derived_text_redaction_policy_version"
+        ]
+        == module.DERIVED_TEXT_REDACTION_POLICY_VERSION
+    )
+
+
+def test_generated_session_search_and_graph_views_do_not_duplicate_credentials(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-07-18T00-00-00-privacy.jsonl"
+    stable_anchor = "SAFE-ANCHOR-7F13"
+    known_secret = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"
+    bearer_secret = "bearerabcdefghijklmnopqrstuvwxyz0123456789"
+    json_secret = "jsonabcdefghijklmnopqrstuvwxyz0123456789"
+    encrypted_secret = "encryptedabcdefghijklmnopqrstuvwxyz0123456789"
+    oversized_secret = "oversizedabcdefghijklmnopqrstuvwxyz0123456789"
+    all_secrets = (
+        known_secret,
+        bearer_secret,
+        json_secret,
+        encrypted_secret,
+        oversized_secret,
+    )
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-07-18T00:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "privacy-session",
+                    "cwd": str(repo),
+                    "model": "gpt-5",
+                },
+            },
+            {
+                "timestamp": "2026-07-18T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": (
+                                f"Verify the exact identifier {stable_anchor} "
+                                "without treating credentials as memory."
+                            ),
+                        }
+                    ],
+                },
+            },
+            {
+                "timestamp": "2026-07-18T00:00:02Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": "call-private",
+                    "arguments": json.dumps(
+                        {
+                            "cmd": (
+                                "curl -H 'Authorization: Bearer "
+                                f"{bearer_secret}' --api-key {known_secret} "
+                                "https://example.test"
+                            ),
+                            "workdir": str(repo),
+                        }
+                    ),
+                },
+            },
+            {
+                "timestamp": "2026-07-18T00:00:03Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call-private",
+                    "output": json.dumps(
+                        {
+                            "api_key": json_secret,
+                            "encrypted_content": encrypted_secret,
+                            "result": f"verified {stable_anchor}",
+                        }
+                    ),
+                },
+            },
+            {
+                "timestamp": "2026-07-18T00:00:04Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call-oversized",
+                    "output": oversized_secret + ("x" * 40_000),
+                },
+            },
+            {
+                "timestamp": "2026-07-18T00:00:05Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": f"Verified benign identifier {stable_anchor}.",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    monkeypatch.setenv("AOA_SESSION_MEMORY_FULL_STOP_SYNC", "1")
+
+    receipt = module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "privacy-session",
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    assert receipt["ok"] is True
+    record = module.resolve_session_record(aoa_root, "privacy-session")
+    session_dir = Path(record["path"])
+    manifest = json.loads(
+        (session_dir / "session.manifest.json").read_text(encoding="utf-8")
+    )
+    raw_path = module.manifest_raw_path(session_dir, manifest)
+    raw_text = raw_path.read_text(encoding="utf-8")
+    raw_block_text = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted(
+            (session_dir / "raw" / "blocks").glob("*.jsonl")
+        )
+    )
+    for secret in all_secrets:
+        assert secret in raw_text
+        assert secret in raw_block_text
+
+    generated_session_text = "\n".join(
+        path.read_text(encoding="utf-8", errors="replace")
+        for path in sorted(session_dir.rglob("*"))
+        if path.is_file()
+        and "raw" not in path.relative_to(session_dir).parts
+        and path.suffix in {".json", ".jsonl", ".md"}
+    )
+    for secret in all_secrets:
+        assert secret not in generated_session_text
+    assert stable_anchor in generated_session_text
+    assert "omitted_large_raw_event" in generated_session_text
+
+    indexed = module.search_index_sessions(
+        aoa_root=aoa_root,
+        target="all",
+        rebuild=True,
+    )
+    assert indexed["ok"] is True
+    search_result = module.search_sessions(
+        aoa_root=aoa_root,
+        query=stable_anchor,
+        session="privacy-session",
+        include_archived_raw_fallback=False,
+        limit=10,
+    )
+    assert search_result["result_count"] >= 1
+    search_packet_text = json.dumps(
+        search_result,
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    assert stable_anchor in search_packet_text
+    for secret in all_secrets:
+        assert secret not in search_packet_text
+
+    archived_exact = module.archived_session_exact_search(
+        aoa_root=aoa_root,
+        session="privacy-session",
+        query=stable_anchor,
+        limit=10,
+    )
+    assert archived_exact["result_count"] >= 1
+    archived_exact_text = json.dumps(
+        archived_exact,
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    assert stable_anchor in archived_exact_text
+    for secret in all_secrets:
+        assert secret not in archived_exact_text
+
+    graph = module.build_session_graph(
+        aoa_root=aoa_root,
+        target="all",
+        write=True,
+        include_rows=False,
+    )
+    assert graph["ok"] is True
+
+    def decoded_sqlite_text(path: Path) -> str:
+        conn = sqlite3.connect(str(path))
+        fragments: list[str] = []
+        try:
+            tables = [
+                str(row[0])
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type = 'table' ORDER BY name"
+                )
+            ]
+            for table in tables:
+                quoted = table.replace('"', '""')
+                for row in conn.execute(f'SELECT * FROM "{quoted}"'):
+                    for value in row:
+                        if isinstance(value, str):
+                            fragments.append(value)
+                        elif isinstance(value, bytes):
+                            try:
+                                decoded = module.zlib.decompress(value).decode(
+                                    "utf-8",
+                                    errors="replace",
+                                )
+                            except (module.zlib.error, UnicodeDecodeError):
+                                decoded = value.decode(
+                                    "utf-8",
+                                    errors="ignore",
+                                )
+                            fragments.append(decoded)
+        finally:
+            conn.close()
+        return "\n".join(fragments)
+
+    projection_text = "\n".join(
+        decoded_sqlite_text(path)
+        for path in sorted(aoa_root.rglob("*.sqlite3"))
+    )
+    graph_paths = module.graph_paths(aoa_root)
+    graph_text = "\n".join(
+        path.read_text(encoding="utf-8", errors="replace")
+        for key, path in graph_paths.items()
+        if key != "root"
+        and path.is_file()
+        and path.suffix != ".sqlite3"
+    )
+    all_projection_text = f"{projection_text}\n{graph_text}"
+    assert stable_anchor in all_projection_text
+    for secret in all_secrets:
+        assert secret not in all_projection_text
