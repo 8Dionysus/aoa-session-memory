@@ -112,6 +112,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0008 Scoped Graph Evidence Freshness](../AOA-SM-D-0008-scoped-graph-evidence-freshness.md) | 2026-07-16 | Accepted | `docs/decisions/AOA-SM-D-0008-scoped-graph-evidence-freshness.md` |
 
+## content digest
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0023 Manifest-Committed Graph Sidecar Publication](../AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md` |
+
 ## content-addressed capture
 
 | Decision | Date | Status | Path |
@@ -159,6 +165,7 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0022 Pinned Entity-Registry Generation for Graph Publication](../AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md` |
+| [AOA-SM-D-0023 Manifest-Committed Graph Sidecar Publication](../AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md` |
 
 ## digest verification
 
@@ -257,6 +264,7 @@
 | [AOA-SM-D-0002 Semantic Projection Generation Identity](../AOA-SM-D-0002-semantic-projection-generation-identity.md) | 2026-07-14 | Accepted | `docs/decisions/AOA-SM-D-0002-semantic-projection-generation-identity.md` |
 | [AOA-SM-D-0021 Raw-Preserving Derived-Text Privacy Boundary](../AOA-SM-D-0021-raw-preserving-derived-text-privacy-boundary.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0021-raw-preserving-derived-text-privacy-boundary.md` |
 | [AOA-SM-D-0022 Pinned Entity-Registry Generation for Graph Publication](../AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md` |
+| [AOA-SM-D-0023 Manifest-Committed Graph Sidecar Publication](../AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md` |
 
 ## global recall honesty
 
@@ -312,6 +320,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0005 Provenance-Preserving Fork Lineage Consolidation](../AOA-SM-D-0005-provenance-preserving-fork-lineage-consolidation.md) | 2026-07-15 | Accepted | `docs/decisions/AOA-SM-D-0005-provenance-preserving-fork-lineage-consolidation.md` |
+
+## manifest commit
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0023 Manifest-Committed Graph Sidecar Publication](../AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md` |
 
 ## mutation rollback
 
@@ -454,6 +468,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0002 Semantic Projection Generation Identity](../AOA-SM-D-0002-semantic-projection-generation-identity.md) | 2026-07-14 | Accepted | `docs/decisions/AOA-SM-D-0002-semantic-projection-generation-identity.md` |
 
+## rollback
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0023 Manifest-Committed Graph Sidecar Publication](../AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md` |
+
 ## route-selection visibility
 
 | Decision | Date | Status | Path |
@@ -503,6 +523,7 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0002 Semantic Projection Generation Identity](../AOA-SM-D-0002-semantic-projection-generation-identity.md) | 2026-07-14 | Accepted | `docs/decisions/AOA-SM-D-0002-semantic-projection-generation-identity.md` |
 | [AOA-SM-D-0022 Pinned Entity-Registry Generation for Graph Publication](../AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md` |
+| [AOA-SM-D-0023 Manifest-Committed Graph Sidecar Publication](../AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md` |
 
 ## starvation prevention
 

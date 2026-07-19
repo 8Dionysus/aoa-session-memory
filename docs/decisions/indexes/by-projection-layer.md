@@ -152,6 +152,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0013 Indexed Graph Seed Before Retrieval Fallback](../AOA-SM-D-0013-indexed-graph-seed-before-retrieval-fallback.md) | 2026-07-17 | Accepted | `docs/decisions/AOA-SM-D-0013-indexed-graph-seed-before-retrieval-fallback.md` |
 
+## graph index
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0023 Manifest-Committed Graph Sidecar Publication](../AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md` |
+
 ## graph maintenance queue
 
 | Decision | Date | Status | Path |
@@ -171,11 +177,18 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0022 Pinned Entity-Registry Generation for Graph Publication](../AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md` |
 
+## graph readers
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0023 Manifest-Committed Graph Sidecar Publication](../AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md` |
+
 ## graph sidecar
 
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0022 Pinned Entity-Registry Generation for Graph Publication](../AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md` |
+| [AOA-SM-D-0023 Manifest-Committed Graph Sidecar Publication](../AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md` |
 
 ## graph source contributions
 
@@ -194,6 +207,7 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0022 Pinned Entity-Registry Generation for Graph Publication](../AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md` |
+| [AOA-SM-D-0023 Manifest-Committed Graph Sidecar Publication](../AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md` |
 
 ## graph timeline
 

@@ -35973,6 +35973,209 @@ def test_graph_incremental_maintenance_rolls_back_dependency_change(
     assert after_digest == before_digest
 
 
+def test_graph_sidecar_stage_is_not_published_before_store_commit(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+
+    def contribution(event_number: int) -> dict[str, Any]:
+        event_id = (
+            f"event:sidecar-stage:000:{event_number:06d}"
+        )
+        return {
+            "source": {
+                "source_key": "segment:sidecar-stage:000",
+                "source_type": "segment",
+                "session_id": "sidecar-stage",
+                "session_label": (
+                    "2026-07-19__001__sidecar-stage"
+                ),
+                "segment_id": "000",
+                "source_path": str(
+                    tmp_path / "sidecar-stage.json"
+                ),
+                "source_paths": [
+                    str(tmp_path / "sidecar-stage.json")
+                ],
+                "source_sha": f"sidecar-stage-{event_number}",
+                "source_mtime": float(event_number),
+                "graph_schema_version": (
+                    module.GRAPH_SCHEMA_VERSION
+                ),
+                "graph_store_schema_version": (
+                    module.GRAPH_STORE_SCHEMA_VERSION
+                ),
+                "graph_event_route_signal_edge_policy": (
+                    module.GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY
+                ),
+                "route_signal_classifier_version": (
+                    module.ROUTE_SIGNAL_CLASSIFIER_VERSION
+                ),
+            },
+            "nodes": [{"id": event_id, "type": "event"}],
+            "edges": [
+                {
+                    "id": f"edge:sidecar-stage:{event_number}",
+                    "source": event_id,
+                    "target": "route:tool:sidecar-stage",
+                    "type": "mentions_route_signal",
+                }
+            ],
+        }
+
+    store = module.GraphSqliteStore(aoa_root, reset=True)
+    try:
+        store.rebuild([contribution(1)])
+        sidecar = store.write_sidecar()
+        index = store.index_payload(
+            records=[{"session_id": "sidecar-stage"}],
+            diagnostics=[],
+            source="test_committed_graph_store",
+        )
+        index["sidecar_commit"] = (
+            module.graph_sidecar_commit_manifest(
+                store,
+                sidecar,
+            )
+        )
+        module.write_json(
+            module.graph_paths(aoa_root)["index"],
+            index,
+        )
+        before_digest = module.graph_projection_semantic_digest(
+            store.conn
+        )["sha256"]
+        before_nodes = module.sha256_file(
+            module.graph_paths(aoa_root)["nodes"]
+        )
+        before_edges = module.sha256_file(
+            module.graph_paths(aoa_root)["edges"]
+        )
+
+        store.replace_sources([contribution(2)])
+        stage = store.stage_sidecar()
+        staged_paths = [
+            Path(value)
+            for value in stage["staged_paths"].values()
+        ]
+
+        assert module.sha256_file(
+            module.graph_paths(aoa_root)["nodes"]
+        ) == before_nodes
+        assert module.sha256_file(
+            module.graph_paths(aoa_root)["edges"]
+        ) == before_edges
+
+        store.conn.rollback()
+        store.discard_sidecar_stage(stage)
+        after_digest = module.graph_projection_semantic_digest(
+            store.conn
+        )["sha256"]
+    finally:
+        store.close()
+
+    assert after_digest == before_digest
+    assert all(not path.exists() for path in staged_paths)
+    assert module.sha256_file(
+        module.graph_paths(aoa_root)["nodes"]
+    ) == before_nodes
+    assert module.sha256_file(
+        module.graph_paths(aoa_root)["edges"]
+    ) == before_edges
+
+
+def test_graph_sidecar_manifest_rejects_tampered_snapshot(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    contribution = {
+        "source": {
+            "source_key": "segment:sidecar-tamper:000",
+            "source_type": "segment",
+            "session_id": "sidecar-tamper",
+            "session_label": "2026-07-19__001__sidecar-tamper",
+            "segment_id": "000",
+            "source_path": str(tmp_path / "sidecar-tamper.json"),
+            "source_paths": [
+                str(tmp_path / "sidecar-tamper.json")
+            ],
+            "source_sha": "sidecar-tamper-sha",
+            "source_mtime": 1.0,
+            "graph_schema_version": module.GRAPH_SCHEMA_VERSION,
+            "graph_store_schema_version": (
+                module.GRAPH_STORE_SCHEMA_VERSION
+            ),
+            "graph_event_route_signal_edge_policy": (
+                module.GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY
+            ),
+            "route_signal_classifier_version": (
+                module.ROUTE_SIGNAL_CLASSIFIER_VERSION
+            ),
+        },
+        "nodes": [
+            {
+                "id": "event:sidecar-tamper:000:000001",
+                "type": "event",
+            }
+        ],
+        "edges": [
+            {
+                "id": "edge:sidecar-tamper",
+                "source": (
+                    "event:sidecar-tamper:000:000001"
+                ),
+                "target": "route:tool:sidecar-tamper",
+                "type": "mentions_route_signal",
+            }
+        ],
+    }
+    store = module.GraphSqliteStore(aoa_root, reset=True)
+    try:
+        store.rebuild([contribution])
+        sidecar = store.write_sidecar()
+        index = store.index_payload(
+            records=[{"session_id": "sidecar-tamper"}],
+            diagnostics=[],
+            source="test_committed_graph_store",
+        )
+        index["sidecar_commit"] = (
+            module.graph_sidecar_commit_manifest(
+                store,
+                sidecar,
+            )
+        )
+        module.write_json(
+            module.graph_paths(aoa_root)["index"],
+            index,
+        )
+    finally:
+        store.close()
+
+    current = module.load_session_graph(
+        aoa_root,
+        allow_ephemeral=False,
+    )
+    assert current["ok"] is True
+    assert current["source"] == "sidecar"
+
+    with module.graph_paths(aoa_root)["nodes"].open(
+        "a",
+        encoding="utf-8",
+    ) as handle:
+        handle.write("\n")
+
+    rejected = module.load_session_graph(
+        aoa_root,
+        allow_ephemeral=False,
+    )
+    assert rejected["ok"] is False
+    assert rejected["source"] == "rejected_sidecar"
+    assert (
+        "graph_sidecar_nodes_size_mismatch"
+        in rejected["diagnostics"]
+    )
+
+
 def test_graph_scoped_generation_can_be_current_while_global_is_stale(
     tmp_path: Path,
 ) -> None:

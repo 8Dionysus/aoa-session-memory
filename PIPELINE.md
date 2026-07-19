@@ -296,6 +296,14 @@ rejected rebuild leaves the previous graph intact. A graph store from before
 the dependency contract requires an explicit full rebuild; a bounded
 maintenance batch cannot silently upgrade its global semantics.
 
+Optional graph sidecar export is a separate manifest-committed projection.
+Nodes and edges are rendered in private staging, the graph transaction and
+pinned dependency are checked before publication, and `graph/index.json` is
+written last with artifact hashes plus the committed store generation,
+dependency, and semantic digest. Readers reject a missing, mismatched, or
+interrupted manifest and return to the graph store or a bounded source-backed
+fallback; sidecar files never make a rolled-back graph mutation visible.
+
 ## 12. Search and graph pressure
 
 Storage diagnosis separates physical bytes, duplicate generated payload,

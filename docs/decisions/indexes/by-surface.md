@@ -22,6 +22,7 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0022 Pinned Entity-Registry Generation for Graph Publication](../AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md` |
+| [AOA-SM-D-0023 Manifest-Committed Graph Sidecar Publication](../AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md` |
 
 ## attribution
 
@@ -129,6 +130,7 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0022 Pinned Entity-Registry Generation for Graph Publication](../AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md` |
+| [AOA-SM-D-0023 Manifest-Committed Graph Sidecar Publication](../AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md` |
 
 ## freshness contract
 
@@ -161,6 +163,7 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0022 Pinned Entity-Registry Generation for Graph Publication](../AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md` |
+| [AOA-SM-D-0023 Manifest-Committed Graph Sidecar Publication](../AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md` |
 
 ## graph maintenance
 
@@ -186,12 +189,19 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0022 Pinned Entity-Registry Generation for Graph Publication](../AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md` |
+| [AOA-SM-D-0023 Manifest-Committed Graph Sidecar Publication](../AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md` |
 
 ## lifecycle
 
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0018 Owner Capability Home And Skill Evidence Lifecycle](../AOA-SM-D-0018-owner-capability-home-and-skill-evidence-lifecycle.md) | 2026-07-18 | Accepted | `docs/decisions/AOA-SM-D-0018-owner-capability-home-and-skill-evidence-lifecycle.md` |
+
+## partial-failure recovery
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0023 Manifest-Committed Graph Sidecar Publication](../AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md` |
 
 ## physical storage transition
 
