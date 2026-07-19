@@ -840,6 +840,12 @@ def test_agent_event_taxonomy_task_episodes_and_search_routes(tmp_path: Path, mo
     assert episode_hits["ok"] is True
     assert episode_hits["result_count"] >= 1
     assert episode_hits["results"][0]["task_episode_id"] == "task-0001"
+    assert episode_hits["results"][0]["candidate_id"] == (
+        episode_hits["results"][0]["doc_id"]
+    )
+    assert episode_hits["candidate_ids"][0] == (
+        episode_hits["results"][0]["candidate_id"]
+    )
     assert episode_hits["results"][0]["match_channel"] == "episode_contextual_bm25"
     assert episode_hits["results"][0]["raw_ref"] == "raw:line:2"
     assert episode_hits["results"][0]["reading_contract"]["status"] == "candidate_navigation_only"
@@ -15947,6 +15953,10 @@ def test_memory_query_intent_separates_exact_typed_episode_temporal_graph_and_di
         "was aoa-session-memory CLI, MCP, or a session-memory skill actually invoked in this span?": "entity_usage",
         "какой terminal stack уже стоял и чего не хватало перед установкой Ghostty": "temporal_state",
         "MV3 background fix -> restart failure -> safer process selection -> successful capture": "causal_chain",
+        "что вызвало restart failure после MV3 background fix": "causal_chain",
+        "какие изменения последовали после решения добавить runtime adapter": "temporal_state",
+        "Какая recovery-цепочка последовала после Ты завис": "temporal_state",
+        "Где начинается локальная работа fork после parent history": "temporal_state",
         "как skill aoa-eval связан с MCP и owner route": "relationship_topology",
         "какие повторяющиеся ошибки и решения были во всех старых сессиях": "global_narrative",
         "почему зелёный downstream canary мог не проверить соседние репозитории": "causal_chain",
@@ -64865,7 +64875,7 @@ def test_decision_followup_alignment_requires_typed_order_and_specificity() -> N
     )
     missing_specific = module.episode_decision_followup_alignment(positive_episode, specific_terms)
 
-    assert module.memory_query_intent(query)["primary"] == "causal_chain"
+    assert module.memory_query_intent(query)["primary"] == "temporal_state"
     assert positive["status"] == "ordered_action_result_chain"
     assert positive["chain"]["anchor"]["refs"]["raw"] == "raw:line:10"
     assert positive["chain"]["action"]["refs"]["raw"] == "raw:line:20"
@@ -76988,3 +76998,520 @@ def test_rebuild_session_labels_backfills_existing_archive(tmp_path: Path) -> No
     assert not legacy_dir.exists()
     registry = json.loads((aoa_root / "session-registry.json").read_text(encoding="utf-8"))
     assert registry["sessions"][0]["session_label"] == "2026-05-13__001__backfill-readable-names"
+
+
+def test_episode_query_scope_separates_session_date_and_slash_alternative() -> None:
+    session_id = "019eb8c7-a7b5-76f0-b66a-0eb3791305ff"
+    scoped = module.episode_semantic_query_scope(
+        "Что пользователь повторил после turn_aborted "
+        f"в сессии {session_id}?"
+    )
+    dated = module.episode_semantic_query_scope(
+        "Найди replay/resume связи около 11 июня 2026 "
+        "для распространения evals."
+    )
+    exact_dated = module.episode_semantic_query_scope(
+        "Какая recovery-цепочка последовала после 'Ты завис' 10 июня 2026?"
+    )
+    shape = module.literal_query_shape(
+        "Найди replay/resume связи около 11 июня 2026 "
+        "для распространения evals."
+    )
+
+    assert scoped["effective_session"] == session_id
+    assert session_id not in scoped["semantic_query_text"]
+    assert "сессии" not in scoped["semantic_query_text"]
+    assert dated["semantic_query_text"] == (
+        "Найди replay/resume связи для распространения evals."
+    )
+    assert dated["natural_calendar_date"] == "2026-06-11"
+    assert dated["natural_calendar_date_from"] == "2026-06-10"
+    assert dated["natural_calendar_date_to"] == "2026-06-12"
+    assert dated["natural_calendar_date_mode"] == (
+        "session_calendar_date_approximate_timezone_tolerant"
+    )
+    assert dated["event_time_claim_allowed"] is False
+    assert exact_dated["natural_calendar_date"] == "2026-06-10"
+    assert exact_dated["natural_calendar_date_from"] == "2026-06-09"
+    assert exact_dated["natural_calendar_date_to"] == "2026-06-11"
+    assert exact_dated["natural_calendar_date_mode"] == (
+        "session_calendar_date_timezone_tolerant"
+    )
+    assert exact_dated["event_time_claim_allowed"] is False
+    assert shape["path_anchor"] == ""
+    assert shape["primary"] != module.LITERAL_QUERY_KIND_PATH
+    assert module.literal_query_path_anchor("tools/abyss-machine-test") == (
+        "tools/abyss-machine-test"
+    )
+
+
+def test_episode_replay_alignment_requires_typed_relation_and_raw_refs() -> None:
+    prior = {
+        "text": "Надо распространить evals по остальным репозиториям",
+        "source_lane": "message_user",
+        "admission_basis": "canonical_user_intent",
+        "line": 1663,
+        "refs": {"raw": "raw:line:1663", "session": "session.json"},
+    }
+    replay = {
+        "text": "Надо распространить evals по остальным репозиториям",
+        "source_lane": "message_user",
+        "admission_basis": "canonical_user_replayed_intent",
+        "line": 1670,
+        "refs": {"raw": "raw:line:1670", "session": "session.json"},
+    }
+    episode = {
+        "event_range": {"from_line": 1663, "to_line": 1739},
+        "representations": {"intents": [prior, replay]},
+        "semantic_continuations": [
+            {
+                **replay,
+                "relation": "replayed_intent",
+                "admission_basis": "exact_normalized_prior_intent",
+            }
+        ],
+    }
+    query = (
+        "Что пользователь повторил после turn_aborted для "
+        "распространения evals?"
+    )
+    terms = module.episode_semantic_query_terms(query)
+    alignment = module.episode_replay_alignment(
+        episode,
+        terms,
+        query_text=query,
+    )
+    evidence = module.episode_semantic_candidate_evidence(
+        episode,
+        terms,
+        query_text=query,
+    )
+    source_kind = module.episode_source_kind_alignment(
+        evidence,
+        terms,
+        query_text=query,
+    )
+    relation_evidence = {"supporting_evidence": []}
+    relation_evidence["supporting_evidence"] = (
+        module.episode_relation_prioritized_support(
+            relation_evidence,
+            decision_followup={},
+            failure_recovery={},
+            replay_alignment=alignment,
+            issue_resolution={},
+        )
+    )
+    relation_source_kind = module.episode_source_kind_alignment(
+        relation_evidence,
+        terms,
+        query_text=query,
+    )
+
+    assert alignment["status"] == "typed_replayed_intent_relation"
+    assert alignment["ranking_boost"] >= 150.0
+    assert alignment["chain"]["prior_intent"]["refs"]["raw"] == (
+        "raw:line:1663"
+    )
+    assert alignment["chain"]["replayed_intent"]["refs"]["raw"] == (
+        "raw:line:1670"
+    )
+    assert alignment["accepted"] is False
+    assert alignment["claim_scope"] == (
+        "navigation_until_bounded_raw_interruption_read"
+    )
+    assert source_kind["status"] == "source_kind_aligned"
+    assert relation_source_kind["status"] == "source_kind_aligned"
+    assert relation_source_kind["evidence"]["refs"]["raw"] in {
+        "raw:line:1663",
+        "raw:line:1670",
+    }
+
+    without_relation = dict(episode)
+    without_relation["semantic_continuations"] = []
+    rejected = module.episode_replay_alignment(
+        without_relation,
+        terms,
+        query_text=query,
+    )
+    assert rejected["status"] == "replayed_intent_relation_missing"
+    assert rejected["ranking_boost"] == 0.0
+
+    replay_admission = module.episode_answer_admission(
+        {
+            "doc_id": "episode:replay-navigation",
+            "query_coverage": {
+                "coverage": 1.0,
+                "matched_term_count": len(terms),
+            },
+            "supporting_evidence": [
+                {
+                    "matched_query_terms": [
+                        term["token"] for term in terms
+                    ],
+                    "refs": {"raw": "raw:line:1670"},
+                }
+            ],
+            "replay_alignment": alignment,
+            "source_kind_alignment": source_kind,
+        },
+        query_term_count=len(terms),
+    )
+    assert replay_admission["admitted"] is False
+    assert replay_admission["status"] == (
+        "replay_interruption_evidence_requires_raw_read"
+    )
+    assert replay_admission["basis"] == (
+        "replay_requires_bounded_raw_interruption_read"
+    )
+    replay_routes = module.episode_semantic_expansion_routes(
+        session_id="replay-session",
+        episode_id="task-0013",
+        session_index_ref="session.index.json",
+        evidence={"supporting_evidence": []},
+        fallback_raw_ref="",
+        replay_alignment=alignment,
+    )
+    assert replay_routes["replay_interruption_window"] == (
+        "evidence-window replay-session raw:line:1663 "
+        "--before 1 --after 9"
+    )
+    replay_next_route = module.episode_unadmitted_relation_next_route(
+        [
+            {
+                "replay_alignment": alignment,
+                "expansion_routes": replay_routes,
+            }
+        ],
+        replay_admission,
+    )
+    assert replay_next_route["status"] == "ready"
+    assert replay_next_route["command"] == (
+        replay_routes["replay_interruption_window"]
+    )
+    assert replay_next_route["expected_refs"] == [
+        "raw:line:1663",
+        "raw:line:1670",
+    ]
+
+    missing_source_admission = module.episode_answer_admission(
+        {
+            "doc_id": "episode:wrong-source-kind",
+            "query_coverage": {
+                "coverage": 1.0,
+                "matched_term_count": len(terms),
+            },
+            "supporting_evidence": [
+                {
+                    "matched_query_terms": [
+                        term["token"] for term in terms
+                    ],
+                    "refs": {"raw": "raw:line:1700"},
+                }
+            ],
+            "source_kind_alignment": {
+                "active": True,
+                "status": "source_kind_evidence_missing",
+            },
+        },
+        query_term_count=len(terms),
+    )
+    assert missing_source_admission["admitted"] is False
+    assert missing_source_admission["status"] == (
+        "requested_source_kind_evidence_unresolved"
+    )
+
+
+def test_episode_lineage_alignment_ranks_boundary_and_history_sides() -> None:
+    query = "Где начинается локальная работа fork после parent history?"
+    terms = module.episode_semantic_query_terms(query)
+    lineage = {
+        "relationship": "forked_from",
+        "parent_session_id": "parent-session",
+        "lineage_evidence_ref": "raw:line:1",
+        "local_work_boundary_ref": "raw:line:3283",
+    }
+    history = {
+        "event_range": {"from_line": 3273, "to_line": 3281},
+        "lineage": {
+            **lineage,
+            "episode_scope": "pre_child_task_history_candidate",
+        },
+    }
+    first_local = {
+        "event_range": {"from_line": 3283, "to_line": 3598},
+        "lineage": {**lineage, "episode_scope": "local_fork_work"},
+    }
+    later_local = {
+        "event_range": {"from_line": 3599, "to_line": 3658},
+        "lineage": {**lineage, "episode_scope": "local_fork_work"},
+    }
+    earlier_history = {
+        "event_range": {"from_line": 2449, "to_line": 2883},
+        "lineage": {
+            **lineage,
+            "episode_scope": "pre_child_task_history_candidate",
+        },
+    }
+
+    history_alignment = module.episode_lineage_alignment(
+        history,
+        terms,
+        query_text=query,
+    )
+    first_alignment = module.episode_lineage_alignment(
+        first_local,
+        terms,
+        query_text=query,
+    )
+    later_alignment = module.episode_lineage_alignment(
+        later_local,
+        terms,
+        query_text=query,
+    )
+    earlier_alignment = module.episode_lineage_alignment(
+        earlier_history,
+        terms,
+        query_text=query,
+    )
+
+    assert first_alignment["starts_at_local_work_boundary"] is True
+    assert history_alignment["ends_at_parent_history_boundary"] is True
+    assert earlier_alignment["ends_at_parent_history_boundary"] is False
+    assert first_alignment["ranking_boost"] > history_alignment["ranking_boost"]
+    assert history_alignment["ranking_boost"] > later_alignment["ranking_boost"]
+    assert history_alignment["ranking_boost"] > earlier_alignment["ranking_boost"]
+    assert first_alignment["evidence_refs"] == {
+        "lineage": "raw:line:1",
+        "local_work_boundary": "raw:line:3283",
+    }
+
+    contrast_query = "отдели replayed parent history от local work в fork"
+    contrast_terms = module.episode_semantic_query_terms(contrast_query)
+    contrast_replay_profile = module.episode_replay_query_profile(
+        contrast_terms,
+        query_text=contrast_query,
+    )
+    contrast_first = module.episode_lineage_alignment(
+        first_local,
+        contrast_terms,
+        query_text=contrast_query,
+    )
+    contrast_history = module.episode_lineage_alignment(
+        history,
+        contrast_terms,
+        query_text=contrast_query,
+    )
+    contrast_earlier = module.episode_lineage_alignment(
+        earlier_history,
+        contrast_terms,
+        query_text=contrast_query,
+    )
+    assert contrast_first["ranking_boost"] > contrast_history["ranking_boost"]
+    assert contrast_history["ranking_boost"] > contrast_earlier["ranking_boost"]
+    assert contrast_replay_profile["lineage_history_context"] is True
+    assert contrast_replay_profile["active"] is False
+
+    lineage_admission = module.episode_answer_admission(
+        {
+            "doc_id": "episode:fork-lineage-navigation",
+            "query_coverage": {
+                "coverage": 1.0,
+                "matched_term_count": len(terms),
+            },
+            "supporting_evidence": [
+                {
+                    "matched_query_terms": [
+                        term["token"] for term in terms
+                    ],
+                    "refs": {"raw": "raw:line:3283"},
+                }
+            ],
+            "lineage_alignment": first_alignment,
+        },
+        query_term_count=len(terms),
+    )
+    assert lineage_admission["admitted"] is False
+    assert lineage_admission["status"] == (
+        "fork_lineage_comparison_evidence_unresolved"
+    )
+    lineage_routes = module.episode_semantic_expansion_routes(
+        session_id="child-session",
+        episode_id="task-0030",
+        session_index_ref="session.index.json",
+        evidence={"supporting_evidence": []},
+        fallback_raw_ref="",
+        lineage_alignment=first_alignment,
+    )
+    lineage_routes["parent_session"] = "task-episodes parent-session"
+    lineage_next_route = module.episode_unadmitted_relation_next_route(
+        [
+            {
+                "lineage_alignment": first_alignment,
+                "expansion_routes": lineage_routes,
+            }
+        ],
+        lineage_admission,
+    )
+    assert lineage_next_route["status"] == "ready"
+    assert lineage_next_route["commands"] == [
+        "evidence-window child-session raw:line:1 --before 0 --after 2",
+        (
+            "evidence-window child-session raw:line:3283 "
+            "--before 4 --after 6"
+        ),
+        "task-episodes parent-session",
+    ]
+
+
+def test_episode_failure_recovery_distinguishes_observed_sequence_from_causality() -> None:
+    episode = {
+        "semantic_continuations": [
+            {
+                "text": "Ты завис",
+                "line": 243,
+                "relation": "failure_observation",
+                "source_lane": "message_user",
+                "admission_basis": "typed_operator_conversation_act",
+                "refs": {"raw": "raw:line:243", "session": "session.json"},
+            },
+            {
+                "text": "Продолжай",
+                "line": 285,
+                "relation": "resume",
+                "source_lane": "message_user",
+                "admission_basis": "typed_operator_conversation_act",
+                "refs": {"raw": "raw:line:285", "session": "session.json"},
+            },
+        ],
+        "representations": {
+            "outcomes": [
+                {
+                    "text": "На связи. Не завис, проверяю состояние.",
+                    "line": 262,
+                    "source_lane": "message_assistant",
+                    "admission_basis": "assistant_observation",
+                    "refs": {
+                        "raw": "raw:line:262",
+                        "session": "session.json",
+                    },
+                }
+            ]
+        },
+        "failure_recovery_windows": [],
+    }
+    query = "Какая recovery-цепочка последовала после Ты завис?"
+    terms = module.episode_semantic_query_terms(query)
+    alignment = module.episode_failure_recovery_alignment(episode, terms)
+    replay_profile = module.episode_replay_query_profile(
+        terms,
+        query_text=query,
+    )
+    interval_replay_profile = module.episode_replay_query_profile(
+        module.episode_semantic_query_terms(
+            "Что произошло между сообщениями Ты завис и Продолжай?"
+        ),
+        query_text=(
+            "Что произошло между сообщениями Ты завис и Продолжай?"
+        ),
+    )
+
+    assert alignment["status"] == (
+        "ordered_observed_failure_resume_sequence"
+    )
+    assert replay_profile["resume"] is False
+    assert replay_profile["active"] is False
+    assert interval_replay_profile["resume"] is True
+    assert interval_replay_profile["active"] is False
+    assert alignment["ranking_boost"] >= 145.0
+    assert alignment["chain"]["failure_observation"]["refs"]["raw"] == (
+        "raw:line:243"
+    )
+    assert alignment["chain"]["resume_request"]["refs"]["raw"] == (
+        "raw:line:285"
+    )
+    assert alignment["accepted"] is False
+    assert alignment["sequence_admissible"] is True
+    assert alignment["claim_scope"] == (
+        "observed_temporal_sequence_not_causal_consequence"
+    )
+
+    prioritized_evidence = {"supporting_evidence": []}
+    prioritized_evidence["supporting_evidence"] = (
+        module.episode_relation_prioritized_support(
+            prioritized_evidence,
+            decision_followup={},
+            failure_recovery=alignment,
+            replay_alignment={},
+            issue_resolution={},
+        )
+    )
+    source_alignment = module.episode_source_kind_alignment(
+        prioritized_evidence,
+        module.episode_semantic_query_terms(
+            "где пользователь счёл агента зависшим, затем работа продолжилась"
+        ),
+        query_text=(
+            "где пользователь счёл агента зависшим, затем работа продолжилась"
+        ),
+    )
+    assert source_alignment["status"] == "source_kind_aligned"
+    assert source_alignment["evidence"]["refs"]["raw"] == (
+        "raw:line:243"
+    )
+
+    admission = module.episode_answer_admission(
+        {
+            "doc_id": "episode:observed-failure-resume",
+            "query_coverage": {"coverage": 0.2, "matched_term_count": 1},
+            "supporting_evidence": [],
+            "failure_recovery": alignment,
+        },
+        query_term_count=len(terms),
+    )
+    assert admission["admitted"] is True
+    assert admission["basis"] == (
+        "typed_observed_failure_resume_sequence_evidence"
+    )
+    assert admission["typed_failure_resume_sequence_admitted"] is True
+    claim_refs = module.episode_claim_evidence_refs(
+        {
+            "doc_id": "episode:observed-failure-resume",
+            "failure_recovery": alignment,
+        },
+        admission,
+    )
+    assert {
+        item["refs"]["raw"]
+        for item in claim_refs
+    } >= {"raw:line:243", "raw:line:285"}
+    assert "do not prove causal" in admission["policy"]
+
+    causal_candidates, causal_gate = (
+        module.episode_causal_claim_shape_gate(
+            [
+                {
+                    "doc_id": "episode:observed-failure-resume",
+                    "query_coverage": {
+                        "coverage": 1.0,
+                        "matched_term_count": len(terms),
+                    },
+                    "supporting_evidence": [],
+                    "failure_recovery": alignment,
+                    "causal_attribution": {
+                        "active": False,
+                        "status": "not_a_causal_attribution_query",
+                    },
+                }
+            ],
+            query_text="Почему агент завис и затем возобновил работу?",
+        )
+    )
+    causal_admission = module.episode_answer_admission(
+        causal_candidates[0],
+        query_term_count=len(terms),
+    )
+    assert causal_gate["required"] is True
+    assert causal_admission["admitted"] is False
+    assert causal_admission["status"] == (
+        "causal_relation_evidence_unresolved"
+    )
