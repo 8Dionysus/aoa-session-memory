@@ -1,0 +1,17 @@
+{
+  "allowed_bytes": 20462507,
+  "allowed_tracked_bytes": 20731939,
+  "approved_by": "repository-owner",
+  "base_ref": "72d3fd3032d9ad06d02afe0740e7171504d72785",
+  "changed_generated_bytes": 20462507,
+  "changed_generated_files": 338,
+  "decision_ref": "aoa-kag:docs/decisions/AOA-KAG-D-0017-portable-content-addressed-repository-family.md",
+  "default_limit_bytes": 1048576,
+  "head_family_digest": "4b2b67f1b3f41cfc07bf35ef4dac4255efdd41a0e1a0521db60c5a0db88b7a57",
+  "reason": "IDX-002 return-loop recovery adds pre-journal stage ownership and fail-closed cleanup, requires stronger raw-authority digest proof, separates operational from semantic progress, and amends D-0020; admit only this digest-bound content-addressed KAG refresh without changing standing budgets.",
+  "repo": "aoa-session-memory",
+  "schema_version": "aoa-repo-local-kag-budget-receipt-v1",
+  "scope": "generated_delta_and_tracked_size",
+  "tracked_bytes": 20731939,
+  "tracked_bytes_max": 13631488
+}
