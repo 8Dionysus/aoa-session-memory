@@ -144,6 +144,9 @@ Ready when:
   source-aware;
 - semantic improvements do not hide exact-recall regressions;
 - fusion/reranking adds lane-specific value under equal budgets;
+- a fusion override names its version, decisive margin, typed or coherent
+  evidence guard, and raw coordinates, and remains navigation rather than
+  answer admission;
 - insufficient evidence produces abstention.
 
 ### 7. Graph views
@@ -191,6 +194,8 @@ Ready when:
 - MCP remains read-only and plan-only unless its owner contract explicitly
   changes;
 - payloads preserve refs, freshness, truncation, and next route;
+- language normalization keeps exact anchors, versions query-time expansion,
+  and rejects prefix-only morphology collisions before sparse evidence credit;
 - access-plane success is not treated as proof authority;
 - mutation stays behind explicit owner commands.
 
@@ -286,7 +291,13 @@ projection have current compatible generations. An active writer,
 incompatible or incomplete snapshot, or before/after semantic drift refuses
 the score. Filesystem and SQLite publication observations remain diagnostic and
 do not invalidate a semantically identical deterministic rebuild by
-themselves.
+themselves. Operational scan durations, shard-local path/mtime/size telemetry,
+and graph-ledger transition clocks are excluded only when query-bearing
+counts, statuses, source digests, generations, and evidence coordinates remain
+unchanged. A bounded snapshot settle retry is ready only when all failed
+attempts remain visible, its sole cause is capture-local physical publication
+drift, and source, semantic, schema, integrity, generation, or mixed failures
+refuse immediately.
 
 A layer is not complete forever. New episode, graph, narrative, or freshness
 evidence may reopen taxonomy, capture, indexing, routing, or presentation.

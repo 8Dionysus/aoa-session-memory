@@ -152,6 +152,22 @@ the manifest digest while scanning. Only a complete digest-verified pass can
 prove absence; partial or unverifiable scans must expose that state. The live
 append-only tail remains a separate freshness route.
 
+Episode query normalization retains the exact token. A bounded Russian
+instrumental-form expansion may use an FTS prefix to obtain candidates, but a
+sparse candidate receives semantic term credit only when the query and source
+tokens reduce to the same bounded morphology stem. Prefix-only collisions are
+rejected and counted in the packet; the query-time policy is independently
+versioned without rewriting episode projections.
+
+Hybrid episode fusion preserves one sparse rank-one candidate only when its
+lead is decisive and either coherent source evidence or a narrow typed
+structural relation with raw coordinates explains that lead. The packet names
+the guard, refs, score gap, fusion-policy version, and bonus. Ordinary
+candidates still use reciprocal-rank fusion; source-kind weight, semantic
+similarity, mention, or adjacency alone cannot activate the guard. This is a
+navigation rule and never admits the replay, fork, delegation, failure,
+recovery, or consequence claim without its normal evidence-reading gate.
+
 Search results, graph paths, atlas entries, registry states, and scenario
 checks are navigation packets. They may expose useful counts or confidence,
 but they do not become reviewed memory, eval verdicts, or owner decisions.
@@ -195,6 +211,13 @@ Deferred live state is not silently green and is not stable corruption. The
 next route is either to wait for quiet, run a targeted catch-up, or inspect raw
 evidence directly when authorized.
 
+A session-scoped skill or MCP usage probe may preserve a verified archived-raw
+source contribution even when the selected global search provider is missing,
+stale, or incomplete. `bounded_current` canonicalizes only that returned
+scope, carries its source fingerprint and evidence refs, and always states
+that it does not upgrade global freshness or authorize an exhaustive negative
+claim.
+
 Graph readers expose global recall freshness and bounded returned-evidence
 freshness as separate axes. Returned evidence-bearing nodes and edges are
 mapped through their source contributions, then checked against store
@@ -236,7 +259,18 @@ source and projection semantic identities before candidate generation, reject
 an active writer or incompatible generation without publishing a pin, and
 admit results only when a second snapshot under the same lease is semantically
 identical. Physical database bytes, inode, mtime, and observation clocks remain
-race diagnostics rather than evaluation identity.
+race diagnostics rather than evaluation identity. Operational rollup shard
+paths, source file size and mtime, scan duration, and graph-ledger clean/dirty
+clocks are likewise telemetry. Their query-bearing status, counts, source
+digests, generations, and evidence coordinates remain part of semantic
+identity.
+
+A cold reader can itself create or retire SQLite WAL/SHM observations while
+capturing an otherwise unchanged semantic snapshot. The reader may retry at
+most three immediate captures only when every failure diagnostic names that
+capture-local physical transition. Every attempt remains visible. Any source,
+schema, generation, semantic, integrity, or mixed diagnostic stops the retry
+and refuses the evaluation.
 
 Timer-originated `auto-maintenance-resource` deferrals are also written to the
 generated persistent retry queue under `diagnostics/`. The
@@ -323,6 +357,9 @@ written last with artifact hashes plus the committed store generation,
 dependency, and semantic digest. Readers reject a missing, mismatched, or
 interrupted manifest and return to the graph store or a bounded source-backed
 fallback; sidecar files never make a rolled-back graph mutation visible.
+A current clean graph store may publish a missing or stale sidecar without
+inventing a dirty source or rebuilding the graph. That packet reports sidecar
+publication separately and keeps semantic graph progress false.
 
 ## 12. Search and graph pressure
 

@@ -120,6 +120,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0007 Typed Graph Bridge Admission](../AOA-SM-D-0007-typed-graph-bridge-admission.md) | 2026-07-16 | Accepted | `docs/decisions/AOA-SM-D-0007-typed-graph-bridge-admission.md` |
 
+## claim abstention
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0027 Evidence-Specific Sparse Anchors in Hybrid Fusion](../AOA-SM-D-0027-evidence-specific-sparse-anchors-in-hybrid-fusion.md) | 2026-07-20 | Accepted | `docs/decisions/AOA-SM-D-0027-evidence-specific-sparse-anchors-in-hybrid-fusion.md` |
+
 ## concurrent export
 
 | Decision | Date | Status | Path |
@@ -167,6 +173,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0021 Raw-Preserving Derived-Text Privacy Boundary](../AOA-SM-D-0021-raw-preserving-derived-text-privacy-boundary.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0021-raw-preserving-derived-text-privacy-boundary.md` |
+
+## decisive sparse margin
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0027 Evidence-Specific Sparse Anchors in Hybrid Fusion](../AOA-SM-D-0027-evidence-specific-sparse-anchors-in-hybrid-fusion.md) | 2026-07-20 | Accepted | `docs/decisions/AOA-SM-D-0027-evidence-specific-sparse-anchors-in-hybrid-fusion.md` |
 
 ## declared schema transition
 
@@ -508,11 +520,23 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0005 Provenance-Preserving Fork Lineage Consolidation](../AOA-SM-D-0005-provenance-preserving-fork-lineage-consolidation.md) | 2026-07-15 | Accepted | `docs/decisions/AOA-SM-D-0005-provenance-preserving-fork-lineage-consolidation.md` |
 
+## raw-ref coordinates
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0027 Evidence-Specific Sparse Anchors in Hybrid Fusion](../AOA-SM-D-0027-evidence-specific-sparse-anchors-in-hybrid-fusion.md) | 2026-07-20 | Accepted | `docs/decisions/AOA-SM-D-0027-evidence-specific-sparse-anchors-in-hybrid-fusion.md` |
+
 ## raw-ref preservation
 
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0009 Correlated Agent Activity Status Relation](../AOA-SM-D-0009-correlated-agent-activity-status-relation.md) | 2026-07-16 | Accepted | `docs/decisions/AOA-SM-D-0009-correlated-agent-activity-status-relation.md` |
+
+## reciprocal-rank fusion
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0027 Evidence-Specific Sparse Anchors in Hybrid Fusion](../AOA-SM-D-0027-evidence-specific-sparse-anchors-in-hybrid-fusion.md) | 2026-07-20 | Accepted | `docs/decisions/AOA-SM-D-0027-evidence-specific-sparse-anchors-in-hybrid-fusion.md` |
 
 ## retry recovery
 
@@ -660,3 +684,9 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0007 Typed Graph Bridge Admission](../AOA-SM-D-0007-typed-graph-bridge-admission.md) | 2026-07-16 | Accepted | `docs/decisions/AOA-SM-D-0007-typed-graph-bridge-admission.md` |
+
+## typed relation evidence
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0027 Evidence-Specific Sparse Anchors in Hybrid Fusion](../AOA-SM-D-0027-evidence-specific-sparse-anchors-in-hybrid-fusion.md) | 2026-07-20 | Accepted | `docs/decisions/AOA-SM-D-0027-evidence-specific-sparse-anchors-in-hybrid-fusion.md` |

@@ -131,3 +131,29 @@ The broader graph suite covers rebuild determinism, dependency rollback,
 incremental maintenance, graph freshness, pruning, storage, and retrieval.
 Real sealed-lab rebuild and portable/runtime parity remain separate completion
 gates.
+
+## Review Amendment — 2026-07-20
+
+A real store-only rebuild exposed an uncovered publication state: the graph
+store was current and had no dirty source contributions, while its optional
+sidecar required regeneration. `graph-maintenance --export-sidecar` completed
+its deep source scan but skipped export because the mutation candidate pool
+was empty. Forcing a source dirty or repeating the full graph rebuild would
+misrepresent semantic work and spend resources without changing graph
+content.
+
+A clean current store may therefore execute a sidecar-only manifest commit
+under the same maintenance lease and pinned registry dependency. It stages and
+hashes nodes and edges, publishes the manifest last, and verifies the store
+semantic digest exactly as the mutation-bearing route does. The result exposes
+`sidecar_exported=true` and `semantic_progress=false`; process completion or
+sidecar publication must not be reported as graph semantic advancement.
+
+This clarification does not permit export from a stale or incompatible graph
+store and does not make the sidecar mandatory for normal SQLite-backed
+retrieval. Focused regression starts from a current store-only build, exports
+with an empty dirty queue, validates file content and store semantics, and
+then confirms that SQLite retrieval remains the live route. A matching
+negative regression changes only the store generation identity while keeping
+the source queue clean and proves that sidecar publication is refused rather
+than laundering that incompatible store as current.

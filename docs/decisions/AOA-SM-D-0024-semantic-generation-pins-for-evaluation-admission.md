@@ -140,3 +140,41 @@ identical atomic republish despite changed file observations and clocks.
 Release proof additionally requires the full source suite, deterministic
 double rebuild of a sealed real-session scope, manual evidence-ref review, and
 generation-matched source, portable, CLI, skill, and MCP packets.
+
+## Review Amendment — 2026-07-20
+
+A sealed real-session H1/H2 rebuild exposed a false invalidation even though
+all projection generation identities, graph content, episode content, and
+query-bearing rollup rows were unchanged. The operational rollup `shards`
+rows had new local paths, SQLite file sizes and mtimes, and scan durations; the
+graph source ledger had new clean/dirty transition clocks. The version-two pin
+had treated those observations as semantic content.
+
+The pin contract now excludes those fields through projection-specific
+normalization and advances to a new version. It continues to retain rollup
+status and query-bearing counts, graph source status, source digests,
+generation and dependency identities, and evidence coordinates. A change to
+those retained values still invalidates evaluation admission. Existing pins
+from the previous contract are rejected as incompatible rather than silently
+reinterpreted.
+
+This is a clarification of the original semantic-versus-physical boundary,
+not a relaxation of drift detection. The failure was first established by a
+real deterministic rebuild; focused regressions then preserve both the
+telemetry-only positive case and query-bearing/source-digest negative cases.
+
+A second real cold-read failure refined the same boundary. Opening a SQLite
+projection for the first evaluation could create or retire WAL/SHM
+observations between the snapshot's physical before/after probes even though
+the maintenance lease excluded a writer and the subsequent semantic snapshot
+was unchanged. Evaluation capture may now make at most three immediate
+attempts only when the incomplete snapshot is unstable and every diagnostic
+is a capture-local SQLite or artifact publication transition. The packet
+retains each failed attempt and reports whether the snapshot settled or the
+budget was exhausted.
+
+This retry is not a freshness wait and cannot launder semantic drift. A raw or
+source mismatch, unreadable projection, schema or producer incompatibility,
+semantic-row change, integrity failure, or any mixed diagnostic stops on its
+first attempt and returns refusal. The before/after semantic comparison still
+runs only from complete compatible snapshots under the same lease.

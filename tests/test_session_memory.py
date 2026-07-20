@@ -14,6 +14,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import warnings
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -2663,6 +2664,33 @@ def test_custom_exec_mixed_read_and_write_does_not_promote_skill_to_inspected() 
     assert anchors[("tool", "exec")] == "invoked"
 
 
+def test_captured_invalid_escape_literal_does_not_leak_syntax_warning() -> None:
+    source = (
+        r'''const r = await tools.exec_command({cmd: "rg '\$HOME' README.md"}); '''
+        "text(r.output);"
+    )
+    payload = {
+        "type": "custom_tool_call",
+        "name": "exec",
+        "input": source,
+    }
+
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        shell_commands = module.custom_exec_shell_commands(payload)
+        entity_commands = module.entity_usage_custom_exec_command_candidates(payload)
+        episode_command = module.episode_exact_operational_nested_literal(
+            source,
+            module.CUSTOM_EXEC_NESTED_COMMAND_LITERAL_RE,
+        )
+
+    expected = r"rg '\$HOME' README.md"
+    assert shell_commands == [expected]
+    assert entity_commands == [expected]
+    assert episode_command == expected
+    assert not [item for item in captured if item.category is SyntaxWarning]
+
+
 def test_structured_shell_reference_to_mcp_service_is_not_invocation() -> None:
     shell_reference = {
         "type": "response_item",
@@ -3625,6 +3653,8 @@ def test_mcp_tool_bare_name_uses_scoped_raw_identity_without_registry_projection
     ]
     probe = resolution["session_identity_probe"]
     assert probe["source_scan"]["status"] == "complete"
+    source_fingerprint = probe["source_scan"]["source_fingerprint"]
+    assert source_fingerprint
     assert probe["raw_ref_verified_count"] == 2
     assert probe["structured_call_count"] == 1
     assert probe["structured_receipt_count"] == 1
@@ -3641,6 +3671,34 @@ def test_mcp_tool_bare_name_uses_scoped_raw_identity_without_registry_projection
         "positive_instance_admitted"
     ] is True
     assert chain["usage_lifecycle"]["states"]["verified"]["present"] is False
+    assert chain["generation_identities"]["compatible"] is False
+    assert chain["generation_identities"]["observed"]["query_source"][
+        "session_index"
+    ]
+    scoped_freshness = chain["freshness"]["scoped"]
+    assert scoped_freshness["status"] == "current"
+    assert scoped_freshness["does_not_upgrade_global_freshness"] is True
+    assert scoped_freshness["source_contributions"] == [
+        {
+            "candidate_id": (
+                "archived-raw-session:scoped-raw-mcp-identity"
+            ),
+            "session_id": "scoped-raw-mcp-identity",
+            "status": "current",
+            "observed_status": "bounded_current",
+            "source_fingerprint": source_fingerprint,
+            "source_ref": probe["source_scan"]["session_manifest"],
+            "basis": "session_scoped_query_time_raw_ref_verification",
+        }
+    ]
+    envelope_scoped = chain["evidence_envelope"]["freshness"]["scoped"]
+    assert envelope_scoped["status"] == "current"
+    assert envelope_scoped["source_contributions"] == (
+        scoped_freshness["source_contributions"]
+    )
+    assert chain["freshness"]["global"]["scope"] == (
+        "selected_search_provider_projection"
+    )
 
 
 def test_mcp_tool_usage_chain_keeps_parallel_same_tool_receipts_correlated(
@@ -8000,6 +8058,228 @@ def test_verbose_coherent_sparse_winner_does_not_require_short_query_coverage() 
     assert module.episode_sparse_anchor_decision(ranked)["active"] is False
 
 
+def test_exact_typed_replay_relation_anchors_hybrid_despite_low_lexical_coverage() -> None:
+    ranked = [
+        {
+            "doc_id": "episode:replayed-intent",
+            "rerank_score": 319.0,
+            "query_coverage": {"coverage": 0.25, "matched_term_count": 1},
+            "supporting_evidence": [],
+            "replay_alignment": {
+                "status": "typed_replayed_intent_relation",
+                "chain": {
+                    "relation": "replayed_intent",
+                    "relation_admission_basis": "exact_normalized_prior_intent",
+                    "prior_intent": {"refs": {"raw": "raw:line:1663"}},
+                    "replayed_intent": {"refs": {"raw": "raw:line:1670"}},
+                },
+            },
+        },
+        {
+            "doc_id": "episode:dense-neighbor",
+            "rerank_score": 62.0,
+            "query_coverage": {"coverage": 0.25, "matched_term_count": 1},
+            "supporting_evidence": [],
+        },
+    ]
+
+    decision = module.episode_sparse_anchor_decision(ranked)
+    anchored_score, bonus = module.episode_hybrid_rrf_score(
+        sparse_rank=1,
+        dense_rank=50,
+        sparse_anchor=decision["active"],
+    )
+    weak_consensus_score, _ = module.episode_hybrid_rrf_score(
+        sparse_rank=4,
+        dense_rank=6,
+    )
+
+    assert decision["status"] == "decisive_typed_sparse_evidence"
+    assert decision["decision_basis"] == "typed_structural_relation"
+    assert decision["typed_evidence"]["signals"] == [
+        "exact_typed_replayed_intent"
+    ]
+    assert bonus > 0
+    assert anchored_score > weak_consensus_score
+
+    ranked[0]["replay_alignment"]["chain"]["replayed_intent"]["refs"]["raw"] = ""
+    assert module.episode_sparse_anchor_decision(ranked)["active"] is False
+    ranked[0]["replay_alignment"]["chain"]["replayed_intent"]["refs"][
+        "raw"
+    ] = "raw:line:1600"
+    assert module.episode_sparse_anchor_decision(ranked)["active"] is False
+
+
+def test_exact_fork_boundary_anchor_requires_resolvable_boundary_and_large_gap() -> None:
+    ranked = [
+        {
+            "doc_id": "episode:first-local-work",
+            "rerank_score": 582.0,
+            "query_coverage": {"coverage": 0.57, "matched_term_count": 4},
+            "supporting_evidence": [{"matched_query_terms": ["fork"]}],
+            "lineage_alignment": {
+                "status": "typed_fork_lineage_scope",
+                "signals": ["forked_from_relation", "exact_local_work_boundary"],
+                "evidence_refs": {
+                    "lineage": "raw:line:3279",
+                    "local_work_boundary": "raw:line:3283",
+                },
+            },
+        },
+        {
+            "doc_id": "episode:nearby-fork",
+            "rerank_score": 479.0,
+            "query_coverage": {"coverage": 0.57, "matched_term_count": 4},
+            "supporting_evidence": [{"matched_query_terms": ["fork"]}],
+        },
+    ]
+
+    decision = module.episode_sparse_anchor_decision(ranked)
+
+    assert decision["active"] is True
+    assert decision["decision_basis"] == "typed_structural_relation"
+    assert decision["typed_evidence"]["refs"]["local_work_boundary"] == (
+        "raw:line:3283"
+    )
+
+    ranked[1]["rerank_score"] = 560.0
+    assert module.episode_sparse_anchor_decision(ranked)["active"] is False
+    ranked[1]["rerank_score"] = 479.0
+    ranked[0]["lineage_alignment"]["signals"] = ["local_work_not_boundary"]
+    assert module.episode_sparse_anchor_decision(ranked)["active"] is False
+
+
+def test_delegated_lifecycle_anchor_requires_ordered_structural_coordinates() -> None:
+    ranked = [
+        {
+            "doc_id": "episode:delegated-lifecycle",
+            "rerank_score": 720.0,
+            "query_coverage": {"coverage": 0.25, "matched_term_count": 1},
+            "supporting_evidence": [],
+            "delegated_lifecycle_alignment": {
+                "status": "typed_delegated_lifecycle_candidate",
+                "structural_refs": {
+                    "task_started": "raw:line:100",
+                    "delegation": "raw:line:105",
+                    "terminal_candidate": "raw:line:140",
+                },
+            },
+        },
+        {
+            "doc_id": "episode:delegated-neighbor",
+            "rerank_score": 600.0,
+            "query_coverage": {"coverage": 0.25, "matched_term_count": 1},
+            "supporting_evidence": [],
+        },
+    ]
+
+    decision = module.episode_sparse_anchor_decision(ranked)
+
+    assert decision["active"] is True
+    assert decision["decision_basis"] == "typed_structural_relation"
+    assert decision["typed_evidence"]["signals"] == [
+        "typed_delegated_lifecycle"
+    ]
+
+    ranked[0]["delegated_lifecycle_alignment"]["structural_refs"][
+        "terminal_candidate"
+    ] = "raw:line:102"
+    assert module.episode_sparse_anchor_decision(ranked)["active"] is False
+
+
+def test_ordered_failure_resume_sequence_anchors_hybrid_without_claiming_causality() -> None:
+    ranked = [
+        {
+            "doc_id": "episode:failure-resume-sequence",
+            "rerank_score": 373.0,
+            "query_coverage": {"coverage": 2 / 3, "matched_term_count": 4},
+            "supporting_evidence": [
+                {"matched_query_terms": ["ты", "завис"]}
+            ],
+            "failure_recovery": {
+                "status": "ordered_observed_failure_resume_sequence",
+                "sequence_admissible": True,
+                "claim_scope": (
+                    "observed_temporal_sequence_not_causal_consequence"
+                ),
+                "chain": {
+                    "failure_observation": {
+                        "refs": {"raw": "raw:line:243"}
+                    },
+                    "resume_request": {
+                        "refs": {"raw": "raw:line:285"}
+                    },
+                },
+            },
+        },
+        {
+            "doc_id": "episode:dense-recovery-neighbor",
+            "rerank_score": 100.0,
+            "query_coverage": {"coverage": 0.5, "matched_term_count": 3},
+            "supporting_evidence": [
+                {"matched_query_terms": ["recovery"]}
+            ],
+        },
+    ]
+
+    decision = module.episode_sparse_anchor_decision(ranked)
+    anchored_score, bonus = module.episode_hybrid_rrf_score(
+        sparse_rank=1,
+        dense_rank=None,
+        sparse_anchor=decision["active"],
+    )
+    weak_consensus_score, _ = module.episode_hybrid_rrf_score(
+        sparse_rank=6,
+        dense_rank=1,
+    )
+
+    assert decision["active"] is True
+    assert decision["status"] == "decisive_typed_sparse_evidence"
+    assert decision["decision_basis"] == "typed_structural_relation"
+    assert decision["typed_evidence"]["signals"] == [
+        "typed_failure_resume_sequence"
+    ]
+    assert decision["typed_evidence"]["refs"] == {
+        "failure_observation": "raw:line:243",
+        "resume_request": "raw:line:285",
+    }
+    assert bonus > 0
+    assert anchored_score > weak_consensus_score
+
+    ranked[0]["failure_recovery"]["chain"]["resume_request"]["refs"][
+        "raw"
+    ] = "raw:line:200"
+    assert module.episode_sparse_anchor_decision(ranked)["active"] is False
+
+    ranked[0]["failure_recovery"]["chain"]["resume_request"]["refs"][
+        "raw"
+    ] = "raw:line:285"
+    ranked[0]["failure_recovery"]["sequence_admissible"] = False
+    assert module.episode_sparse_anchor_decision(ranked)["active"] is False
+
+    ranked[0]["failure_recovery"]["sequence_admissible"] = True
+    ranked[0]["failure_recovery"]["claim_scope"] = (
+        "causal_recovery_consequence"
+    )
+    assert module.episode_sparse_anchor_decision(ranked)["active"] is False
+
+    ranked[0]["failure_recovery"]["claim_scope"] = (
+        "observed_temporal_sequence_not_causal_consequence"
+    )
+    ranked[0]["failure_recovery"]["status"] = (
+        "ordered_failure_diagnosis_recovery_result_chain"
+    )
+    assert module.episode_sparse_anchor_decision(ranked)["active"] is False
+
+    ranked[0]["failure_recovery"]["status"] = (
+        "ordered_observed_failure_resume_sequence"
+    )
+    ranked[0]["failure_recovery"]["chain"]["failure_observation"]["refs"][
+        "raw"
+    ] = ""
+    assert module.episode_sparse_anchor_decision(ranked)["active"] is False
+
+
 def test_full_coverage_ordered_temporal_span_anchors_hybrid_fusion() -> None:
     ranked = [
         {
@@ -8984,6 +9264,165 @@ def test_episode_semantic_field_tokens_separate_escaped_newline_from_identifier(
     )
     assert commit in tokens
     assert f"n{commit}" not in tokens
+
+
+def test_episode_query_normalization_matches_russian_instrumental_paraphrase() -> None:
+    """Regression derived from the manual 20260720 time-scoped skill lab."""
+
+    terms = {
+        item["token"]: item
+        for item in module.episode_semantic_query_terms(
+            "Что шло следующим этапом?"
+        )
+    }
+    source_tokens = module.episode_semantic_field_tokens(
+        "Какой следующий этап был?"
+    )
+
+    assert module.EPISODE_QUERY_NORMALIZATION_VERSION == 1
+    assert terms["следующим"]["prefixes"] == ["следующ"]
+    assert terms["этапом"]["prefixes"] == ["этап"]
+    assert module.episode_semantic_term_matches_tokens(
+        terms["следующим"], source_tokens
+    )
+    assert module.episode_semantic_term_matches_tokens(
+        terms["этапом"], source_tokens
+    )
+
+
+def test_episode_query_normalization_rejects_prefix_only_russian_collisions() -> None:
+    """Real-vocabulary negatives keep FTS expansion out of evidence admission."""
+
+    cases = (
+        ("старом", "стартовал"),
+        ("правом", "правда"),
+        ("строим", "строгим"),
+    )
+
+    for query_token, unrelated_source in cases:
+        term = module.episode_semantic_query_terms(query_token)[0]
+        source_tokens = module.episode_semantic_field_tokens(
+            unrelated_source
+        )
+
+        assert term["bounded_morphology_stems"]
+        assert module.episode_semantic_term_matches_tokens(
+            term,
+            source_tokens,
+        ) is False
+
+    positive_cases = (
+        ("старом", "старый"),
+        ("правом", "право"),
+        ("строим", "строить"),
+        ("следующим", "следующий"),
+        ("этапом", "этап"),
+        ("этапом", "этапы"),
+    )
+    for query_token, related_source in positive_cases:
+        term = module.episode_semantic_query_terms(query_token)[0]
+        assert module.episode_semantic_term_matches_tokens(
+            term,
+            module.episode_semantic_field_tokens(related_source),
+        )
+
+
+def test_episode_search_uses_russian_prefix_only_as_candidate_generation(
+    tmp_path: Path,
+) -> None:
+    """Synthetic invariant derived from a real 594-token noise audit."""
+
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-russian-morphology-noise.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-07-20T00:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "russian-morphology-noise",
+                    "cwd": str(workspace),
+                    "evidence_origin": (
+                        "synthetic_from_manual_594_token_noise_audit"
+                    ),
+                },
+            },
+            {
+                "timestamp": "2026-07-20T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": (
+                                "Стартовал процесс, правда оказалась строгим "
+                                "ограничением. Следующий этап подтверждён."
+                            ),
+                        }
+                    ],
+                },
+            },
+            {
+                "timestamp": "2026-07-20T00:00:02Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "Зафиксировал навигационную заметку.",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "russian-morphology-noise",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    search_build = module.search_index_sessions(
+        aoa_root=aoa_root,
+        target="all",
+        rebuild=True,
+    )
+    assert search_build["ok"] is True
+
+    for query in ("старом", "правом", "строим"):
+        result = module.episode_semantic_search(
+            aoa_root=aoa_root,
+            query=query,
+            mode="sparse",
+            limit=5,
+        )
+
+        assert result["result_count"] == 0
+        assert result["query_normalization"][
+            "prefix_only_candidate_rejected_count"
+        ] == 1
+
+    for query in ("следующим", "этапом"):
+        result = module.episode_semantic_search(
+            aoa_root=aoa_root,
+            query=query,
+            mode="sparse",
+            limit=5,
+        )
+
+        assert result["result_count"] == 1
+        assert result["results"][0]["raw_ref"] == "raw:line:2"
 
 
 def test_causal_attribution_requires_correlation_owned_target_bearing_result() -> None:
@@ -32334,6 +32773,60 @@ def test_projection_semantic_fingerprint_ignores_operational_source_mtime(
     assert changed["sha256"] != second["sha256"]
 
 
+def test_evaluation_generation_graph_ledger_ignores_operational_clocks(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    ledger_path = module.graph_paths(aoa_root)["source_state_ledger"]
+    payload = {
+        "artifact_type": "session_memory_graph_source_state_ledger",
+        "generated_at": "2026-07-18T00:00:00Z",
+        "updated_at": "2026-07-18T00:00:01Z",
+        "sources": {
+            "segment:session-one:000": {
+                "source_key": "segment:session-one:000",
+                "source_sha": "source-content-a",
+                "source_mtime": 100.0,
+                "status": "clean",
+                "last_checked": "2026-07-18T00:00:01Z",
+                "last_clean_at": "2026-07-18T00:00:01Z",
+                "last_dirty_at": "2026-07-17T23:59:00Z",
+            }
+        },
+    }
+    module.write_json(ledger_path, payload)
+    first = module.evaluation_generation_projection_artifact_fingerprint(
+        aoa_root,
+        ledger_path,
+    )
+
+    payload["sources"]["segment:session-one:000"].update(
+        {
+            "source_mtime": 200.0,
+            "last_checked": "2026-07-19T00:00:01Z",
+            "last_clean_at": "2026-07-19T00:00:01Z",
+            "last_dirty_at": "2026-07-18T23:59:00Z",
+        }
+    )
+    module.write_json(ledger_path, payload)
+    second = module.evaluation_generation_projection_artifact_fingerprint(
+        aoa_root,
+        ledger_path,
+    )
+
+    payload["sources"]["segment:session-one:000"]["source_sha"] = (
+        "source-content-b"
+    )
+    module.write_json(ledger_path, payload)
+    changed = module.evaluation_generation_projection_artifact_fingerprint(
+        aoa_root,
+        ledger_path,
+    )
+
+    assert first == second
+    assert changed["sha256"] != second["sha256"]
+
+
 def test_atlas_publish_epoch_hides_partial_axis_and_clean_budget_failure_keeps_last_good(
     tmp_path: Path,
     monkeypatch: Any,
@@ -40090,6 +40583,36 @@ def test_graph_build_store_only_rebuilds_sqlite_without_sidecar(tmp_path: Path) 
     assert not (aoa_root / "graph" / "index.json").exists()
     sidecar_state = module.graph_sidecar_state(aoa_root)
     assert sidecar_state["status"] == "not_exported"
+
+    exported = module.graph_maintenance(
+        aoa_root=aoa_root,
+        target="all",
+        apply=True,
+        export_sidecar=True,
+        mode="deep",
+    )
+    assert exported["ok"] is True
+    assert exported["selected_count"] == 0
+    assert exported["semantic_progress"] is False
+    assert exported["sidecar_exported"] is True
+    assert exported["maintenance_detail"][
+        "sidecar_export_without_source_mutation"
+    ] is True
+    exported_index = module.read_json(
+        aoa_root / "graph" / "index.json",
+        {},
+    )
+    sidecar_validation = module.graph_sidecar_commit_validation(
+        aoa_root,
+        exported_index,
+        verify_content=True,
+        verify_store_semantics=True,
+    )
+    assert sidecar_validation["ok"] is True
+    assert (aoa_root / "graph" / "nodes.jsonl").exists()
+    assert (aoa_root / "graph" / "edges.jsonl").exists()
+
+    module.remove_graph_sidecar_artifacts(aoa_root)
     neighborhood = module.graph_neighborhood(aoa_root=aoa_root, anchor="aoa-session-memory-mcp", kind="mcp", depth=1)
     assert neighborhood["ok"] is True
     assert neighborhood["graph"]["source"] == "sqlite_graph_store"
@@ -40106,6 +40629,50 @@ def test_graph_build_store_only_rebuilds_sqlite_without_sidecar(tmp_path: Path) 
     assert in_place["atomic_store_rebuild"] is False
     assert in_place["in_place_rebuild"] is True
     assert not (aoa_root / "graph" / "nodes.jsonl").exists()
+
+    conn = sqlite3.connect(str(aoa_root / "graph" / "graph.sqlite3"))
+    conn.execute(
+        "UPDATE metadata SET value = ? WHERE key = ?",
+        ("stale-generation", "graph_generation_id"),
+    )
+    conn.commit()
+    conn.close()
+    stale_state = module.graph_store_query_state(aoa_root)
+    assert stale_state["status"] == "stale"
+    assert "graph_generation_mismatch" in stale_state["reasons"]
+
+    blocked_export = module.graph_maintenance(
+        aoa_root=aoa_root,
+        target="all",
+        apply=True,
+        export_sidecar=True,
+        mode="deep",
+    )
+    assert blocked_export["ok"] is False
+    assert blocked_export["selected_count"] == 0
+    assert blocked_export["semantic_progress"] is False
+    assert blocked_export["sidecar_exported"] is False
+    assert blocked_export["maintenance_detail"][
+        "sidecar_export_blocked"
+    ] is True
+    assert blocked_export["maintenance_detail"][
+        "sidecar_export_blocked_store_status"
+    ] == "stale"
+    assert "graph_generation_mismatch" in blocked_export[
+        "maintenance_detail"
+    ]["sidecar_export_blocked_store_reasons"]
+    assert any(
+        diagnostic.startswith(
+            "graph_sidecar_export_requires_current_graph_store:"
+        )
+        for diagnostic in blocked_export["diagnostics"]
+    )
+    assert "graph-build all --write --force-large-export" in (
+        blocked_export["next_route"]
+    )
+    assert not (aoa_root / "graph" / "nodes.jsonl").exists()
+    assert not (aoa_root / "graph" / "edges.jsonl").exists()
+    assert not (aoa_root / "graph" / "index.json").exists()
 
 
 def test_graph_build_store_only_keeps_sidecar_when_atomic_rebuild_is_not_promoted(tmp_path: Path) -> None:
@@ -61958,6 +62525,164 @@ def test_evaluation_generation_pin_refuses_incompatible_producer_generation(
     )
 
 
+def test_evaluation_generation_pin_rejects_previous_semantic_schema(
+    tmp_path: Path,
+) -> None:
+    result = module.evaluation_generation_pin_check_payload(
+        aoa_root=tmp_path / ".aoa",
+        pin={
+            "schema_version": "session_memory_evaluation_generation_pin_v2",
+            "snapshot": {},
+        },
+    )
+
+    assert (
+        module.EVALUATION_GENERATION_PIN_SCHEMA_VERSION
+        == "session_memory_evaluation_generation_pin_v3"
+    )
+    assert result["ok"] is False
+    assert result["status"] == "refused_incompatible_pin_schema"
+    assert result["answer_or_score_admissible"] is False
+    assert result["diagnostics"] == [
+        "evaluation_generation_pin_schema_mismatch"
+    ]
+
+
+def test_evaluation_generation_snapshot_retries_only_capture_local_physical_drift(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    transient = {
+        "ok": False,
+        "status": "incomplete",
+        "stable_at_capture": False,
+        "identity_sha256": "transient",
+        "diagnostics": [
+            "evaluation_projection_unstable_at_capture:search/aoa-search.sqlite3"
+        ],
+    }
+    stable = {
+        "ok": True,
+        "status": "captured",
+        "stable_at_capture": True,
+        "identity_sha256": "stable",
+        "diagnostics": [],
+    }
+    snapshots = iter((transient, stable))
+    call_count = 0
+
+    def fake_snapshot(**_kwargs: Any) -> dict[str, Any]:
+        nonlocal call_count
+        call_count += 1
+        return next(snapshots)
+
+    monkeypatch.setattr(module, "evaluation_generation_snapshot", fake_snapshot)
+
+    result = module.evaluation_generation_settled_snapshot(
+        aoa_root=tmp_path / ".aoa",
+    )
+
+    assert call_count == 2
+    assert result["ok"] is True
+    assert result["identity_sha256"] == "stable"
+    assert result["capture_attempt_count"] == 2
+    assert result["capture_retry_count"] == 1
+    assert result["capture_retry_status"] == (
+        "settled_after_physical_drift"
+    )
+    assert result["capture_attempts"][0][
+        "retryable_physical_drift"
+    ] is True
+
+
+def test_evaluation_generation_snapshot_never_retries_semantic_or_source_failure(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    call_count = 0
+
+    def fake_snapshot(**_kwargs: Any) -> dict[str, Any]:
+        nonlocal call_count
+        call_count += 1
+        return {
+            "ok": False,
+            "status": "incomplete",
+            "stable_at_capture": False,
+            "identity_sha256": "raw-drift",
+            "diagnostics": [
+                "evaluation_projection_unstable_at_capture:search/aoa-search.sqlite3",
+                "evaluation_raw_declared_digest_mismatch:session-1",
+            ],
+        }
+
+    monkeypatch.setattr(module, "evaluation_generation_snapshot", fake_snapshot)
+
+    result = module.evaluation_generation_settled_snapshot(
+        aoa_root=tmp_path / ".aoa",
+    )
+
+    assert call_count == 1
+    assert result["ok"] is False
+    assert result["capture_attempt_count"] == 1
+    assert result["capture_retry_count"] == 0
+    assert result["capture_retry_status"] == "not_needed"
+    assert result["capture_attempts"][0][
+        "retryable_physical_drift"
+    ] is False
+
+
+def test_evaluation_generation_snapshot_stops_if_retry_exposes_semantic_failure(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    snapshots = iter(
+        (
+            {
+                "ok": False,
+                "status": "incomplete",
+                "stable_at_capture": False,
+                "identity_sha256": "transient",
+                "diagnostics": [
+                    "evaluation_projection_unstable_at_capture:"
+                    "search/aoa-search.sqlite3"
+                ],
+            },
+            {
+                "ok": False,
+                "status": "incomplete",
+                "stable_at_capture": True,
+                "identity_sha256": "source-mismatch",
+                "diagnostics": [
+                    "evaluation_raw_declared_digest_mismatch:session-1"
+                ],
+            },
+        )
+    )
+    call_count = 0
+
+    def fake_snapshot(**_kwargs: Any) -> dict[str, Any]:
+        nonlocal call_count
+        call_count += 1
+        return next(snapshots)
+
+    monkeypatch.setattr(module, "evaluation_generation_snapshot", fake_snapshot)
+
+    result = module.evaluation_generation_settled_snapshot(
+        aoa_root=tmp_path / ".aoa",
+    )
+
+    assert call_count == 2
+    assert result["ok"] is False
+    assert result["capture_attempt_count"] == 2
+    assert result["capture_retry_count"] == 1
+    assert result["capture_retry_status"] == (
+        "stopped_on_non_retryable_failure"
+    )
+    assert result["capture_attempts"][1][
+        "retryable_physical_drift"
+    ] is False
+
+
 def test_evaluation_generation_sqlite_state_accepts_generationless_rollup(
     tmp_path: Path,
 ) -> None:
@@ -61972,7 +62697,16 @@ def test_evaluation_generation_sqlite_state_accepts_generationless_rollup(
     conn.executescript(
         """
         CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT);
-        CREATE TABLE shards(shard TEXT PRIMARY KEY, status TEXT);
+        CREATE TABLE shards(
+            shard TEXT PRIMARY KEY,
+            shard_db_path TEXT,
+            source_size_bytes INTEGER,
+            source_mtime_ns INTEGER,
+            generated_at TEXT,
+            status TEXT,
+            event_total INTEGER,
+            elapsed_ms INTEGER
+        );
         CREATE TABLE route_rollups(
             shard TEXT,
             layer TEXT,
@@ -61981,7 +62715,13 @@ def test_evaluation_generation_sqlite_state_accepts_generationless_rollup(
             PRIMARY KEY(shard, layer, key, route_signal)
         );
         INSERT INTO meta(key, value) VALUES('generated_at', '2026-07-18T00:00:00Z');
-        INSERT INTO shards(shard, status) VALUES('month_2026_07', 'current');
+        INSERT INTO shards(
+            shard, shard_db_path, source_size_bytes, source_mtime_ns,
+            generated_at, status, event_total, elapsed_ms
+        ) VALUES(
+            'month_2026_07', '/first/local/shard.sqlite3', 100, 1000,
+            '2026-07-18T00:00:00Z', 'current', 7, 10
+        );
         INSERT INTO route_rollups(shard, layer, key, route_signal)
         VALUES('month_2026_07', 'tool', 'apply_patch', 'tool:apply_patch');
         """
@@ -61997,9 +62737,58 @@ def test_evaluation_generation_sqlite_state_accepts_generationless_rollup(
     )
     assert state["status"] == "observed"
     assert state["observed_generation_ids"] == {}
+    assert state["semantic_projection_digest"]["mode"] == (
+        "operational_route_rollup_semantic_tables_v2"
+    )
     assert state["semantic_projection_digest"]["tables"][2][
         "row_count"
     ] == 1
+
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        UPDATE shards
+        SET shard_db_path = ?, source_size_bytes = ?,
+            source_mtime_ns = ?, generated_at = ?, elapsed_ms = ?
+        WHERE shard = ?
+        """,
+        (
+            "/second/local/shard.sqlite3",
+            200,
+            2000,
+            "2026-07-19T00:00:00Z",
+            99,
+            "month_2026_07",
+        ),
+    )
+    conn.commit()
+    conn.close()
+    operationally_rebuilt = module.evaluation_generation_sqlite_state(
+        aoa_root=aoa_root,
+        db_path=db_path,
+        state_tables=module.EVALUATION_GENERATION_SEARCH_STATE_TABLES,
+        session_ids=None,
+    )
+    assert operationally_rebuilt["identity_sha256"] == state[
+        "identity_sha256"
+    ]
+
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "UPDATE shards SET event_total = 8 WHERE shard = ?",
+        ("month_2026_07",),
+    )
+    conn.commit()
+    conn.close()
+    semantically_changed = module.evaluation_generation_sqlite_state(
+        aoa_root=aoa_root,
+        db_path=db_path,
+        state_tables=module.EVALUATION_GENERATION_SEARCH_STATE_TABLES,
+        session_ids=None,
+    )
+    assert semantically_changed["identity_sha256"] != state[
+        "identity_sha256"
+    ]
 
 
 def test_generation_pinned_evaluation_refuses_interleaved_generation(
