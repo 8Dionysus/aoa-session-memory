@@ -35752,6 +35752,141 @@ def test_graph_atomic_rebuild_preserves_published_store_when_dependency_changes(
     assert after_digest == before_digest
 
 
+def test_graph_atomic_rebuild_preserves_store_when_producer_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+
+    def contribution(source_name: str) -> dict[str, Any]:
+        event_id = f"event:{source_name}:000:000001"
+        return {
+            "source": {
+                "source_key": f"segment:{source_name}:000",
+                "source_type": "segment",
+                "session_id": source_name,
+                "session_label": (
+                    f"2026-07-20__001__{source_name}"
+                ),
+                "segment_id": "000",
+                "source_path": str(
+                    tmp_path / f"{source_name}.json"
+                ),
+                "source_paths": [
+                    str(tmp_path / f"{source_name}.json")
+                ],
+                "source_sha": f"{source_name}-sha",
+                "source_mtime": 1.0,
+                "graph_schema_version": (
+                    module.GRAPH_SCHEMA_VERSION
+                ),
+                "graph_store_schema_version": (
+                    module.GRAPH_STORE_SCHEMA_VERSION
+                ),
+                "graph_event_route_signal_edge_policy": (
+                    module.GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY
+                ),
+                "route_signal_classifier_version": (
+                    module.ROUTE_SIGNAL_CLASSIFIER_VERSION
+                ),
+            },
+            "nodes": [{"id": event_id, "type": "event"}],
+            "edges": [
+                {
+                    "id": f"edge:{source_name}",
+                    "source": event_id,
+                    "target": f"route:tool:{source_name}",
+                    "type": "mentions_route_signal",
+                }
+            ],
+        }
+
+    module.build_entity_registry(
+        aoa_root=aoa_root,
+        write=True,
+        include_runtime=False,
+        observed_source="none",
+    )
+    dependency = module.graph_entity_registry_dependency_snapshot(
+        aoa_root,
+        ensure_current=True,
+    )
+    assert dependency["status"] == "current"
+    original_store = module.GraphSqliteStore(
+        aoa_root,
+        reset=True,
+    )
+    try:
+        original_store.rebuild([contribution("published")])
+        before_digest = module.graph_projection_semantic_digest(
+            original_store.conn
+        )["sha256"]
+    finally:
+        original_store.close()
+
+    monkeypatch.setattr(
+        module,
+        "graph_entity_registry_dependency_snapshot",
+        lambda *_args, **_kwargs: dependency,
+    )
+    monkeypatch.setattr(
+        module,
+        "graph_session_records",
+        lambda *_args, **_kwargs: (
+            [{"session_id": "candidate", "path": str(tmp_path)}],
+            [],
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "graph_contributions_for_record",
+        lambda *_args, **_kwargs: (
+            [contribution("candidate")],
+            [],
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "session_memory_loaded_producer_source_state",
+        lambda: {
+            "stable": False,
+            "status": "changed",
+            "loaded_sha256": "loaded",
+            "current_sha256": "changed",
+            "diagnostics": [
+                "producer_source_changed_during_process"
+            ],
+        },
+    )
+
+    result = module.build_session_graph(
+        aoa_root=aoa_root,
+        target="all",
+        write=True,
+        include_rows=False,
+        export_sidecar=False,
+        atomic_store_rebuild=True,
+    )
+    conn = sqlite3.connect(
+        str(aoa_root / "graph" / "graph.sqlite3")
+    )
+    conn.row_factory = sqlite3.Row
+    try:
+        after_digest = module.graph_projection_semantic_digest(
+            conn
+        )["sha256"]
+    finally:
+        conn.close()
+
+    assert result["ok"] is False
+    assert result["written"] is False
+    assert (
+        "producer_source_changed_during_graph_build"
+        in result["diagnostics"]
+    )
+    assert after_digest == before_digest
+
+
 def test_graph_legacy_store_requires_full_rebuild_before_maintenance(
     tmp_path: Path,
 ) -> None:
@@ -61299,6 +61434,42 @@ def test_generation_identity_is_canonical_deterministic_and_dependency_bound(
     )
 
 
+def test_generation_identity_uses_process_loaded_producer_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded_sha256 = (
+        module.SESSION_MEMORY_LOADED_PRODUCER_SHA256
+    )
+    before_common = module.session_memory_generation_common()
+    before_registry = module.entity_registry_generation_identity()
+
+    monkeypatch.setattr(
+        module,
+        "sha256_file_exact",
+        lambda _path: "changed-source-sha256",
+    )
+
+    source_state = (
+        module.session_memory_loaded_producer_source_state()
+    )
+    after_common = module.session_memory_generation_common()
+    after_registry = module.entity_registry_generation_identity()
+
+    assert source_state["stable"] is False
+    assert source_state["status"] == "changed"
+    assert (
+        "producer_source_changed_during_process"
+        in source_state["diagnostics"]
+    )
+    assert before_common == after_common
+    assert before_registry == after_registry
+    assert after_common["producer_sha256"] == loaded_sha256
+    assert after_registry["producer_sha256"] == loaded_sha256
+    assert after_common["producer_identity_mode"] == (
+        "process_loaded_source_snapshot_v1"
+    )
+
+
 def test_evaluation_generation_pin_invalidates_projection_and_raw_drift(
     tmp_path: Path,
 ) -> None:
@@ -68392,6 +68563,99 @@ def test_budgeted_full_search_rebuild_does_not_replace_existing_db(tmp_path: Pat
     assert document_count == full["document_count"]
 
 
+def test_search_atomic_rebuild_discards_changed_producer_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    transcript = tmp_path / "producer-drift-search.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-07-20T01:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "producer-drift-search",
+                    "cwd": str(repo),
+                },
+            },
+            {
+                "timestamp": "2026-07-20T01:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Keep the published search generation.",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "producer-drift-search",
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    first = module.search_index_sessions(
+        aoa_root=aoa_root,
+        target="all",
+        rebuild=True,
+        include_entity_registry=False,
+        refresh_catalog=False,
+    )
+    assert first["ok"] is True
+    db_path = module.search_db_path(aoa_root)
+    before_sha256 = hashlib.sha256(db_path.read_bytes()).hexdigest()
+
+    monkeypatch.setattr(
+        module,
+        "session_memory_loaded_producer_source_state",
+        lambda: {
+            "stable": False,
+            "status": "changed",
+            "loaded_sha256": "loaded",
+            "current_sha256": "changed",
+            "diagnostics": [
+                "producer_source_changed_during_process"
+            ],
+        },
+    )
+    rejected = module.search_index_sessions(
+        aoa_root=aoa_root,
+        target="all",
+        rebuild=True,
+        include_entity_registry=False,
+        refresh_catalog=False,
+    )
+
+    assert rejected["ok"] is False
+    assert (
+        "producer_source_changed_during_search_build"
+        in rejected["diagnostics"]
+    )
+    assert rejected["discarded_build_db_path"].endswith(
+        f".{module.SEARCH_DB_NAME}.rebuild-{os.getpid()}"
+    )
+    assert not Path(rejected["discarded_build_db_path"]).exists()
+    assert hashlib.sha256(db_path.read_bytes()).hexdigest() == (
+        before_sha256
+    )
+
+
 def test_projection_state_selection_uses_full_dirty_id_list_not_sample_only() -> None:
     records = [{"session_id": f"session-{index}", "session_label": f"label-{index}"} for index in range(45)]
     dirty_ids = [f"session-{index}" for index in range(45)]
@@ -72820,6 +73084,118 @@ def test_session_projection_reindex_is_atomic_restartable_and_semantically_deter
     )
     assert recovered_contributions
     assert recovered_diagnostics == []
+
+
+def test_session_projection_rejects_changed_producer_and_preserves_last_good(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "producer-drift-session.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-07-20T00:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "producer-drift-session",
+                    "cwd": str(workspace),
+                },
+            },
+            {
+                "timestamp": "2026-07-20T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Preserve the last good projection.",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    receipt = module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "producer-drift-session",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    session_dir = Path(str(receipt["session_dir"]))
+    record = module.resolve_session_record(
+        aoa_root,
+        "producer-drift-session",
+    )
+
+    def projection_bytes() -> dict[str, bytes]:
+        return {
+            str(path.relative_to(session_dir)): path.read_bytes()
+            for path in sorted(session_dir.rglob("*"))
+            if path.is_file()
+            and (
+                path.name
+                in {
+                    "session.manifest.json",
+                    module.SESSION_INDEX_JSON,
+                    module.SESSION_INDEX_MARKDOWN,
+                }
+                or path.parent.name in {"raw", "segments"}
+            )
+        }
+
+    last_good = projection_bytes()
+    changed_state = {
+        "schema_version": 1,
+        "artifact_type": (
+            "session_memory_loaded_producer_source_state"
+        ),
+        "producer": "aoa_session_memory.py",
+        "identity_mode": (
+            module.SESSION_MEMORY_PRODUCER_IDENTITY_MODE
+        ),
+        "loaded_sha256": "loaded",
+        "current_sha256": "changed",
+        "stable": False,
+        "status": "changed",
+        "diagnostics": [
+            "producer_source_changed_during_process"
+        ],
+    }
+    monkeypatch.setattr(
+        module,
+        "session_memory_loaded_producer_source_state",
+        lambda: dict(changed_state),
+    )
+
+    failed = module.reindex_session_from_raw(aoa_root, record)
+
+    assert failed["status"] == "diagnostic"
+    assert (
+        "session_projection_rebuild_failed_last_good_preserved"
+        in failed["diagnostics"]
+    )
+    assert "producer_source_changed_during_process" in (
+        failed["diagnostics"][1]
+    )
+    assert projection_bytes() == last_good
+    assert not module.session_projection_publish_journal_path(
+        session_dir
+    ).exists()
+    assert not list(
+        session_dir.parent.glob(
+            f".{session_dir.name}.projection-stage-*"
+        )
+    )
 
 
 def test_route_generation_refresh_uses_atomic_session_rebuild(
