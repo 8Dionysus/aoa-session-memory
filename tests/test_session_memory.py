@@ -65674,6 +65674,324 @@ def test_archived_session_exact_fallback_recovers_literal_beyond_posting_text_bo
     ).archived_raw_fallback is False
 
 
+def test_raw_exact_fallback_applies_typed_scope_before_bounded_ranking(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    session_id = "71717171-8282-4939-9060-717171717171"
+    transcript = (
+        tmp_path
+        / "rollout-2026-07-20T09-36-00-filter-before-ranking.jsonl"
+    )
+    anchor = "RET009_FILTER_ORDER_ANCHOR_7B3E9D"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-07-20T09:36:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": session_id,
+                    "cwd": str(workspace),
+                    "evidence_origin": "synthetic",
+                },
+            },
+            {
+                "timestamp": "2026-07-20T09:36:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": "call-ret009-command",
+                    "arguments": json.dumps(
+                        {
+                            "cmd": (
+                                "x" * 3_200
+                                + anchor
+                                + "y" * 3_200
+                                + " inspect"
+                            )
+                        }
+                    ),
+                },
+            },
+            {
+                "timestamp": "2026-07-20T09:36:02Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": (
+                                "x" * 3_200
+                                + anchor
+                                + "y" * 3_200
+                                + " remember user intent"
+                            ),
+                        }
+                    ],
+                },
+            },
+            {
+                "timestamp": "2026-07-20T09:36:03Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "agent_message",
+                    "message": (
+                        "x" * 3_200
+                        + anchor
+                        + "y" * 3_200
+                        + " stream-only copy"
+                    ),
+                },
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": session_id,
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    typed_top1 = module.search_sessions(
+        aoa_root=aoa_root,
+        query=anchor,
+        session=session_id,
+        event_type="USER_INTENT",
+        limit=1,
+        explain=True,
+    )
+    typed_absent = module.search_sessions(
+        aoa_root=aoa_root,
+        query=anchor,
+        session=session_id,
+        event_type="DECISION",
+        limit=1,
+        explain=True,
+    )
+    family_outcome_top1 = module.search_sessions(
+        aoa_root=aoa_root,
+        query=anchor,
+        session=session_id,
+        family="communication",
+        outcome="requested",
+        limit=1,
+        explain=True,
+    )
+    family_top1 = module.search_sessions(
+        aoa_root=aoa_root,
+        query=anchor,
+        session=session_id,
+        family="communication",
+        limit=1,
+        explain=True,
+    )
+    observed_outcome = module.search_sessions(
+        aoa_root=aoa_root,
+        query=anchor,
+        session=session_id,
+        outcome="observed",
+        limit=1,
+        explain=True,
+    )
+    before_event = module.search_sessions(
+        aoa_root=aoa_root,
+        query=anchor,
+        session=session_id,
+        event_id_before="000003",
+        limit=10,
+        explain=True,
+    )
+    without_stream_copy = module.search_sessions(
+        aoa_root=aoa_root,
+        query=anchor,
+        session=session_id,
+        exclude_agent_event_stream_copies=True,
+        limit=10,
+        explain=True,
+    )
+    missing_store_absent = not module.search_db_path(aoa_root).exists()
+    indexed = module.search_index_sessions(
+        aoa_root=aoa_root,
+        target="all",
+    )
+    ordinary_fallback = module.search_sessions(
+        aoa_root=aoa_root,
+        query=anchor,
+        session=session_id,
+        event_type="USER_INTENT",
+        limit=1,
+        literal_postings_only=True,
+        explain=True,
+    )
+    ordinary_before_event = module.search_sessions(
+        aoa_root=aoa_root,
+        query=anchor,
+        session=session_id,
+        event_id_before="000003",
+        limit=10,
+        literal_postings_only=True,
+        explain=True,
+    )
+    ordinary_without_stream_copy = module.search_sessions(
+        aoa_root=aoa_root,
+        query=anchor,
+        session=session_id,
+        exclude_agent_event_stream_copies=True,
+        limit=10,
+        literal_postings_only=True,
+        explain=True,
+    )
+    transcript.write_text(
+        transcript.read_text(encoding="utf-8")
+        + "\n".join(
+            json.dumps(row, ensure_ascii=False)
+            for row in [
+                {
+                    "timestamp": "2026-07-20T09:36:04Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call",
+                        "name": "exec_command",
+                        "call_id": "call-ret009-live-command",
+                        "arguments": json.dumps(
+                            {"cmd": f"inspect live {anchor}"}
+                        ),
+                    },
+                },
+                {
+                    "timestamp": "2026-07-20T09:36:05Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": f"live user intent {anchor}",
+                            }
+                        ],
+                    },
+                },
+                {
+                    "timestamp": "2026-07-20T09:36:06Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "agent_message",
+                        "message": f"live stream copy {anchor}",
+                    },
+                },
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    live_typed_top1 = module.live_tail_exact_search(
+        aoa_root=aoa_root,
+        session=session_id,
+        query=anchor,
+        event_type="USER_INTENT",
+        limit=1,
+        explain=True,
+    )
+    live_before_event = module.live_tail_exact_search(
+        aoa_root=aoa_root,
+        session=session_id,
+        query=anchor,
+        event_id_before="000006",
+        limit=10,
+        explain=True,
+    )
+    live_without_stream_copy = module.live_tail_exact_search(
+        aoa_root=aoa_root,
+        session=session_id,
+        query=anchor,
+        exclude_agent_event_stream_copies=True,
+        limit=10,
+        explain=True,
+    )
+
+    assert missing_store_absent is True
+    assert [item["raw_ref"] for item in typed_top1["results"]] == [
+        "raw:line:3"
+    ]
+    assert typed_top1["archived_raw_fallback"]["status"] == (
+        "applied_verified_after_index_missing"
+    )
+    assert typed_top1["archived_raw_fallback"][
+        "result_truncated"
+    ] is False
+    assert typed_top1["archived_raw_fallback"]["structured_filter"][
+        "rejection_counts"
+    ] == {"event_type": 2}
+    assert typed_absent["results"] == []
+    assert typed_absent["archived_raw_fallback"]["status"] == (
+        "no_match_complete_verified_after_index_missing"
+    )
+    assert typed_absent["archived_raw_fallback"]["abstention"][
+        "status"
+    ] == "exact_substring_absent_in_complete_verified_filtered_scope"
+    assert typed_absent["archived_raw_fallback"]["structured_filter"][
+        "rejected_candidate_count"
+    ] == 3
+    assert [
+        item["raw_ref"] for item in family_outcome_top1["results"]
+    ] == ["raw:line:3"]
+    assert [item["raw_ref"] for item in family_top1["results"]] == [
+        "raw:line:3"
+    ]
+    assert family_top1["archived_raw_fallback"]["structured_filter"][
+        "rejection_counts"
+    ] == {"family": 1}
+    assert [item["raw_ref"] for item in observed_outcome["results"]] == [
+        "raw:line:4"
+    ]
+    assert observed_outcome["archived_raw_fallback"][
+        "structured_filter"
+    ]["rejection_counts"] == {"outcome": 2}
+    assert [item["raw_ref"] for item in before_event["results"]] == [
+        "raw:line:2"
+    ]
+    assert [
+        item["raw_ref"] for item in without_stream_copy["results"]
+    ] == ["raw:line:2", "raw:line:3"]
+    assert indexed["ok"] is True
+    assert [
+        item["raw_ref"] for item in ordinary_fallback["results"]
+    ] == ["raw:line:3"]
+    assert ordinary_fallback["archived_raw_fallback"]["status"] == (
+        "applied_verified"
+    )
+    assert ordinary_fallback["archived_raw_fallback"][
+        "structured_filter"
+    ]["placement"] == "before_bounded_candidate_ranking"
+    assert [
+        item["raw_ref"] for item in ordinary_before_event["results"]
+    ] == ["raw:line:2"]
+    assert [
+        item["raw_ref"]
+        for item in ordinary_without_stream_copy["results"]
+    ] == ["raw:line:2", "raw:line:3"]
+    assert [item["raw_ref"] for item in live_typed_top1["results"]] == [
+        "raw:line:6"
+    ]
+    assert [item["raw_ref"] for item in live_before_event["results"]] == [
+        "raw:line:5"
+    ]
+    assert [
+        item["raw_ref"] for item in live_without_stream_copy["results"]
+    ] == ["raw:line:5", "raw:line:6"]
+
+
 def test_archived_session_exact_fallback_suppresses_its_own_query_and_result_echoes(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
@@ -68633,6 +68951,23 @@ def test_search_shards_materialize_monthly_and_fanout(tmp_path: Path) -> None:
     assert may_hit["search_catalog"]["shard"] == "month/2026-05"
     assert may_hit["search_catalog"]["shard_db_path"]
     assert may_hit["refs"]["raw"]
+    fanout_before_event = module.search_sessions(
+        aoa_root=aoa_root,
+        session="may-shard-session",
+        event_id_before="000003",
+        doc_type="event",
+        use_shards=True,
+        explain=True,
+    )
+    assert fanout_before_event["ok"] is True
+    assert fanout_before_event["search_projection"]["mode"] == (
+        module.SEARCH_ACTIVE_PROJECTION_SHARD_FANOUT
+    )
+    assert fanout_before_event["results"]
+    assert all(
+        str(item["event_id"]) < "000003"
+        for item in fanout_before_event["results"]
+    )
 
     stale_structured_catalog = dict(catalog)
     stale_structured_catalog["shards"] = [dict(item) for item in catalog["shards"]]

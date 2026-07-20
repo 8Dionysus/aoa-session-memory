@@ -265,6 +265,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0010 Natural-Language Intent Before Literal Length](../AOA-SM-D-0010-natural-language-intent-before-literal-length.md) | 2026-07-16 | Accepted | `docs/decisions/AOA-SM-D-0010-natural-language-intent-before-literal-length.md` |
 
+## filter-before-bound
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0003 Session-Scoped Archived Raw Exact Fallback](../AOA-SM-D-0003-session-scoped-archived-raw-exact-fallback.md) | 2026-07-15 | Accepted | `docs/decisions/AOA-SM-D-0003-session-scoped-archived-raw-exact-fallback.md` |
+
 ## foreign-correlation rejection
 
 | Decision | Date | Status | Path |

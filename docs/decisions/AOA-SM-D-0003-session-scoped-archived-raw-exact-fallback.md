@@ -11,7 +11,7 @@ Accepted.
 - Owner surfaces: `scripts/aoa_session_memory.py`, `PIPELINE.md`, `README.md`
 - Surface classes: query routing, exact retrieval, raw evidence, portable source
 - Projection layers: exact literal postings, archived raw fallback
-- Guard families: session scope, bounded scan, digest verification, query echo suppression, no persistent index
+- Guard families: session scope, bounded scan, digest verification, filter-before-bound, query echo suppression, no persistent index
 - Posture: accepted
 
 ## Context
@@ -142,3 +142,27 @@ filters, unbounded scope, a disabled fallback, truncation, source drift, and
 digest failure still abstain. The regression arose from a manual concurrent
 reader/writer trial; private coordinates and timings remain in session
 provenance rather than this owner record.
+
+## Review Amendment — Filter Scope Before Candidate Bounds
+
+A complete raw scan and a complete filtered result are different invariants.
+Every event-local filter supported by the raw route — event ID bound, event
+type, family, outcome, and duplicate event-stream exclusion — constrains raw
+candidate collection before the candidate heap, ranking, and return limit.
+Applying such a filter only to an already bounded top-k may hide a compatible
+lower-ranked event and must never produce a complete-negative verdict.
+
+Archive and freshness predicates remain explicit source-wide checks because
+all candidates from one captured raw snapshot share those states. The packet
+names requested filters, their pre-bound placement, rejection counts, and
+result truncation. A complete digest-verified scan with no candidate in the
+requested filter scope may prove only that scoped absence; it must not say the
+literal was absent from the raw archive when out-of-scope occurrences were
+observed.
+
+This amendment was derived from a preregistered adversarial trial. The old
+reader returned an empty typed top-1 result while also reporting a complete
+verified scan, ignored a requested before-event bound, and returned an
+explicitly excluded event-stream copy. The regression preserves those three
+failures as negative controls and also exercises ordinary archived fallback
+and live-tail filtering.
