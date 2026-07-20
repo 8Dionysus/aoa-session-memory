@@ -60564,6 +60564,277 @@ def test_evaluation_generation_pin_invalidates_projection_and_raw_drift(
     assert raw_check["answer_or_score_admissible"] is False
 
 
+def test_evaluation_generation_pin_accepts_semantically_identical_atomic_publish(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    session_id = "evaluation-generation-repeatable-publish"
+    transcript = tmp_path / "evaluation-generation-repeatable-publish.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-07-18T00:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": session_id, "cwd": str(repo)},
+            },
+            {
+                "timestamp": "2026-07-18T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Rebuild the same sealed projection twice.",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": session_id,
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    assert module.search_index_sessions(
+        aoa_root=aoa_root,
+        target="all",
+    )["ok"] is True
+    assert module.build_search_catalog(
+        aoa_root,
+        write=True,
+    )["ok"] is True
+
+    before = module.evaluation_generation_snapshot(
+        aoa_root=aoa_root,
+        sessions=[session_id],
+    )
+    assert before["ok"] is True
+    db_path = module.search_db_path(aoa_root)
+    replacement = db_path.with_name(f".{db_path.name}.repeatable.tmp")
+    shutil.copy2(db_path, replacement)
+    os.replace(replacement, db_path)
+    os.utime(db_path, None)
+    catalog_path = module.search_catalog_path(aoa_root)
+    catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+    catalog["generated_at"] = "2099-01-01T00:00:00Z"
+    module.write_json(catalog_path, catalog)
+
+    after = module.evaluation_generation_snapshot(
+        aoa_root=aoa_root,
+        sessions=[session_id],
+    )
+    comparison = module.evaluation_generation_compare(before, after)
+    search_logical_path = module.evaluation_generation_logical_path(
+        aoa_root,
+        db_path,
+    )
+    before_search = next(
+        item
+        for item in before["sqlite_projections"]
+        if item["path"] == search_logical_path
+    )
+    after_search = next(
+        item
+        for item in after["sqlite_projections"]
+        if item["path"] == search_logical_path
+    )
+    assert before_search["files"] != after_search["files"]
+    catalog_logical_path = module.evaluation_generation_logical_path(
+        aoa_root,
+        catalog_path,
+    )
+    before_catalog = next(
+        item
+        for item in before["projection_artifacts"]
+        if item["path"] == catalog_logical_path
+    )
+    after_catalog = next(
+        item
+        for item in after["projection_artifacts"]
+        if item["path"] == catalog_logical_path
+    )
+    assert before_catalog["file"] != after_catalog["file"]
+    assert before_catalog["semantic_fingerprint"] == (
+        after_catalog["semantic_fingerprint"]
+    )
+    assert comparison["ok"] is True
+    assert comparison["status"] == "generation_stable"
+    assert comparison["changed_components"] == []
+    assert comparison["answer_or_score_admissible"] is True
+
+
+def test_evaluation_generation_pin_invalidates_semantic_artifact_drift(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    catalog_path = module.search_catalog_path(aoa_root)
+    catalog_path.parent.mkdir(parents=True)
+    module.write_json(
+        catalog_path,
+        {
+            "schema_version": 1,
+            "artifact_type": "session_memory_search_catalog",
+            "generated_at": "2026-07-18T00:00:00Z",
+            "sessions": [{"session_id": "semantic-artifact"}],
+        },
+    )
+    before = module.evaluation_generation_projection_artifact_state(
+        aoa_root,
+        catalog_path,
+    )
+    catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+    catalog["sessions"][0]["session_id"] = "different-semantic-artifact"
+    module.write_json(catalog_path, catalog)
+    after = module.evaluation_generation_projection_artifact_state(
+        aoa_root,
+        catalog_path,
+    )
+    assert before["identity_sha256"] != after["identity_sha256"]
+    assert before["semantic_fingerprint"] != after["semantic_fingerprint"]
+
+
+def test_evaluation_generation_pin_refuses_incompatible_producer_generation(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    session_id = "evaluation-generation-incompatible-producer"
+    transcript = tmp_path / "evaluation-generation-incompatible.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-07-18T00:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": session_id, "cwd": str(repo)},
+            },
+            {
+                "timestamp": "2026-07-18T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Do not admit an old producer generation.",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": session_id,
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    assert module.search_index_sessions(
+        aoa_root=aoa_root,
+        target="all",
+    )["ok"] is True
+    current = module.evaluation_generation_snapshot(
+        aoa_root=aoa_root,
+        sessions=[session_id],
+    )
+    assert current["ok"] is True
+    common = module.session_memory_generation_common()
+    monkeypatch.setattr(
+        module,
+        "session_memory_generation_common",
+        lambda: {**common, "producer_sha256": "f" * 64},
+    )
+
+    incompatible = module.evaluation_generation_snapshot(
+        aoa_root=aoa_root,
+        sessions=[session_id],
+    )
+    assert incompatible["ok"] is False
+    assert incompatible["status"] == "incompatible_generation"
+    assert incompatible["generation_compatibility"]["compatible"] is False
+    assert incompatible["generation_compatibility"][
+        "incompatible_check_count"
+    ] > 0
+    assert any(
+        diagnostic.startswith("evaluation_generation_incompatible:")
+        for diagnostic in incompatible["diagnostics"]
+    )
+    captured = module.evaluation_generation_pin_capture_payload(
+        aoa_root=aoa_root,
+        sessions=[session_id],
+    )
+    assert captured["ok"] is False
+    assert captured["status"] == (
+        "refused_incompatible_generation_snapshot"
+    )
+
+
+def test_evaluation_generation_sqlite_state_accepts_generationless_rollup(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    db_path = (
+        aoa_root
+        / module.SEARCH_ROOT
+        / module.SEARCH_OPERATIONAL_ROUTE_ROLLUP_DB_NAME
+    )
+    db_path.parent.mkdir(parents=True)
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT);
+        CREATE TABLE shards(shard TEXT PRIMARY KEY, status TEXT);
+        CREATE TABLE route_rollups(
+            shard TEXT,
+            layer TEXT,
+            key TEXT,
+            route_signal TEXT,
+            PRIMARY KEY(shard, layer, key, route_signal)
+        );
+        INSERT INTO meta(key, value) VALUES('generated_at', '2026-07-18T00:00:00Z');
+        INSERT INTO shards(shard, status) VALUES('month_2026_07', 'current');
+        INSERT INTO route_rollups(shard, layer, key, route_signal)
+        VALUES('month_2026_07', 'tool', 'apply_patch', 'tool:apply_patch');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    state = module.evaluation_generation_sqlite_state(
+        aoa_root=aoa_root,
+        db_path=db_path,
+        state_tables=module.EVALUATION_GENERATION_SEARCH_STATE_TABLES,
+        session_ids=None,
+    )
+    assert state["status"] == "observed"
+    assert state["observed_generation_ids"] == {}
+    assert state["semantic_projection_digest"]["tables"][2][
+        "row_count"
+    ] == 1
+
+
 def test_generation_pinned_evaluation_refuses_interleaved_generation(
     tmp_path: Path,
     monkeypatch: Any,
