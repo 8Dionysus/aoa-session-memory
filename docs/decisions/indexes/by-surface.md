@@ -83,6 +83,7 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0022 Pinned Entity-Registry Generation for Graph Publication](../AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md` |
+| [AOA-SM-D-0028 Authoritative Registry Rebuild Excludes Generated History](../AOA-SM-D-0028-authoritative-registry-rebuild-excludes-generated-history.md) | 2026-07-20 | Accepted | `docs/decisions/AOA-SM-D-0028-authoritative-registry-rebuild-excludes-generated-history.md` |
 
 ## entity routing
 
@@ -144,6 +145,7 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0022 Pinned Entity-Registry Generation for Graph Publication](../AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md` |
 | [AOA-SM-D-0023 Manifest-Committed Graph Sidecar Publication](../AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md` |
+| [AOA-SM-D-0028 Authoritative Registry Rebuild Excludes Generated History](../AOA-SM-D-0028-authoritative-registry-rebuild-excludes-generated-history.md) | 2026-07-20 | Accepted | `docs/decisions/AOA-SM-D-0028-authoritative-registry-rebuild-excludes-generated-history.md` |
 
 ## freshness contract
 
@@ -210,6 +212,12 @@
 | [AOA-SM-D-0022 Pinned Entity-Registry Generation for Graph Publication](../AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md` |
 | [AOA-SM-D-0023 Manifest-Committed Graph Sidecar Publication](../AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md` |
 
+## indexing
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0028 Authoritative Registry Rebuild Excludes Generated History](../AOA-SM-D-0028-authoritative-registry-rebuild-excludes-generated-history.md) | 2026-07-20 | Accepted | `docs/decisions/AOA-SM-D-0028-authoritative-registry-rebuild-excludes-generated-history.md` |
+
 ## lifecycle
 
 | Decision | Date | Status | Path |
@@ -230,6 +238,7 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0025 Process-Loaded Producer Generation Identity](../AOA-SM-D-0025-process-loaded-producer-generation-identity.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0025-process-loaded-producer-generation-identity.md` |
+| [AOA-SM-D-0028 Authoritative Registry Rebuild Excludes Generated History](../AOA-SM-D-0028-authoritative-registry-rebuild-excludes-generated-history.md) | 2026-07-20 | Accepted | `docs/decisions/AOA-SM-D-0028-authoritative-registry-rebuild-excludes-generated-history.md` |
 
 ## partial-failure recovery
 
@@ -338,6 +347,7 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0024 Semantic Generation Pins for Evaluation Admission](../AOA-SM-D-0024-semantic-generation-pins-for-evaluation-admission.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0024-semantic-generation-pins-for-evaluation-admission.md` |
 | [AOA-SM-D-0025 Process-Loaded Producer Generation Identity](../AOA-SM-D-0025-process-loaded-producer-generation-identity.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0025-process-loaded-producer-generation-identity.md` |
+| [AOA-SM-D-0028 Authoritative Registry Rebuild Excludes Generated History](../AOA-SM-D-0028-authoritative-registry-rebuild-excludes-generated-history.md) | 2026-07-20 | Accepted | `docs/decisions/AOA-SM-D-0028-authoritative-registry-rebuild-excludes-generated-history.md` |
 
 ## resource scheduling
 

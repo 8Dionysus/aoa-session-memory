@@ -146,6 +146,18 @@ operation. Every source contribution uses the immutable index from that
 snapshot, and both graph metadata and source rows record its dependency
 identity. Runtime aliases are not re-resolved independently per record.
 
+Entity-registry construction distinguishes incremental navigation history from
+an authoritative rebuild. Incremental refresh may retain bounded prior-snapshot
+aliases and retired identities under an explicit history policy. A full rebuild
+uses only current declared owner sources and route terms built in the same
+candidate search store; it cannot merge the prior generated registry or prefer
+an older operational rollup. The registry records both its history policy and a
+versioned semantic fingerprint of the observed route entries. A changed or
+unverifiable observed dependency makes the registry stale even when runtime
+source mtimes, schema, producer generation, and entity count are unchanged.
+Previous registries, rollups, and route terms remain generated navigation
+surfaces; their resolvable raw and owner refs remain the evidence authority.
+
 ## 8. Consumer routing
 
 Consumers should start with the cheapest typed route that matches the

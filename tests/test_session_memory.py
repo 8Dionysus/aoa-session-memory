@@ -22415,6 +22415,111 @@ def test_entity_registry_auto_uses_stale_materialized_rollup_before_route_terms(
     assert entry["freshness"]["observed_route_source_status"] == "stale"
 
 
+def test_entity_registry_freshness_tracks_observed_rollup_semantics(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    empty_codex_home = tmp_path / "empty-codex-home"
+    empty_mcp_services_root = tmp_path / "empty-mcp-services"
+    empty_codex_home.mkdir()
+    empty_mcp_services_root.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(empty_codex_home))
+    monkeypatch.setenv(
+        "AOA_ENTITY_REGISTRY_MCP_SERVICES_ROOTS",
+        str(empty_mcp_services_root),
+    )
+    monkeypatch.setattr(
+        module,
+        "entity_registry_runtime_source_entries",
+        lambda _aoa_root: [],
+    )
+    rollup_db = (
+        module.search_operational_route_rollup_db_path(aoa_root)
+    )
+    conn = module.init_search_operational_route_rollup_db(
+        rollup_db
+    )
+    conn.executemany(
+        "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+        [
+            (
+                "artifact_type",
+                "session_memory_search_operational_route_rollup",
+            ),
+            (
+                "rollup_schema_version",
+                str(
+                    module.SEARCH_OPERATIONAL_ROUTE_ROLLUP_SCHEMA_VERSION
+                ),
+            ),
+            ("generated_at", "2026-07-20T00:00:00Z"),
+        ],
+    )
+    conn.execute(
+        """
+        INSERT INTO route_rollups(
+            shard, layer, key, route_signal, posting_count,
+            session_count, first_session_date, last_session_date,
+            raw_refs_json, segment_refs_json, session_ids_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "month/2026-07",
+            "skill",
+            "dependency_skill",
+            "skill:dependency_skill",
+            1,
+            1,
+            "2026-07-20",
+            "2026-07-20",
+            json.dumps(["raw:line:1"]),
+            json.dumps(["000__initial.md#event-000001"]),
+            json.dumps(["dependency-session"]),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    built = module.build_entity_registry(
+        aoa_root=aoa_root,
+        write=True,
+        include_runtime=False,
+        observed_source="route-rollup",
+    )
+    dependency = built["observed_source_dependency"]
+    current = module.entity_registry_maintenance_status(
+        aoa_root
+    )
+
+    assert dependency["source"] == "operational_route_rollup"
+    assert dependency["entry_count"] == 1
+    assert current["status"] == "current"
+    assert current["current_observed_source_dependency"][
+        "semantic_sha256"
+    ] == dependency["semantic_sha256"]
+
+    conn = sqlite3.connect(str(rollup_db))
+    conn.execute(
+        "UPDATE route_rollups SET posting_count = 2 "
+        "WHERE layer = 'skill' AND key = 'dependency_skill'"
+    )
+    conn.commit()
+    conn.close()
+    changed = module.entity_registry_maintenance_status(
+        aoa_root
+    )
+
+    assert changed["status"] == "needs_maintenance"
+    assert (
+        "entity_registry_observed_dependency_changed"
+        in changed["diagnostics"]
+    )
+    assert changed["current_observed_source_dependency"][
+        "semantic_sha256"
+    ] != dependency["semantic_sha256"]
+
+
 def test_auto_maintenance_refreshes_stale_entity_registry_search_docs(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
@@ -64021,10 +64126,44 @@ def test_full_rebuild_is_semantically_deterministic_for_same_sealed_input(
         workspace_root=workspace,
         aoa_root=aoa_root,
     )
+    stable_skill = (
+        aoa_root / "skills" / "deterministic-skill" / "SKILL.md"
+    )
+    stable_skill.parent.mkdir(parents=True)
+    stable_skill.write_text(
+        "---\nname: deterministic-skill\n---\n",
+        encoding="utf-8",
+    )
+
+    def stable_runtime_entries(
+        _aoa_root: Path,
+    ) -> list[dict[str, Any]]:
+        return [
+            module.entity_registry_make_entry(
+                kind="skill",
+                key="deterministic_skill",
+                aliases=["deterministic-skill"],
+                source_refs=[
+                    module.entity_registry_source_ref(
+                        stable_skill,
+                        source_type=(
+                            "aoa_session_memory_source_skills"
+                        ),
+                        status="active",
+                    )
+                ],
+                source_surface=(
+                    "aoa_session_memory_source_skills"
+                ),
+                owner="aoa-session-memory",
+                status="active",
+            )
+        ]
+
     monkeypatch.setattr(
         module,
         "entity_registry_runtime_source_entries",
-        lambda _aoa_root: [],
+        stable_runtime_entries,
     )
 
     first = module.search_index_sessions(
@@ -64042,6 +64181,37 @@ def test_full_rebuild_is_semantically_deterministic_for_same_sealed_input(
     conn = module.connect_existing_search_db(db_path)
     first_digest = module.search_projection_semantic_digest(conn)
     conn.close()
+    assert first_registry["history_policy"] == (
+        module.ENTITY_REGISTRY_HISTORY_POLICY_AUTHORITATIVE_REBUILD
+    )
+    assert first_registry["observed_route_source"] == (
+        "archived_route_terms"
+    )
+
+    generated_only_history = tmp_path / "removed-generated-only-skill.md"
+    generated_only_history.write_text(
+        "This prior generated candidate is not a declared owner input.\n",
+        encoding="utf-8",
+    )
+    poisoned_registry = json.loads(
+        json.dumps(first_registry)
+    )
+    poisoned_entry = next(
+        entry
+        for entry in poisoned_registry["entries"]
+        if entry["entity_id"] == "skill:deterministic_skill"
+    )
+    poisoned_entry["source_refs"].append(
+        module.entity_registry_source_ref(
+            generated_only_history,
+            source_type="codex_user_skills",
+            status="active",
+        )
+    )
+    module.write_json(
+        aoa_root / module.ENTITY_REGISTRY_PATH,
+        poisoned_registry,
+    )
 
     second = module.search_index_sessions(
         aoa_root=aoa_root,
@@ -64065,6 +64235,10 @@ def test_full_rebuild_is_semantically_deterministic_for_same_sealed_input(
     assert first_registry["source_fingerprint"] == second_registry[
         "source_fingerprint"
     ]
+    assert str(generated_only_history) not in json.dumps(
+        second_registry,
+        ensure_ascii=False,
+    )
     assert first_digest["table_counts"] == second_digest["table_counts"]
     assert first_digest["table_counts"]["documents"] > 0
     assert first_digest["table_counts"][

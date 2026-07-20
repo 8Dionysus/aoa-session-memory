@@ -87,6 +87,7 @@
 | [AOA-SM-D-0022 Pinned Entity-Registry Generation for Graph Publication](../AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md` |
 | [AOA-SM-D-0024 Semantic Generation Pins for Evaluation Admission](../AOA-SM-D-0024-semantic-generation-pins-for-evaluation-admission.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0024-semantic-generation-pins-for-evaluation-admission.md` |
 | [AOA-SM-D-0025 Process-Loaded Producer Generation Identity](../AOA-SM-D-0025-process-loaded-producer-generation-identity.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0025-process-loaded-producer-generation-identity.md` |
+| [AOA-SM-D-0028 Authoritative Registry Rebuild Excludes Generated History](../AOA-SM-D-0028-authoritative-registry-rebuild-excludes-generated-history.md) | 2026-07-20 | Accepted | `docs/decisions/AOA-SM-D-0028-authoritative-registry-rebuild-excludes-generated-history.md` |
 
 ## entity usage chain
 
@@ -187,6 +188,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0013 Indexed Graph Seed Before Retrieval Fallback](../AOA-SM-D-0013-indexed-graph-seed-before-retrieval-fallback.md) | 2026-07-17 | Accepted | `docs/decisions/AOA-SM-D-0013-indexed-graph-seed-before-retrieval-fallback.md` |
+
+## graph dependency
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0028 Authoritative Registry Rebuild Excludes Generated History](../AOA-SM-D-0028-authoritative-registry-rebuild-excludes-generated-history.md) | 2026-07-20 | Accepted | `docs/decisions/AOA-SM-D-0028-authoritative-registry-rebuild-excludes-generated-history.md` |
 
 ## graph index
 
@@ -339,6 +346,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0012 Bounded Background Graph Queue Reserve](../AOA-SM-D-0012-bounded-background-graph-queue-reserve.md) | 2026-07-17 | Accepted | `docs/decisions/AOA-SM-D-0012-bounded-background-graph-queue-reserve.md` |
 
+## route terms
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0028 Authoritative Registry Rebuild Excludes Generated History](../AOA-SM-D-0028-authoritative-registry-rebuild-excludes-generated-history.md) | 2026-07-20 | Accepted | `docs/decisions/AOA-SM-D-0028-authoritative-registry-rebuild-excludes-generated-history.md` |
+
 ## route-signal rollups
 
 | Decision | Date | Status | Path |
@@ -358,6 +371,12 @@
 | [AOA-SM-D-0024 Semantic Generation Pins for Evaluation Admission](../AOA-SM-D-0024-semantic-generation-pins-for-evaluation-admission.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0024-semantic-generation-pins-for-evaluation-admission.md` |
 | [AOA-SM-D-0025 Process-Loaded Producer Generation Identity](../AOA-SM-D-0025-process-loaded-producer-generation-identity.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0025-process-loaded-producer-generation-identity.md` |
 | [AOA-SM-D-0026 Best-Effort Progress Transport](../AOA-SM-D-0026-best-effort-progress-transport.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0026-best-effort-progress-transport.md` |
+
+## search entity documents
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0028 Authoritative Registry Rebuild Excludes Generated History](../AOA-SM-D-0028-authoritative-registry-rebuild-excludes-generated-history.md) | 2026-07-20 | Accepted | `docs/decisions/AOA-SM-D-0028-authoritative-registry-rebuild-excludes-generated-history.md` |
 
 ## search repair
 
