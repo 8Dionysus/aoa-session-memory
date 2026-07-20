@@ -179,8 +179,9 @@ Ready when:
 - dirty state propagates;
 - incremental workers are idempotent and restartable;
 - pre-journal session stages distinguish live, dead, and legacy-unowned
-  producers; cleanup preserves raw and last-good bytes, and owner preflight
-  rejects every remaining stage;
+  producers; cleanup requires a verified stronger raw authority, reports
+  operational rather than semantic progress, preserves raw and last-good bytes,
+  and owner preflight rejects every remaining stage;
 - live tails wait for a quiet window without hiding stable evidence;
 - resource/lock deferral later resumes automatically;
 - no heavy necessary projection starves indefinitely;

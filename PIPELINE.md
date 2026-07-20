@@ -103,10 +103,12 @@ removal use the same boundary while keeping stable evidence refs.
 
 Sibling session-projection stages name their producer PID before a publish
 journal exists. If that process terminates during construction, maintenance may
-remove the generated stage only after the PID is absent and while holding the
-shared lease. A legacy stage without producer identity is not guessed away: its
-reported content digest and quiet-age guard require explicit operator
-confirmation. Any journal-bearing stage remains owned by journal recovery.
+remove the generated stage only after the PID is absent, while holding the
+shared lease, and after any staged raw copy matches either published owner raw
+or its resolvable external source. A legacy stage without producer identity is
+not guessed away: its reported content digest and quiet-age guard require
+explicit operator confirmation in addition to the raw-authority proof. Any
+journal-bearing stage remains owned by journal recovery.
 
 ## 6. Count-only accounting
 
@@ -350,7 +352,8 @@ session-projection temps, removes only those whose producer PID is absent while
 holding the shared maintenance lease, and leaves live stores, published
 last-good session files, and raw evidence untouched. Legacy unowned session
 stages require an exact reported content digest; a mismatch causes no mutation.
-An active writer defers cleanup rather than racing publication.
+An active writer defers cleanup rather than racing publication. Debris removal
+is operational progress and always reports `semantic_progress=false`.
 
 Graph incremental mutation checks its pinned registry dependency before
 mutation and before commit. A dependency race rolls back the transaction.

@@ -133,13 +133,18 @@ The accepted publication law is unchanged and is clarified as follows:
 - a stage with an existing publish journal remains owned by journal recovery;
   generic cleanup does not remove it independently;
 - under the maintenance lease, cleanup may remove a pre-journal stage only
-  when its encoded producer PID is absent;
+  when its encoded producer PID is absent and any staged raw copy is either
+  byte-identical to published owner raw or byte-identical to its still
+  resolvable external source; a stage without raw needs no such match;
 - a legacy stage without producer identity is fail-closed. The cleanup plan
   returns a deterministic content digest, and removal requires the operator to
   repeat that exact digest after a quiet-age guard. A wrong or stale digest
-  causes no mutation;
+  causes no mutation. The digest confirms the selected generated directory; it
+  never substitutes for the stronger raw-authority check;
 - raw sessions, preserved captures, published last-good files, and live index
   stores are outside this cleanup scope;
+- successful debris removal is reported as operational progress with
+  `semantic_progress=false`; it does not promote any projection freshness;
 - owner preflight rejects any remaining sibling stage instead of treating an
   otherwise valid raw/archive set as clean.
 

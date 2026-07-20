@@ -34952,7 +34952,10 @@ def test_maintenance_cleanup_removes_dead_session_stage_but_keeps_live_stage(
 
     assert applied["ok"] is True
     assert applied["status"] == "applied"
-    assert applied["semantic_progress"] is True
+    assert applied["process_completed"] is True
+    assert applied["operational_progress"] is True
+    assert applied["semantic_progress"] is False
+    assert applied["remaining_cleanup_needed"] is False
     assert applied["action_counts"][
         "session_projection_stage_removed"
     ] == 1
@@ -34982,7 +34985,7 @@ def test_unowned_session_stage_requires_exact_digest_confirmation(
         b'raw authority\n'
     )
     (legacy_stage / "generated.index.json").write_text(
-        '{}\n',
+        '{"a":1}\n',
         encoding="utf-8",
     )
     old_epoch = time.time() - (
@@ -35013,6 +35016,7 @@ def test_unowned_session_stage_requires_exact_digest_confirmation(
     assert unconfirmed["ok"] is True
     assert unconfirmed["status"] == "cleanup_needed"
     assert unconfirmed["semantic_progress"] is False
+    assert unconfirmed["remaining_cleanup_needed"] is True
     assert legacy_stage.exists()
 
     rejected = module.maintenance_cleanup(
@@ -35056,11 +35060,44 @@ def test_unowned_session_stage_requires_exact_digest_confirmation(
     assert duplicate_stage.exists()
     module.remove_projection_publish_path(duplicate_stage)
 
-    applied = module.maintenance_cleanup(
+    (legacy_stage / "generated.index.json").write_text(
+        '{"b":2}\n',
+        encoding="utf-8",
+    )
+    os.utime(
+        legacy_stage / "generated.index.json",
+        (old_epoch, old_epoch),
+        follow_symlinks=False,
+    )
+    stale_confirmation = module.maintenance_cleanup(
         aoa_root=aoa_root,
         apply=True,
         confirmed_unowned_session_stage_digests={
             content_digest
+        },
+    )
+    assert stale_confirmation["ok"] is False
+    assert stale_confirmation["status"] == (
+        "confirmation_rejected"
+    )
+    assert stale_confirmation["action_counts"][
+        "session_projection_stage_removed"
+    ] == 0
+    assert legacy_stage.exists()
+    refreshed = module.maintenance_cleanup(
+        aoa_root=aoa_root,
+        apply=False,
+    )
+    refreshed_digest = refreshed[
+        "session_projection_stages"
+    ]["entries"][0]["content_digest"]
+    assert refreshed_digest != content_digest
+
+    applied = module.maintenance_cleanup(
+        aoa_root=aoa_root,
+        apply=True,
+        confirmed_unowned_session_stage_digests={
+            refreshed_digest
         },
     )
 
@@ -35072,6 +35109,293 @@ def test_unowned_session_stage_requires_exact_digest_confirmation(
     assert not legacy_stage.exists()
     assert published_raw.is_file()
     assert module.sha256_file(published_raw) == published_raw_sha
+
+
+def test_session_stage_cleanup_requires_verified_stronger_raw_authority(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    sessions_root = aoa_root / "sessions"
+    session_dir = sessions_root / "raw-authority"
+    owner_raw = session_dir / "raw" / "session.raw.jsonl"
+    owner_raw.parent.mkdir(parents=True)
+    owner_raw.write_bytes(b"published last good\n")
+    owner_raw_sha = module.sha256_file(owner_raw)
+    external_source = tmp_path / "source.jsonl"
+    external_source.write_bytes(b"new captured authority\n")
+    external_source_sha = module.sha256_file(
+        external_source
+    )
+    monkeypatch.setattr(
+        module,
+        "process_is_alive",
+        lambda _pid: False,
+    )
+
+    externally_verified = sessions_root / (
+        ".raw-authority.projection-stage-987654-external"
+    )
+    (externally_verified / "raw").mkdir(parents=True)
+    (externally_verified / "raw" / "session.raw.jsonl").write_bytes(
+        b"new captured authority\n"
+    )
+    module.write_json(
+        externally_verified / "raw" / module.RAW_SOURCE_JSON,
+        {"source_path": str(external_source)},
+    )
+
+    external_plan = module.maintenance_cleanup(
+        aoa_root=aoa_root,
+        apply=False,
+    )
+    external_entry = external_plan[
+        "session_projection_stages"
+    ]["entries"][0]
+    assert external_entry["status"] == "orphaned"
+    assert external_entry["safe_to_remove"] is True
+    assert external_entry["raw_authority"]["verified"] is True
+    assert external_entry["raw_authority"]["status"] == (
+        "external_source_raw_digest_match"
+    )
+
+    external_apply = module.maintenance_cleanup(
+        aoa_root=aoa_root,
+        apply=True,
+    )
+    assert external_apply["status"] == "applied"
+    assert external_apply["operational_progress"] is True
+    assert external_apply["semantic_progress"] is False
+    assert not externally_verified.exists()
+    assert module.sha256_file(owner_raw) == owner_raw_sha
+    assert module.sha256_file(
+        external_source
+    ) == external_source_sha
+
+    unresolved_marked = sessions_root / (
+        ".raw-authority.projection-stage-987654-unresolved"
+    )
+    (unresolved_marked / "raw").mkdir(parents=True)
+    (
+        unresolved_marked
+        / "raw"
+        / "session.raw.jsonl"
+    ).write_bytes(b"unresolved staged raw\n")
+
+    blocked = module.maintenance_cleanup(
+        aoa_root=aoa_root,
+        apply=True,
+    )
+    blocked_entry = blocked[
+        "session_projection_stages"
+    ]["entries"][0]
+    assert blocked["status"] == (
+        "blocked_raw_authority_unresolved"
+    )
+    assert blocked["operational_progress"] is False
+    assert blocked["semantic_progress"] is False
+    assert blocked["remaining_cleanup_needed"] is True
+    assert blocked["action_counts"][
+        "session_projection_stage_removed"
+    ] == 0
+    assert blocked_entry["status"] == (
+        "orphaned_raw_authority_unresolved"
+    )
+    assert blocked_entry["raw_authority"]["verified"] is False
+    assert unresolved_marked.exists()
+
+    legacy_unresolved = sessions_root / (
+        ".raw-authority.projection-stage-legacyunresolved"
+    )
+    unresolved_marked.rename(legacy_unresolved)
+    old_epoch = time.time() - (
+        module.SESSION_PROJECTION_UNOWNED_CONFIRM_MIN_AGE_SECONDS
+        + 60
+    )
+    for path in [
+        *legacy_unresolved.rglob("*"),
+        legacy_unresolved,
+    ]:
+        os.utime(
+            path,
+            (old_epoch, old_epoch),
+            follow_symlinks=False,
+        )
+    legacy_plan = module.maintenance_cleanup(
+        aoa_root=aoa_root,
+        apply=False,
+    )
+    legacy_entry = legacy_plan[
+        "session_projection_stages"
+    ]["entries"][0]
+    legacy_digest = legacy_entry["content_digest"]
+    assert legacy_entry["raw_authority"]["verified"] is False
+
+    rejected = module.maintenance_cleanup(
+        aoa_root=aoa_root,
+        apply=True,
+        confirmed_unowned_session_stage_digests={
+            legacy_digest
+        },
+    )
+    assert rejected["ok"] is False
+    assert rejected["status"] == "confirmation_rejected"
+    assert rejected["confirmation_errors"] == [
+        "unowned_session_projection_stage_raw_authority_unresolved:"
+        f"{legacy_digest}:stronger_raw_digest_mismatch"
+    ]
+    assert rejected["action_counts"][
+        "session_projection_stage_removed"
+    ] == 0
+    assert legacy_unresolved.exists()
+    assert module.sha256_file(owner_raw) == owner_raw_sha
+
+
+def test_session_stage_cleanup_revalidates_raw_authority_before_removal(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    sessions_root = aoa_root / "sessions"
+    owner = sessions_root / "revalidate-owner"
+    owner.mkdir(parents=True)
+    stage = sessions_root / (
+        ".revalidate-owner.projection-stage-987654-dead"
+    )
+    stage.mkdir()
+    (stage / "generated").write_bytes(b"x")
+    monkeypatch.setattr(
+        module,
+        "process_is_alive",
+        lambda _pid: False,
+    )
+    original_probe = (
+        module.session_projection_stage_raw_authority
+    )
+    probe_count = 0
+
+    def changing_probe(
+        stage_path: Path,
+        owner_session_dir: Path,
+    ) -> dict[str, Any]:
+        nonlocal probe_count
+        probe_count += 1
+        if probe_count == 1:
+            return original_probe(
+                stage_path,
+                owner_session_dir,
+            )
+        return {
+            "schema_version": module.SCHEMA_VERSION,
+            "artifact_type": (
+                "session_memory_session_projection_stage_raw_authority"
+            ),
+            "inspected": True,
+            "verified": False,
+            "status": "changed_during_cleanup",
+            "diagnostics": [
+                "test_injected_raw_authority_change"
+            ],
+        }
+
+    monkeypatch.setattr(
+        module,
+        "session_projection_stage_raw_authority",
+        changing_probe,
+    )
+
+    applied = module.maintenance_cleanup(
+        aoa_root=aoa_root,
+        apply=True,
+    )
+
+    assert applied["ok"] is False
+    assert applied["status"] == (
+        "cleanup_revalidation_failed"
+    )
+    assert applied["operational_progress"] is False
+    assert applied["semantic_progress"] is False
+    assert applied["action_counts"][
+        "session_projection_stage_removed"
+    ] == 0
+    assert applied["removal_revalidation_errors"] == [
+        "session_projection_stage_raw_authority_changed_before_"
+        "removal:"
+        f"{stage.name}:changed_during_cleanup"
+    ]
+    assert stage.exists()
+
+
+def test_legacy_stage_cleanup_revalidates_digest_before_removal(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    sessions_root = aoa_root / "sessions"
+    owner = sessions_root / "legacy-revalidate"
+    owner.mkdir(parents=True)
+    stage = sessions_root / (
+        ".legacy-revalidate.projection-stage-legacytoken"
+    )
+    stage.mkdir()
+    (stage / "generated").write_bytes(b"x")
+    old_epoch = time.time() - (
+        module.SESSION_PROJECTION_UNOWNED_CONFIRM_MIN_AGE_SECONDS
+        + 60
+    )
+    for path in [*stage.rglob("*"), stage]:
+        os.utime(
+            path,
+            (old_epoch, old_epoch),
+            follow_symlinks=False,
+        )
+    plan = module.maintenance_cleanup(
+        aoa_root=aoa_root,
+        apply=False,
+    )
+    expected_digest = plan[
+        "session_projection_stages"
+    ]["entries"][0]["content_digest"]
+    original_digest = (
+        module.generated_directory_content_digest
+    )
+    digest_count = 0
+
+    def changing_digest(path: Path) -> str:
+        nonlocal digest_count
+        digest_count += 1
+        if digest_count == 2:
+            return "f" * 64
+        return original_digest(path)
+
+    monkeypatch.setattr(
+        module,
+        "generated_directory_content_digest",
+        changing_digest,
+    )
+
+    applied = module.maintenance_cleanup(
+        aoa_root=aoa_root,
+        apply=True,
+        confirmed_unowned_session_stage_digests={
+            expected_digest
+        },
+    )
+
+    assert applied["ok"] is False
+    assert applied["status"] == (
+        "cleanup_revalidation_failed"
+    )
+    assert applied["operational_progress"] is False
+    assert applied["semantic_progress"] is False
+    assert applied["action_counts"][
+        "session_projection_stage_removed"
+    ] == 0
+    assert applied["removal_revalidation_errors"] == [
+        "session_projection_stage_digest_changed_before_"
+        f"removal:{stage.name}"
+    ]
+    assert stage.exists()
 
 
 def test_session_stage_cleanup_preserves_last_good_and_allows_reindex(
@@ -39797,6 +40121,72 @@ def test_maintenance_next_actions_requires_review_for_unowned_session_stage(
     assert "--write-report" in command
     assert "--apply" not in command
     assert "--confirm-unowned-session-stage-digest" not in command
+
+
+def test_maintenance_next_actions_routes_unresolved_stage_raw_to_review(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    sessions_root = aoa_root / "sessions"
+    owner_raw = (
+        sessions_root
+        / "raw-owner"
+        / "raw"
+        / "session.raw.jsonl"
+    )
+    owner_raw.parent.mkdir(parents=True)
+    owner_raw.write_bytes(b"published raw\n")
+    stage = sessions_root / (
+        ".raw-owner.projection-stage-987654-unresolved"
+    )
+    (stage / "raw").mkdir(parents=True)
+    (stage / "raw" / "session.raw.jsonl").write_bytes(
+        b"different staged raw\n"
+    )
+    monkeypatch.setattr(
+        module,
+        "process_is_alive",
+        lambda _pid: False,
+    )
+
+    recommendation, actions = (
+        module.session_memory_maintenance_next_actions(
+            workspace_root=workspace,
+            aoa_root=aoa_root,
+            search={
+                "actionable_dirty_session_count": 0,
+                "deferred_live_session_count": 0,
+            },
+            graph={
+                "status": "current",
+                "needs_maintenance": False,
+                "actionable_count": 0,
+                "diagnostics": [],
+            },
+            route_status={
+                "needs_index_maintenance": False,
+                "needs_graph_maintenance": False,
+            },
+            entity_registry={
+                "status": "current",
+                "needs_maintenance": False,
+            },
+            coordinator={},
+        )
+    )
+
+    assert recommendation == "review_maintenance_cleanup"
+    assert actions[0]["id"] == (
+        "review_unresolved_session_projection_stage"
+    )
+    assert actions[0]["reason"] == (
+        "session_projection_stage_stronger_raw_"
+        "authority_unverified"
+    )
+    assert "--apply" not in actions[0]["command"]
+    assert "Do not remove the stage" in actions[0]["note"]
 
 
 def test_maintenance_next_actions_prioritizes_runtime_cleanup(tmp_path: Path, monkeypatch: Any) -> None:
