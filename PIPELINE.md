@@ -218,6 +218,13 @@ backlog, catch-up, deep, and manual-bulk profiles represent different resource
 and mutation envelopes. Timer-driven work yields to active owners and records
 resource-pressure deferrals.
 
+Multi-lane evaluations use the same coordinator in read mode. They pin
+source and projection semantic identities before candidate generation, reject
+an active writer or incompatible generation without publishing a pin, and
+admit results only when a second snapshot under the same lease is semantically
+identical. Physical database bytes, inode, mtime, and observation clocks remain
+race diagnostics rather than evaluation identity.
+
 Timer-originated `auto-maintenance-resource` deferrals are also written to the
 generated persistent retry queue under `diagnostics/`. The
 `auto-maintenance-retry` dispatcher consumes at most a bounded number of due

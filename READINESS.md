@@ -265,12 +265,21 @@ proof.
 For an architectural retrieval or projection change:
 
 - preserve baseline A before implementation;
+- capture a compatible semantic generation pin and hold the shared read lease
+  across candidate generation and its final drift check;
 - compare A and B on the same evidence, versions, budgets, and freshness;
 - report results by query lane;
 - do not accept a mean gain that hides critical exact, provenance, freshness,
   causality, or abstention loss;
 - rerun after cleanup;
 - return to earlier layers when later evidence invalidates their proof.
+
+A pin is admissible only when selected sources and every answer-bearing
+projection have current compatible generations. An active writer,
+incompatible or incomplete snapshot, or before/after semantic drift refuses
+the score. Filesystem and SQLite publication observations remain diagnostic and
+do not invalidate a semantically identical deterministic rebuild by
+themselves.
 
 A layer is not complete forever. New episode, graph, narrative, or freshness
 evidence may reopen taxonomy, capture, indexing, routing, or presentation.
