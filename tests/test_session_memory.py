@@ -65553,6 +65553,23 @@ def test_archived_session_exact_fallback_recovers_literal_beyond_posting_text_bo
         query_timeout_ms=1,
         explain=True,
     )
+    search_store = module.search_db_path(aoa_root)
+    search_store.unlink()
+    missing_index_recovered = module.search_sessions(
+        aoa_root=aoa_root,
+        query=suffix_anchor,
+        session=session_id,
+        limit=5,
+        explain=True,
+    )
+    missing_index_without_fallback = module.search_sessions(
+        aoa_root=aoa_root,
+        query=suffix_anchor,
+        session=session_id,
+        limit=5,
+        explain=True,
+        include_archived_raw_fallback=False,
+    )
 
     assert indexed["ok"] is True
     assert postings_only["result_count"] == 0
@@ -65609,6 +65626,45 @@ def test_archived_session_exact_fallback_recovers_literal_beyond_posting_text_bo
     assert timeout_recovered["result_count"] == 1
     assert timeout_recovered["results"][0]["raw_ref"] == "raw:line:3"
     assert timeout_recovered["archived_raw_fallback"]["status"] == "applied_verified_after_index_timeout"
+    assert (
+        timeout_recovered["results"][0]["explain"][
+            "index_timeout_recovery"
+        ]["timed_out_projection"]
+        == timeout_recovered["search_projection"]
+    )
+    assert missing_index_recovered["ok"] is True
+    assert missing_index_recovered["provider"]["status"] == "portable_sqlite_missing"
+    assert missing_index_recovered["result_count"] == 1
+    assert missing_index_recovered["results"][0]["raw_ref"] == "raw:line:3"
+    assert (
+        missing_index_recovered["results"][0]["explain"][
+            "index_missing_recovery"
+        ]["failed_projection"]
+        == missing_index_recovered["search_projection"]
+    )
+    assert (
+        missing_index_recovered["archived_raw_fallback"]["status"]
+        == "applied_verified_after_index_missing"
+    )
+    assert missing_index_recovered["search_projection_recovery"] == {
+        "status": "applied_verified_after_index_missing",
+        "recovered_by": "session_archived_raw_exact_fallback",
+        "failed_projection": missing_index_recovered["search_projection"],
+        "mutates": False,
+    }
+    assert (
+        missing_index_recovered["truth_status"]
+        == "index_missing_recovered_by_complete_verified_archived_raw"
+    )
+    assert search_store.exists() is False
+    assert missing_index_without_fallback["ok"] is False
+    assert missing_index_without_fallback["result_count"] == 0
+    assert (
+        missing_index_without_fallback["cost_profile"][
+            "archived_raw_fallback_attempted"
+        ]
+        is False
+    )
     parsed_archived = module.build_parser().parse_args(
         ["archived-raw-search", suffix_anchor, "--session", session_id]
     )

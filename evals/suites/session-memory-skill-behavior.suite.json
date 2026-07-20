@@ -30,7 +30,7 @@
     {
       "path": "tests/test_session_memory.py",
       "kind": "file",
-      "sha256": "5a06bd5491ffbf4d915e3d22320d46e2e7b2ca6701697a5480f9991fae45e38a"
+      "sha256": "21c5db68cf9b8cfdc8693c3d01bdf22140b97d7aaaa3d4515990684e850d5864"
     },
     {
       "path": "evals/cases/session-memory-skill-behavior.v1.json",
@@ -55,7 +55,7 @@
     {
       "path": "scripts/aoa_session_memory.py",
       "kind": "file",
-      "sha256": "f2f20bb0fe8012790a07078c64094a93f1d2980090367eb706857c639f5e38d6"
+      "sha256": "bdf9fd7c2c460828561b45a8ec50eb95c41a985714d919b8ea847b7e7097263a"
     },
     {
       "path": "scripts/capability_route.py",

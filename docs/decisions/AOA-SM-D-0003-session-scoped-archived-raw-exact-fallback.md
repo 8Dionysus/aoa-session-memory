@@ -125,3 +125,20 @@ regressions reproduce a literal beyond the compact posting bound, index
 timeout recovery, bounded-scan abstention, and retrieval-query echo
 suppression. Exact values and private session coordinates remain in session
 provenance.
+
+## Review Amendment — 2026-07-20
+
+An absent published search store is another form of insufficient projected
+evidence; it is not a reason to skip the already accepted exact-recall route.
+When the query and filters satisfy the same bounded session-scoped guards, the
+ordinary search reader attempts the digest-verified archived raw fallback even
+while no compatible store is published. It keeps the missing projection as
+the visible first-route state, reports the recovery separately, writes no
+index, and leaves global projection freshness unresolved.
+
+This clarification does not expose an in-progress replacement to concurrent
+readers and does not turn a raw candidate into an admitted claim. Unsupported
+filters, unbounded scope, a disabled fallback, truncation, source drift, and
+digest failure still abstain. The regression arose from a manual concurrent
+reader/writer trial; private coordinates and timings remain in session
+provenance rather than this owner record.
