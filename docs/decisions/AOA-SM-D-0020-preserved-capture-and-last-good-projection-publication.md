@@ -9,9 +9,9 @@ Accepted.
 - Decision ID: AOA-SM-D-0020
 - Original date: 2026-07-18
 - Owner surfaces: `scripts/aoa_session_memory.py`, `schemas/`, `PIPELINE.md`, `tests/test_session_memory.py`
-- Surface classes: raw preservation, session indexing, physical storage transition, recovery
+- Surface classes: raw preservation, session indexing, physical storage transition, recovery, maintenance coordination
 - Projection layers: raw capture state, session projection, segment projection, raw-block storage
-- Guard families: last-good preservation, content-addressed capture, atomic publish, partial-failure rollback, generation compatibility
+- Guard families: last-good preservation, content-addressed capture, atomic publish, partial-failure rollback, orphan cleanup, generation compatibility
 - Posture: accepted
 
 ## Context
@@ -117,6 +117,35 @@ and next-route semantics. Reopen this decision if concurrent-reader evidence
 shows a mixed generation, if capture retention creates unbounded pressure, or
 if another projection needs to join the session publish boundary.
 
+## Review 2026-07-20 — Pre-Journal Stage Recovery
+
+A stopped real rebuild showed that the earlier verification covered injected
+exceptions and interruption after the publish journal, but not process
+termination while the sibling stage was still being constructed. Last-good
+and raw evidence remained correct, yet an abandoned generated stage survived
+restart and the prior cleanup route did not report it.
+
+The accepted publication law is unchanged and is clarified as follows:
+
+- every newly created session-projection stage includes its producer PID in
+  its name so the maintenance owner can distinguish a live producer from an
+  absent one without reading staged content as authority;
+- a stage with an existing publish journal remains owned by journal recovery;
+  generic cleanup does not remove it independently;
+- under the maintenance lease, cleanup may remove a pre-journal stage only
+  when its encoded producer PID is absent;
+- a legacy stage without producer identity is fail-closed. The cleanup plan
+  returns a deterministic content digest, and removal requires the operator to
+  repeat that exact digest after a quiet-age guard. A wrong or stale digest
+  causes no mutation;
+- raw sessions, preserved captures, published last-good files, and live index
+  stores are outside this cleanup scope;
+- owner preflight rejects any remaining sibling stage instead of treating an
+  otherwise valid raw/archive set as clean.
+
+This amendment records the recovery choice; runtime receipts and
+session-specific incident evidence remain outside the public decision record.
+
 ## Verification
 
 Owner-neutral regressions inject capture-copy and mid-publication failures,
@@ -126,3 +155,8 @@ successfully. Deterministic double rebuild, metadata-generation mismatch,
 deferred-worker retry, raw-unavailable incident, and compressed-block reader
 cases cover adjacent contracts. Live catch-up, portable parity, and access-plane
 proof remain distinct completion gates.
+
+The pre-journal recovery amendment additionally requires live/dead producer
+classification, wrong/exact legacy-digest controls, unchanged last-good/raw
+digests, cleanup-plus-reindex, a real stopped-stage recovery receipt, and a
+preflight negative before deterministic double rebuild.

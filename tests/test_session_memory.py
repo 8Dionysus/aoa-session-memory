@@ -34897,6 +34897,276 @@ def test_storage_maintenance_checkpoints_sqlite_wal(tmp_path: Path) -> None:
     assert Path(payload["report_markdown"]).exists()
 
 
+def test_maintenance_cleanup_removes_dead_session_stage_but_keeps_live_stage(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    sessions_root = aoa_root / "sessions"
+    session_dir = sessions_root / "session.stage.identity"
+    session_dir.mkdir(parents=True)
+    live_stage = Path(
+        module.tempfile.mkdtemp(
+            prefix=module.session_projection_stage_prefix(
+                session_dir
+            ),
+            dir=sessions_root,
+        )
+    )
+    dead_stage = sessions_root / (
+        f".{session_dir.name}.projection-stage-987654-dead"
+    )
+    dead_stage.mkdir()
+    (live_stage / "live.generated").write_bytes(b"live")
+    (dead_stage / "dead.generated").write_bytes(b"dead")
+    monkeypatch.setattr(
+        module,
+        "process_is_alive",
+        lambda pid: pid == os.getpid(),
+    )
+
+    dry_run = module.maintenance_cleanup(
+        aoa_root=aoa_root,
+        apply=False,
+    )
+
+    assert dry_run["status"] == "cleanup_needed"
+    stages = dry_run["session_projection_stages"]
+    assert stages["orphaned_count"] == 1
+    assert stages["active_count"] == 1
+    assert any(
+        entry["producer_pid"] == os.getpid()
+        and entry["status"] == "active_or_pid_alive"
+        for entry in stages["entries"]
+    )
+    assert any(
+        entry["producer_pid"] == 987654
+        and entry["status"] == "orphaned"
+        for entry in stages["entries"]
+    )
+
+    applied = module.maintenance_cleanup(
+        aoa_root=aoa_root,
+        apply=True,
+    )
+
+    assert applied["ok"] is True
+    assert applied["status"] == "applied"
+    assert applied["semantic_progress"] is True
+    assert applied["action_counts"][
+        "session_projection_stage_removed"
+    ] == 1
+    assert live_stage.exists()
+    assert not dead_stage.exists()
+    assert applied["session_projection_stages"][
+        "active_count"
+    ] == 1
+    module.remove_projection_publish_path(live_stage)
+
+
+def test_unowned_session_stage_requires_exact_digest_confirmation(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    sessions_root = aoa_root / "sessions"
+    session_dir = sessions_root / "legacy-session"
+    published_raw = session_dir / "raw" / "session.raw.jsonl"
+    published_raw.parent.mkdir(parents=True)
+    published_raw.write_bytes(b'raw authority\n')
+    published_raw_sha = module.sha256_file(published_raw)
+    legacy_stage = sessions_root / (
+        ".legacy-session.projection-stage-legacytoken"
+    )
+    (legacy_stage / "raw").mkdir(parents=True)
+    (legacy_stage / "raw" / "session.raw.jsonl").write_bytes(
+        b'raw authority\n'
+    )
+    (legacy_stage / "generated.index.json").write_text(
+        '{}\n',
+        encoding="utf-8",
+    )
+    old_epoch = time.time() - (
+        module.SESSION_PROJECTION_UNOWNED_CONFIRM_MIN_AGE_SECONDS
+        + 60
+    )
+    for path in [*legacy_stage.rglob("*"), legacy_stage]:
+        os.utime(path, (old_epoch, old_epoch), follow_symlinks=False)
+
+    dry_run = module.maintenance_cleanup(
+        aoa_root=aoa_root,
+        apply=False,
+    )
+    entry = dry_run["session_projection_stages"]["entries"][0]
+    content_digest = entry["content_digest"]
+
+    assert dry_run["status"] == "cleanup_needed"
+    assert dry_run["semantic_progress"] is False
+    assert entry["status"] == "unowned_legacy"
+    assert entry["safe_to_remove"] is False
+    assert entry["confirmation_required"] is True
+    assert len(content_digest) == 64
+
+    unconfirmed = module.maintenance_cleanup(
+        aoa_root=aoa_root,
+        apply=True,
+    )
+    assert unconfirmed["ok"] is True
+    assert unconfirmed["status"] == "cleanup_needed"
+    assert unconfirmed["semantic_progress"] is False
+    assert legacy_stage.exists()
+
+    rejected = module.maintenance_cleanup(
+        aoa_root=aoa_root,
+        apply=True,
+        confirmed_unowned_session_stage_digests={"0" * 64},
+    )
+    assert rejected["ok"] is False
+    assert rejected["status"] == "confirmation_rejected"
+    assert rejected["semantic_progress"] is False
+    assert rejected["confirmation_errors"] == [
+        "unmatched_unowned_session_projection_stage_digest:"
+        + "0" * 64
+    ]
+    assert legacy_stage.exists()
+
+    duplicate_stage = sessions_root / (
+        ".legacy-session.projection-stage-secondlegacy"
+    )
+    shutil.copytree(legacy_stage, duplicate_stage)
+    for path in [*duplicate_stage.rglob("*"), duplicate_stage]:
+        os.utime(
+            path,
+            (old_epoch, old_epoch),
+            follow_symlinks=False,
+        )
+    ambiguous = module.maintenance_cleanup(
+        aoa_root=aoa_root,
+        apply=True,
+        confirmed_unowned_session_stage_digests={
+            content_digest
+        },
+    )
+    assert ambiguous["ok"] is False
+    assert ambiguous["status"] == "confirmation_rejected"
+    assert ambiguous["confirmation_errors"] == [
+        "ambiguous_unowned_session_projection_stage_digest:"
+        f"{content_digest}:2"
+    ]
+    assert legacy_stage.exists()
+    assert duplicate_stage.exists()
+    module.remove_projection_publish_path(duplicate_stage)
+
+    applied = module.maintenance_cleanup(
+        aoa_root=aoa_root,
+        apply=True,
+        confirmed_unowned_session_stage_digests={
+            content_digest
+        },
+    )
+
+    assert applied["ok"] is True
+    assert applied["status"] == "applied"
+    assert applied["action_counts"][
+        "session_projection_stage_removed"
+    ] == 1
+    assert not legacy_stage.exists()
+    assert published_raw.is_file()
+    assert module.sha256_file(published_raw) == published_raw_sha
+
+
+def test_session_stage_cleanup_preserves_last_good_and_allows_reindex(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "session-stage-restart.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-07-20T00:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "session-stage-restart",
+                    "cwd": str(workspace),
+                },
+            },
+            {
+                "timestamp": "2026-07-20T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Preserve the last good projection.",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    synced = module.sync_session_from_transcript(
+        aoa_root=aoa_root,
+        event={
+            "session_id": "session-stage-restart",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+        },
+        transcript_path=transcript,
+        hook_event_name="Stop",
+    )
+    session_dir = Path(synced["session_dir"])
+    raw_path = session_dir / "raw" / "session.raw.jsonl"
+    raw_sha = module.sha256_file(raw_path)
+    last_good_digest = module.session_projection_semantic_digest(
+        session_dir
+    )
+    staged = module.stage_existing_session_projection(
+        session_dir
+    )
+    dead_stage = staged.with_name(
+        f".{session_dir.name}.projection-stage-987654-killed"
+    )
+    staged.rename(dead_stage)
+    monkeypatch.setattr(
+        module,
+        "process_is_alive",
+        lambda _pid: False,
+    )
+
+    applied = module.maintenance_cleanup(
+        aoa_root=aoa_root,
+        apply=True,
+    )
+
+    assert applied["action_counts"][
+        "session_projection_stage_removed"
+    ] == 1
+    assert not dead_stage.exists()
+    assert module.sha256_file(raw_path) == raw_sha
+    assert module.session_projection_semantic_digest(
+        session_dir
+    ) == last_good_digest
+
+    record = module.resolve_session_record(
+        aoa_root,
+        "session-stage-restart",
+    )
+    rebuilt = module.reindex_session_from_raw(
+        aoa_root,
+        record,
+    )
+
+    assert rebuilt["status"] == "reindexed"
+    assert module.sha256_file(raw_path) == raw_sha
+    assert module.session_projection_stage_status(aoa_root)[
+        "entry_count"
+    ] == 0
+
+
 def test_maintenance_cleanup_clears_stale_active_job_and_orphaned_graph_tmp(tmp_path: Path, monkeypatch: Any) -> None:
     aoa_root = tmp_path / ".aoa"
     graph_root = aoa_root / module.GRAPH_ROOT
@@ -39476,6 +39746,57 @@ def test_maintenance_next_actions_routes_mostly_missing_graph_store_to_rebuild(t
     assert "--write --store-only --progress-every 10" in command_text
     assert "--in-place" not in command_text
     assert "resource-gated store-only rebuild" in actions[0]["note"]
+
+
+def test_maintenance_next_actions_requires_review_for_unowned_session_stage(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    sessions_root = aoa_root / "sessions"
+    owner = sessions_root / "legacy-owner"
+    owner.mkdir(parents=True)
+    legacy_stage = sessions_root / (
+        ".legacy-owner.projection-stage-legacytoken"
+    )
+    legacy_stage.mkdir()
+    (legacy_stage / "generated").write_bytes(b"x")
+
+    recommendation, actions = (
+        module.session_memory_maintenance_next_actions(
+            workspace_root=workspace,
+            aoa_root=aoa_root,
+            search={
+                "actionable_dirty_session_count": 0,
+                "deferred_live_session_count": 0,
+            },
+            graph={
+                "status": "current",
+                "needs_maintenance": False,
+                "actionable_count": 0,
+                "diagnostics": [],
+            },
+            route_status={
+                "needs_index_maintenance": False,
+                "needs_graph_maintenance": False,
+            },
+            entity_registry={
+                "status": "current",
+                "needs_maintenance": False,
+            },
+            coordinator={},
+        )
+    )
+
+    assert recommendation == "review_maintenance_cleanup"
+    assert actions[0]["id"] == (
+        "review_unowned_session_projection_stage"
+    )
+    command = actions[0]["command"]
+    assert "maintenance-cleanup" in command
+    assert "--write-report" in command
+    assert "--apply" not in command
+    assert "--confirm-unowned-session-stage-digest" not in command
 
 
 def test_maintenance_next_actions_prioritizes_runtime_cleanup(tmp_path: Path, monkeypatch: Any) -> None:

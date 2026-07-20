@@ -101,6 +101,13 @@ complete prior generation and removes its stage and backup; it never repairs a
 mixed tree in place. Physical raw-block compression and confirmed plaintext
 removal use the same boundary while keeping stable evidence refs.
 
+Sibling session-projection stages name their producer PID before a publish
+journal exists. If that process terminates during construction, maintenance may
+remove the generated stage only after the PID is absent and while holding the
+shared lease. A legacy stage without producer identity is not guessed away: its
+reported content digest and quiet-age guard require explicit operator
+confirmation. Any journal-bearing stage remains owned by journal recovery.
+
 ## 6. Count-only accounting
 
 Token observations are separated by basis:
@@ -338,10 +345,12 @@ not silently reinterpret an admitted incremental transition as a PID-local
 full rebuild. Unknown or structurally incomplete transitions keep the
 deep/full-rebuild boundary.
 
-`maintenance-cleanup` recognizes PID-tagged graph and search rebuild temps,
-removes only those whose producer PID is absent while holding the shared
-maintenance lease, and leaves live stores and raw evidence untouched. An
-active writer defers cleanup rather than racing publication.
+`maintenance-cleanup` recognizes PID-tagged graph, search, and pre-journal
+session-projection temps, removes only those whose producer PID is absent while
+holding the shared maintenance lease, and leaves live stores, published
+last-good session files, and raw evidence untouched. Legacy unowned session
+stages require an exact reported content digest; a mismatch causes no mutation.
+An active writer defers cleanup rather than racing publication.
 
 Graph incremental mutation checks its pinned registry dependency before
 mutation and before commit. A dependency race rolls back the transaction.
