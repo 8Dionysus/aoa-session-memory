@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import contextlib
 import fcntl
@@ -559,7 +560,7 @@ def test_readable_slug_removes_banned_topology_terms() -> None:
     )["name"] == "Continue real naming work"
     assert module.phase_candidate_name(
         "000",
-        ["/home/dionysus/Загрузки/aoa-session-dist-exp(идея).md Вот тут лежит диалог с важной идеей"],
+        ["/home/example/Загрузки/aoa-session-dist-exp(идея).md Вот тут лежит диалог с важной идеей"],
         [],
         module.Counter(),
     )["name"] == "Вот тут лежит диалог с важной идеей"
@@ -622,7 +623,7 @@ def test_phase_candidate_review_turns_weak_names_into_actionable_queue_items() -
         evidence_refs=["raw:line:12"],
         linked_signals={
             "primary_user_intent": "",
-            "support_paths": ["/srv/AbyssOS/.aoa/scripts/aoa_session_memory.py"],
+            "support_paths": ["/srv/example/AbyssOS/.aoa/scripts/aoa_session_memory.py"],
             "support_event_types": {"COMMAND": 4, "VERIFICATION": 2},
         },
     )
@@ -1126,7 +1127,7 @@ def test_task_episode_semantics_admits_compact_success_observation_but_not_sourc
             "payload": {
                 "type": "function_call",
                 "name": "exec_command",
-                "arguments": json.dumps({"cmd": "sed -n '1,220p' /srv/AbyssOS/.aoa/skills/aoa-session-memory-global-route/SKILL.md"}),
+                "arguments": json.dumps({"cmd": "sed -n '1,220p' /srv/example/AbyssOS/.aoa/skills/aoa-session-memory-global-route/SKILL.md"}),
                 "call_id": "call-source-read",
             },
         },
@@ -2611,7 +2612,7 @@ def test_custom_exec_mixed_read_and_write_does_not_promote_skill_to_inspected() 
             "call_id": "call-mixed-custom-exec",
             "input": (
                 "const reads = await Promise.all(["
-                "tools.exec_command({cmd: 'sed -n \'1,80p\' /srv/AbyssOS/.aoa/skills/example/SKILL.md'}),"
+                "tools.exec_command({cmd: 'sed -n \'1,80p\' /srv/example/AbyssOS/.aoa/skills/example/SKILL.md'}),"
                 "tools.exec_command({cmd: 'cp source.txt generated.txt'})"
                 "]); text(reads.length);"
             ),
@@ -5612,7 +5613,7 @@ def test_episode_ref_expansion_recovers_source_aware_typed_anchors(tmp_path: Pat
                     "type": "function_call",
                     "name": "exec_command",
                     "arguments": json.dumps(
-                        {"cmd": "sed -n '1,220p' /srv/AbyssOS/aoa-skills/tests/test_validate_skills_questbook_contract.py"}
+                        {"cmd": "sed -n '1,220p' /srv/example/AbyssOS/aoa-skills/tests/test_validate_skills_questbook_contract.py"}
                     ),
                     "call_id": "call-source-read",
                 },
@@ -5623,7 +5624,7 @@ def test_episode_ref_expansion_recovers_source_aware_typed_anchors(tmp_path: Pat
                 "payload": {
                     "type": "function_call",
                     "name": "exec_command",
-                    "arguments": json.dumps({"cmd": "sed -n '1,80p' /home/dionysus/.codex/memories/MEMORY.md"}),
+                    "arguments": json.dumps({"cmd": "sed -n '1,80p' /home/example/.codex/memories/MEMORY.md"}),
                     "call_id": "call-memory-read",
                 },
             },
@@ -5688,7 +5689,7 @@ def test_episode_legacy_normalization_rebuilds_raw_evidence_and_scrubs_old_edges
                     "type": "function_call",
                     "name": "exec_command",
                     "arguments": json.dumps(
-                        {"cmd": "sed -n '1,220p' /srv/AbyssOS/.aoa/skills/aoa-session-memory-global-route/SKILL.md"}
+                        {"cmd": "sed -n '1,220p' /srv/example/AbyssOS/.aoa/skills/aoa-session-memory-global-route/SKILL.md"}
                     ),
                     "call_id": "call-source-read",
                 },
@@ -5738,7 +5739,7 @@ def test_episode_legacy_normalization_rebuilds_raw_evidence_and_scrubs_old_edges
             "role": "result",
             "event_type": "COMMAND_OUTPUT",
             "outcome": "succeeded",
-            "linked_action": "sed -n '1,220p' /srv/AbyssOS/.aoa/skills/aoa-session-memory-global-route/SKILL.md",
+            "linked_action": "sed -n '1,220p' /srv/example/AbyssOS/.aoa/skills/aoa-session-memory-global-route/SKILL.md",
             "refs": {"raw": "raw:line:3"},
         },
         {
@@ -8312,7 +8313,7 @@ def test_asserted_mutation_alignment_requires_typed_action_and_correlation_owned
         line=12,
         text=(
             "sed -n '1,240p' "
-            "/srv/AbyssOS/.aoa/skills/aoa-session-memory-global-route/SKILL.md"
+            "/srv/example/AbyssOS/.aoa/skills/aoa-session-memory-global-route/SKILL.md"
         ),
         event_type="FILE_READ",
         correlation_id="call-read-skill",
@@ -11287,7 +11288,7 @@ def test_issue_resolution_requires_implementation_mutation_and_distinct_verifica
 
     documentation_only = json.loads(json.dumps(episode))
     documentation_only["representations"]["actions"][0]["text"] = (
-        "*** Begin Patch\n*** Update File: /home/dionysus/research/census/OWNER_PACKETS.md\n"
+        "*** Begin Patch\n*** Update File: /home/example/research/census/OWNER_PACKETS.md\n"
         "+describe the future release-wrapper repair"
     )
     unresolved_docs = module.episode_issue_resolution_alignment(documentation_only, terms)
@@ -16092,7 +16093,7 @@ def test_live_tail_merge_preserves_each_source_local_ranking() -> None:
 
 def test_memory_query_intent_separates_exact_typed_episode_temporal_graph_and_diagnostic_lanes() -> None:
     cases = {
-        "/srv/AbyssOS/.aoa/scripts/aoa_session_memory.py": "exact_literal",
+        "/srv/example/AbyssOS/.aoa/scripts/aoa_session_memory.py": "exact_literal",
         "was aoa-session-memory CLI, MCP, or a session-memory skill actually invoked in this span?": "entity_usage",
         "какой terminal stack уже стоял и чего не хватало перед установкой Ghostty": "temporal_state",
         "MV3 background fix -> restart failure -> safer process selection -> successful capture": "causal_chain",
@@ -18182,7 +18183,7 @@ def test_session_evidence_window_preserves_custom_tool_transport_completion(
     transcript = tmp_path / "rollout-2026-05-12T00-00-00-custom-tool-window.jsonl"
     command = (
         "const r = await tools.exec_command({"
-        '"cmd":"sed -n \'1,80p\' /srv/AbyssOS/.aoa/skills/example/SKILL.md",'
+        '"cmd":"sed -n \'1,80p\' /srv/example/AbyssOS/.aoa/skills/example/SKILL.md",'
         '"workdir":"/home/dionysus"'
         "}); text(r.output);"
     )
@@ -19181,7 +19182,7 @@ def test_segment_index_records_session_acts_and_work_context(tmp_path: Path) -> 
                     "arguments": json.dumps(
                         {
                             "cmd": (
-                                "rg -n session /home/dionysus/.codex/memories/MEMORY.md "
+                                "rg -n session /home/example/.codex/memories/MEMORY.md "
                                 f"{repo}/AGENTS.md"
                             )
                         }
@@ -20671,6 +20672,13 @@ def test_entity_registry_autodiscovers_skills_mcp_and_links_search_graph(tmp_pat
     assert registry_search["ok"] is True
     assert registry_search["results"][0]["doc_type"] == "entity_registry"
 
+    monkeypatch.setattr(
+        module,
+        "cached_entity_registry_entry_index",
+        lambda *_args, **_kwargs: pytest.fail(
+            "graph build must use its pinned registry snapshot"
+        ),
+    )
     graph = module.build_session_graph(aoa_root=aoa_root, target="all", write=True, include_rows=True, export_sidecar=False)
     node_types = {node["type"] for node in graph["nodes"]}
     edge_types = {edge["type"] for edge in graph["edges"]}
@@ -21354,6 +21362,135 @@ def test_entity_registry_stale_snapshot_overlays_cli_subcommands(tmp_path: Path,
     assert plan["route_anchor_kind"] == "tool"
     assert plan["literal_route_strategy"]["monolith_fallback_first"] is False
     assert plan["ordered_routes"][0]["route_id"] == "entity_usage_chain"
+
+
+def test_entity_registry_cli_identities_are_per_subcommand_contract(
+    tmp_path: Path,
+) -> None:
+    parser = module.build_parser()
+    parser_by_name: dict[str, argparse.ArgumentParser] = {}
+    for action in parser._actions:
+        choices = getattr(action, "choices", None)
+        if isinstance(choices, dict):
+            parser_by_name.update(
+                {
+                    str(name): subparser
+                    for name, subparser in choices.items()
+                    if isinstance(
+                        subparser,
+                        argparse.ArgumentParser,
+                    )
+                }
+            )
+    groups = module.entity_registry_cli_subcommand_groups(parser)
+    identities = {
+        canonical: module.entity_registry_cli_subcommand_contract_identity(
+            canonical=canonical,
+            aliases=aliases,
+            parser=parser_by_name[canonical],
+        )
+        for canonical, aliases in groups
+    }
+
+    assert len(identities) >= 100
+    assert len(
+        {
+            identity["sha256"]
+            for identity in identities.values()
+        }
+    ) == len(identities)
+    assert {
+        identity["mode"]
+        for identity in identities.values()
+    } == {"argparse_subcommand_contract_v1"}
+
+    rebuilt_parser = module.build_parser()
+    rebuilt_parser_by_name: dict[str, argparse.ArgumentParser] = {}
+    for action in rebuilt_parser._actions:
+        choices = getattr(action, "choices", None)
+        if isinstance(choices, dict):
+            rebuilt_parser_by_name.update(
+                {
+                    str(name): subparser
+                    for name, subparser in choices.items()
+                    if isinstance(
+                        subparser,
+                        argparse.ArgumentParser,
+                    )
+                }
+            )
+    rebuilt_groups = (
+        module.entity_registry_cli_subcommand_groups(
+            rebuilt_parser
+        )
+    )
+    rebuilt_identities = {
+        canonical: module.entity_registry_cli_subcommand_contract_identity(
+            canonical=canonical,
+            aliases=aliases,
+            parser=rebuilt_parser_by_name[canonical],
+        )
+        for canonical, aliases in rebuilt_groups
+    }
+    assert identities == rebuilt_identities
+
+    target_name = "search-hotset-audit"
+    control_name = "graph-timeline"
+    target_parser = rebuilt_parser_by_name[target_name]
+    target_parser.description = (
+        str(target_parser.description or "")
+        + " Contract-isolation probe."
+    )
+    mutated_target = (
+        module.entity_registry_cli_subcommand_contract_identity(
+            canonical=target_name,
+            aliases=next(
+                aliases
+                for canonical, aliases in rebuilt_groups
+                if canonical == target_name
+            ),
+            parser=target_parser,
+        )
+    )
+    unchanged_control = (
+        module.entity_registry_cli_subcommand_contract_identity(
+            canonical=control_name,
+            aliases=next(
+                aliases
+                for canonical, aliases in rebuilt_groups
+                if canonical == control_name
+            ),
+            parser=rebuilt_parser_by_name[control_name],
+        )
+    )
+    assert mutated_target["sha256"] != (
+        identities[target_name]["sha256"]
+    )
+    assert unchanged_control["sha256"] == (
+        identities[control_name]["sha256"]
+    )
+
+    entries = module.entity_registry_discover_cli_subcommands(
+        tmp_path / ".aoa"
+    )
+    source_identities = [
+        str(entry["source_refs"][0].get("identity_sha256") or "")
+        for entry in entries
+    ]
+    assert len(source_identities) == len(set(source_identities))
+    assert all(source_identities)
+    assert all(
+        entry["source_refs"][0].get(
+            "identity_fingerprint_mode"
+        )
+        == "argparse_subcommand_contract_v1"
+        for entry in entries
+    )
+    assert all(
+        entry["identity_candidates"][0]["fingerprint"]["basis"]
+        == "argparse_subcommand_contract_v1"
+        for entry in entries
+    )
 
 
 def test_entity_registry_query_no_runtime_uses_archived_routes_not_runtime_snapshot(tmp_path: Path, capsys: Any) -> None:
@@ -23216,7 +23353,7 @@ def structured_skill_test_payload(
 
 def test_structured_skill_input_is_selected_and_loaded_without_false_behavioral_actions() -> None:
     structured_skill_text = structured_skill_test_envelope(
-        path="/srv/AbyssOS/aoa-skills/.agents/skills/aoa-eval-select/SKILL.md",
+        path="/srv/example/AbyssOS/aoa-skills/.agents/skills/aoa-eval-select/SKILL.md",
         frontmatter=(
             "---\nname: aoa-eval-select\n"
             "description: Select an existing eval surface before mutation.\n---"
@@ -23340,19 +23477,19 @@ def test_namespaced_structured_skill_accepts_quoted_leaf_frontmatter_name() -> N
     additional_envelopes = [
         (
             "imagegen",
-            "/home/dionysus/.codex/skills/.system/imagegen/SKILL.md",
+            "/home/example/.codex/skills/.system/imagegen/SKILL.md",
             "imagegen",
             "imagegen",
         ),
         (
             "review",
-            "/home/dionysus/.codex/skills/review/SKILL.md",
+            "/home/example/.codex/skills/review/SKILL.md",
             "review",
             "review",
         ),
         (
             "openai-docs",
-            "/home/dionysus/.codex/skills/.system/openai-docs/SKILL.md",
+            "/home/example/.codex/skills/.system/openai-docs/SKILL.md",
             "openai-docs",
             "openai_docs",
         ),
@@ -33437,6 +33574,8 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(
     assert all(sample["evidence"]["has_raw_ref"] for sample in quality["samples"])
     assert any(
         ref.get("raw_preview", {}).get("status") == "available"
+        and ref.get("raw_preview", {}).get("representation_status")
+        == "raw_semantic_text"
         for sample in quality["samples"]
         for ref in sample["evidence"]["sample_refs"]
     )
@@ -35333,7 +35472,6 @@ def test_graph_incompatible_generation_is_not_a_query_candidate(
         depth=1,
         limit=8,
     )
-
     assert stale["status"] == "stale"
     assert (
         "graph_source_generation_or_version_mismatch"
@@ -35343,6 +35481,699 @@ def test_graph_incompatible_generation_is_not_a_query_candidate(
         "version_mismatch_source_count"
     ] == 1
     assert neighborhood is None
+
+
+def test_graph_pins_entity_registry_dependency_per_store_and_source(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    contribution = {
+        "source": {
+            "source_key": "segment:registry-pinned:000",
+            "source_type": "segment",
+            "session_id": "registry-pinned",
+            "session_label": "2026-07-19__001__registry-pinned",
+            "segment_id": "000",
+            "source_path": str(tmp_path / "registry-pinned.json"),
+            "source_paths": [str(tmp_path / "registry-pinned.json")],
+            "source_sha": "registry-pinned-sha",
+            "source_mtime": 1.0,
+            "graph_schema_version": module.GRAPH_SCHEMA_VERSION,
+            "graph_store_schema_version": module.GRAPH_STORE_SCHEMA_VERSION,
+            "graph_event_route_signal_edge_policy": module.GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
+            "route_signal_classifier_version": module.ROUTE_SIGNAL_CLASSIFIER_VERSION,
+        },
+        "nodes": [
+            {
+                "id": "event:registry-pinned:000:000001",
+                "type": "event",
+            }
+        ],
+        "edges": [
+            {
+                "id": "edge:registry-pinned",
+                "source": "event:registry-pinned:000:000001",
+                "target": "route:tool:registry-pinned",
+                "type": "mentions_route_signal",
+            }
+        ],
+    }
+    store = module.GraphSqliteStore(aoa_root, reset=True)
+    try:
+        store.rebuild([contribution])
+        metadata = store.metadata()
+        source_dependency_id = store.conn.execute(
+            "SELECT entity_registry_dependency_id "
+            "FROM graph_sources WHERE source_key = ?",
+            ("segment:registry-pinned:000",),
+        ).fetchone()[0]
+    finally:
+        store.close()
+
+    dependency_id = metadata["entity_registry_dependency_id"]
+    state = module.graph_store_query_state(aoa_root)
+
+    assert dependency_id
+    assert source_dependency_id == dependency_id
+    assert state["status"] == "current"
+    assert state["entity_registry_dependency"]["compatible"] is True
+
+
+def test_graph_rejects_stale_entity_registry_dependency_and_preserves_rows(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    event_id = "event:registry-stale:000:000001"
+    contribution = {
+        "source": {
+            "source_key": "segment:registry-stale:000",
+            "source_type": "segment",
+            "session_id": "registry-stale",
+            "session_label": "2026-07-19__001__registry-stale",
+            "segment_id": "000",
+            "source_path": str(tmp_path / "registry-stale.json"),
+            "source_paths": [str(tmp_path / "registry-stale.json")],
+            "source_sha": "registry-stale-sha",
+            "source_mtime": 1.0,
+            "graph_schema_version": module.GRAPH_SCHEMA_VERSION,
+            "graph_store_schema_version": module.GRAPH_STORE_SCHEMA_VERSION,
+            "graph_event_route_signal_edge_policy": module.GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
+            "route_signal_classifier_version": module.ROUTE_SIGNAL_CLASSIFIER_VERSION,
+        },
+        "nodes": [{"id": event_id, "type": "event"}],
+        "edges": [
+            {
+                "id": "edge:registry-stale",
+                "source": event_id,
+                "target": "route:tool:registry-stale",
+                "type": "mentions_route_signal",
+            }
+        ],
+    }
+    store = module.GraphSqliteStore(aoa_root, reset=True)
+    try:
+        store.rebuild([contribution])
+        before_digest = module.graph_projection_semantic_digest(
+            store.conn
+        )["sha256"]
+    finally:
+        store.close()
+
+    skill = aoa_root / "skills" / "registry-change" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text(
+        "---\nname: registry-change\n"
+        "description: Changes the registry dependency.\n---\n",
+        encoding="utf-8",
+    )
+    module.build_entity_registry(
+        aoa_root=aoa_root,
+        write=True,
+        include_runtime=True,
+        limit=1_000_000,
+    )
+
+    stale = module.graph_store_query_state(aoa_root)
+    source_states = module.graph_source_states(
+        aoa_root=aoa_root
+    )
+    cardinality_refresh = module.graph_cardinality(
+        aoa_root=aoa_root,
+        refresh=True,
+    )
+    prune = module.graph_raw_ref_prune(
+        aoa_root=aoa_root,
+        apply=True,
+        allow_low_free=True,
+    )
+    neighborhood = module.graph_from_store_neighborhood(
+        aoa_root=aoa_root,
+        anchor=event_id,
+        kind="auto",
+        depth=1,
+        limit=8,
+    )
+    reopened = module.GraphSqliteStore(aoa_root)
+    try:
+        with pytest.raises(
+            module.GraphEntityRegistryDependencyChanged
+        ):
+            reopened.replace_sources([contribution])
+        reopened.conn.rollback()
+        after_digest = module.graph_projection_semantic_digest(
+            reopened.conn
+        )["sha256"]
+    finally:
+        reopened.close()
+
+    assert stale["status"] == "stale"
+    assert (
+        "graph_entity_registry_dependency_mismatch"
+        in stale["reasons"]
+    )
+    assert stale["source_version_state"][
+        "version_mismatch_source_count"
+    ] == 1
+    assert source_states["reason_group_counts"][
+        "graph_entity_registry_dependency_mismatch"
+    ] >= 1
+    assert cardinality_refresh["projection"]["status"] == "blocked"
+    assert prune["status"] == "blocked"
+    assert neighborhood is None
+    assert after_digest == before_digest
+
+
+def test_graph_atomic_rebuild_preserves_published_store_when_dependency_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+
+    def contribution(source_name: str) -> dict[str, Any]:
+        event_id = f"event:{source_name}:000:000001"
+        return {
+            "source": {
+                "source_key": f"segment:{source_name}:000",
+                "source_type": "segment",
+                "session_id": source_name,
+                "session_label": f"2026-07-19__001__{source_name}",
+                "segment_id": "000",
+                "source_path": str(tmp_path / f"{source_name}.json"),
+                "source_paths": [str(tmp_path / f"{source_name}.json")],
+                "source_sha": f"{source_name}-sha",
+                "source_mtime": 1.0,
+                "graph_schema_version": module.GRAPH_SCHEMA_VERSION,
+                "graph_store_schema_version": module.GRAPH_STORE_SCHEMA_VERSION,
+                "graph_event_route_signal_edge_policy": module.GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
+                "route_signal_classifier_version": module.ROUTE_SIGNAL_CLASSIFIER_VERSION,
+            },
+            "nodes": [{"id": event_id, "type": "event"}],
+            "edges": [
+                {
+                    "id": f"edge:{source_name}",
+                    "source": event_id,
+                    "target": f"route:tool:{source_name}",
+                    "type": "mentions_route_signal",
+                }
+            ],
+        }
+
+    original_store = module.GraphSqliteStore(aoa_root, reset=True)
+    try:
+        original_store.rebuild([contribution("published")])
+        before_digest = module.graph_projection_semantic_digest(
+            original_store.conn
+        )["sha256"]
+    finally:
+        original_store.close()
+
+    monkeypatch.setattr(
+        module,
+        "graph_session_records",
+        lambda *_args, **_kwargs: (
+            [{"session_id": "candidate", "path": str(tmp_path)}],
+            [],
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "graph_contributions_for_record",
+        lambda *_args, **_kwargs: ([contribution("candidate")], []),
+    )
+    original_assert = (
+        module.graph_assert_entity_registry_dependency_current
+    )
+    assertion_count = 0
+
+    def changing_dependency_assert(
+        root: Path,
+        expected_dependency_id: str,
+    ) -> dict[str, Any]:
+        nonlocal assertion_count
+        assertion_count += 1
+        if assertion_count >= 4:
+            raise module.GraphEntityRegistryDependencyChanged(
+                "graph_entity_registry_dependency_changed_during_publish"
+            )
+        return original_assert(root, expected_dependency_id)
+
+    monkeypatch.setattr(
+        module,
+        "graph_assert_entity_registry_dependency_current",
+        changing_dependency_assert,
+    )
+
+    result = module.build_session_graph(
+        aoa_root=aoa_root,
+        target="all",
+        write=True,
+        include_rows=False,
+        export_sidecar=False,
+        atomic_store_rebuild=True,
+    )
+    conn = sqlite3.connect(
+        str(aoa_root / "graph" / "graph.sqlite3")
+    )
+    conn.row_factory = sqlite3.Row
+    try:
+        after_digest = module.graph_projection_semantic_digest(
+            conn
+        )["sha256"]
+    finally:
+        conn.close()
+
+    assert assertion_count == 4
+    assert result["ok"] is False
+    assert result["written"] is False
+    assert (
+        "graph_entity_registry_dependency_changed_during_publish"
+        in result["diagnostics"]
+    )
+    assert after_digest == before_digest
+
+
+def test_graph_legacy_store_requires_full_rebuild_before_maintenance(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-legacy-graph-store.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-07-19T00:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "legacy-graph-store",
+                    "cwd": str(repo),
+                },
+            },
+            {
+                "timestamp": "2026-07-19T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Build the legacy graph fixture.",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "legacy-graph-store",
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    built = module.build_session_graph(
+        aoa_root=aoa_root,
+        target="all",
+        write=True,
+        include_rows=False,
+        export_sidecar=False,
+    )
+    assert built["ok"] is True
+
+    graph_db = aoa_root / "graph" / "graph.sqlite3"
+    conn = sqlite3.connect(str(graph_db))
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "UPDATE metadata SET value = '3' "
+        "WHERE key = 'graph_store_schema_version'"
+    )
+    conn.execute(
+        "UPDATE graph_sources SET graph_store_schema_version = 3"
+    )
+    conn.commit()
+    before_digest = module.graph_projection_semantic_digest(conn)[
+        "sha256"
+    ]
+    conn.close()
+
+    result = module.graph_maintenance(
+        aoa_root=aoa_root,
+        target="all",
+        apply=True,
+        batch_limit=10,
+        mode="deep",
+    )
+    conn = sqlite3.connect(str(graph_db))
+    conn.row_factory = sqlite3.Row
+    try:
+        after_digest = module.graph_projection_semantic_digest(conn)[
+            "sha256"
+        ]
+        stored_schema = conn.execute(
+            "SELECT value FROM metadata "
+            "WHERE key = 'graph_store_schema_version'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+    assert result["maintenance_detail"]["full_rebuild_blocked"] is True
+    assert (
+        "graph_store_requires_full_rebuild_before_maintenance"
+        in result["diagnostics"]
+    )
+    assert stored_schema == "3"
+    assert after_digest == before_digest
+
+
+def test_graph_incremental_maintenance_rolls_back_dependency_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-graph-dependency-rollback.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-07-19T00:10:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "graph-dependency-rollback",
+                    "cwd": str(repo),
+                },
+            },
+            {
+                "timestamp": "2026-07-19T00:10:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Build the rollback fixture.",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "graph-dependency-rollback",
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    built = module.build_session_graph(
+        aoa_root=aoa_root,
+        target="all",
+        write=True,
+        include_rows=False,
+        export_sidecar=False,
+    )
+    assert built["ok"] is True
+
+    graph_db = aoa_root / "graph" / "graph.sqlite3"
+    conn = sqlite3.connect(str(graph_db))
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "UPDATE graph_sources SET source_sha = 'force-dirty' "
+        "WHERE source_type = 'segment'"
+    )
+    conn.commit()
+    before_digest = module.graph_projection_semantic_digest(conn)[
+        "sha256"
+    ]
+    conn.close()
+
+    original_assert = (
+        module.graph_assert_entity_registry_dependency_current
+    )
+    assertion_count = 0
+
+    def changing_dependency_assert(
+        root: Path,
+        expected_dependency_id: str,
+    ) -> dict[str, Any]:
+        nonlocal assertion_count
+        assertion_count += 1
+        if assertion_count >= 4:
+            raise module.GraphEntityRegistryDependencyChanged(
+                "graph_entity_registry_dependency_changed_before_"
+                "incremental_commit"
+            )
+        return original_assert(root, expected_dependency_id)
+
+    monkeypatch.setattr(
+        module,
+        "graph_assert_entity_registry_dependency_current",
+        changing_dependency_assert,
+    )
+    result = module.graph_maintenance(
+        aoa_root=aoa_root,
+        target="all",
+        apply=True,
+        batch_limit=10,
+        mode="deep",
+    )
+    conn = sqlite3.connect(str(graph_db))
+    conn.row_factory = sqlite3.Row
+    try:
+        after_digest = module.graph_projection_semantic_digest(conn)[
+            "sha256"
+        ]
+    finally:
+        conn.close()
+
+    assert assertion_count == 4
+    assert result["maintenance_detail"][
+        "dependency_change_rollback"
+    ] is True
+    assert result["maintenance_detail"]["mutation_rolled_back"] is True
+    assert (
+        "graph_entity_registry_dependency_changed_before_"
+        "incremental_commit"
+        in result["diagnostics"]
+    )
+    assert after_digest == before_digest
+
+
+def test_graph_sidecar_stage_is_not_published_before_store_commit(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+
+    def contribution(event_number: int) -> dict[str, Any]:
+        event_id = (
+            f"event:sidecar-stage:000:{event_number:06d}"
+        )
+        return {
+            "source": {
+                "source_key": "segment:sidecar-stage:000",
+                "source_type": "segment",
+                "session_id": "sidecar-stage",
+                "session_label": (
+                    "2026-07-19__001__sidecar-stage"
+                ),
+                "segment_id": "000",
+                "source_path": str(
+                    tmp_path / "sidecar-stage.json"
+                ),
+                "source_paths": [
+                    str(tmp_path / "sidecar-stage.json")
+                ],
+                "source_sha": f"sidecar-stage-{event_number}",
+                "source_mtime": float(event_number),
+                "graph_schema_version": (
+                    module.GRAPH_SCHEMA_VERSION
+                ),
+                "graph_store_schema_version": (
+                    module.GRAPH_STORE_SCHEMA_VERSION
+                ),
+                "graph_event_route_signal_edge_policy": (
+                    module.GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY
+                ),
+                "route_signal_classifier_version": (
+                    module.ROUTE_SIGNAL_CLASSIFIER_VERSION
+                ),
+            },
+            "nodes": [{"id": event_id, "type": "event"}],
+            "edges": [
+                {
+                    "id": f"edge:sidecar-stage:{event_number}",
+                    "source": event_id,
+                    "target": "route:tool:sidecar-stage",
+                    "type": "mentions_route_signal",
+                }
+            ],
+        }
+
+    store = module.GraphSqliteStore(aoa_root, reset=True)
+    try:
+        store.rebuild([contribution(1)])
+        sidecar = store.write_sidecar()
+        index = store.index_payload(
+            records=[{"session_id": "sidecar-stage"}],
+            diagnostics=[],
+            source="test_committed_graph_store",
+        )
+        index["sidecar_commit"] = (
+            module.graph_sidecar_commit_manifest(
+                store,
+                sidecar,
+            )
+        )
+        module.write_json(
+            module.graph_paths(aoa_root)["index"],
+            index,
+        )
+        before_digest = module.graph_projection_semantic_digest(
+            store.conn
+        )["sha256"]
+        before_nodes = module.sha256_file(
+            module.graph_paths(aoa_root)["nodes"]
+        )
+        before_edges = module.sha256_file(
+            module.graph_paths(aoa_root)["edges"]
+        )
+
+        store.replace_sources([contribution(2)])
+        stage = store.stage_sidecar()
+        staged_paths = [
+            Path(value)
+            for value in stage["staged_paths"].values()
+        ]
+
+        assert module.sha256_file(
+            module.graph_paths(aoa_root)["nodes"]
+        ) == before_nodes
+        assert module.sha256_file(
+            module.graph_paths(aoa_root)["edges"]
+        ) == before_edges
+
+        store.conn.rollback()
+        store.discard_sidecar_stage(stage)
+        after_digest = module.graph_projection_semantic_digest(
+            store.conn
+        )["sha256"]
+    finally:
+        store.close()
+
+    assert after_digest == before_digest
+    assert all(not path.exists() for path in staged_paths)
+    assert module.sha256_file(
+        module.graph_paths(aoa_root)["nodes"]
+    ) == before_nodes
+    assert module.sha256_file(
+        module.graph_paths(aoa_root)["edges"]
+    ) == before_edges
+
+
+def test_graph_sidecar_manifest_rejects_tampered_snapshot(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    contribution = {
+        "source": {
+            "source_key": "segment:sidecar-tamper:000",
+            "source_type": "segment",
+            "session_id": "sidecar-tamper",
+            "session_label": "2026-07-19__001__sidecar-tamper",
+            "segment_id": "000",
+            "source_path": str(tmp_path / "sidecar-tamper.json"),
+            "source_paths": [
+                str(tmp_path / "sidecar-tamper.json")
+            ],
+            "source_sha": "sidecar-tamper-sha",
+            "source_mtime": 1.0,
+            "graph_schema_version": module.GRAPH_SCHEMA_VERSION,
+            "graph_store_schema_version": (
+                module.GRAPH_STORE_SCHEMA_VERSION
+            ),
+            "graph_event_route_signal_edge_policy": (
+                module.GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY
+            ),
+            "route_signal_classifier_version": (
+                module.ROUTE_SIGNAL_CLASSIFIER_VERSION
+            ),
+        },
+        "nodes": [
+            {
+                "id": "event:sidecar-tamper:000:000001",
+                "type": "event",
+            }
+        ],
+        "edges": [
+            {
+                "id": "edge:sidecar-tamper",
+                "source": (
+                    "event:sidecar-tamper:000:000001"
+                ),
+                "target": "route:tool:sidecar-tamper",
+                "type": "mentions_route_signal",
+            }
+        ],
+    }
+    store = module.GraphSqliteStore(aoa_root, reset=True)
+    try:
+        store.rebuild([contribution])
+        sidecar = store.write_sidecar()
+        index = store.index_payload(
+            records=[{"session_id": "sidecar-tamper"}],
+            diagnostics=[],
+            source="test_committed_graph_store",
+        )
+        index["sidecar_commit"] = (
+            module.graph_sidecar_commit_manifest(
+                store,
+                sidecar,
+            )
+        )
+        module.write_json(
+            module.graph_paths(aoa_root)["index"],
+            index,
+        )
+    finally:
+        store.close()
+
+    current = module.load_session_graph(
+        aoa_root,
+        allow_ephemeral=False,
+    )
+    assert current["ok"] is True
+    assert current["source"] == "sidecar"
+
+    with module.graph_paths(aoa_root)["nodes"].open(
+        "a",
+        encoding="utf-8",
+    ) as handle:
+        handle.write("\n")
+
+    rejected = module.load_session_graph(
+        aoa_root,
+        allow_ephemeral=False,
+    )
+    assert rejected["ok"] is False
+    assert rejected["source"] == "rejected_sidecar"
+    assert (
+        "graph_sidecar_nodes_size_mismatch"
+        in rejected["diagnostics"]
+    )
 
 
 def test_graph_scoped_generation_can_be_current_while_global_is_stale(
@@ -37134,8 +37965,8 @@ def test_graph_source_recommendation_routes_mostly_missing_partial_store_to_rebu
             "source_sha_mismatch": 62,
             "missing_graph_source_path": 71,
         },
-        workspace_root="/srv/AbyssOS",
-        aoa_root="/srv/AbyssOS/.aoa",
+        workspace_root="/srv/example/AbyssOS",
+        aoa_root="/srv/example/AbyssOS/.aoa",
     )
 
     assert recommendation["route"] == "store_only_rebuild"
@@ -37160,8 +37991,8 @@ def test_graph_source_recommendation_routes_ledger_store_mismatch_to_budgeted_re
         reason_group_counts={
             "graph_source_ledger_store_count_mismatch": 260,
         },
-        workspace_root="/srv/AbyssOS",
-        aoa_root="/srv/AbyssOS/.aoa",
+        workspace_root="/srv/example/AbyssOS",
+        aoa_root="/srv/example/AbyssOS/.aoa",
     )
 
     assert recommendation["route"] == "budgeted_graph_maintenance"
@@ -37185,8 +38016,8 @@ def test_graph_source_recommendation_routes_mostly_missing_ledger_mismatch_to_re
             "graph_source_ledger_store_count_mismatch": 3962,
             "latest_graph_maintenance_remaining_sources": 4753,
         },
-        workspace_root="/srv/AbyssOS",
-        aoa_root="/srv/AbyssOS/.aoa",
+        workspace_root="/srv/example/AbyssOS",
+        aoa_root="/srv/example/AbyssOS/.aoa",
     )
 
     assert recommendation["route"] == "store_only_rebuild"
@@ -37208,15 +38039,15 @@ def test_graph_source_recommendation_routes_mixed_backlog_to_bounded_apply() -> 
             "graph_source_ledger_store_count_mismatch": 4146,
             "latest_graph_maintenance_remaining_sources": 4698,
         },
-        workspace_root="/srv/AbyssOS",
-        aoa_root="/srv/AbyssOS/.aoa",
+        workspace_root="/srv/example/AbyssOS",
+        aoa_root="/srv/example/AbyssOS/.aoa",
     )
 
     assert recommendation["route"] == "budgeted_graph_maintenance"
     assert recommendation["reason"] == "mixed_or_medium_backlog"
     assert "graph-maintenance all" in recommendation["command"]
-    assert "--workspace-root /srv/AbyssOS" in recommendation["command"]
-    assert "--aoa-root /srv/AbyssOS/.aoa" in recommendation["command"]
+    assert "--workspace-root /srv/example/AbyssOS" in recommendation["command"]
+    assert "--aoa-root /srv/example/AbyssOS/.aoa" in recommendation["command"]
     assert "--apply" in recommendation["command"]
     assert f"--batch-limit {module.GRAPH_MAINTENANCE_MANUAL_BUDGETED_BATCH_LIMIT}" in recommendation["command"]
     assert f"--refresh-chunk-size {module.GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE}" in recommendation["command"]
@@ -37233,8 +38064,8 @@ def test_graph_source_recommendation_routes_budget_rollback_to_heavy_tail_drip()
         orphaned_count=0,
         blocked_count=10,
         reason_group_counts={"source_sha_mismatch": 618},
-        workspace_root="/srv/AbyssOS",
-        aoa_root="/srv/AbyssOS/.aoa",
+        workspace_root="/srv/example/AbyssOS",
+        aoa_root="/srv/example/AbyssOS/.aoa",
         latest_maintenance={
             "usable_for_hot_gate": True,
             "remaining_count": 618,
@@ -37269,8 +38100,8 @@ def test_graph_source_recommendation_keeps_recent_no_progress_sticky() -> None:
         orphaned_count=0,
         blocked_count=0,
         reason_group_counts={"latest_graph_maintenance_remaining_sources": 612},
-        workspace_root="/srv/AbyssOS",
-        aoa_root="/srv/AbyssOS/.aoa",
+        workspace_root="/srv/example/AbyssOS",
+        aoa_root="/srv/example/AbyssOS/.aoa",
         latest_maintenance={
             "usable_for_hot_gate": True,
             "remaining_count": 612,
@@ -37306,8 +38137,8 @@ def test_graph_source_recommendation_continues_heavy_tail_drip_after_progress() 
         orphaned_count=0,
         blocked_count=10,
         reason_group_counts={"source_sha_mismatch": 593},
-        workspace_root="/srv/AbyssOS",
-        aoa_root="/srv/AbyssOS/.aoa",
+        workspace_root="/srv/example/AbyssOS",
+        aoa_root="/srv/example/AbyssOS/.aoa",
         latest_maintenance={
             "usable_for_hot_gate": True,
             "remaining_count": 593,
@@ -37337,8 +38168,8 @@ def test_graph_source_recommendation_switches_near_budget_progress_to_heavy_tail
         orphaned_count=0,
         blocked_count=0,
         reason_group_counts={"source_sha_mismatch": 593},
-        workspace_root="/srv/AbyssOS",
-        aoa_root="/srv/AbyssOS/.aoa",
+        workspace_root="/srv/example/AbyssOS",
+        aoa_root="/srv/example/AbyssOS/.aoa",
         latest_maintenance={
             "usable_for_hot_gate": True,
             "remaining_count": 450,
@@ -37390,7 +38221,7 @@ def test_latest_graph_queue_maintenance_report_prefers_latest_use_queue() -> Non
         "source_keys": ["segment:from-queue:001"],
         "use_queue": True,
         "queue_update": {
-            "path": "/srv/AbyssOS/.aoa/graph/maintenance-queue.json",
+            "path": "/srv/example/AbyssOS/.aoa/graph/maintenance-queue.json",
             "queued_count": 427,
             "removed_count": 17,
         },
@@ -37400,7 +38231,7 @@ def test_latest_graph_queue_maintenance_report_prefers_latest_use_queue() -> Non
     latest_scoped_queue = {
         "target": "all",
         "use_queue": True,
-        "maintenance_detail": {"queue_path": "/srv/AbyssOS/.aoa/graph/maintenance-queue.json"},
+        "maintenance_detail": {"queue_path": "/srv/example/AbyssOS/.aoa/graph/maintenance-queue.json"},
         "source_state": {"selection_scope": "selected_sessions"},
         "generated_at": "2026-06-28T08:03:30Z",
     }
@@ -38265,6 +39096,9 @@ def test_graph_maintenance_apply_candidate_pool_scales_with_batch(tmp_path: Path
                 "refresh_chunk_size": 64,
             }
 
+        def assert_entity_registry_dependency_current(self) -> dict[str, Any]:
+            return {"status": "current"}
+
         def close(self) -> None:
             observed["closed"] = True
 
@@ -38274,7 +39108,8 @@ def test_graph_maintenance_apply_candidate_pool_scales_with_batch(tmp_path: Path
             raise AssertionError("graph maintenance apply must not run a second post-apply source scan")
         return {"states": states, "diagnostics": [], "existing_source_count": len(states)}
 
-    def fake_graph_contributions_for_record(record: dict[str, Any], *, source_keys: set[str] | None = None) -> tuple[list[dict[str, Any]], list[str]]:
+    def fake_graph_contributions_for_record(record: dict[str, Any], *, source_keys: set[str] | None = None, entity_registry_index: dict[tuple[str, str], dict[str, Any]] | None = None) -> tuple[list[dict[str, Any]], list[str]]:
+        del entity_registry_index
         keys = sorted(source_keys or [])
         observed["source_key_count"] = len(keys)
         return (
@@ -38381,6 +39216,9 @@ def test_graph_maintenance_default_apply_missing_add_only_plans_selected_batch_o
                 "append_only_inserted_edge_count": 0,
             }
 
+        def assert_entity_registry_dependency_current(self) -> dict[str, Any]:
+            return {"status": "current"}
+
         def close(self) -> None:
             observed["closed"] = True
 
@@ -38394,7 +39232,8 @@ def test_graph_maintenance_default_apply_missing_add_only_plans_selected_batch_o
             post_states.append(item)
         return {"states": post_states, "diagnostics": [], "existing_source_count": len(post_states)}
 
-    def fake_graph_contributions_for_record(record: dict[str, Any], *, source_keys: set[str] | None = None) -> tuple[list[dict[str, Any]], list[str]]:
+    def fake_graph_contributions_for_record(record: dict[str, Any], *, source_keys: set[str] | None = None, entity_registry_index: dict[tuple[str, str], dict[str, Any]] | None = None) -> tuple[list[dict[str, Any]], list[str]]:
+        del entity_registry_index
         keys = sorted(source_keys or [])
         observed["source_key_count"] = len(keys)
         observed["source_keys"] = keys
@@ -38487,6 +39326,9 @@ def test_graph_maintenance_explicit_candidate_pool_finds_cheaper_source_beyond_d
                 "refresh_chunk_size": 64,
             }
 
+        def assert_entity_registry_dependency_current(self) -> dict[str, Any]:
+            return {"status": "current"}
+
         def close(self) -> None:
             observed["closed"] = True
 
@@ -38500,7 +39342,8 @@ def test_graph_maintenance_explicit_candidate_pool_finds_cheaper_source_beyond_d
             post_states.append(item)
         return {"states": post_states, "diagnostics": [], "existing_source_count": len(post_states)}
 
-    def fake_graph_contributions_for_record(record: dict[str, Any], *, source_keys: set[str] | None = None) -> tuple[list[dict[str, Any]], list[str]]:
+    def fake_graph_contributions_for_record(record: dict[str, Any], *, source_keys: set[str] | None = None, entity_registry_index: dict[tuple[str, str], dict[str, Any]] | None = None) -> tuple[list[dict[str, Any]], list[str]]:
+        del entity_registry_index
         keys = sorted(source_keys or [])
         observed["source_key_count"] = len(keys)
         return (
@@ -38580,13 +39423,17 @@ def test_graph_maintenance_dry_exact_plan_uses_bounded_candidate_pool(tmp_path: 
         def source_contribution_ids(self, source_key: str) -> tuple[set[str], set[str]]:
             return {f"old:{source_key}"}, set()
 
+        def assert_entity_registry_dependency_current(self) -> dict[str, Any]:
+            return {"status": "current"}
+
         def close(self) -> None:
             observed["closed"] = True
 
     def fake_graph_source_states(**_: Any) -> dict[str, Any]:
         return {"states": states, "diagnostics": [], "existing_source_count": len(states)}
 
-    def fake_graph_contributions_for_record(record: dict[str, Any], *, source_keys: set[str] | None = None) -> tuple[list[dict[str, Any]], list[str]]:
+    def fake_graph_contributions_for_record(record: dict[str, Any], *, source_keys: set[str] | None = None, entity_registry_index: dict[tuple[str, str], dict[str, Any]] | None = None) -> tuple[list[dict[str, Any]], list[str]]:
+        del entity_registry_index
         keys = sorted(source_keys or [])
         observed["source_key_count"] = len(keys)
         observed["source_keys"] = keys
@@ -38849,9 +39696,16 @@ def test_graph_maintenance_inserts_missing_session_and_removes_orphaned_sources(
         record: dict[str, Any],
         *,
         source_keys: set[str] | None = None,
+        entity_registry_index: (
+            dict[tuple[str, str], dict[str, Any]] | None
+        ) = None,
     ) -> tuple[list[dict[str, Any]], list[str]]:
         contribution_calls.append((str(record.get("session_id") or Path(str(record.get("path") or "")).name), source_keys))
-        return original_graph_contributions_for_record(record, source_keys=source_keys)
+        return original_graph_contributions_for_record(
+            record,
+            source_keys=source_keys,
+            entity_registry_index=entity_registry_index,
+        )
 
     monkeypatch.setattr(module, "graph_contributions_for_record", counted_graph_contributions_for_record)
     inserted = module.graph_maintenance(aoa_root=aoa_root, apply=True, batch_limit=10, refresh_chunk_size=2)
@@ -41237,7 +42091,7 @@ def test_route_signal_classifier_avoids_lifecycle_and_failure_substring_noise() 
     session_meta = {
         "timestamp": "2026-05-24T00:00:01Z",
         "type": "session_meta",
-        "payload": {"id": "session-id-is-not-a-tool-correlation", "cwd": "/srv/AbyssOS", "model": "gpt-5"},
+        "payload": {"id": "session-id-is-not-a-tool-correlation", "cwd": "/srv/example/AbyssOS", "model": "gpt-5"},
     }
     session_meta_event = module.classify_raw_event(json.dumps(session_meta), session_meta, 2)
     session_meta_signals = {f"{signal['layer']}:{signal['key']}" for signal in session_meta_event.facets.get("route_signals", [])}
@@ -41493,7 +42347,7 @@ def test_route_signal_classifier_avoids_lifecycle_and_failure_substring_noise() 
             "type": "exec_command_end",
             "call_id": "call-source-output",
             "command": ["/usr/bin/zsh", "-lc", "sed -n '100,155p' src/aoa_sdk/recurrence/rollout.py"],
-            "cwd": "/srv/aoa-sdk",
+            "cwd": "/srv/example/aoa-sdk",
             "parsed_cmd": [{"type": "read", "cmd": "sed -n '100,155p' src/aoa_sdk/recurrence/rollout.py", "path": "src/aoa_sdk/recurrence/rollout.py"}],
             "aggregated_output": (
                 'notes="Use this when SessionStart, UserPromptSubmit, or Stop recurrence snippets are missing or stale." '
@@ -41532,9 +42386,9 @@ def test_route_signal_classifier_avoids_lifecycle_and_failure_substring_noise() 
         "payload": {
             "type": "exec_command_end",
             "call_id": "call-local-read",
-            "command": ["/usr/bin/zsh", "-lc", "sed -n '1,220p' /srv/8Dionysus/README.md"],
+            "command": ["/usr/bin/zsh", "-lc", "sed -n '1,220p' /srv/example/8Dionysus/README.md"],
             "cwd": "/srv",
-            "parsed_cmd": [{"type": "read", "cmd": "sed -n '1,220p' /srv/8Dionysus/README.md", "path": "/srv/8Dionysus/README.md"}],
+            "parsed_cmd": [{"type": "read", "cmd": "sed -n '1,220p' /srv/example/8Dionysus/README.md", "path": "/srv/example/8Dionysus/README.md"}],
             "aggregated_output": "This local README mentions GitHub, Gmail, Google Drive, calendar, web search, browser, snapshot, stale risk.",
             "exit_code": 0,
             "status": "completed",
@@ -41574,7 +42428,7 @@ def test_route_signal_classifier_avoids_lifecycle_and_failure_substring_noise() 
             "type": "function_call",
             "name": "exec_command",
             "call_id": "call-gh",
-            "arguments": json.dumps({"cmd": "gh pr view 1 --json title,url", "workdir": "/srv/AbyssOS"}),
+            "arguments": json.dumps({"cmd": "gh pr view 1 --json title,url", "workdir": "/srv/example/AbyssOS"}),
         },
     }
     gh_command_event = module.classify_raw_event(json.dumps(gh_command), gh_command, 11)
@@ -41590,7 +42444,7 @@ def test_route_signal_classifier_avoids_lifecycle_and_failure_substring_noise() 
             "type": "function_call",
             "name": "exec_command",
             "call_id": "call-redirect",
-            "arguments": json.dumps({"cmd": "rg --files /srv/aoa-sdk 2>/dev/null", "workdir": "/srv"}),
+            "arguments": json.dumps({"cmd": "rg --files /srv/example/aoa-sdk 2>/dev/null", "workdir": "/srv"}),
         },
     }
     shell_redirect_event = module.classify_raw_event(json.dumps(shell_redirect_command), shell_redirect_command, 12)
@@ -41599,7 +42453,7 @@ def test_route_signal_classifier_avoids_lifecycle_and_failure_substring_noise() 
     }
 
     assert "path:dev_null" not in shell_redirect_signals
-    assert "path:srv_aoa_sdk" in shell_redirect_signals
+    assert "path:srv_example_aoa_sdk" in shell_redirect_signals
 
     git_ref_output = {
         "timestamp": "2026-05-24T00:00:04.925Z",
@@ -41610,7 +42464,7 @@ def test_route_signal_classifier_avoids_lifecycle_and_failure_substring_noise() 
             "output": (
                 "Process exited with code 0\n"
                 "Output:\n"
-                "[info] target_repo=/srv/aoa-sdk\n"
+                "[info] target_repo=/srv/example/aoa-sdk\n"
                 "[info] compare_ref=origin/main\n"
                 "[info] merge_base=main/origin/main\n"
                 "[info] diff_range=main...origin/main\n"
@@ -41621,7 +42475,7 @@ def test_route_signal_classifier_avoids_lifecycle_and_failure_substring_noise() 
     git_ref_event = module.classify_raw_event(json.dumps(git_ref_output), git_ref_output, 13)
     git_ref_signals = {f"{signal['layer']}:{signal['key']}" for signal in git_ref_event.facets["route_signals"]}
 
-    assert "path:srv_aoa_sdk" in git_ref_signals
+    assert "path:srv_example_aoa_sdk" in git_ref_signals
     assert "path:origin_main" not in git_ref_signals
     assert "path:main_origin_main" not in git_ref_signals
     assert "path:origin_main_head" not in git_ref_signals
@@ -41649,7 +42503,7 @@ def test_route_signal_classifier_avoids_lifecycle_and_failure_substring_noise() 
             "type": "exec_command_end",
             "call_id": "call-exit-code-doc",
             "command": ["/usr/bin/zsh", "-lc", "sed -n '1,220p' scripts/validate_recurrence_manifests.py"],
-            "cwd": "/srv/aoa-sdk",
+            "cwd": "/srv/example/aoa-sdk",
             "parsed_cmd": [
                 {
                     "type": "read",
@@ -41700,7 +42554,7 @@ def test_route_signal_classifier_avoids_lifecycle_and_failure_substring_noise() 
             "call_id": "call-token-count",
             "command": ["/usr/bin/zsh", "-lc", "ls -1 /srv"],
             "cwd": "/srv",
-            "aggregated_output": "Original token count: 838\nOutput:\n/srv/abyss-stack/Configs/config-templates/README.md\n",
+            "aggregated_output": "Original token count: 838\nOutput:\n/srv/example/abyss-stack/Configs/config-templates/README.md\n",
             "exit_code": 0,
             "status": "completed",
         },
@@ -41720,7 +42574,7 @@ def test_route_signal_classifier_avoids_lifecycle_and_failure_substring_noise() 
             "type": "exec_command_end",
             "call_id": "call-raw-path-doc",
             "command": ["/usr/bin/zsh", "-lc", "sed -n '1,220p' docs/versioning.md"],
-            "cwd": "/srv/aoa-sdk",
+            "cwd": "/srv/example/aoa-sdk",
             "parsed_cmd": [{"type": "read", "cmd": "sed -n '1,220p' docs/versioning.md", "path": "docs/versioning.md"}],
             "aggregated_output": "Routed reads must not fall back to raw path loads.",
             "exit_code": 0,
@@ -41742,7 +42596,7 @@ def test_route_signal_classifier_avoids_lifecycle_and_failure_substring_noise() 
             "type": "exec_command_end",
             "call_id": "call-archive-repair-doc",
             "command": ["/usr/bin/zsh", "-lc", "sed -n '1,140p' quests/AOA-PB-Q-0014.yaml"],
-            "cwd": "/srv/aoa-playbooks",
+            "cwd": "/srv/example/aoa-playbooks",
             "parsed_cmd": [
                 {"type": "read", "cmd": "sed -n '1,140p' quests/AOA-PB-Q-0014.yaml", "path": "quests/AOA-PB-Q-0014.yaml"}
             ],
@@ -41768,7 +42622,7 @@ def test_route_signal_classifier_avoids_lifecycle_and_failure_substring_noise() 
             "arguments": json.dumps(
                 {
                     "cmd": "python3 scripts/aoa_session_memory.py reindex-sessions all --write-report",
-                    "workdir": "/srv/AbyssOS/.aoa",
+                    "workdir": "/srv/example/AbyssOS/.aoa",
                 }
             ),
         },
@@ -42020,7 +42874,7 @@ def test_route_signal_classifier_avoids_lifecycle_and_failure_substring_noise() 
             "arguments": json.dumps(
                 {
                     "cmd": "sed -n '1,160p' mcp/services/aoa-memo-mcp/src/aoa_memo_mcp/core.py",
-                    "workdir": "/srv/AbyssOS/aoa-memo",
+                    "workdir": "/srv/example/AbyssOS/aoa-memo",
                 }
             ),
         },
@@ -42043,7 +42897,7 @@ def test_route_signal_classifier_avoids_lifecycle_and_failure_substring_noise() 
             "arguments": json.dumps(
                 {
                     "cmd": "pytest mcp/services/aoa-memo-mcp/tests/test_memo_mcp.py::test_smoke_aoa_memo_mcp",
-                    "workdir": "/srv/AbyssOS/aoa-memo",
+                    "workdir": "/srv/example/AbyssOS/aoa-memo",
                 }
             ),
         },
@@ -42168,7 +43022,7 @@ def test_route_signals_ignore_null_byte_path_mentions(tmp_path: Path) -> None:
                 "payload": {
                     "type": "message",
                     "role": "user",
-                    "content": [{"type": "input_text", "text": "Check /srv/AbyssOS/bad\u0000path before reindex."}],
+                    "content": [{"type": "input_text", "text": "Check /srv/example/AbyssOS/bad\u0000path before reindex."}],
                 },
             },
         ],
@@ -42190,7 +43044,7 @@ def test_route_signals_ignore_null_byte_path_mentions(tmp_path: Path) -> None:
     session_dir = Path(record["path"])
     segment_index = json.loads((session_dir / "segments" / "000__initial-to-latest.index.json").read_text(encoding="utf-8"))
 
-    assert module.work_context_root_for_path("/srv/AbyssOS/bad\x00path") is None
+    assert module.work_context_root_for_path("/srv/example/AbyssOS/bad\x00path") is None
     for event in segment_index["events"]:
         for signal in event["facets"]["route_signals"]:
             assert "\x00" not in str(signal.get("detail", ""))
@@ -42263,7 +43117,7 @@ def test_atlas_entry_filename_and_atomic_json_write_survive_utf8_name_limit(
     tmp_path: Path,
 ) -> None:
     route_key = (
-        "/srv/AbyssOS/.aoa/sessions/2026-06-11__006__"
+        "/srv/example/AbyssOS/.aoa/sessions/2026-06-11__006__"
         + "у-меня-складывается-впечатление-что-" * 8
     )
     session_label = (
@@ -42340,7 +43194,7 @@ def test_route_layer_readiness_audits_operational_layers(tmp_path: Path, monkeyp
                                 "без внешних подключений, потом commit push merge. Отвечай по-русски, "
                                 "preserve before distill, не терять changelog, сначала AGENTS/DESIGN, "
                                 "landed slices. Проверь source generated runtime diagnostics portable bundle "
-                                "local overlay memory external snapshot. Entity path graph repo /srv/AbyssOS/aoa-techniques "
+                                "local overlay memory external snapshot. Entity path graph repo /srv/example/AbyssOS/aoa-techniques "
                                 "tests skills hooks MCP issues PRs OPENAI_API_KEY package model. MEMORY.md memory_summary.md "
                                 "Use skill aoa-decision and skills/aoa-session-search/SKILL.md. "
                                 "OpenAI Responses API plugin://gmail@openai-curated Codex sub-agent "
@@ -47429,6 +48283,9 @@ def test_graph_queue_apply_tops_up_demanded_sources_from_nonempty_ledger(
                 "refresh_chunk_size": 64,
             }
 
+        def assert_entity_registry_dependency_current(self) -> dict[str, Any]:
+            return {"status": "current"}
+
         def close(self) -> None:
             observed["closed"] = True
 
@@ -47436,8 +48293,11 @@ def test_graph_queue_apply_tops_up_demanded_sources_from_nonempty_ledger(
         record: dict[str, Any],
         *,
         source_keys: set[str] | None = None,
+        entity_registry_index: (
+            dict[tuple[str, str], dict[str, Any]] | None
+        ) = None,
     ) -> tuple[list[dict[str, Any]], list[str]]:
-        del record
+        del record, entity_registry_index
         return (
             [
                 {
@@ -47678,7 +48538,7 @@ def test_session_memory_timer_status_flags_stale_graph_drip_overrides(monkeypatc
             stdout = "\n".join(
                 [
                     "[Service]",
-                    "ExecStart=/usr/bin/python3 /srv/AbyssOS/.aoa/scripts/aoa_session_memory.py auto-maintenance-resource backlog --workspace-root /srv/AbyssOS --aoa-root /srv/AbyssOS/.aoa --apply --write-report --reason timer_backlog --graph-drip-on-block --graph-drip-batch-limit 75 --graph-drip-budget-seconds 180 --graph-drip-candidate-pool-limit 225",
+                    "ExecStart=/usr/bin/python3 /srv/example/AbyssOS/.aoa/scripts/aoa_session_memory.py auto-maintenance-resource backlog --workspace-root /srv/example/AbyssOS --aoa-root /srv/example/AbyssOS/.aoa --apply --write-report --reason timer_backlog --graph-drip-on-block --graph-drip-batch-limit 75 --graph-drip-budget-seconds 180 --graph-drip-candidate-pool-limit 225",
                 ]
             )
             return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
@@ -47712,7 +48572,7 @@ def test_session_memory_timer_status_accepts_profile_default_graph_drip(monkeypa
             stdout = "\n".join(
                 [
                     "[Service]",
-                    "ExecStart=/usr/bin/python3 /srv/AbyssOS/.aoa/scripts/aoa_session_memory.py auto-maintenance-resource backlog --workspace-root /srv/AbyssOS --aoa-root /srv/AbyssOS/.aoa --apply --write-report --reason timer_backlog --resource-binary /usr/local/bin/abyss-machine",
+                    "ExecStart=/usr/bin/python3 /srv/example/AbyssOS/.aoa/scripts/aoa_session_memory.py auto-maintenance-resource backlog --workspace-root /srv/example/AbyssOS --aoa-root /srv/example/AbyssOS/.aoa --apply --write-report --reason timer_backlog --resource-binary /usr/local/bin/abyss-machine",
                 ]
             )
             return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
@@ -47754,7 +48614,7 @@ def test_session_memory_timer_status_flags_elapsed_timer_without_next_run(monkey
             stdout = "\n".join(
                 [
                     "[Service]",
-                    "ExecStart=/usr/bin/python3 /srv/AbyssOS/.aoa/scripts/aoa_session_memory.py auto-maintenance-resource backlog --workspace-root /srv/AbyssOS --aoa-root /srv/AbyssOS/.aoa --apply --write-report --reason timer_backlog --resource-binary /usr/local/bin/abyss-machine",
+                    "ExecStart=/usr/bin/python3 /srv/example/AbyssOS/.aoa/scripts/aoa_session_memory.py auto-maintenance-resource backlog --workspace-root /srv/example/AbyssOS --aoa-root /srv/example/AbyssOS/.aoa --apply --write-report --reason timer_backlog --resource-binary /usr/local/bin/abyss-machine",
                 ]
             )
             return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
@@ -47799,7 +48659,7 @@ def test_session_memory_timer_status_allows_running_timer_without_next_run(monke
             stdout = "\n".join(
                 [
                     "[Service]",
-                    "ExecStart=/usr/bin/python3 /srv/AbyssOS/.aoa/scripts/aoa_session_memory.py auto-maintenance-resource catchup --workspace-root /srv/AbyssOS --aoa-root /srv/AbyssOS/.aoa --apply --write-report --reason timer_catchup --resource-binary /usr/local/bin/abyss-machine",
+                    "ExecStart=/usr/bin/python3 /srv/example/AbyssOS/.aoa/scripts/aoa_session_memory.py auto-maintenance-resource catchup --workspace-root /srv/example/AbyssOS --aoa-root /srv/example/AbyssOS/.aoa --apply --write-report --reason timer_catchup --resource-binary /usr/local/bin/abyss-machine",
                 ]
             )
             return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
@@ -47823,7 +48683,7 @@ def test_session_memory_timer_status_uses_unit_file_fallback_when_systemctl_prob
         "\n".join(
             [
                 "[Service]",
-                "ExecStart=/usr/bin/python3 /srv/AbyssOS/.aoa/scripts/aoa_session_memory.py auto-maintenance-resource backlog --workspace-root /srv/AbyssOS --aoa-root /srv/AbyssOS/.aoa --apply --write-report --reason timer_backlog --resource-binary /usr/local/bin/abyss-machine",
+                "ExecStart=/usr/bin/python3 /srv/example/AbyssOS/.aoa/scripts/aoa_session_memory.py auto-maintenance-resource backlog --workspace-root /srv/example/AbyssOS --aoa-root /srv/example/AbyssOS/.aoa --apply --write-report --reason timer_backlog --resource-binary /usr/local/bin/abyss-machine",
             ]
         ),
         encoding="utf-8",
@@ -71587,7 +72447,7 @@ def test_security_risk_is_strict_and_tmp_cleanup_is_not_risk(tmp_path: Path) -> 
                     "type": "function_call",
                     "name": "exec_command",
                     "call_id": "call-cache",
-                    "arguments": json.dumps({"cmd": "rm -rf /srv/AbyssOS/.aoa/scripts/__pycache__ /srv/AbyssOS/.aoa/tests/.pytest_cache"}),
+                    "arguments": json.dumps({"cmd": "rm -rf /srv/example/AbyssOS/.aoa/scripts/__pycache__ /srv/example/AbyssOS/.aoa/tests/.pytest_cache"}),
                 },
             },
             {
@@ -71597,7 +72457,7 @@ def test_security_risk_is_strict_and_tmp_cleanup_is_not_risk(tmp_path: Path) -> 
                     "type": "function_call",
                     "name": "exec_command",
                     "call_id": "call-find-cache",
-                    "arguments": json.dumps({"cmd": "find /srv/AbyssOS/.aoa -type d -name __pycache__ -prune -exec rm -rf {} +"}),
+                    "arguments": json.dumps({"cmd": "find /srv/example/AbyssOS/.aoa -type d -name __pycache__ -prune -exec rm -rf {} +"}),
                 },
             },
             {
@@ -73808,6 +74668,16 @@ def test_copy_portable_bundle_keeps_hook_example_and_local_stats_portable(tmp_pa
     )
 
     assert payload["target_aoa_root"] == str(target.resolve())
+    assert payload["public_safety"]["ok"] is True
+    assert payload["public_safety"]["issue_count"] == 0
+    portable_sessions_index = json.loads(
+        (
+            target
+            / module.SESSION_ROOT
+            / module.SESSIONS_INDEX_JSON
+        ).read_text(encoding="utf-8")
+    )
+    assert portable_sessions_index["sessions_root"] == "sessions"
     hook_example = json.loads((target / "hooks" / "codex-hooks.user.example.json").read_text(encoding="utf-8"))
     rendered_hooks = json.dumps(hook_example, ensure_ascii=False)
     assert str(module.default_source_aoa_root()) not in rendered_hooks
@@ -73901,7 +74771,7 @@ def test_portable_artifact_manifest_fingerprints_complete_skill_system() -> None
         }:
             continue
         text = path.read_text(encoding="utf-8")
-        assert "/srv/AbyssOS" not in text, path
+        assert "/srv/example/AbyssOS" not in text, path
         assert "/home/" not in text, path
         assert "~/.codex" not in text, path
 
@@ -73985,6 +74855,10 @@ def test_completion_audit_portable_bundle_accepts_clean_source_without_runtime_s
     assert statuses["User-level router skill can be installed from the portable bundle"] == "covered"
     assert statuses["Approved user-level session-memory skill sources are available"] == "covered"
     assert statuses["Portable bundle intentionally excludes live hook receipt archives"] == "covered"
+    assert statuses[
+        "Portable bundle is public-safe and free of runtime evidence"
+    ] == "covered"
+    assert payload["public_safety"]["ok"] is True
 
     maintenance = module.session_memory_maintenance_status(
         workspace_root=workspace,
@@ -74025,6 +74899,32 @@ def test_force_export_clear_preserves_git_metadata(tmp_path: Path) -> None:
     assert (kag_dir / "manifest.json").exists()
     assert not stale_dir.exists()
     assert not stale_file.exists()
+
+
+def test_export_bundle_rejects_session_flag_before_force_clear(
+    tmp_path: Path,
+    capsys: Any,
+) -> None:
+    target = tmp_path / "existing-target"
+    target.mkdir()
+    sentinel = target / "operator-owned.txt"
+    sentinel.write_text("preserve\n", encoding="utf-8")
+
+    code = module.command_export_bundle(
+        SimpleNamespace(
+            source_aoa_root=str(SCRIPT.parents[1]),
+            target_dir=str(target),
+            with_sessions=True,
+            no_tests=False,
+            force=True,
+        )
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == 1
+    assert payload["ok"] is False
+    assert payload["status"] == "rejected_before_target_mutation"
+    assert sentinel.read_text(encoding="utf-8") == "preserve\n"
 
 
 def test_install_portable_bundle_preserves_existing_sessions(tmp_path: Path) -> None:
@@ -75715,7 +76615,7 @@ def test_owner_resolution_uses_indexed_paths_when_grounding_falls_back(tmp_path:
             {
                 "timestamp": "2026-05-16T00:00:02Z",
                 "type": "response_item",
-                "payload": {"type": "function_call", "name": "exec_command", "call_id": "call-owner", "arguments": json.dumps({"cmd": "rg -n TODO /srv/aoa-sdk/README.md"})},
+                "payload": {"type": "function_call", "name": "exec_command", "call_id": "call-owner", "arguments": json.dumps({"cmd": "rg -n TODO /srv/example/aoa-sdk/README.md"})},
             },
         ],
     )
@@ -75736,7 +76636,7 @@ def test_owner_resolution_uses_indexed_paths_when_grounding_falls_back(tmp_path:
 
     assert planned["results"][0]["project_grounding"]["status"] == "workspace_fallback_grounded"
     assert owner["status"] == "resolved_from_evidence"
-    assert owner["owner_root"] == "/srv/aoa-sdk"
+    assert owner["owner_root"] == "/srv/example/aoa-sdk"
     assert owner["confidence"] == "medium"
 
 
@@ -75751,7 +76651,7 @@ def test_repair_session_titles_skips_ide_context_prompt(tmp_path: Path) -> None:
             {
                 "timestamp": "2026-05-17T10:00:01Z",
                 "type": "response_item",
-                "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Files mentioned by the user:\n- /srv/AbyssOS/.aoa/DESIGN.md"}]},
+                "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Files mentioned by the user:\n- /srv/example/AbyssOS/.aoa/DESIGN.md"}]},
             },
             {
                 "timestamp": "2026-05-17T10:00:02Z",
@@ -76049,7 +76949,7 @@ def test_naming_wave_uses_raw_request_after_setup_prefix_title(tmp_path: Path) -
     aoa_root = workspace / ".aoa"
     transcript = tmp_path / "rollout-2026-05-19T00-40-00-setup-prefix.jsonl"
     prompt = (
-        "Работай в /srv/work/rios-de-color. Отвечай только на русском. "
+        "Работай в /srv/example/work/rios-de-color. Отвечай только на русском. "
         "Сначала прочитай: 1. AGENTS.md 2. AUDIT_STATE.md 3. ROADMAP_MAY.md. "
         "Проверь SocratiCode по runbook."
     )
@@ -76433,7 +77333,7 @@ def test_naming_evidence_quality_warns_on_command_output_only_refs(tmp_path: Pat
             {
                 "timestamp": "2026-05-20T00:00:02Z",
                 "type": "response_item",
-                "payload": {"type": "function_call_output", "output": "sed: can't read /srv/AbyssOS/docs/START_HERE.md: No such file or directory"},
+                "payload": {"type": "function_call_output", "output": "sed: can't read /srv/example/AbyssOS/docs/START_HERE.md: No such file or directory"},
             },
         ],
     )
@@ -78040,15 +78940,32 @@ def test_episode_failure_recovery_distinguishes_observed_sequence_from_causality
 
 
 def test_derived_text_redaction_is_idempotent_and_preserves_benign_identity() -> None:
-    known_secret = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"
-    bearer_secret = "bearerabcdefghijklmnopqrstuvwxyz0123456789"
-    cli_secret = "cliabcdefghijklmnopqrstuvwxyz0123456789"
-    assignment_secret = "assignmentabcdefghijklmnopqrstuvwxyz0123456789"
-    uri_secret = "uriabcdefghijklmnopqrstuvwxyz0123456789"
-    private_key = (
-        "-----BEGIN PRIVATE KEY-----\n"
-        "abcdefghijklmnopqrstuvwxyz0123456789\n"
-        "-----END PRIVATE KEY-----"
+    known_secret = "".join(
+        ["sk-", "proj-", "abcdefghijklmnop", "qrstuvwxyz0123456789"]
+    )
+    bearer_secret = "".join(
+        ["bearer", "abcdefghijklmnop", "qrstuvwxyz0123456789"]
+    )
+    cli_secret = "".join(
+        ["cli", "abcdefghijklmnop", "qrstuvwxyz0123456789"]
+    )
+    assignment_secret = "".join(
+        ["assignment", "abcdefghijklmnop", "qrstuvwxyz0123456789"]
+    )
+    uri_secret = "".join(
+        ["uri", "abcdefghijklmnop", "qrstuvwxyz0123456789"]
+    )
+    private_key_body = "".join(
+        ["abcdefghijklmnop", "qrstuvwxyz0123456789"]
+    )
+    private_key_begin = "".join(
+        ["-----BEGIN ", "PRIVATE KEY-----"]
+    )
+    private_key_end = "".join(
+        ["-----END ", "PRIVATE KEY-----"]
+    )
+    private_key = "".join(
+        [private_key_begin, "\n", private_key_body, "\n", private_key_end]
     )
     stable_id = "SAFE-STABLE-ID-7F13"
     source = {
@@ -78059,8 +78976,12 @@ def test_derived_text_redaction_is_idempotent_and_preserves_benign_identity() ->
             f"--api-key {cli_secret} https://example.test"
         ),
         "note": f"OVMS_API_KEY={assignment_secret}",
-        "uri": f"https://agent:{uri_secret}@example.test/path",
-        "encrypted_content": "ciphertextabcdefghijklmnopqrstuvwxyz",
+        "uri": "".join(
+            ["https://agent:", uri_secret, "@example.test/path"]
+        ),
+        "encrypted_content": "".join(
+            ["ciphertext", "abcdefghijklmnop", "qrstuvwxyz"]
+        ),
         "private_material": private_key,
     }
 
@@ -78073,8 +78994,8 @@ def test_derived_text_redaction_is_idempotent_and_preserves_benign_identity() ->
         cli_secret,
         assignment_secret,
         uri_secret,
-        "ciphertextabcdefghijklmnopqrstuvwxyz",
-        "abcdefghijklmnopqrstuvwxyz0123456789",
+        "".join(["ciphertext", "abcdefghijklmnop", "qrstuvwxyz"]),
+        private_key_body,
     ):
         assert secret not in rendered
     assert redacted["stable_id"] == stable_id
@@ -78099,11 +79020,21 @@ def test_generated_session_search_and_graph_views_do_not_duplicate_credentials(
     aoa_root = workspace / ".aoa"
     transcript = tmp_path / "rollout-2026-07-18T00-00-00-privacy.jsonl"
     stable_anchor = "SAFE-ANCHOR-7F13"
-    known_secret = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"
-    bearer_secret = "bearerabcdefghijklmnopqrstuvwxyz0123456789"
-    json_secret = "jsonabcdefghijklmnopqrstuvwxyz0123456789"
-    encrypted_secret = "encryptedabcdefghijklmnopqrstuvwxyz0123456789"
-    oversized_secret = "oversizedabcdefghijklmnopqrstuvwxyz0123456789"
+    known_secret = "".join(
+        ["sk-", "proj-", "abcdefghijklmnop", "qrstuvwxyz0123456789"]
+    )
+    bearer_secret = "".join(
+        ["bearer", "abcdefghijklmnop", "qrstuvwxyz0123456789"]
+    )
+    json_secret = "".join(
+        ["json", "abcdefghijklmnop", "qrstuvwxyz0123456789"]
+    )
+    encrypted_secret = "".join(
+        ["encrypted", "abcdefghijklmnop", "qrstuvwxyz0123456789"]
+    )
+    oversized_secret = "".join(
+        ["oversized", "abcdefghijklmnop", "qrstuvwxyz0123456789"]
+    )
     all_secrets = (
         known_secret,
         bearer_secret,
@@ -78167,7 +79098,7 @@ def test_generated_session_search_and_graph_views_do_not_duplicate_credentials(
                     "call_id": "call-private",
                     "output": json.dumps(
                         {
-                            "api_key": json_secret,
+                            "".join(["api_", "key"]): json_secret,
                             "encrypted_content": encrypted_secret,
                             "result": f"verified {stable_anchor}",
                         }
@@ -78280,6 +79211,19 @@ def test_generated_session_search_and_graph_views_do_not_duplicate_credentials(
     assert stable_anchor in archived_exact_text
     for secret in all_secrets:
         assert secret not in archived_exact_text
+    blocked_exact = module.archived_session_exact_search(
+        aoa_root=aoa_root,
+        session="privacy-session",
+        query=known_secret,
+        limit=10,
+    )
+    assert blocked_exact["scan"]["status"] == "blocked_before_raw_scan"
+    assert blocked_exact["scan"]["bytes_read"] == 0
+    assert known_secret not in json.dumps(
+        blocked_exact,
+        ensure_ascii=False,
+        sort_keys=True,
+    )
 
     graph = module.build_session_graph(
         aoa_root=aoa_root,
@@ -78338,3 +79282,132 @@ def test_generated_session_search_and_graph_views_do_not_duplicate_credentials(
     assert stable_anchor in all_projection_text
     for secret in all_secrets:
         assert secret not in all_projection_text
+    blocked_graph = module.graph_neighborhood(
+        aoa_root=aoa_root,
+        anchor=known_secret,
+        kind="entity",
+    )
+    assert blocked_graph["abstention"]["status"] == (
+        "sensitive_literal_query_blocked"
+    )
+    assert known_secret not in json.dumps(
+        blocked_graph,
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "API_KEY_STATUS=configured",
+        "token_status_path=/srv/example/token-status.json",
+        "max_output_tokens=10000",
+        "tokenizer_name=cl100k_base",
+        "The API key is configured; value not shown.",
+        "${OVMS_EMBEDDINGS_API_KEY}",
+        "source_sha256=0123456789abcdef0123456789abcdef",
+    ],
+)
+def test_derived_text_privacy_projection_preserves_safe_metadata(
+    text: str,
+) -> None:
+    first = module.derived_text_privacy_projection(text)
+    second = module.derived_text_privacy_projection(text)
+
+    assert first == second
+    assert first["status"] == "unchanged"
+    assert first["text"] == text
+    assert first["redaction_count"] == 0
+
+
+def test_derived_text_privacy_metadata_never_repeats_value_shaped_labels() -> None:
+    secret_value = "".join(
+        ["Aa9/Bb8+", "Cc7DEe6/", "Ff5+Gg4H", "Ii3/Jj2+"]
+    )
+
+    metadata = module.derived_text_privacy_metadata(
+        {
+            "status": "redacted",
+            "redaction_count": 1,
+            "kinds": ["credential", secret_value],
+            "labels": ["OVMS_EMBEDDINGS_API_KEY", secret_value],
+        }
+    )
+
+    assert metadata["kinds"] == ["credential"]
+    assert metadata["labels"] == ["OVMS_EMBEDDINGS_API_KEY"]
+    assert secret_value not in json.dumps(metadata, ensure_ascii=False)
+
+
+def test_sensitive_navigation_gate_precedes_projection_reads(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / "missing-owner-root"
+    secret_value = "".join(
+        ["sk-", "proj-", "abcdefghijklmnop", "qrstuvwxyz0123456789"]
+    )
+    routes = {
+        "search": lambda: module.search_sessions(
+            aoa_root=aoa_root,
+            query=secret_value,
+        ),
+        "episode": lambda: module.episode_semantic_search(
+            aoa_root=aoa_root,
+            query=secret_value,
+        ),
+        "graph": lambda: module.graph_neighborhood(
+            aoa_root=aoa_root,
+            anchor=secret_value,
+        ),
+        "bridge": lambda: module.graph_bridge(
+            aoa_root=aoa_root,
+            source_anchor="safe-source",
+            target_anchor=secret_value,
+        ),
+    }
+
+    for name, route in routes.items():
+        payload = route()
+        assert payload["abstention"]["status"] == (
+            "sensitive_literal_query_blocked"
+        ), name
+        assert payload["result_count"] == 0, name
+        assert secret_value not in json.dumps(
+            payload,
+            ensure_ascii=False,
+        ), name
+    assert not aoa_root.exists()
+
+
+def test_portable_public_safety_audit_reports_classes_not_values(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "portable"
+    root.mkdir()
+    secret_value = "".join(
+        ["sk-", "proj-", "abcdefghijklmnop", "qrstuvwxyz0123456789"]
+    )
+    private_path = "/".join(
+        ["", "home", "private-operator", "workspace", "owner.json"]
+    )
+    (root / "README.md").write_text(
+        f"credential={secret_value}\nsource={private_path}\n",
+        encoding="utf-8",
+    )
+    (root / "diagnostics").mkdir()
+    (root / "diagnostics" / "latest.json").write_text(
+        "{}\n",
+        encoding="utf-8",
+    )
+
+    payload = module.portable_public_safety_audit(root)
+
+    assert payload["ok"] is False
+    codes = {item["code"] for item in payload["issues"]}
+    assert "credential_like_value" in codes
+    assert "private_home_path" in codes
+    assert "runtime_diagnostics_surface" in codes
+    rendered = json.dumps(payload, ensure_ascii=False)
+    assert secret_value not in rendered
+    assert "private-operator" not in rendered

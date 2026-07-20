@@ -112,6 +112,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0008 Scoped Graph Evidence Freshness](../AOA-SM-D-0008-scoped-graph-evidence-freshness.md) | 2026-07-16 | Accepted | `docs/decisions/AOA-SM-D-0008-scoped-graph-evidence-freshness.md` |
 
+## content digest
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0023 Manifest-Committed Graph Sidecar Publication](../AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md` |
+
 ## content-addressed capture
 
 | Decision | Date | Status | Path |
@@ -136,6 +142,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0016 Quantitative Comparisons Require Correlated Count Evidence](../AOA-SM-D-0016-quantitative-comparisons-require-correlated-count-evidence.md) | 2026-07-17 | Accepted | `docs/decisions/AOA-SM-D-0016-quantitative-comparisons-require-correlated-count-evidence.md` |
 
+## credential-value redaction
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0021 Raw-Preserving Derived-Text Privacy Boundary](../AOA-SM-D-0021-raw-preserving-derived-text-privacy-boundary.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0021-raw-preserving-derived-text-privacy-boundary.md` |
+
 ## declared schema transition
 
 | Decision | Date | Status | Path |
@@ -147,6 +159,13 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0004 Declared Incremental Search Schema Transitions](../AOA-SM-D-0004-declared-incremental-search-schema-transitions.md) | 2026-07-15 | Accepted | `docs/decisions/AOA-SM-D-0004-declared-incremental-search-schema-transitions.md` |
+
+## dependency pinning
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0022 Pinned Entity-Registry Generation for Graph Publication](../AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md` |
+| [AOA-SM-D-0023 Manifest-Committed Graph Sidecar Publication](../AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md` |
 
 ## digest verification
 
@@ -214,6 +233,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0009 Correlated Agent Activity Status Relation](../AOA-SM-D-0009-correlated-agent-activity-status-relation.md) | 2026-07-16 | Accepted | `docs/decisions/AOA-SM-D-0009-correlated-agent-activity-status-relation.md` |
 
+## full-rebuild boundary
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0022 Pinned Entity-Registry Generation for Graph Publication](../AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md` |
+
 ## generated index parity
 
 | Decision | Date | Status | Path |
@@ -237,6 +262,9 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0002 Semantic Projection Generation Identity](../AOA-SM-D-0002-semantic-projection-generation-identity.md) | 2026-07-14 | Accepted | `docs/decisions/AOA-SM-D-0002-semantic-projection-generation-identity.md` |
+| [AOA-SM-D-0021 Raw-Preserving Derived-Text Privacy Boundary](../AOA-SM-D-0021-raw-preserving-derived-text-privacy-boundary.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0021-raw-preserving-derived-text-privacy-boundary.md` |
+| [AOA-SM-D-0022 Pinned Entity-Registry Generation for Graph Publication](../AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md` |
+| [AOA-SM-D-0023 Manifest-Committed Graph Sidecar Publication](../AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md` |
 
 ## global recall honesty
 
@@ -256,6 +284,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0015 Deadline-Aware Cooperative Retry Dispatch](../AOA-SM-D-0015-deadline-aware-cooperative-retry-dispatch.md) | 2026-07-17 | Accepted | `docs/decisions/AOA-SM-D-0015-deadline-aware-cooperative-retry-dispatch.md` |
+
+## host neutrality
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0021 Raw-Preserving Derived-Text Privacy Boundary](../AOA-SM-D-0021-raw-preserving-derived-text-privacy-boundary.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0021-raw-preserving-derived-text-privacy-boundary.md` |
 
 ## indexed exact seed
 
@@ -286,6 +320,18 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0005 Provenance-Preserving Fork Lineage Consolidation](../AOA-SM-D-0005-provenance-preserving-fork-lineage-consolidation.md) | 2026-07-15 | Accepted | `docs/decisions/AOA-SM-D-0005-provenance-preserving-fork-lineage-consolidation.md` |
+
+## manifest commit
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0023 Manifest-Committed Graph Sidecar Publication](../AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md` |
+
+## mutation rollback
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0022 Pinned Entity-Registry Generation for Graph Publication](../AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md` |
 
 ## natural-language intent
 
@@ -362,6 +408,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0001 Session-Memory Decision Rationale Lane](../AOA-SM-D-0001-session-memory-decision-rationale-lane.md) | 2026-07-14 | Accepted | `docs/decisions/AOA-SM-D-0001-session-memory-decision-rationale-lane.md` |
 
+## public-safety audit
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0021 Raw-Preserving Derived-Text Privacy Boundary](../AOA-SM-D-0021-raw-preserving-derived-text-privacy-boundary.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0021-raw-preserving-derived-text-privacy-boundary.md` |
+
 ## quantitative comparison
 
 | Decision | Date | Status | Path |
@@ -385,6 +437,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0006 Bounded Query-Demand Projection Catch-Up](../AOA-SM-D-0006-bounded-query-demand-projection-catch-up.md) | 2026-07-16 | Accepted | `docs/decisions/AOA-SM-D-0006-bounded-query-demand-projection-catch-up.md` |
+
+## raw authority
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0021 Raw-Preserving Derived-Text Privacy Boundary](../AOA-SM-D-0021-raw-preserving-derived-text-privacy-boundary.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0021-raw-preserving-derived-text-privacy-boundary.md` |
 
 ## raw evidence fallback
 
@@ -410,6 +468,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0002 Semantic Projection Generation Identity](../AOA-SM-D-0002-semantic-projection-generation-identity.md) | 2026-07-14 | Accepted | `docs/decisions/AOA-SM-D-0002-semantic-projection-generation-identity.md` |
 
+## rollback
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0023 Manifest-Committed Graph Sidecar Publication](../AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md` |
+
 ## route-selection visibility
 
 | Decision | Date | Status | Path |
@@ -427,6 +491,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0006 Bounded Query-Demand Projection Catch-Up](../AOA-SM-D-0006-bounded-query-demand-projection-catch-up.md) | 2026-07-16 | Accepted | `docs/decisions/AOA-SM-D-0006-bounded-query-demand-projection-catch-up.md` |
+
+## sensitive-query abstention
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0021 Raw-Preserving Derived-Text Privacy Boundary](../AOA-SM-D-0021-raw-preserving-derived-text-privacy-boundary.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0021-raw-preserving-derived-text-privacy-boundary.md` |
 
 ## session scope
 
@@ -452,6 +522,8 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0002 Semantic Projection Generation Identity](../AOA-SM-D-0002-semantic-projection-generation-identity.md) | 2026-07-14 | Accepted | `docs/decisions/AOA-SM-D-0002-semantic-projection-generation-identity.md` |
+| [AOA-SM-D-0022 Pinned Entity-Registry Generation for Graph Publication](../AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md` |
+| [AOA-SM-D-0023 Manifest-Committed Graph Sidecar Publication](../AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md` |
 
 ## starvation prevention
 

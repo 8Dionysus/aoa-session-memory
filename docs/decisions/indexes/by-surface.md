@@ -17,6 +17,13 @@
 | [AOA-SM-D-0016 Quantitative Comparisons Require Correlated Count Evidence](../AOA-SM-D-0016-quantitative-comparisons-require-correlated-count-evidence.md) | 2026-07-17 | Accepted | `docs/decisions/AOA-SM-D-0016-quantitative-comparisons-require-correlated-count-evidence.md` |
 | [AOA-SM-D-0017 Bounded Temporal Interval Reading Before Answer Admission](../AOA-SM-D-0017-bounded-temporal-interval-reading-before-answer-admission.md) | 2026-07-18 | Accepted | `docs/decisions/AOA-SM-D-0017-bounded-temporal-interval-reading-before-answer-admission.md` |
 
+## atomic publication
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0022 Pinned Entity-Registry Generation for Graph Publication](../AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md` |
+| [AOA-SM-D-0023 Manifest-Committed Graph Sidecar Publication](../AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md` |
+
 ## attribution
 
 | Decision | Date | Status | Path |
@@ -58,11 +65,23 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0001 Session-Memory Decision Rationale Lane](../AOA-SM-D-0001-session-memory-decision-rationale-lane.md) | 2026-07-14 | Accepted | `docs/decisions/AOA-SM-D-0001-session-memory-decision-rationale-lane.md` |
 
+## derived text
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0021 Raw-Preserving Derived-Text Privacy Boundary](../AOA-SM-D-0021-raw-preserving-derived-text-privacy-boundary.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0021-raw-preserving-derived-text-privacy-boundary.md` |
+
 ## docs route
 
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0001 Session-Memory Decision Rationale Lane](../AOA-SM-D-0001-session-memory-decision-rationale-lane.md) | 2026-07-14 | Accepted | `docs/decisions/AOA-SM-D-0001-session-memory-decision-rationale-lane.md` |
+
+## entity canonicalization
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0022 Pinned Entity-Registry Generation for Graph Publication](../AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md` |
 
 ## entity routing
 
@@ -106,6 +125,13 @@
 | [AOA-SM-D-0010 Natural-Language Intent Before Literal Length](../AOA-SM-D-0010-natural-language-intent-before-literal-length.md) | 2026-07-16 | Accepted | `docs/decisions/AOA-SM-D-0010-natural-language-intent-before-literal-length.md` |
 | [AOA-SM-D-0011 Evidence-Grain Date Bounds](../AOA-SM-D-0011-evidence-grain-date-bounds.md) | 2026-07-17 | Accepted | `docs/decisions/AOA-SM-D-0011-evidence-grain-date-bounds.md` |
 
+## freshness
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0022 Pinned Entity-Registry Generation for Graph Publication](../AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md` |
+| [AOA-SM-D-0023 Manifest-Committed Graph Sidecar Publication](../AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md` |
+
 ## freshness contract
 
 | Decision | Date | Status | Path |
@@ -132,6 +158,13 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0008 Scoped Graph Evidence Freshness](../AOA-SM-D-0008-scoped-graph-evidence-freshness.md) | 2026-07-16 | Accepted | `docs/decisions/AOA-SM-D-0008-scoped-graph-evidence-freshness.md` |
 
+## graph indexing
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0022 Pinned Entity-Registry Generation for Graph Publication](../AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md` |
+| [AOA-SM-D-0023 Manifest-Committed Graph Sidecar Publication](../AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md` |
+
 ## graph maintenance
 
 | Decision | Date | Status | Path |
@@ -151,11 +184,24 @@
 | [AOA-SM-D-0007 Typed Graph Bridge Admission](../AOA-SM-D-0007-typed-graph-bridge-admission.md) | 2026-07-16 | Accepted | `docs/decisions/AOA-SM-D-0007-typed-graph-bridge-admission.md` |
 | [AOA-SM-D-0009 Correlated Agent Activity Status Relation](../AOA-SM-D-0009-correlated-agent-activity-status-relation.md) | 2026-07-16 | Accepted | `docs/decisions/AOA-SM-D-0009-correlated-agent-activity-status-relation.md` |
 
+## incremental maintenance
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0022 Pinned Entity-Registry Generation for Graph Publication](../AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md` |
+| [AOA-SM-D-0023 Manifest-Committed Graph Sidecar Publication](../AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md` |
+
 ## lifecycle
 
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0018 Owner Capability Home And Skill Evidence Lifecycle](../AOA-SM-D-0018-owner-capability-home-and-skill-evidence-lifecycle.md) | 2026-07-18 | Accepted | `docs/decisions/AOA-SM-D-0018-owner-capability-home-and-skill-evidence-lifecycle.md` |
+
+## partial-failure recovery
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0023 Manifest-Committed Graph Sidecar Publication](../AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md` |
 
 ## physical storage transition
 
@@ -174,6 +220,7 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0019 Portable Export Excludes Atomic-Publish Scratch Files](../AOA-SM-D-0019-portable-export-excludes-atomic-publish-scratch-files.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0019-portable-export-excludes-atomic-publish-scratch-files.md` |
+| [AOA-SM-D-0021 Raw-Preserving Derived-Text Privacy Boundary](../AOA-SM-D-0021-raw-preserving-derived-text-privacy-boundary.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0021-raw-preserving-derived-text-privacy-boundary.md` |
 
 ## portable source
 
@@ -181,6 +228,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0001 Session-Memory Decision Rationale Lane](../AOA-SM-D-0001-session-memory-decision-rationale-lane.md) | 2026-07-14 | Accepted | `docs/decisions/AOA-SM-D-0001-session-memory-decision-rationale-lane.md` |
 | [AOA-SM-D-0003 Session-Scoped Archived Raw Exact Fallback](../AOA-SM-D-0003-session-scoped-archived-raw-exact-fallback.md) | 2026-07-15 | Accepted | `docs/decisions/AOA-SM-D-0003-session-scoped-archived-raw-exact-fallback.md` |
+
+## privacy
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0021 Raw-Preserving Derived-Text Privacy Boundary](../AOA-SM-D-0021-raw-preserving-derived-text-privacy-boundary.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0021-raw-preserving-derived-text-privacy-boundary.md` |
 
 ## public-safe copy boundary
 
@@ -207,6 +260,7 @@
 | [AOA-SM-D-0014 Session-Scoped Structured Prompt-Visibility Probe](../AOA-SM-D-0014-session-scoped-structured-prompt-visibility-probe.md) | 2026-07-17 | Accepted | `docs/decisions/AOA-SM-D-0014-session-scoped-structured-prompt-visibility-probe.md` |
 | [AOA-SM-D-0016 Quantitative Comparisons Require Correlated Count Evidence](../AOA-SM-D-0016-quantitative-comparisons-require-correlated-count-evidence.md) | 2026-07-17 | Accepted | `docs/decisions/AOA-SM-D-0016-quantitative-comparisons-require-correlated-count-evidence.md` |
 | [AOA-SM-D-0017 Bounded Temporal Interval Reading Before Answer Admission](../AOA-SM-D-0017-bounded-temporal-interval-reading-before-answer-admission.md) | 2026-07-18 | Accepted | `docs/decisions/AOA-SM-D-0017-bounded-temporal-interval-reading-before-answer-admission.md` |
+| [AOA-SM-D-0021 Raw-Preserving Derived-Text Privacy Boundary](../AOA-SM-D-0021-raw-preserving-derived-text-privacy-boundary.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0021-raw-preserving-derived-text-privacy-boundary.md` |
 
 ## queue recovery
 
@@ -226,6 +280,7 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0020 Preserved Capture and Last-Good Projection Publication](../AOA-SM-D-0020-preserved-capture-and-last-good-projection-publication.md) | 2026-07-18 | Accepted | `docs/decisions/AOA-SM-D-0020-preserved-capture-and-last-good-projection-publication.md` |
+| [AOA-SM-D-0021 Raw-Preserving Derived-Text Privacy Boundary](../AOA-SM-D-0021-raw-preserving-derived-text-privacy-boundary.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0021-raw-preserving-derived-text-privacy-boundary.md` |
 
 ## recovery
 

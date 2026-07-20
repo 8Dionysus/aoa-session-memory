@@ -48,7 +48,12 @@ before Codex session archiving starts.
 - `.aoa/AGENTS.md` exists.
 - `.aoa/INSTALL.md` exists for portable setup.
 - `.aoa/scripts/aoa_session_memory.py` compiles.
-- `export-bundle` creates a clean bundle unless `--with-sessions` is explicit.
+- `export-bundle` always creates a public-safe bundle without session archives
+  or raw evidence. The legacy `--with-sessions` spelling is retained only to
+  fail explicitly and direct private transfers to an owner-to-owner migration
+  route.
+- `portable-public-safety-audit` reports no credential, host-path, runtime
+  database, diagnostics, session-evidence, or incomplete-coverage findings.
 - `hooks-config` emits all required Codex lifecycle hooks for the selected
   roots.
 - `codex-grounding` passes on a host with Codex installed.

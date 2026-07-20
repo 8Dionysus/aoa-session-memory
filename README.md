@@ -115,8 +115,20 @@ workspace/.aoa
 ```
 
 A live workspace may contain private session archives, generated search/graph
-stores, and diagnostics. A clean portable bundle excludes those runtime
-surfaces by default.
+stores, and diagnostics. A portable bundle always excludes those runtime
+surfaces; private evidence transfer belongs to a separate owner-to-owner
+migration route.
+
+Before publication, run the same bounded public-safety gate used by
+`export-bundle`:
+
+```bash
+python3 scripts/aoa_session_memory.py portable-public-safety-audit \
+  --aoa-root /path/to/portable/.aoa
+```
+
+The gate fails closed on runtime evidence, credential-like values, private
+host paths, or incomplete scan coverage without echoing matched values.
 
 ## Quick Start
 
@@ -227,6 +239,13 @@ A stale packet can still route older evidence, but it cannot silently answer a
 current-state question. Use the packet's typed next action or the relevant
 maintenance route. A timer success is not proof that every semantic projection
 is current.
+
+Graph freshness includes the exact persisted entity-registry generation used
+to canonicalize its nodes and edges. Graph metadata and every source
+contribution pin that dependency. If the registry generation, semantic digest,
+source fingerprint, or stronger owner-source freshness changes, graph routes
+abstain until catch-up or full rebuild; they do not mix aliases dynamically
+inside one graph generation.
 
 ## Agent Access
 
