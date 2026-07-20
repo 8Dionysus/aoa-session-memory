@@ -5757,6 +5757,95 @@ def test_episode_ref_expansion_recovers_source_aware_typed_anchors(tmp_path: Pat
     assert ("test", "test_validate_skills_questbook_contract", "inspected") in relations
 
 
+def test_episode_enrichment_promotes_canonical_response_over_stream_mirror(
+    tmp_path: Path,
+) -> None:
+    raw_path = tmp_path / "session.raw.jsonl"
+    text = "На связи. Не завис, проверяю состояние."
+    write_jsonl(
+        raw_path,
+        [
+            {
+                "timestamp": "2026-06-10T19:00:00Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "agent_message",
+                    "message": text,
+                },
+            },
+            {
+                "timestamp": "2026-06-10T19:00:00.100Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {"type": "output_text", "text": text}
+                    ],
+                },
+            },
+        ],
+    )
+    episode = {
+        "event_range": {"from_line": 1, "to_line": 2},
+        "representations": {
+            "outcomes": [
+                {
+                    "text": text,
+                    "source_lane": "event_msg_stream",
+                    "admission_basis": "runtime_stream_observation",
+                    "line": 1,
+                    "refs": {"raw": "raw:line:1"},
+                }
+            ]
+        },
+        "action_refs": [],
+        "tool_refs": [],
+        "plan_refs": [],
+        "progress_refs": [],
+        "answer_refs": [
+            {
+                "line": 2,
+                "raw_ref": "raw:line:2",
+                "source_type": "response_item",
+            }
+        ],
+        "closeout_refs": [],
+        "verification_refs": [],
+        "error_refs": [],
+        "blocker_refs": [],
+    }
+
+    limits = module.episode_semantic_ref_line_limits([episode])
+    assert set(limits) == {1, 2}
+    records = module.raw_event_semantic_records_by_line(
+        raw_path,
+        line_limits=limits,
+    )
+    enriched = module.episode_semantic_enrich_from_refs(
+        episode,
+        raw_records_by_line=records,
+        session_ref="session.manifest.json",
+    )
+
+    outcomes = enriched["representations"]["outcomes"]
+    assert len(outcomes) == 1
+    assert outcomes[0]["line"] == 2
+    assert outcomes[0]["source_lane"] == "episode_ref_response_item"
+    assert outcomes[0]["mirror_refs"] == [
+        {
+            "raw": "raw:line:1",
+            "session": "session.manifest.json",
+        }
+    ]
+    assert outcomes[0]["mirror_evidence"]["status"] == (
+        "proven_adjacent_runtime_mirror_collapsed"
+    )
+    assert enriched["semantic_contract"][
+        "assistant_runtime_mirror_collapse"
+    ]["collapsed_entry_count"] == 1
+
+
 def test_episode_legacy_normalization_rebuilds_raw_evidence_and_scrubs_old_edges(tmp_path: Path) -> None:
     raw_path = tmp_path / "session.raw.jsonl"
     write_jsonl(
@@ -11638,7 +11727,15 @@ def test_failure_recovery_alignment_requires_ordered_correlations_and_human_diag
         "как missingcomponent20260714zz сломал перезапуск Chromium и как после этого восстановились"
     )
     russian_profile = module.episode_failure_recovery_query_profile(russian_missing_anchor_terms)
-    assert russian_profile == {"failure": True, "recovery": True, "active": True}
+    assert russian_profile == {
+        "failure": True,
+        "recovery": True,
+        "active": True,
+        "multiplicity_requested": False,
+        "chain_requested": False,
+        "continuation_requested": False,
+        "consequence_requested": False,
+    }
     russian_unresolved = module.episode_failure_recovery_alignment(episode, russian_missing_anchor_terms)
     assert russian_unresolved["status"] == "failure_recovery_chain_unresolved"
     russian_rejected = module.episode_answer_admission(
@@ -20698,6 +20795,298 @@ def test_graph_neighborhood_explains_exact_store_miss_and_bounded_retrieval_seed
     )
 
 
+def test_graph_neighborhood_uses_source_verified_exact_correlation_before_fuzzy_seed(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    correlation_id = "call_exact_neighborhood_123456789"
+    refs = {
+        "raw": "raw:line:10",
+        "segment": "001.md#event-000010",
+        "segment_index": "001.index.json",
+        "session": "session.manifest.json",
+    }
+
+    monkeypatch.setattr(
+        module,
+        "graph_from_store_neighborhood",
+        lambda **_kwargs: {
+            "ok": False,
+            "source": "sqlite_graph_store",
+            "nodes": [],
+            "edges": [],
+            "resolved": {
+                "start_node_ids": [],
+                "resolver_strategy": (
+                    "indexed_exact_miss_requires_retrieval_seed"
+                ),
+            },
+            "diagnostics": [
+                "graph_store_unindexed_payload_scan_skipped"
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "graph_source_verified_correlation_timeline",
+        lambda **_kwargs: {
+            "ok": True,
+            "source": "source_verified_correlation_trace",
+            "generated_at": "2026-07-19T00:00:00Z",
+            "node_count": 2,
+            "edge_count": 1,
+            "nodes": [
+                {
+                    "id": "event:s:001:000010",
+                    "type": "event",
+                    "line": 10,
+                    "correlation_id": correlation_id,
+                    "refs": refs,
+                    "evidence_refs": [{"refs": refs}],
+                },
+                {
+                    "id": "event:s:001:000011",
+                    "type": "event",
+                    "line": 11,
+                    "correlation_id": correlation_id,
+                    "refs": {
+                        **refs,
+                        "raw": "raw:line:11",
+                    },
+                    "evidence_refs": [
+                        {
+                            "refs": {
+                                **refs,
+                                "raw": "raw:line:11",
+                            }
+                        }
+                    ],
+                },
+            ],
+            "edges": [
+                {
+                    "id": "edge:exact-correlation",
+                    "source": "event:s:001:000010",
+                    "target": "event:s:001:000011",
+                    "type": "answered_by",
+                    "correlation_id": correlation_id,
+                    "evidence_refs": [{"refs": refs}],
+                }
+            ],
+            "resolved": {
+                "start_node_ids": [
+                    "event:s:001:000010",
+                    "event:s:001:000011",
+                ],
+                "resolver_strategy": (
+                    "source_event_correlation_id_exact"
+                ),
+            },
+            "freshness": {
+                "status": "scope_unverified",
+                "global_freshness": {"status": "unresolved"},
+                "scope_freshness": {
+                    "status": "scope_source_verified",
+                    "does_not_upgrade_global_freshness": True,
+                },
+            },
+            "quality": {
+                "structured_correlation_candidate_budget_exhausted": (
+                    False
+                )
+            },
+            "diagnostics": [
+                "structured_correlation_source_admission_applied"
+            ],
+        },
+    )
+
+    def forbidden_fuzzy_route(**_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError(
+            "generic fuzzy route must not run for an exact correlation"
+        )
+
+    monkeypatch.setattr(module, "trace_route", forbidden_fuzzy_route)
+
+    neighborhood = module.graph_neighborhood(
+        aoa_root=tmp_path / ".aoa",
+        anchor=correlation_id,
+        kind="auto",
+        depth=2,
+        limit=8,
+    )
+
+    assert neighborhood["ok"] is True
+    assert neighborhood["graph"]["source"] == (
+        "source_verified_correlation_trace"
+    )
+    assert neighborhood["route_selection"] == {
+        "first_route": "sqlite_graph_store_exact",
+        "first_route_resolution": (
+            "indexed_exact_miss_requires_retrieval_seed"
+        ),
+        "selected_route": "source_verified_correlation_trace",
+        "fallback_reason": (
+            "exact_correlation_not_materialized_in_graph_store"
+        ),
+        "generic_fuzzy_graph_expansion_used": False,
+    }
+    assert neighborhood["freshness"]["global_freshness"][
+        "status"
+    ] == "unresolved"
+    assert neighborhood["answer_admission"]["admitted"] is False
+    assert neighborhood["answer_admission"][
+        "navigation_admissible"
+    ] is True
+
+
+def test_typed_graph_miss_keeps_wrong_kind_fuzzy_path_as_navigation_only(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    anchor = "operational_use_wave_e"
+    refs = {
+        "raw": "raw:line:10",
+        "segment": "001.md#event-000010",
+        "segment_index": "001.index.json",
+        "session": "session.manifest.json",
+    }
+    path_node_id = module.graph_route_node_id(
+        "path",
+        "evidence_operational_use_wave_e_tsv",
+    )
+
+    monkeypatch.setattr(
+        module,
+        "graph_from_store_neighborhood",
+        lambda **_kwargs: {
+            "ok": False,
+            "nodes": [],
+            "edges": [],
+            "resolved": {
+                "start_node_ids": [],
+                "resolver_strategy": (
+                    "indexed_exact_miss_requires_retrieval_seed"
+                ),
+            },
+            "diagnostics": [
+                "graph_store_unindexed_payload_scan_skipped"
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "trace_route",
+        lambda **_kwargs: {
+            "ok": True,
+            "result_count": 1,
+            "results": [{"doc_id": "event:s:001:000010"}],
+            "route_candidates": [],
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "graph_from_search_results",
+        lambda **_kwargs: {
+            "ok": True,
+            "source": "bounded_trace_search",
+            "generated_at": "2026-07-19T00:00:00Z",
+            "nodes": [
+                {
+                    "id": path_node_id,
+                    "type": "path",
+                    "label": (
+                        "path:evidence_operational_use_wave_e_tsv"
+                    ),
+                    "route_layer": "path",
+                    "route_key": (
+                        "evidence_operational_use_wave_e_tsv"
+                    ),
+                    "evidence_refs": [{"refs": refs}],
+                }
+            ],
+            "edges": [],
+            "diagnostics": [],
+        },
+    )
+
+    neighborhood = module.graph_neighborhood(
+        aoa_root=tmp_path / ".aoa",
+        anchor=anchor,
+        kind="agent",
+        depth=2,
+        limit=8,
+    )
+
+    assert neighborhood["ok"] is False
+    assert neighborhood["nodes"] == []
+    assert [node["id"] for node in neighborhood["candidate_nodes"]] == [
+        path_node_id
+    ]
+    assert neighborhood["resolved"]["start_node_ids"] == []
+    assert neighborhood["resolved"]["candidate_node_ids"] == [
+        path_node_id
+    ]
+    assert neighborhood["resolved"]["resolver_strategy"] == (
+        "typed_anchor_unresolved_fuzzy_candidates"
+    )
+    assert neighborhood["route_selection"]["selected_route"] == (
+        "bounded_trace_search_candidate_only"
+    )
+    assert neighborhood["route_selection"]["fallback_reason"] == (
+        "typed_exact_anchor_unresolved_candidate_navigation_only"
+    )
+    assert neighborhood["answer_admission"]["admitted"] is False
+    assert neighborhood["answer_admission"][
+        "navigation_admissible"
+    ] is False
+
+    monkeypatch.setattr(
+        module,
+        "graph_neighborhood",
+        lambda **_kwargs: neighborhood,
+    )
+    monkeypatch.setattr(
+        module,
+        "search_sessions",
+        lambda **_kwargs: {
+            "ok": True,
+            "results": [
+                {
+                    "doc_id": "event:s:001:000010",
+                    "refs": refs,
+                    "freshness": {"status": "fresh"},
+                }
+            ],
+            "diagnostics": [],
+        },
+    )
+    quality = module.graph_quality_audit(
+        aoa_root=tmp_path / ".aoa",
+        anchors=[
+            {
+                "id": "wrong_kind_agent",
+                "anchor": anchor,
+                "kind": "agent",
+                "role": "agent",
+            }
+        ],
+        limit=4,
+        sample_ref_limit=1,
+    )
+
+    assert quality["ok"] is True
+    assert quality["ready_for_manual_verdict_count"] == 0
+    assert quality["correct_typed_abstention_count"] == 1
+    assert quality["needs_repair_before_verdict_count"] == 0
+    sample = quality["samples"][0]
+    assert sample["review_status"] == "correct_typed_abstention"
+    assert sample["quality_flags"] == []
+    assert sample["answer_rules"]["status"] == "needs_review"
+    assert sample["answer_rules"]["important_claim_allowed"] is False
+
+
 def test_graph_store_typed_path_exact_key_wins_alias_and_fuzzy_collisions(tmp_path: Path) -> None:
     aoa_root = tmp_path / ".aoa"
     store = module.GraphSqliteStore(aoa_root, reset=True)
@@ -29003,6 +29392,95 @@ def test_entity_usage_scenario_audit_is_layer_aware_for_hook_and_agent_events(tm
     assert audit["provider_summary"]["providers"]["portable_sqlite"]["freshness"]["status"] == "current"
 
 
+def test_entity_usage_scenario_keeps_missing_hook_receipt_unresolved_not_false_failure(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    candidate = {
+        "route_id": 1,
+        "layer": "hook",
+        "key": "postcompact",
+        "kind": "hook",
+        "anchor": "postcompact",
+        "route_signal": "hook:postcompact",
+        "registry_status": "observed",
+        "registry_source_surface": "archived_route_terms",
+    }
+
+    monkeypatch.setattr(
+        module,
+        "entity_usage_scenario_candidates",
+        lambda **_kwargs: ([candidate], []),
+    )
+    monkeypatch.setattr(
+        module,
+        "hook_receipt_route_search",
+        lambda **_kwargs: {
+            "ok": True,
+            "generated_at": "2026-07-19T00:00:00Z",
+            "receipt_path_count": 2,
+            "session_record_count": 3,
+            "session_without_receipt_path_count": 1,
+            "scanned_line_count": 9,
+            "total_receipt_count": 0,
+            "receipts": [],
+            "coverage": {
+                "status": "partial_local_receipt_path_coverage",
+                "negative_claim_allowed": False,
+            },
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "search_provider_status_fast",
+        lambda **_kwargs: {
+            "schema_version": 1,
+            "artifact_type": "search_provider_status",
+            "ok": True,
+            "selected_provider": "portable_sqlite",
+            "providers": {
+                "portable_sqlite": {
+                    "provider": "portable_sqlite",
+                    "ok": True,
+                    "status": "ready",
+                    "has_route_index": True,
+                    "has_route_terms": True,
+                    "freshness": {
+                        "status": "current",
+                        "checked": True,
+                    },
+                }
+            },
+        },
+    )
+
+    audit = module.entity_usage_scenario_audit(
+        aoa_root=tmp_path / ".aoa",
+        sample_size=1,
+        seed="missing-postcompact-receipt",
+    )
+
+    assert audit["ok"] is True
+    assert audit["quality"]["passed_count"] == 0
+    assert audit["quality"]["warn_count"] == 0
+    assert audit["quality"]["unresolved_count"] == 1
+    assert audit["quality"]["failed_count"] == 0
+    sample = audit["samples"][0]
+    assert sample["status"] == "unresolved"
+    assert sample["answer_admission"]["admitted"] is False
+    assert sample["answer_admission"]["status"] == (
+        "hook_usage_unresolved_no_matching_owner_receipt"
+    )
+    assert sample["answer_admission"]["negative_claim_allowed"] is False
+    assert sample["next_owner_route"] == (
+        "inspect current hook owner/runtime configuration and capture a "
+        "new matching receipt"
+    )
+    assert sample["event_count"] == 0
+    assert sample["evidence_refs"] == []
+
+
 def test_entity_usage_audit_uses_fast_provider_status_for_route_packet(tmp_path: Path, monkeypatch: Any) -> None:
     usage_hit = {
         "doc_id": "event:session:001:000001",
@@ -34188,12 +34666,12 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(
         for result in packet["lexical"]["results"]
         if result.get("doc_type") == "entity_registry"
     )
-    assert packet["answer_rules"]["status"] in {"needs_review", "evidence_ready"}
-    assert packet["answer_rules"]["important_claim_allowed"] is True
+    assert packet["answer_rules"]["status"] == "needs_review"
+    assert packet["answer_rules"]["important_claim_allowed"] is False
     assert explain["artifact_type"] == "session_memory_graph_explain_packet"
     assert explain["kind"] == "mcp"
     assert explain["evidence_refs"]
-    assert explain["answer_rules"]["graph_rag_synthesis_allowed"] is True
+    assert explain["answer_rules"]["graph_rag_synthesis_allowed"] is False
     assert eval_payload["results"]
     assert quality["artifact_type"] == "session_memory_graph_quality_audit"
     assert quality["ok"] is True
@@ -57730,6 +58208,84 @@ def test_graph_high_fanout_cardinality_comparison_proves_configured_targets(
     assert route_comparison["rejected_candidate"]["reason"] == (
         "segment/session route-signal aggregate is larger than the source mention edge set"
     )
+
+
+def test_graph_high_fanout_cardinality_uses_explicit_counterfactual_for_default_omitted_has_event(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir()
+    projection = {
+        "status": "current",
+        "counts": {
+            "node": {"event": 700},
+            "edge": {
+                "event_mentions_registered_entity": 1000,
+                "session_has_registered_entity": 50,
+                "mentions_route_signal": 800,
+                "answered_by": 100,
+                "responds_to": 100,
+                "has_task_episode": 5,
+                "goal_lifecycle_has_event": 10,
+                "goal_lifecycle_in_task_episode": 4,
+                "has_goal_lifecycle": 2,
+            },
+        },
+        "metadata": {},
+        "diagnostics": [],
+    }
+    monkeypatch.setattr(
+        module,
+        "episode_direct_relation_postings_cardinality",
+        lambda _aoa_root: {
+            "ok": True,
+            "status": "current",
+            "proof_ready": True,
+            "physical_direct_posting_count": 60,
+            "count_basis": "current_physical_rows",
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "session_memory_operational_route_rollup_status",
+        lambda **_kwargs: {
+            "status": "current",
+            "needs_refresh": False,
+            "source_mismatch_count": 0,
+            "route_rollup_row_count": 10,
+            "diagnostics": [],
+        },
+    )
+
+    payload = module.graph_high_fanout_cardinality_comparison(
+        aoa_root=aoa_root,
+        projection=projection,
+        limit=12,
+    )
+    structural = next(
+        item
+        for item in payload["target_comparisons"]
+        if item["target_projection"]
+        == module.GRAPH_STRUCTURAL_EVENT_CHAIN_TARGET_PROJECTION
+    )
+
+    assert payload["ok"] is True
+    assert structural["passed"] is True
+    assert structural["post_prune_verified"] is False
+    assert structural["physical_before_edge_counts"] == {
+        "has_event": 0
+    }
+    assert structural["before_edge_counts"] == {"has_event": 700}
+    assert structural["before_count_source"] == (
+        "counterfactual_one_per_event_node_under_"
+        "default_omitted_producer_policy"
+    )
+    assert structural["counterfactual_node_type"] == "event"
+    assert structural["counterfactual_node_count"] == 700
+    assert structural["after_edge_count"] == 221
+    assert "has_event" in structural["default_omitted_edge_types"]
+    assert "has_event" not in module.GRAPH_HIGH_FANOUT_PRUNE_EDGE_TYPES
 
 
 def test_graph_high_fanout_cardinality_blocks_partial_episode_replacement(
@@ -81398,9 +81954,20 @@ def test_episode_failure_recovery_distinguishes_observed_sequence_from_causality
         },
         "failure_recovery_windows": [],
     }
-    query = "Какая recovery-цепочка последовала после Ты завис?"
+    query = "Было ли после сообщения Ты завис сообщение Продолжай?"
     terms = module.episode_semantic_query_terms(query)
     alignment = module.episode_failure_recovery_alignment(episode, terms)
+    broad_query = (
+        "Найди эпизод установки Ghostty, где пользователь несколько раз "
+        "счёл агента зависшим, а затем работа продолжилась."
+    )
+    broad_terms = module.episode_semantic_query_terms(broad_query)
+    incomplete_broad_alignment = (
+        module.episode_failure_recovery_alignment(
+            episode,
+            broad_terms,
+        )
+    )
     replay_profile = module.episode_replay_query_profile(
         terms,
         query_text=query,
@@ -81417,7 +81984,7 @@ def test_episode_failure_recovery_distinguishes_observed_sequence_from_causality
     assert alignment["status"] == (
         "ordered_observed_failure_resume_sequence"
     )
-    assert replay_profile["resume"] is False
+    assert replay_profile["resume"] is True
     assert replay_profile["active"] is False
     assert interval_replay_profile["resume"] is True
     assert interval_replay_profile["active"] is False
@@ -81433,6 +82000,13 @@ def test_episode_failure_recovery_distinguishes_observed_sequence_from_causality
     assert alignment["claim_scope"] == (
         "observed_temporal_sequence_not_causal_consequence"
     )
+    assert incomplete_broad_alignment["status"] == (
+        "observed_failure_resume_qualifiers_unresolved"
+    )
+    assert incomplete_broad_alignment["sequence_admissible"] is False
+    assert set(
+        incomplete_broad_alignment["unsatisfied_qualifiers"]
+    ) == {"multiplicity", "continuation"}
 
     prioritized_evidence = {"supporting_evidence": []}
     prioritized_evidence["supporting_evidence"] = (
@@ -81484,6 +82058,111 @@ def test_episode_failure_recovery_distinguishes_observed_sequence_from_causality
         for item in claim_refs
     } >= {"raw:line:243", "raw:line:285"}
     assert "do not prove causal" in admission["policy"]
+
+    complete_episode = json.loads(json.dumps(episode))
+    complete_episode["semantic_continuations"][1:1] = [
+        {
+            "text": "????",
+            "line": 249,
+            "relation": "failure_observation",
+            "source_lane": "message_user",
+            "admission_basis": "typed_operator_conversation_act",
+            "refs": {
+                "raw": "raw:line:249",
+                "session": "session.json",
+            },
+        },
+        {
+            "text": "Ало, прием. Ты завис?",
+            "line": 258,
+            "relation": "failure_observation",
+            "source_lane": "message_user",
+            "admission_basis": "typed_operator_conversation_act",
+            "refs": {
+                "raw": "raw:line:258",
+                "session": "session.json",
+            },
+        },
+    ]
+    complete_episode["representations"]["actions"] = [
+        {
+            "text": "exec_command install Ghostty",
+            "line": 290,
+            "source_lane": "structured_tool_call",
+            "admission_basis": "structured_operational_action",
+            "correlation_id": "call-ghostty-resume",
+            "refs": {
+                "raw": "raw:line:290",
+                "session": "session.json",
+            },
+        }
+    ]
+    complete_episode["representations"]["outcomes"].append(
+        {
+            "text": "Process exited with code 0",
+            "line": 297,
+            "source_lane": "structured_tool_result",
+            "admission_basis": "structured_result_status",
+            "correlation_id": "call-ghostty-resume",
+            "outcome": "succeeded",
+            "refs": {
+                "raw": "raw:line:297",
+                "session": "session.json",
+            },
+        }
+    )
+    complete_broad_alignment = (
+        module.episode_failure_recovery_alignment(
+            complete_episode,
+            broad_terms,
+        )
+    )
+    assert complete_broad_alignment["status"] == (
+        "ordered_observed_failure_resume_sequence"
+    )
+    assert complete_broad_alignment["sequence_admissible"] is True
+    assert complete_broad_alignment["unsatisfied_qualifiers"] == []
+    assert complete_broad_alignment["qualifier_checks"][
+        "multiplicity"
+    ]["observed_failure_count"] == 3
+    assert complete_broad_alignment["chain"][
+        "post_resume_action"
+    ]["refs"]["raw"] == "raw:line:290"
+    assert complete_broad_alignment["chain"][
+        "post_resume_result"
+    ]["refs"]["raw"] == "raw:line:297"
+    broad_admission = module.episode_answer_admission(
+        {
+            "doc_id": "episode:observed-failure-resume-complete",
+            "query_coverage": {
+                "coverage": 0.2,
+                "matched_term_count": 1,
+            },
+            "supporting_evidence": [],
+            "failure_recovery": complete_broad_alignment,
+        },
+        query_term_count=len(broad_terms),
+    )
+    assert broad_admission["admitted"] is True
+    assert {
+        item["refs"]["raw"]
+        for item in module.episode_claim_evidence_refs(
+            {
+                "doc_id": (
+                    "episode:observed-failure-resume-complete"
+                ),
+                "failure_recovery": complete_broad_alignment,
+            },
+            broad_admission,
+        )
+    } >= {
+        "raw:line:243",
+        "raw:line:249",
+        "raw:line:258",
+        "raw:line:285",
+        "raw:line:290",
+        "raw:line:297",
+    }
 
     causal_candidates, causal_gate = (
         module.episode_causal_claim_shape_gate(
