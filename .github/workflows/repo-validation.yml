@@ -54,7 +54,7 @@ jobs:
           pytest==9.0.3 'PyYAML>=6.0,<7.0' 'jsonschema>=4.0,<5.0'
 
       - name: Check repo-local KAG index family
-        uses: 8Dionysus/aoa-kag/.github/actions/repo-local-kag-index@b28f64a497fd440dd58cbaae90d655da46224d8c
+        uses: 8Dionysus/aoa-kag/.github/actions/repo-local-kag-index@f9893eee77c5431b6fa7804b7eb2341a4e1200de
         with:
           history-ref: ${{ github.event.pull_request.base.sha || github.event.before || format('{0}^', github.sha) }}
           event-history-ref: ${{ github.event.pull_request.base.sha || github.event.before || format('{0}^', github.sha) }}

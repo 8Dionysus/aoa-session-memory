@@ -1,0 +1,17 @@
+{
+  "allowed_bytes": 5209453,
+  "allowed_tracked_bytes": 18315544,
+  "approved_by": "repository-owner",
+  "base_ref": "414cfe59baf63148e5df77f2a1e846cfe521c134",
+  "changed_generated_bytes": 5209453,
+  "changed_generated_files": 87,
+  "decision_ref": "aoa-kag:docs/decisions/AOA-KAG-D-0017-portable-content-addressed-repository-family.md",
+  "default_limit_bytes": 1048576,
+  "head_family_digest": "b8b62ef111effe9764a8c6c600d9538e7a7754d42c7fadf6891f22e9ba315b2b",
+  "reason": "Project capability contracts into typed KAG entities and relations through the declared owner port.",
+  "repo": "aoa-session-memory",
+  "schema_version": "aoa-repo-local-kag-budget-receipt-v1",
+  "scope": "generated_delta_and_tracked_size",
+  "tracked_bytes": 18315544,
+  "tracked_bytes_max": 13631488
+}
