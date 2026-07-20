@@ -50,7 +50,7 @@
     {
       "path": "generated/capability_graph.json",
       "kind": "file",
-      "sha256": "58b36aed538e2c3cff4b68f67ecb17d50f5b9bdb00fd94daedc5ee4bb7cef5af"
+      "sha256": "246f8c09cc2438962cb26bf50286cd04beba478a85cb9ec27fe73ab18d4c4be1"
     }
   ],
   "auto_run_allowed": false,
