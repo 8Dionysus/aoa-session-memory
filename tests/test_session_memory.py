@@ -30,6 +30,37 @@ sys.modules["aoa_session_memory"] = module
 spec.loader.exec_module(module)
 
 
+def test_best_effort_progress_emitter_quarantines_broken_pipe() -> None:
+    class BrokenPipeStream:
+        def write(self, _text: str) -> int:
+            raise BrokenPipeError(32, "progress reader closed")
+
+        def flush(self) -> None:
+            raise BrokenPipeError(32, "progress reader closed")
+
+    emitter = module.BestEffortJsonProgressEmitter(
+        enabled=True,
+        stream=BrokenPipeStream(),
+    )
+
+    assert emitter.emit({"event": "first"}) is False
+    assert emitter.emit({"event": "second"}) is False
+    assert emitter.summary() == {
+        "schema_version": 1,
+        "requested": True,
+        "status": "detached_broken_pipe",
+        "emitted_count": 0,
+        "failed_count": 1,
+        "suppressed_count": 1,
+        "stream_detached": False,
+        "failure_kind": "BrokenPipeError",
+        "authority_boundary": (
+            "progress transport is non-authoritative; projection receipts "
+            "and resolvable evidence prove semantic progress"
+        ),
+    }
+
+
 def write_jsonl(path: Path, rows: list[dict[str, object]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8")
@@ -35750,6 +35781,111 @@ def test_graph_atomic_rebuild_preserves_published_store_when_dependency_changes(
         in result["diagnostics"]
     )
     assert after_digest == before_digest
+
+
+def test_graph_progress_broken_pipe_does_not_abort_semantic_publish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    module.build_entity_registry(
+        aoa_root=aoa_root,
+        write=True,
+        include_runtime=False,
+        observed_source="none",
+    )
+
+    source_name = "progress-pipe"
+    event_id = f"event:{source_name}:000:000001"
+    contribution = {
+        "source": {
+            "source_key": f"segment:{source_name}:000",
+            "source_type": "segment",
+            "session_id": source_name,
+            "session_label": (
+                f"2026-07-19__001__{source_name}"
+            ),
+            "segment_id": "000",
+            "source_path": str(
+                tmp_path / f"{source_name}.json"
+            ),
+            "source_paths": [
+                str(tmp_path / f"{source_name}.json")
+            ],
+            "source_sha": f"{source_name}-sha",
+            "source_mtime": 1.0,
+            "graph_schema_version": (
+                module.GRAPH_SCHEMA_VERSION
+            ),
+            "graph_store_schema_version": (
+                module.GRAPH_STORE_SCHEMA_VERSION
+            ),
+            "graph_event_route_signal_edge_policy": (
+                module.GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY
+            ),
+            "route_signal_classifier_version": (
+                module.ROUTE_SIGNAL_CLASSIFIER_VERSION
+            ),
+        },
+        "nodes": [{"id": event_id, "type": "event"}],
+        "edges": [
+            {
+                "id": f"edge:{source_name}",
+                "source": event_id,
+                "target": f"route:tool:{source_name}",
+                "type": "mentions_route_signal",
+            }
+        ],
+    }
+
+    class BrokenPipeStream:
+        def write(self, _text: str) -> int:
+            raise BrokenPipeError(32, "progress reader closed")
+
+        def flush(self) -> None:
+            raise BrokenPipeError(32, "progress reader closed")
+
+    monkeypatch.setattr(
+        module,
+        "graph_session_records",
+        lambda *_args, **_kwargs: (
+            [{"session_id": source_name, "path": str(tmp_path)}],
+            [],
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "graph_contributions_for_record",
+        lambda *_args, **_kwargs: ([contribution], []),
+    )
+    monkeypatch.setattr(
+        module.sys,
+        "stderr",
+        BrokenPipeStream(),
+    )
+
+    result = module.build_session_graph(
+        aoa_root=aoa_root,
+        target="all",
+        write=True,
+        include_rows=False,
+        export_sidecar=False,
+        atomic_store_rebuild=True,
+        progress_every=1,
+    )
+    state = module.graph_store_query_state(aoa_root)
+
+    assert result["ok"] is True
+    assert result["written"] is True
+    assert result["processed_record_count"] == 1
+    assert result["progress_telemetry"]["status"] == (
+        "detached_broken_pipe"
+    )
+    assert result["progress_telemetry"]["failed_count"] == 1
+    assert state["status"] == "current"
+    assert (
+        aoa_root / "graph" / "graph.sqlite3"
+    ).is_file()
 
 
 def test_graph_atomic_rebuild_preserves_store_when_producer_changes(

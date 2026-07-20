@@ -218,6 +218,19 @@ backlog, catch-up, deep, and manual-bulk profiles represent different resource
 and mutation envelopes. Timer-driven work yields to active owners and records
 resource-pressure deferrals.
 
+Each writer pins its generation identities to the producer bytes loaded by the
+current process. It rechecks the resolved producer source before atomic
+publication; a missing, unreadable, or changed source refuses publication and
+preserves the last-good projection. Re-reading a mutable script path must not
+make in-memory code claim a newer generation.
+
+Optional JSON progress events are best-effort observability. A broken progress
+pipe is detached and later heartbeat events are suppressed without aborting
+semantic work. The operation packet exposes delivery, failure, and suppression
+counts separately. Projection receipts, generation checks, resolvable evidence,
+and atomic publication prove semantic progress; heartbeat delivery, process
+exit, timer completion, and lock acquisition do not.
+
 Multi-lane evaluations use the same coordinator in read mode. They pin
 source and projection semantic identities before candidate generation, reject
 an active writer or incompatible generation without publishing a pin, and

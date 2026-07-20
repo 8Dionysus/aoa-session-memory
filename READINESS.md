@@ -104,8 +104,15 @@ Ready when:
 - generated intervals match preserved coordinates;
 - segment and session indexes resolve to raw evidence;
 - schema/classifier versions are visible;
+- generation identities name the producer bytes loaded by the writer, and a
+  changed producer source refuses publication;
 - stale indexes are detected and rebuildable;
 - compaction markers do not create false semantic microsegments.
+
+Progress transport is a separate runtime-observability gate. A disconnected
+heartbeat reader must not abort an otherwise valid atomic build, and delivered
+heartbeat events must not be accepted as evidence that the projection is
+current.
 
 ### 4. Episodes
 
