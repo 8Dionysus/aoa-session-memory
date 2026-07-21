@@ -71,10 +71,13 @@ and claim ceilings, not a benefit verdict.
 An admitted receipt must bind source, installed, prompt-visible, selected, and
 executed versions; package and installed fingerprints; one task episode;
 observed procedure sections; tools; checkpoints; a verifier; consequences;
-review; and alternative explanations. `identity_status=drift` remains useful
-diagnostic evidence but cannot prove invocation. Even a verified current
-receipt exposes only an effect-attribution candidate until `aoa-evals`
-resolves a controlled comparison.
+review; and alternative explanations. `identity_status=drift` can prove
+invocation of the explicitly matched historical selected/executed package
+when those identities agree, but it sets `source_current=false` and
+`promotion_identity_eligible=false`. It cannot prove that the current source
+was invoked. Even a verified current receipt exposes only an
+effect-attribution candidate until `aoa-evals` resolves a controlled
+comparison.
 
 If `quality.skill_text_fallback_deferred=true`, the bounded dispatch passes
 found no candidate and deliberately avoided broad FTS. This is not proof of

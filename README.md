@@ -202,6 +202,10 @@ reviewed receipt can support invocation, deflection, and verification claims,
 plus an effect-attribution candidate. It cannot issue a benefit or promotion
 verdict; that authority remains with `aoa-evals`.
 
+For a reproducible, evidence-first demonstration that another session can run
+without preselecting its target from retriever output, follow
+[`docs/SKILL-USAGE-EVIDENCE-DEMO.md`](docs/SKILL-USAGE-EVIDENCE-DEMO.md).
+
 Inspect one task interval:
 
 ```bash
