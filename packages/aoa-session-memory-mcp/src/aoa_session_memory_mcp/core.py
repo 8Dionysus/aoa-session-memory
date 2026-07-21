@@ -5276,7 +5276,7 @@ class AoASessionMemoryMCPState:
             return None
         conn: sqlite3.Connection | None = None
         try:
-            conn = sqlite3.connect(str(db_path))
+            conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True, timeout=0.5)
             conn.row_factory = sqlite3.Row
             if not self._sqlite_table_exists(conn, "documents"):
                 return None
@@ -7245,7 +7245,7 @@ class AoASessionMemoryMCPState:
         where = " AND ".join(filters)
         conn: sqlite3.Connection | None = None
         try:
-            conn = sqlite3.connect(str(db_path))
+            conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True, timeout=0.5)
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 f"""
