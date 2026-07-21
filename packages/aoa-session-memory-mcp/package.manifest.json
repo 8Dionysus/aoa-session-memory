@@ -191,8 +191,8 @@
     {
       "mode": "0644",
       "path": "tests/test_session_memory_mcp.py",
-      "sha256": "93b6cf43a21d6aa1dd95fe3e2a44890ba2e6da8e3bdf85236b92c480ce9e4702",
-      "size": 341837,
+      "sha256": "1a24533bced9f473f85412e10a818c3d1c5e87ba0d4be1dd0b62b02ecf68789a",
+      "size": 341820,
       "source": "owner:tests/test_session_memory_mcp.py"
     }
   ],
@@ -2498,8 +2498,8 @@
   "schema": "aoa_session_memory_mcp_package_manifest_v1",
   "schema_version": 1,
   "upstream": {
-    "commit": "304c058a5cf8a76ddb8f49d107b604f1b1c9daa8",
-    "commit_epoch": 1784612405,
+    "commit": "df9d416a8df23c47ff67d2428ee8116a4cc51dd6",
+    "commit_epoch": 1784613113,
     "repository": "https://github.com/8Dionysus/abyss-stack",
     "source_path": "mcp/services/aoa-session-memory-mcp"
   }

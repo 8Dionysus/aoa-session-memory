@@ -3817,8 +3817,8 @@ def test_codex_session_advisory_reports_current_stale_transport(tmp_path: Path, 
         process_dir.joinpath("stat").write_text(" ".join(fields), encoding="utf-8")
 
     write_process(current_pid, "200", ["python", "validate_session_memory_mcp.py"], 3_500.0)
-    write_process("200", "1", ["/home/dionysus/.local/bin/codex", "resume"], 1_500.0)
-    write_process("201", "1", ["/home/dionysus/.local/bin/codex", "resume"], 3_500.0)
+    write_process("200", "1", ["/home/example/.local/bin/codex", "resume"], 1_500.0)
+    write_process("201", "1", ["/home/example/.local/bin/codex", "resume"], 3_500.0)
     write_process("301", "201", ["python3", ".codex/bin/aoa-session-memory-mcp-server.py"], 3_600.0)
 
     advisory = validator._codex_session_advisory(proc)
@@ -3875,8 +3875,8 @@ def test_codex_session_advisory_treats_config_mtime_as_advisory_when_child_is_fr
         process_dir.joinpath("stat").write_text(" ".join(fields), encoding="utf-8")
 
     write_process(current_pid, "200", ["python", "validate_session_memory_mcp.py"], 2_100.0)
-    write_process("200", "1", ["/home/dionysus/.local/bin/codex", "resume"], 1_500.0)
-    write_process("301", "200", ["/home/dionysus/.local/bin/aoa-session-memory-mcp-server"], 1_600.0)
+    write_process("200", "1", ["/home/example/.local/bin/codex", "resume"], 1_500.0)
+    write_process("301", "200", ["/home/example/.local/bin/aoa-session-memory-mcp-server"], 1_600.0)
 
     advisory = validator._codex_session_advisory(proc)
 
@@ -3926,8 +3926,8 @@ def test_codex_session_advisory_recognizes_installed_server_entrypoint(tmp_path:
         process_dir.joinpath("stat").write_text(" ".join(fields), encoding="utf-8")
 
     write_process(current_pid, "200", ["python", "validate_session_memory_mcp.py"], source_epoch + 100.0)
-    write_process("200", "1", ["/home/dionysus/.local/bin/codex", "app-server"], source_epoch + 110.0)
-    write_process("301", "200", ["/home/dionysus/.local/bin/aoa-session-memory-mcp-server"], source_epoch + 120.0)
+    write_process("200", "1", ["/home/example/.local/bin/codex", "app-server"], source_epoch + 110.0)
+    write_process("301", "200", ["/home/example/.local/bin/aoa-session-memory-mcp-server"], source_epoch + 120.0)
 
     advisory = validator._codex_session_advisory(proc)
 
@@ -3980,8 +3980,8 @@ def test_codex_session_advisory_does_not_restart_for_core_only_change(
         process_dir.joinpath("stat").write_text(" ".join(fields), encoding="utf-8")
 
     write_process(current_pid, "200", ["python", "validate_session_memory_mcp.py"], 2_000.0)
-    write_process("200", "1", ["/home/dionysus/.local/bin/codex", "resume"], 2_000.0)
-    write_process("301", "200", ["/home/dionysus/.local/bin/aoa-session-memory-mcp-server"], 2_000.0)
+    write_process("200", "1", ["/home/example/.local/bin/codex", "resume"], 2_000.0)
+    write_process("301", "200", ["/home/example/.local/bin/aoa-session-memory-mcp-server"], 2_000.0)
 
     advisory = validator._codex_session_advisory(proc)
 
@@ -4021,7 +4021,7 @@ def test_transport_preflight_reports_current_codex_restart_need(tmp_path: Path, 
         process_dir.joinpath("stat").write_text(" ".join(fields), encoding="utf-8")
 
     write_process(current_pid, "200", ["python", "pytest"], 3_500.0)
-    write_process("200", "1", ["/home/dionysus/.local/bin/codex", "resume"], 1_500.0)
+    write_process("200", "1", ["/home/example/.local/bin/codex", "resume"], 1_500.0)
     state = AoASessionMemoryMCPState(
         workspace_root=tmp_path,
         aoa_root=tmp_path / ".aoa",
@@ -4448,8 +4448,8 @@ def test_transport_preflight_treats_config_mtime_as_advisory_when_child_is_fresh
         process_dir.joinpath("stat").write_text(" ".join(fields), encoding="utf-8")
 
     write_process(current_pid, "200", ["python", "pytest"], 2_100.0)
-    write_process("200", "1", ["/home/dionysus/.local/bin/codex", "resume"], 1_500.0)
-    write_process("301", "200", ["/home/dionysus/.local/bin/aoa-session-memory-mcp-server"], 1_600.0)
+    write_process("200", "1", ["/home/example/.local/bin/codex", "resume"], 1_500.0)
+    write_process("301", "200", ["/home/example/.local/bin/aoa-session-memory-mcp-server"], 1_600.0)
     state = AoASessionMemoryMCPState(
         workspace_root=tmp_path,
         aoa_root=tmp_path / ".aoa",
@@ -4497,8 +4497,8 @@ def test_transport_preflight_recognizes_installed_server_entrypoint(tmp_path: Pa
         process_dir.joinpath("stat").write_text(" ".join(fields), encoding="utf-8")
 
     write_process(current_pid, "200", ["python", "pytest"], source_epoch + 100.0)
-    write_process("200", "1", ["/home/dionysus/.local/bin/codex", "resume"], source_epoch + 110.0)
-    write_process("301", "200", ["/home/dionysus/.local/bin/aoa-session-memory-mcp-server"], source_epoch + 120.0)
+    write_process("200", "1", ["/home/example/.local/bin/codex", "resume"], source_epoch + 110.0)
+    write_process("301", "200", ["/home/example/.local/bin/aoa-session-memory-mcp-server"], source_epoch + 120.0)
     state = AoASessionMemoryMCPState(
         workspace_root=tmp_path,
         aoa_root=tmp_path / ".aoa",
@@ -4556,8 +4556,8 @@ def test_transport_preflight_does_not_restart_for_core_only_change(tmp_path: Pat
         process_dir.joinpath("stat").write_text(" ".join(fields), encoding="utf-8")
 
     write_process(current_pid, "200", ["python", "pytest"], 2_000.0)
-    write_process("200", "1", ["/home/dionysus/.local/bin/codex", "resume"], 2_000.0)
-    write_process("301", "200", ["/home/dionysus/.local/bin/aoa-session-memory-mcp-server"], 2_000.0)
+    write_process("200", "1", ["/home/example/.local/bin/codex", "resume"], 2_000.0)
+    write_process("301", "200", ["/home/example/.local/bin/aoa-session-memory-mcp-server"], 2_000.0)
     state = AoASessionMemoryMCPState(
         workspace_root=tmp_path,
         aoa_root=tmp_path / ".aoa",
@@ -4620,8 +4620,8 @@ def test_transport_preflight_restarts_for_core_change_when_auto_reload_disabled(
         process_dir.joinpath("stat").write_text(" ".join(fields), encoding="utf-8")
 
     write_process(current_pid, "200", ["python", "pytest"], 2_000.0)
-    write_process("200", "1", ["/home/dionysus/.local/bin/codex", "resume"], 2_000.0)
-    write_process("301", "200", ["/home/dionysus/.local/bin/aoa-session-memory-mcp-server"], 2_000.0)
+    write_process("200", "1", ["/home/example/.local/bin/codex", "resume"], 2_000.0)
+    write_process("301", "200", ["/home/example/.local/bin/aoa-session-memory-mcp-server"], 2_000.0)
     state = AoASessionMemoryMCPState(
         workspace_root=tmp_path,
         aoa_root=tmp_path / ".aoa",
