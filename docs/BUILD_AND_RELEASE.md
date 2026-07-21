@@ -34,7 +34,9 @@ python -m venv /tmp/aoa-session-memory-artifact
 ```
 
 Use `examples/synthetic/bootstrap_demo.py` and
-`examples/synthetic/mcp_protocol_smoke.py` for the standalone protocol proof.
+`examples/synthetic/mcp_protocol_smoke.py` for the standalone protocol proof,
+then `examples/synthetic/negative_case_matrix.py` for installed-package root,
+transport, bearer, drift, and stale-evidence refusal cases.
 
 ## Maintainer projection route
 

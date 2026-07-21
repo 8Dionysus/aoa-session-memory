@@ -39,3 +39,18 @@ The smoke lists tools, resources, templates, and prompts; verifies every tool's
 read-only annotations; exercises exact search, usage, episode, graph,
 freshness, missing-evidence, and causal-claim boundaries; opens one raw ref;
 and proves the archive file digests are unchanged when the server exits.
+
+Run the installed-package negative matrix in a separate scratch root:
+
+```bash
+python examples/synthetic/negative_case_matrix.py \
+  --workspace-root /tmp/aoa-session-memory-demo \
+  --scratch-root /tmp/aoa-session-memory-negative
+```
+
+It checks missing, invalid, explicit, conflicting, symlinked, space-bearing,
+and Unicode roots; no host-only runtime helper; malformed and non-loopback HTTP
+configuration; missing bearer authentication; unsupported transport; package
+manifest drift; and stale projection refusal. Its receipt contains only case
+names and bounded status signals. The primary demo archive must remain
+byte-unchanged.

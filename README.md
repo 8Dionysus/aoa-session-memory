@@ -119,6 +119,10 @@ The demo's readiness packet is deliberately partial: one synthetic session is
 useful for route proof, not a claim of production coverage or retrieval
 quality. See [the demo guide](examples/synthetic/README.md).
 
+The same guide includes an installed-package negative matrix for root
+discovery, portability, transport/authentication refusal, manifest drift, and
+stale evidence.
+
 ## Architecture
 
 ```text
