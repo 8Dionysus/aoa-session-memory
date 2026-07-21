@@ -1,4 +1,4 @@
-name: Repo Validation
+name: Standalone Validation
 
 on:
   push:
@@ -10,75 +10,86 @@ permissions:
   contents: read
 
 jobs:
-  source_index:
-    name: Repo Validation
+  standalone:
+    name: Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
     env:
-      AOA_STATS_ROOT: ${{ github.workspace }}/.deps/aoa-stats
-      AOA_SKILLS_ROOT: ${{ github.workspace }}/.deps/aoa-skills
-      AOA_EVALS_ROOT: ${{ github.workspace }}/.deps/aoa-evals
+      PYTHONDONTWRITEBYTECODE: "1"
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.14"]
 
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
 
-      - name: Checkout aoa-stats protocol validator
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
-        with:
-          repository: 8Dionysus/aoa-stats
-          ref: 96833eea25f16fd61b174dad8286e7d8bcf1a93c
-          path: .deps/aoa-stats
-
-      - name: Checkout aoa-skills capability contract
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
-        with:
-          repository: 8Dionysus/aoa-skills
-          ref: 6f53e97cecb74877cf1d91432d685a72cf6771b8
-          path: .deps/aoa-skills
-
-      - name: Checkout aoa-evals local-port contract
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
-        with:
-          repository: 8Dionysus/aoa-evals
-          ref: f836f94fd8a04dc914b5cab700757bf05b096aa8
-          path: .deps/aoa-evals
-
       - name: Setup Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
 
-      - name: Install test dependency
+      - name: Install standalone test dependencies
         run: >-
-          python3 -m pip install --disable-pip-version-check
-          pytest==9.0.3 'PyYAML>=6.0,<7.0' 'jsonschema>=4.0,<5.0'
-
-      - name: Check repo-local KAG index family
-        uses: 8Dionysus/aoa-kag/.github/actions/repo-local-kag-index@f9893eee77c5431b6fa7804b7eb2341a4e1200de
-        with:
-          history-ref: ${{ github.event.pull_request.base.sha || github.event.before || format('{0}^', github.sha) }}
-          event-history-ref: ${{ github.event.pull_request.base.sha || github.event.before || format('{0}^', github.sha) }}
-
-      - name: Check owner-local stats protocol
-        run: python3 scripts/validate_local_stats_port.py
-
-      - name: Check owner-local capability contract and generated parity
-        run: >-
-          PYTHONDONTWRITEBYTECODE=1
-          python3 scripts/validate_local_capability_port.py --check-generated
-
-      - name: Check owner-local eval port and execution sidecars
-        run: >-
-          PYTHONDONTWRITEBYTECODE=1
-          python3 "$AOA_EVALS_ROOT/scripts/validate_local_eval_port.py"
-          --target-root "$GITHUB_WORKSPACE"
+          python -m pip install --disable-pip-version-check
+          'mcp>=1.28,<2'
+          'build>=1.3,<2'
+          'jsonschema>=4.25,<5'
+          'pytest>=8,<10'
+          'PyYAML>=6.0,<7.0'
 
       - name: Check decision index parity
-        run: python3 scripts/generate_decision_indexes.py --check
+        run: python scripts/generate_decision_indexes.py --check
 
-      - name: Run complete source and skill-system tests
+      - name: Audit current public tree
+        run: python scripts/audit_public_tree.py --root . --fail-on blocking
+
+      - name: Run portable source tests
         run: >-
-          PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider
+          PYTHONDONTWRITEBYTECODE=1 python -m pytest -q -p no:cacheprovider
           tests/test_session_memory.py
-          tests/test_skill_system.py
-          tests/test_skill_behavioral_sandbox.py
+          tests/test_public_tree_audit.py
+
+      - name: Run MCP package release check
+        working-directory: packages/aoa-session-memory-mcp
+        run: python scripts/release_check.py
+
+      - name: Build package twice outside the checkout
+        run: |
+          python scripts/build_mcp_package.py \
+            --outdir "$RUNNER_TEMP/build-a" \
+            --staging-root "$RUNNER_TEMP/stage-a" \
+            > "$RUNNER_TEMP/build-a.json"
+          python scripts/build_mcp_package.py \
+            --outdir "$RUNNER_TEMP/build-b" \
+            --staging-root "$RUNNER_TEMP/stage-b" \
+            > "$RUNNER_TEMP/build-b.json"
+          python - "$RUNNER_TEMP/build-a.json" "$RUNNER_TEMP/build-b.json" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          first = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          second = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+          if first["artifacts"] != second["artifacts"]:
+              raise SystemExit("sdist or wheel is not byte-reproducible")
+          if not first["source_unchanged"] or not second["source_unchanged"]:
+              raise SystemExit("external build changed package source")
+          PY
+
+      - name: Install wheel and run synthetic protocol smoke
+        run: |
+          python -m venv "$RUNNER_TEMP/artifact-venv"
+          wheel="$(find "$RUNNER_TEMP/build-a" -maxdepth 1 -name '*.whl' -print -quit)"
+          test -n "$wheel"
+          "$RUNNER_TEMP/artifact-venv/bin/pip" install "$wheel"
+          "$RUNNER_TEMP/artifact-venv/bin/python" examples/synthetic/bootstrap_demo.py \
+            --destination "$RUNNER_TEMP/synthetic-demo" \
+            > "$RUNNER_TEMP/synthetic-demo.json"
+          "$RUNNER_TEMP/artifact-venv/bin/python" examples/synthetic/mcp_protocol_smoke.py \
+            --workspace-root "$RUNNER_TEMP/synthetic-demo" \
+            --cwd "$RUNNER_TEMP" \
+            > "$RUNNER_TEMP/mcp-protocol-smoke.json"
+
+      - name: Re-audit clean checkout
+        run: python scripts/audit_public_tree.py --root . --fail-on blocking
