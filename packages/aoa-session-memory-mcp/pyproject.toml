@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aoa-session-memory-mcp"
+version = "0.1.0"
+description = "MCP access plane for AoA session evidence and route intelligence"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+dependencies = [
+  "mcp>=1.28,<2",
+]
+
+[project.optional-dependencies]
+test = [
+  "build>=1.3,<2",
+  "jsonschema>=4.25,<5",
+  "pytest>=8,<10",
+]
+
+[project.urls]
+Documentation = "https://github.com/8Dionysus/aoa-session-memory"
+Issues = "https://github.com/8Dionysus/aoa-session-memory/issues"
+Source = "https://github.com/8Dionysus/aoa-session-memory"
+
+[project.scripts]
+aoa-session-memory-mcp = "aoa_session_memory_mcp.cli:main"
+aoa-session-memory-mcp-server = "aoa_session_memory_mcp.server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
