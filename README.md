@@ -1,353 +1,331 @@
 # AoA Session Memory
 
-`aoa-session-memory` is a portable memory organ that preserves agent-session
-trajectories as evidence and turns them into queryable, provenance-carrying
-read models without confusing memory with truth.
+**Memory for long-running agent work, with a path back to the evidence.**
 
-Its current production adapter is Codex. The architecture is intentionally
-broader than Codex: sessions, evidence, episodes, indexes, typed relationships,
-freshness, and review boundaries are the durable center.
+A long Codex session contains much more than its final answer. It contains
+decisions, corrections, failed approaches, commands, tool results, verification,
+and working patterns that may become useful again later.
 
-## Why It Exists
+Most of this experience remains buried inside transcripts. Context gets
+compacted, sessions end, repositories change, and the exact path that produced
+an important result becomes difficult to recover.
 
-Long agent work does not fit safely inside active context.
+`aoa-session-memory` preserves that path. It captures agent-session history,
+gives important events stable coordinates, and builds ways to search and inspect
+the experience without losing the connection to its original source.
 
-Sessions compact, terminate, move between runtimes, and accumulate more exact
-evidence than a summary can preserve. Commands, corrections, failed branches,
-decisions, tool results, verification, and ownership boundaries must remain
-recoverable after the context that produced them is gone.
+The current production adapter is Codex.
 
-`aoa-session-memory` separates:
+## What it does
 
-- preserved evidence from interpretation;
-- retrieval from proof;
-- memory from current owner truth;
-- candidate learning from promoted capability;
-- portable source from local runtime state.
+`aoa-session-memory` can help an agent:
 
-## Current System
+- recover important context after a long session has been compacted
+- find decisions, errors, verification results, and unfinished work
+- compare events and working patterns across multiple sessions
+- inspect how skills, tools, MCP servers, and workflows were actually used
+- trace conclusions back to the session evidence they came from
+- connect development history with the current state of a repository
+- prepare reviewed candidates for evals, skills, automations, and datasets
 
-The portable implementation currently provides:
+The portable implementation includes raw session preservation, readable
+segments, typed task episodes, stable session identity, structured entities,
+exact and semantic retrieval, temporal and graph views, freshness tracking,
+agent-facing skills, and read-only MCP access.
 
-- Codex transcript capture and lifecycle receipts;
-- raw transcript mirrors and compaction-coordinate raw blocks;
-- readable segments plus machine indexes;
-- stable session identity, naming, and archive navigation;
-- typed agent events and task episodes;
-- exact/literal search and structured route filters;
-- entity registry, usage-chain, consequence, and neighborhood routes;
-- generated atlas, search, graph, and operational rollup projections;
-- bounded graph neighborhood, bridge, timeline, and GraphRAG-style packets;
-- projection freshness, maintenance coordination, and recovery routes;
-- read-only, plan-only MCP access;
-- clean export and installation into another workspace.
+These parts work together, but they do not all claim the same authority.
+A search result helps locate evidence. A generated episode helps interpret a
+part of the work. The original session records what happened. The current
+repository source describes what the software does now.
 
-These capabilities are read and evidence surfaces. They do not make generated
-classifications, graph edges, or summaries reviewed truth.
-
-## Direction of Growth
-
-The organ is intended to grow from reliable session recall toward cumulative
-agent experience:
+## How it works
 
 ```text
-experience
-  -> evidence-backed memory
-  -> reviewed understanding
-  -> eval
-  -> skill / automation / dataset / training candidate
-  -> changed agent
-  -> new experience
-```
-
-Future adapters may preserve dialogue-oriented sessions, model experiments,
-instrumentation, eval/training lineage, and experience across model versions.
-Those are architectural horizons, not claims about the current implementation.
-
-The organ does not itself own eval verdicts, skills, automation policy, model
-training, or agent identity. It preserves the evidence and lineage from which
-their owners may make reviewed decisions.
-
-## Architecture at a Glance
-
-```text
-agent runtime
-  -> adapter and lightweight capture
-  -> raw session evidence
-  -> segments, typed events, and task episodes
-  -> exact / structured / semantic / graph / narrative projections
-  -> bounded evidence packets with freshness and refs
+agent session
+  -> lightweight capture
+  -> preserved raw evidence
+  -> events, segments, and task episodes
+  -> exact / structured / semantic / graph views
+  -> bounded evidence packet
   -> human or agent review
-  -> owner-controlled promotion
+  -> improvement or eval candidate
 ```
 
-The downward route always remains available:
+Derived views are used for navigation. Important results keep references back to
+their sources:
 
 ```text
-narrative or answer
-  -> episode / graph / search hit
+answer or narrative
+  -> episode / graph / search result
   -> segment
-  -> raw or external owner evidence
+  -> raw session event or external repository evidence
 ```
 
-## Evidence and Authority
+This distinction matters in real agent work.
 
-Use the source that owns the question:
+A skill may appear in a transcript without being used. It may have been visible
+to the agent, selected, read, partially followed, completed, verified, or linked
+to a later result. `aoa-session-memory` treats these as different states instead
+of collapsing them into a single “skill used” claim.
 
-| Question | Authority |
-| --- | --- |
-| What was recorded in the session? | raw transcript and source metadata |
-| Where is the relevant evidence? | generated indexes and route packets |
-| What does a repository do now? | that repository's current source |
-| What did an eval prove? | the eval owner and admitted evidence |
-| Is a projection current? | live projection and maintenance status |
-| Why does the architecture have this boundary? | `DESIGN.md` and owner decisions |
+The same principle applies to decisions and repository state. Session memory can
+preserve why a decision was made. The repository that owns the decision
+determines whether it still applies.
 
-Session memory can find owner truth. It does not replace it.
+## Try it
 
-## Repository and Install Shapes
+You do not need access to the author's private Codex sessions.
 
-The same portable source can run as:
+The repository includes public-safe synthetic fixtures that run through the real
+session-memory mechanics. They exercise skill routing, evidence packets,
+lifecycle boundaries, recovery behavior, attribution limits, and Codex adapter
+handling.
 
-```text
-standalone aoa-session-memory repository
-workspace/.aoa
-```
+Behavioral-sandbox cases run in isolated temporary environments. They cannot
+make an in-process network connection or modify the authored source tree. One
+router-integration case additionally uses the separately owned `aoa-skills`
+contract and therefore belongs to the optional ecosystem lane.
 
-A live workspace may contain private session archives, generated search/graph
-stores, and diagnostics. A portable bundle always excludes those runtime
-surfaces; private evidence transfer belongs to a separate owner-to-owner
-migration route.
+### Supported environment
 
-Before publication, run the same bounded public-safety gate used by
-`export-bundle`:
+- Linux
+- Python 3.11 or newer
+
+Codex CLI is not required for the standalone fixture tests. It is required only
+for live Codex capture and adapter-grounding checks.
+
+### Clone the repository
 
 ```bash
-python3 scripts/aoa_session_memory.py portable-public-safety-audit \
-  --aoa-root /path/to/portable/.aoa
+git clone https://github.com/8Dionysus/aoa-session-memory.git
+cd aoa-session-memory
 ```
 
-The gate fails closed on runtime evidence, credential-like values, private
-host paths, or incomplete scan coverage without echoing matched values.
-
-## Quick Start
-
-Validate a source or installed root:
+### Create an isolated environment
 
 ```bash
-python3 scripts/aoa_session_memory.py validate \
-  --workspace-root /path/to/workspace \
-  --aoa-root /path/to/workspace/.aoa
+python3 -m venv /tmp/aoa-session-memory-venv
+/tmp/aoa-session-memory-venv/bin/pip install \
+  "mcp>=1.28,<2" \
+  "build>=1.3,<2" \
+  "jsonschema>=4.25,<5" \
+  "pytest>=8,<10" \
+  "PyYAML>=6.0,<7.0"
 ```
 
-Inspect filesystem and adapter health:
+### Run the standalone behavioral sandbox
 
 ```bash
-python3 scripts/aoa_session_memory.py doctor \
-  --workspace-root /path/to/workspace \
-  --aoa-root /path/to/workspace/.aoa
+/tmp/aoa-session-memory-venv/bin/python -m pytest -q -p no:cacheprovider \
+  tests/test_skill_behavioral_sandbox.py \
+  -k "not route-global-owner-cli"
 ```
 
-Inspect projection and maintenance state without mutating:
+A successful run exits with status `0`.
+
+### Validate the standalone checkout
 
 ```bash
-python3 scripts/aoa_session_memory.py projection-status \
-  --workspace-root /path/to/workspace \
-  --aoa-root /path/to/workspace/.aoa
-
-python3 scripts/aoa_session_memory.py maintenance-status \
-  --workspace-root /path/to/workspace \
-  --aoa-root /path/to/workspace/.aoa \
-  --full
+/tmp/aoa-session-memory-venv/bin/python scripts/aoa_session_memory.py validate \
+  --workspace-root "$PWD" \
+  --aoa-root "$PWD"
 ```
 
-For installation, hooks, and clean export, use `INSTALL.md`.
-
-## Common Evidence Routes
-
-Plan an exact path, UUID, command, error, or literal phrase query:
+### Run the portable source suite
 
 ```bash
-python3 scripts/aoa_session_memory.py literal-query-plan \
-  "Traceback ValueError"
+/tmp/aoa-session-memory-venv/bin/python -m pytest -q -p no:cacheprovider \
+  tests/test_session_memory.py \
+  tests/test_public_tree_audit.py \
+  tests/test_git_history_audit.py
 ```
 
-Verify an exact literal against one archived raw authority when the planner
-selects that fallback:
+The fixtures verify their named behavioral and mechanical boundaries. They do
+not claim that a model independently selected the best skill or that a skill
+improved performance. Those questions require live evidence and a separate eval.
+The complete skill-router integration suite uses a pinned `aoa-skills` checkout
+and runs in the optional ecosystem workflow; it is not a standalone dependency.
+
+### Run the standalone MCP demo
+
+Build and install the read-only MCP package without writing build state into
+the checkout:
 
 ```bash
-python3 scripts/aoa_session_memory.py archived-raw-search \
-  --session SESSION_ID_OR_LABEL --query "exact literal"
+/tmp/aoa-session-memory-venv/bin/python scripts/build_mcp_package.py \
+  --outdir /tmp/aoa-session-memory-artifacts \
+  --staging-root /tmp/aoa-session-memory-stage
+
+/tmp/aoa-session-memory-venv/bin/pip install \
+  /tmp/aoa-session-memory-artifacts/aoa_session_memory_mcp-*.whl
 ```
 
-A complete negative result is authoritative only when the packet reports a
-digest-verified, non-truncated scan.
-
-Ask how an operational entity was used and what happened after:
+Create an invented public-safe session corpus and query it:
 
 ```bash
-python3 scripts/aoa_session_memory.py usage-chain \
-  aoa-session-memory-mcp --kind mcp
+/tmp/aoa-session-memory-venv/bin/python examples/synthetic/bootstrap_demo.py \
+  --destination /tmp/aoa-session-memory-demo
+
+/tmp/aoa-session-memory-venv/bin/aoa-session-memory-mcp \
+  --workspace-root /tmp/aoa-session-memory-demo \
+  search DEMO-ANCHOR-42 --limit 5
 ```
 
-Validate and preview admission of an immutable reviewed skill-use receipt:
+Run the real stdio protocol smoke. It lists the MCP catalog, calls the main
+route families, opens returned evidence, and verifies that read-only access did
+not change the archive:
 
 ```bash
-python3 scripts/aoa_session_memory.py skill-usage-receipt validate RECEIPT.json
-python3 scripts/aoa_session_memory.py skill-usage-receipt record RECEIPT.json
+/tmp/aoa-session-memory-venv/bin/python \
+  examples/synthetic/mcp_protocol_smoke.py \
+  --workspace-root /tmp/aoa-session-memory-demo \
+  --cwd /tmp
 ```
 
-Only an explicit second call with `--apply` writes the receipt. A current
-reviewed receipt can support invocation, deflection, and verification claims,
-plus an effect-attribution candidate. It cannot issue a benefit or promotion
-verdict; that authority remains with `aoa-evals`.
+## Use it with Codex
 
-For a reproducible, evidence-first demonstration that another session can run
-without preselecting its target from retriever output, follow
-[`docs/SKILL-USAGE-EVIDENCE-DEMO.md`](docs/SKILL-USAGE-EVIDENCE-DEMO.md).
-
-Inspect one task interval:
-
-```bash
-python3 scripts/aoa_session_memory.py task-episodes latest \
-  --limit 10 --order recent
-```
-
-Inspect a bounded relation between known anchors:
-
-```bash
-python3 scripts/aoa_session_memory.py graph-bridge \
-  aoa-session-memory-mcp exec_command \
-  --source-kind mcp --target-kind tool
-```
-
-These commands return navigation and evidence packets. Open the returned raw,
-segment, session, receipt, or owner refs before relying on an important claim.
-
-The complete operational and recovery reference lives in `PIPELINE.md`.
-
-## Freshness Is Part of the Answer
-
-Generated projections may be:
-
-- `current`;
-- `stale-readable`;
-- `deferred`;
-- `blocked`;
-- `failed`;
-- `truncated`;
-- `fallback`;
-- `unresolved`.
-
-A stale packet can still route older evidence, but it cannot silently answer a
-current-state question. Use the packet's typed next action or the relevant
-maintenance route. A timer success is not proof that every semantic projection
-is current.
-
-Graph freshness includes the exact persisted entity-registry generation used
-to canonicalize its nodes and edges. Graph metadata and every source
-contribution pin that dependency. If the registry generation, semantic digest,
-source fingerprint, or stronger owner-source freshness changes, graph routes
-abstain until catch-up or full rebuild; they do not mix aliases dynamically
-inside one graph generation. A newer owner-source `mtime` triggers a live
-runtime-owner fingerprint check but is not itself semantic drift: a
-content-equivalent config or skill rewrite remains current when its versioned
-identity/content fingerprint matches. A changed or unavailable fingerprint
-still invalidates the registry dependency and blocks graph publication.
-
-## Agent Access
-
-Agents should use progressive disclosure:
-
-1. classify the question;
-2. select an exact or typed route;
-3. inspect the bounded packet and freshness;
-4. expand to episodes, graph, semantic, or narrative layers only when needed;
-5. open raw evidence for exact verification;
-6. return unknown when the evidence is insufficient.
-
-`DESIGN.AGENTS.md` defines this contract. The MCP surface follows the same
-read-only evidence route and does not own mutation or proof.
-
-## Automatic Maintenance
-
-Capture stays lightweight. Incremental workers and maintenance routes advance
-segments, indexes, search, atlas, registry, graph, and other generated
-projections.
-
-The intended happy path is automatic and observable:
-
-- dirty state propagates through projection dependencies;
-- active live tails wait for a quiet window;
-- bounded jobs resume after resource or lock deferral;
-- readers retain the last committed usable snapshot;
-- status distinguishes launcher success from semantic freshness.
-
-Manual commands remain available for diagnosis, controlled repair, deep
-rebuild, and recovery. See `PIPELINE.md`.
-
-## Documentation Map
-
-| File | Read it for |
-| --- | --- |
-| `AGENTS.md` | immediate laws, authority, and task routing |
-| `DESIGN.md` | identity, architecture, boundaries, and open horizon |
-| `DESIGN.AGENTS.md` | agent query and evidence-access contract |
-| `PIPELINE.md` | operational lifecycle, command reference, maintenance, and recovery |
-| `READINESS.md` | readiness states, proof requirements, and gate selection |
-| `INSTALL.md` | installation, hook generation, and portable export |
-| `NAMING.md` | archive labels and semantic naming |
-| `docs/decisions/` | durable rationale and generated decision lookup indexes |
-| `stats/` | bounded revision-level measurements over portable source surfaces |
-
-Source code, config, and schemas own runtime behavior. Live commands and
-generated diagnostics own current status. Git history and session evidence own
-historical development detail.
-
-The owner-local stats port currently measures portable scenario-fixture
-coverage at a named source revision. It does not inspect live archives or turn
-fixture coverage into memory quality, route correctness, or readiness.
-
-## Portability
-
-Export a clean bundle from the active authored source:
-
-```bash
-python3 scripts/aoa_session_memory.py export-bundle \
-  --source-aoa-root /path/to/source/.aoa \
-  --target-dir /path/to/aoa-session-memory \
-  --force
-```
-
-Install into a workspace:
+Install the portable kernel into a Codex workspace:
 
 ```bash
 python3 scripts/aoa_session_memory.py install \
-  --source-aoa-root /path/to/aoa-session-memory \
-  --workspace-root /path/to/workspace \
+  --source-aoa-root "$PWD" \
+  --workspace-root /absolute/path/to/workspace \
   --force
 ```
 
-Do not hand-copy generated hooks or portable consumers when the builder/export
-route exists.
+The installed system will live under:
 
-## What Does Not Belong Here
+```text
+/absolute/path/to/workspace/.aoa
+```
 
-The portable owner terrain should not accumulate:
+Validate it:
 
-- private transcripts or session-specific notes;
-- experiment diaries, temporary benchmarks, or failed variants;
-- changing runtime counts and version snapshots;
-- local operator doctrine;
-- generated search/graph databases or maintenance reports;
-- model caches or training artifacts;
-- unreviewed claims promoted from session history.
+```bash
+python3 /absolute/path/to/workspace/.aoa/scripts/aoa_session_memory.py \
+  validate \
+  --workspace-root /absolute/path/to/workspace \
+  --aoa-root /absolute/path/to/workspace/.aoa
+```
 
-Keep construction history in session provenance and diagnostics. Promote only
-the smallest durable contract, invariant, fixture, or decision that the owner
-actually needs.
+On a machine with Codex installed, the adapter can also be checked with:
 
-## Core Rule
+```bash
+python3 /absolute/path/to/workspace/.aoa/scripts/aoa_session_memory.py \
+  codex-grounding \
+  --workspace-root /absolute/path/to/workspace \
+  --aoa-root /absolute/path/to/workspace/.aoa
+```
+
+Live session capture requires workspace-specific hook configuration. The full
+procedure is documented in [`INSTALL.md`](INSTALL.md).
+
+Private session archives, generated runtime databases, diagnostics, secrets, and
+host-specific configuration are excluded from the normal portable source.
+
+## Example of live use
+
+Once a workspace has accumulated its own sessions, a user can ask Codex a normal
+working question:
+
+> Use aoa-session-memory to review how this skill performed in recent sessions.
+> Where did it help, where did it work poorly or get used incorrectly, and what
+> likely affected the results? Show examples from the sessions.
+
+The system can locate candidate uses, distinguish the different stages of skill
+interaction, compare strong and weak cases, and open the evidence behind the
+assessment.
+
+The same approach can be applied to tools, MCP servers, errors, decisions,
+workflows, and recurring development patterns.
+
+## Built during OpenAI Build Week
+
+`aoa-session-memory` began before OpenAI Build Week. During the submission
+period, it was substantially extended and prepared as a portable developer tool.
+
+The Build Week work included:
+
+- stronger exact, semantic, temporal, and graph retrieval
+- evidence-backed skill-use and consequence tracking
+- generation-aware freshness and maintenance
+- a semantic skill system with typed capability relationships
+- progressive skill disclosure and task-local routing
+- a public-safe behavioral sandbox
+- a deterministic read-only MCP package and synthetic protocol demo
+- portable installation, validation, export, and Codex grounding
+- stronger privacy and public-safety boundaries
+- a reproducible procedure for reviewing skill-use evidence
+
+The main submission-period development is preserved in pull requests
+[#59](https://github.com/8Dionysus/aoa-session-memory/pull/59) through
+[#62](https://github.com/8Dionysus/aoa-session-memory/pull/62).
+
+## How Codex and GPT-5.6 were used
+
+I built `aoa-session-memory` in close collaboration with Codex. Earlier parts
+of the project were developed with GPT-5.5, while most of the current
+architecture and the Build Week work were completed with GPT-5.6 Sol.
+
+Our work took place through long, iterative Codex sessions. We would move from
+an architectural idea to implementation, test it, inspect what failed, and
+return to earlier decisions when new evidence exposed a problem.
+
+Codex was especially useful when a change touched many connected parts of the
+system at once. It helped trace contracts across implementation, schemas,
+skills, tests, documentation, generated projections, and portable exports.
+This made the architecture-to-verification loop much faster while preserving
+the wider context of the project.
+
+Many important changes began with failures we found in real sessions. Semantic
+similarity could surface a relevant-looking episode without enough evidence to
+support an answer. A skill could appear in a transcript without having been
+used. A generated projection could remain readable after the logic that created
+it had changed.
+
+We reproduced these cases, followed them through the repository, and turned
+them into clearer contracts, evidence boundaries, and regression tests.
+
+I directed the product and made the final architectural decisions, while Codex
+helped research, challenge, implement, and verify them. Stable decisions were
+then recorded in [`DESIGN.md`](DESIGN.md) and
+[`docs/decisions/`](docs/decisions/).
+
+These decisions include preserving session history as evidence, keeping
+generated representations traceable to their sources, separating memory from
+the current truth of a repository, and requiring review before experience
+becomes a durable skill, eval, automation, or dataset.
+
+The project was also used during its own development. Our preserved Codex
+sessions became material for retrieval experiments, failure analysis, and
+further calibration of the system.
+
+## Documentation
+
+| File | Purpose |
+| --- | --- |
+| [`DESIGN.md`](DESIGN.md) | architecture, authority, and long-term boundaries |
+| [`PIPELINE.md`](PIPELINE.md) | capture, projection, retrieval, and maintenance |
+| [`READINESS.md`](READINESS.md) | readiness states and proof requirements |
+| [`INSTALL.md`](INSTALL.md) | installation, hooks, and portable export |
+| [`docs/BUILD_AND_RELEASE.md`](docs/BUILD_AND_RELEASE.md) | reproducible package build and release gates |
+| [`docs/PORTABILITY.md`](docs/PORTABILITY.md) | standalone and optional ecosystem dependencies |
+| [`docs/decisions/`](docs/decisions/) | durable architectural decisions |
+| [`docs/decisions/AOA-SM-D-0018-owner-capability-home-and-skill-evidence-lifecycle.md`](docs/decisions/AOA-SM-D-0018-owner-capability-home-and-skill-evidence-lifecycle.md) | capability ownership and skill-evidence lifecycle |
+
+## Contributing and security
+
+Read [`CONTRIBUTING.md`](CONTRIBUTING.md) before changing evidence or generated
+surfaces. Report credential exposure, unsafe history, transcript leakage, path
+handling, or MCP authentication issues through the private route in
+[`SECURITY.md`](SECURITY.md), not a public issue containing sensitive material.
+
+## License
+
+The repository and projected MCP package are licensed under the
+[Apache License 2.0](LICENSE).
+
+## Core rule
 
 ```text
 Preserve evidence.

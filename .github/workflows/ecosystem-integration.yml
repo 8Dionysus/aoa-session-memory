@@ -1,0 +1,82 @@
+name: Ecosystem Integration (Optional)
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 4 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  owner_contracts:
+    name: Pinned owner contracts
+    runs-on: ubuntu-latest
+    env:
+      AOA_STATS_ROOT: ${{ github.workspace }}/.deps/aoa-stats
+      AOA_SKILLS_ROOT: ${{ github.workspace }}/.deps/aoa-skills
+      AOA_EVALS_ROOT: ${{ github.workspace }}/.deps/aoa-evals
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+
+      - name: Checkout aoa-stats protocol validator
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          repository: 8Dionysus/aoa-stats
+          ref: 96833eea25f16fd61b174dad8286e7d8bcf1a93c
+          path: .deps/aoa-stats
+          token: ${{ secrets.AOA_ECOSYSTEM_READ_TOKEN || github.token }}
+
+      - name: Checkout aoa-skills capability contract
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          repository: 8Dionysus/aoa-skills
+          ref: 6f53e97cecb74877cf1d91432d685a72cf6771b8
+          path: .deps/aoa-skills
+          token: ${{ secrets.AOA_ECOSYSTEM_READ_TOKEN || github.token }}
+
+      - name: Checkout aoa-evals local-port contract
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          repository: 8Dionysus/aoa-evals
+          ref: f836f94fd8a04dc914b5cab700757bf05b096aa8
+          path: .deps/aoa-evals
+          token: ${{ secrets.AOA_ECOSYSTEM_READ_TOKEN || github.token }}
+
+      - name: Setup Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.12"
+
+      - name: Install ecosystem test dependencies
+        run: >-
+          python -m pip install --disable-pip-version-check
+          pytest==9.0.3 'PyYAML>=6.0,<7.0' 'jsonschema>=4.0,<5.0'
+
+      - name: Check repo-local KAG index family
+        uses: 8Dionysus/aoa-kag/.github/actions/repo-local-kag-index@f9893eee77c5431b6fa7804b7eb2341a4e1200de
+        with:
+          history-ref: ${{ github.sha }}^
+          event-history-ref: ${{ github.sha }}^
+
+      - name: Check owner-local stats protocol
+        run: python scripts/validate_local_stats_port.py
+
+      - name: Check owner-local capability contract and generated parity
+        run: >-
+          PYTHONDONTWRITEBYTECODE=1
+          python scripts/validate_local_capability_port.py --check-generated
+
+      - name: Check owner-local eval port and execution sidecars
+        run: >-
+          PYTHONDONTWRITEBYTECODE=1
+          python "$AOA_EVALS_ROOT/scripts/validate_local_eval_port.py"
+          --target-root "$GITHUB_WORKSPACE"
+
+      - name: Run owner-coupled skill tests
+        run: >-
+          PYTHONDONTWRITEBYTECODE=1 python -m pytest -q -p no:cacheprovider
+          tests/test_skill_system.py
+          tests/test_skill_behavioral_sandbox.py
