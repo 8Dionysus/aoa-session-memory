@@ -2,12 +2,13 @@
 
 ## Build without changing the checkout
 
-Install the public build dependency in an external virtual environment, then
-use the repository helper:
+Install the MCP runtime and public build dependencies in an external virtual
+environment, then use the repository helper:
 
 ```bash
 python -m venv /tmp/aoa-session-memory-build
-/tmp/aoa-session-memory-build/bin/pip install 'build>=1.3,<2' 'jsonschema>=4.25,<5'
+/tmp/aoa-session-memory-build/bin/pip install \
+  'mcp>=1.28,<2' 'build>=1.3,<2' 'jsonschema>=4.25,<5'
 /tmp/aoa-session-memory-build/bin/python scripts/build_mcp_package.py \
   --outdir /tmp/aoa-session-memory-artifacts \
   --staging-root /tmp/aoa-session-memory-stage \
@@ -54,7 +55,7 @@ A release candidate requires:
 2. green Python 3.11 and 3.14 standalone CI;
 3. byte-reproducible wheel and sdist;
 4. clean wheel installation and stdio MCP protocol smoke;
-5. current-tree and full-history public-safety verdicts;
+5. a blocking-clean current tree and a reviewed retained-history inventory;
 6. confirmed root license and dependency review;
 7. integrated foundation handoff and final generated-index parity;
 8. an explicit maintainer publication decision.

@@ -2,14 +2,9 @@
 
 ## Current status
 
-The repository root has no confirmed `LICENSE`. That blocks public visibility
-and release publication. No root license should be inferred from the package
-subdirectory or from dependency licenses.
-
-The proposed root license is Apache License 2.0 because the authored MCP owner
-source already uses Apache-2.0 and the projected package includes the exact
-owner license. The repository owner must explicitly accept or replace this
-proposal before a root `LICENSE` is added.
+The repository is licensed under Apache License 2.0. The root `LICENSE` and
+the projected MCP package carry the same license text, and the package metadata
+declares the SPDX expression `Apache-2.0`.
 
 ## Dependency and artifact review
 

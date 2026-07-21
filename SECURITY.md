@@ -30,8 +30,8 @@ repository is public.
 
 See the package [threat model](packages/aoa-session-memory-mcp/docs/THREAT_MODEL.md),
 [public-tree audit](scripts/audit_public_tree.py), [full-history
-audit](scripts/audit_git_history.py), and [publication
-boundary](docs/PUBLICATION.md) for the enforced checks.
+inventory](scripts/audit_git_history.py), and [publication
+boundary](docs/PUBLICATION.md) for the current checks and residual-risk posture.
 
 Security fixes target the current maintained branch and any explicitly
 supported release. No public stable release is implied by this policy.

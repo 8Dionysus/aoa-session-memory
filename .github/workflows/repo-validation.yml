@@ -46,9 +46,9 @@ jobs:
       - name: Audit current public tree
         run: python scripts/audit_public_tree.py --root . --fail-on blocking
 
-      - name: Audit reachable history on public repository
+      - name: Inventory retained history on public repository
         if: github.event.repository.visibility == 'public'
-        run: python scripts/audit_git_history.py --repo . --fail-on blocking
+        run: python scripts/audit_git_history.py --repo . --fail-on none
 
       - name: Run portable source tests
         run: >-

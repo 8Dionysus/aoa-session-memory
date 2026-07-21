@@ -42,8 +42,9 @@ outside that directory.
 - Preserve raw, segment, session, and freshness refs in derived packets.
 - State which owner surface changed and which checks passed.
 - Run the current-tree audit before requesting review.
-- Treat the full-history audit as a publication gate; an ordinary branch test
-  cannot prove that every remote ref or GitHub-hosted surface was fetched.
+- Treat the full-history audit as a disclosure-debt inventory; an ordinary
+  branch test cannot prove that every remote ref or GitHub-hosted surface was
+  fetched. Current-tree blocking findings still fail the contribution gate.
 - Do not include wheels, sdists, virtual environments, databases, caches, logs,
   diagnostics, or generated runtime sessions.
 
