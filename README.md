@@ -190,6 +190,7 @@ Install the portable kernel into a Codex workspace:
 python3 scripts/aoa_session_memory.py install \
   --source-aoa-root "$PWD" \
   --workspace-root /absolute/path/to/workspace \
+  --write-user-hooks /absolute/path/to/workspace/.codex/hooks.json \
   --force
 ```
 
@@ -217,8 +218,14 @@ python3 /absolute/path/to/workspace/.aoa/scripts/aoa_session_memory.py \
   --aoa-root /absolute/path/to/workspace/.aoa
 ```
 
-Live session capture requires workspace-specific hook configuration. The full
-procedure is documented in [`INSTALL.md`](INSTALL.md).
+This also installs workspace-local hooks for live Codex capture. Verify them:
+
+```bash
+python3 /absolute/path/to/workspace/.aoa/scripts/aoa_session_memory.py \
+  codex-hooks-status \
+  --workspace-root /absolute/path/to/workspace \
+  --aoa-root /absolute/path/to/workspace/.aoa
+```
 
 Private session archives, generated runtime databases, diagnostics, secrets, and
 host-specific configuration are excluded from the normal portable source.
