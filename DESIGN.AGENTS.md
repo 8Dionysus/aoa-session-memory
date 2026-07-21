@@ -159,6 +159,17 @@ Stop escalation when:
 - freshness is too weak;
 - the required owner or raw evidence is unavailable.
 
+Local reranking is an optional escalation after hybrid candidate generation,
+not a default semantic stage. Weak lexical coverage is an observed signal, not
+an automatic trigger: it is expected for multilingual and conceptual
+paraphrases. Automatic reranking requires a declared causal, recovery, or
+explicit-sequence query shape and a bounded health read proving the optional
+provider already warm. A cold or unknown provider returns a visible deferred
+state without being woken; an explicit caller may opt into the measured cold
+cost. The packet must preserve the policy, trigger, observed signals,
+readiness, budget, and applied or deferred reason. Neither a warm provider nor
+a reranker score changes the evidence or claim-admission requirements.
+
 ## Entity Usage Semantics
 
 Agents must keep the following states distinct:

@@ -100,6 +100,7 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0027 Evidence-Specific Sparse Anchors in Hybrid Fusion](../AOA-SM-D-0027-evidence-specific-sparse-anchors-in-hybrid-fusion.md) | 2026-07-20 | Accepted | `docs/decisions/AOA-SM-D-0027-evidence-specific-sparse-anchors-in-hybrid-fusion.md` |
+| [AOA-SM-D-0029 Warm-Budgeted Automatic Rerank Escalation](../AOA-SM-D-0029-warm-budgeted-automatic-rerank-escalation.md) | 2026-07-21 | Accepted | `docs/decisions/AOA-SM-D-0029-warm-budgeted-automatic-rerank-escalation.md` |
 
 ## episode entity state
 
@@ -129,6 +130,7 @@
 | [AOA-SM-D-0025 Process-Loaded Producer Generation Identity](../AOA-SM-D-0025-process-loaded-producer-generation-identity.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0025-process-loaded-producer-generation-identity.md` |
 | [AOA-SM-D-0026 Best-Effort Progress Transport](../AOA-SM-D-0026-best-effort-progress-transport.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0026-best-effort-progress-transport.md` |
 | [AOA-SM-D-0027 Evidence-Specific Sparse Anchors in Hybrid Fusion](../AOA-SM-D-0027-evidence-specific-sparse-anchors-in-hybrid-fusion.md) | 2026-07-20 | Accepted | `docs/decisions/AOA-SM-D-0027-evidence-specific-sparse-anchors-in-hybrid-fusion.md` |
+| [AOA-SM-D-0029 Warm-Budgeted Automatic Rerank Escalation](../AOA-SM-D-0029-warm-budgeted-automatic-rerank-escalation.md) | 2026-07-21 | Accepted | `docs/decisions/AOA-SM-D-0029-warm-budgeted-automatic-rerank-escalation.md` |
 
 ## episode source
 
@@ -264,6 +266,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0011 Evidence-Grain Date Bounds](../AOA-SM-D-0011-evidence-grain-date-bounds.md) | 2026-07-17 | Accepted | `docs/decisions/AOA-SM-D-0011-evidence-grain-date-bounds.md` |
+
+## local rerank navigation
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0029 Warm-Budgeted Automatic Rerank Escalation](../AOA-SM-D-0029-warm-budgeted-automatic-rerank-escalation.md) | 2026-07-21 | Accepted | `docs/decisions/AOA-SM-D-0029-warm-budgeted-automatic-rerank-escalation.md` |
 
 ## maintenance coordinator
 

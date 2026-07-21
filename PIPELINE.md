@@ -189,6 +189,16 @@ similarity, mention, or adjacency alone cannot activate the guard. This is a
 navigation rule and never admits the replay, fork, delegation, failure,
 recovery, or consequence claim without its normal evidence-reading gate.
 
+Local cross-encoder reranking has a separate escalation policy. Weak lexical
+coverage remains visible but cannot trigger automatic work by itself.
+Automatic reranking requires a structural causal, recovery, or
+explicit-sequence reason and a bounded provider-health result proving the
+optional model already loaded. Cold, unknown, or unavailable providers are
+reported as deferred and are not woken. Explicit reranking remains an opt-in
+route whose cold-start cost is shown separately. Health packets omit
+host-private model and cache paths, and reranker order remains navigation
+under the ordinary evidence and claim-shape gates.
+
 Search results, graph paths, atlas entries, registry states, and scenario
 checks are navigation packets. They may expose useful counts or confidence,
 but they do not become reviewed memory, eval verdicts, or owner decisions.

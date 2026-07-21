@@ -147,6 +147,13 @@ Ready when:
 - a fusion override names its version, decisive margin, typed or coherent
   evidence guard, and raw coordinates, and remains navigation rather than
   answer admission;
+- weak lexical coverage alone does not trigger optional reranking;
+- automatic reranking names its policy and structural reason, does not wake a
+  cold provider, and preserves a separately measured explicit opt-in route;
+- cold-deferred, warm-applied, and provider-unavailable paths expose the same
+  admission boundary without leaking private host paths;
+- a reranker without demonstrated lane value remains optional even when its
+  runtime route is healthy;
 - insufficient evidence produces abstention.
 
 ### 7. Graph views
@@ -249,7 +256,7 @@ Use the narrowest sufficient route.
 | Capture or hooks | focused tests, adapter grounding, hook status, live lifecycle probe |
 | Classifier or taxonomy | reindex/catch-up, manual positive/negative samples, freshness |
 | Exact search | fixed gold refs, collision and fallback cases, latency |
-| Semantic/rerank | unchanged gold corpus, per-lane A/B, exact-recall guard |
+| Semantic/rerank | unchanged gold corpus, per-lane and production-auto A/B, cold/warm provider gates, exact-recall guard |
 | Episode formation | manually adjudicated boundaries and cross-compaction cases |
 | Graph semantics | relation/path review, hybrid-only comparison, cardinality |
 | Orchestration | real incremental, quiet-window, resource-block, restart, catch-up |
