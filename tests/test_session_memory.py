@@ -21042,6 +21042,15 @@ def test_graph_exact_correlation_uses_session_raw_seed_when_graph_and_search_are
         "answered_by",
         "responds_to",
     }
+    assert all(
+        edge["correlation_status"] == "matched_identity"
+        and edge["relation_state"] == "observed_projection"
+        and edge["temporal_order_status"] == "valid"
+        for edge in neighborhood["edges"]
+    )
+    assert neighborhood["answer_admission"]["relation_state_counts"] == {
+        "observed_projection": 2,
+    }
     assert neighborhood["quality"][
         "structured_correlation_mention_only_rejected_count"
     ] == 1
@@ -21244,6 +21253,12 @@ def test_graph_timeline_structured_correlation_admits_source_events_and_rejects_
         "answered_by",
         "responds_to",
     }
+    assert all(
+        relation["correlation_status"] == "matched_identity"
+        and relation["relation_state"] == "observed_projection"
+        and relation["temporal_order_status"] == "valid"
+        for relation in timeline["relations"]
+    )
     assert timeline["quality"]["timeline_mode"] == "exact_structured_correlation"
     assert (
         timeline["quality"]["structured_correlation_admission_scope"]
