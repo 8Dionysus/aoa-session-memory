@@ -21713,6 +21713,25 @@ def test_typed_graph_miss_keeps_wrong_kind_fuzzy_path_as_navigation_only(
     assert sample["answer_rules"]["important_claim_allowed"] is False
 
 
+def test_graph_quality_treats_successful_message_mirror_dedup_as_informational() -> None:
+    finding = module.graph_quality_diagnostic_finding(
+        "exact_literal_postings_adjacent_message_mirror_deduplicated:2"
+    )
+    unknown = module.graph_quality_diagnostic_finding(
+        "unexpected_graph_projection_failure"
+    )
+
+    assert finding == {
+        "code": (
+            "exact_literal_postings_adjacent_message_mirror_"
+            "deduplicated:2"
+        ),
+        "severity": "informational",
+        "category": "expected_bounded_route_posture",
+    }
+    assert unknown["severity"] == "critical"
+
+
 def test_graph_store_typed_path_exact_key_wins_alias_and_fuzzy_collisions(tmp_path: Path) -> None:
     aoa_root = tmp_path / ".aoa"
     store = module.GraphSqliteStore(aoa_root, reset=True)
