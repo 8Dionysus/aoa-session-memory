@@ -19240,7 +19240,7 @@ def test_session_evidence_window_preserves_custom_tool_transport_completion(
     command = (
         "const r = await tools.exec_command({"
         '"cmd":"sed -n \'1,80p\' /srv/example/AbyssOS/.aoa/skills/example/SKILL.md",'
-        '"workdir":"/home/dionysus"'
+        '"workdir":"/home/example"'
         "}); text(r.output);"
     )
     write_jsonl(
@@ -19335,7 +19335,7 @@ def test_session_evidence_window_preserves_custom_tool_transport_completion(
 
     workdir_state = module.episode_entity_state_search(
         aoa_root=aoa_root,
-        anchor="path:home_dionysus",
+        anchor="path:home_example",
         kind="path",
         session="custom-tool-evidence-window",
         limit=10,
