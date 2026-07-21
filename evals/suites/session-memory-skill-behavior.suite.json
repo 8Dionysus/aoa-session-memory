@@ -30,7 +30,7 @@
     {
       "path": "tests/test_session_memory.py",
       "kind": "file",
-      "sha256": "4d2acd21f541b756e29fd60f157aa75676f56c4937fa9952b2adf3209beb70c4"
+      "sha256": "e27a3bfb46862249ec5c7085a53fd27cf916912837463a77b6b417397883fb40"
     },
     {
       "path": "evals/cases/session-memory-skill-behavior.v1.json",
