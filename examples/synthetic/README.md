@@ -49,8 +49,8 @@ python examples/synthetic/negative_case_matrix.py \
 ```
 
 It checks missing, invalid, explicit, conflicting, symlinked, space-bearing,
-and Unicode roots; no host-only runtime helper; malformed and non-loopback HTTP
-configuration; missing bearer authentication; unsupported transport; package
-manifest drift; and stale projection refusal. Its receipt contains only case
-names and bounded status signals. The primary demo archive must remain
-byte-unchanged.
+and Unicode roots; disabled optional providers; no host-only runtime helper;
+malformed, non-loopback, and unavailable HTTP; missing bearer authentication;
+unsupported transport; package manifest drift; and stale projection refusal.
+Its receipt contains only case names and bounded status signals. The primary
+demo archive must remain byte-unchanged.

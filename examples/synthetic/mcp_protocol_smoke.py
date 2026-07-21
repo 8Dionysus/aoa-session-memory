@@ -46,7 +46,7 @@ def payload(result: Any) -> dict[str, Any]:
     return parsed
 
 
-def open_raw_ref(search: dict[str, Any]) -> dict[str, str | int]:
+def open_evidence_refs(search: dict[str, Any]) -> dict[str, str | int]:
     for result in search.get("results", []):
         refs = result.get("refs") if isinstance(result, dict) else None
         if not isinstance(refs, dict) or not refs.get("raw") or not refs.get("session"):
@@ -55,13 +55,23 @@ def open_raw_ref(search: dict[str, Any]) -> dict[str, str | int]:
         line = int(raw_ref.rsplit(":", 1)[-1])
         raw_path = Path(str(refs["session"])).parent / "raw" / "session.raw.jsonl"
         raw_line = raw_path.read_text(encoding="utf-8").splitlines()[line - 1]
+        segment_ref = str(refs.get("segment") or "")
+        segment_name, _separator, segment_anchor = segment_ref.partition("#")
+        segment_path = Path(str(refs["session"])).parent / "segments" / segment_name
+        if not segment_name or not segment_path.is_file():
+            continue
+        segment_text = segment_path.read_text(encoding="utf-8")
+        if segment_anchor and f'id="{segment_anchor}"' not in segment_text:
+            continue
         return {
-            "ref": raw_ref,
-            "line": line,
+            "raw_ref": raw_ref,
+            "raw_line": line,
             "raw_path": raw_path.as_posix(),
-            "line_sha256": hashlib.sha256(raw_line.encode("utf-8")).hexdigest(),
+            "raw_line_sha256": hashlib.sha256(raw_line.encode("utf-8")).hexdigest(),
+            "segment_ref": segment_ref,
+            "segment_sha256": hashlib.sha256(segment_text.encode("utf-8")).hexdigest(),
         }
-    raise RuntimeError("search returned no resolvable raw ref")
+    raise RuntimeError("search returned no resolvable raw and segment refs")
 
 
 async def run(args: argparse.Namespace) -> dict[str, Any]:
@@ -127,11 +137,11 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                     read_timeout_seconds=timeout,
                 )
             )
-            raw = open_raw_ref(search)
+            opened = open_evidence_refs(search)
             freshness = payload(
                 await session.call_tool(
                     "aoa_session_freshness_check",
-                    {"refs": [raw["ref"]], "session": "latest"},
+                    {"refs": [opened["raw_ref"]], "session": "latest"},
                     read_timeout_seconds=timeout,
                 )
             )
@@ -165,13 +175,18 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         or episodes.get("result_count", 0) < 1
     ):
         raise RuntimeError("exact, usage, or episode route returned no usable packet")
-    if graph.get("ok") is not True or not graph.get("evidence_refs"):
-        raise RuntimeError("graph route returned no evidence refs")
+    if graph.get("ok") is not True or not graph.get("evidence_refs") or graph.get("edge_count", 0) < 1:
+        raise RuntimeError("graph route returned no relation edge or evidence refs")
     if freshness.get("ok") is not True or missing.get("ok") is not False:
         raise RuntimeError("freshness positive or missing-evidence negative case failed")
     authority = candidate.get("authority_boundary")
-    if not authority or "truth" not in json.dumps(authority).casefold():
-        raise RuntimeError("causal-claim packet did not preserve an authority boundary")
+    candidate_posture = str(candidate.get("candidate_posture") or "")
+    if (
+        not authority
+        or "truth" not in json.dumps(authority).casefold()
+        or "not a verdict" not in candidate_posture
+    ):
+        raise RuntimeError("causal-claim packet did not preserve candidate-only authority")
 
     return {
         "schema": "aoa_session_memory_synthetic_mcp_smoke_v1",
@@ -188,12 +203,13 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             "usage_ok": usage.get("ok"),
             "episode_count": episodes.get("result_count"),
             "graph_node_count": graph.get("node_count"),
+            "graph_edge_count": graph.get("edge_count"),
             "graph_evidence_ref_count": graph.get("evidence_ref_count"),
             "freshness": freshness.get("projection_freshness", {}).get("status"),
             "missing_evidence_ok": missing.get("ok"),
-            "causal_claim_posture": candidate.get("truth_status") or candidate.get("authority_boundary"),
+            "causal_claim_posture": candidate_posture,
         },
-        "opened_evidence": raw,
+        "opened_evidence": opened,
         "archive_unchanged": True,
     }
 

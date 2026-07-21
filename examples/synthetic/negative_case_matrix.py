@@ -2,16 +2,22 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import hashlib
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
+
+import httpx
+from mcp import ClientSession
+from mcp.client.streamable_http import streamable_http_client
 
 from aoa_session_memory_mcp.core import AoASessionMemoryMCPState, RootDiscoveryError
 
@@ -67,6 +73,24 @@ def record(cases: list[dict[str, Any]], name: str, **signals: Any) -> None:
 def require(condition: bool, name: str) -> None:
     if not condition:
         raise RuntimeError(name)
+
+
+async def unavailable_http_probe(port: int) -> bool:
+    token = "negative-matrix-" + "a" * 48
+    try:
+        async with httpx.AsyncClient(
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=1.0,
+        ) as client:
+            async with streamable_http_client(
+                f"http://127.0.0.1:{port}/mcp",
+                http_client=client,
+            ) as (read_stream, write_stream, _get_session_id):
+                async with ClientSession(read_stream, write_stream) as session:
+                    await asyncio.wait_for(session.initialize(), timeout=2.0)
+                    return False
+    except Exception:
+        return True
 
 
 def main() -> int:
@@ -159,7 +183,14 @@ def main() -> int:
                 require(shutil.which("abyss-machine") is None, "abyss-machine unexpectedly present in clean PATH")
                 status = AoASessionMemoryMCPState.discover(workspace_root=workspace).session_memory_status(include_live=False)
             require(status.get("authority_boundary", {}).get("mcp_role"), "standalone status missing authority boundary")
-            record(cases, "optional_host_runtime_absent", standalone_status=True)
+            record(cases, "host_runtime_absent", standalone_status=True)
+
+            provider_config = json.loads((archive / "config" / "search-providers.json").read_text(encoding="utf-8"))
+            providers = provider_config.get("providers", {})
+            require(providers.get("portable_sqlite", {}).get("enabled") is True, "portable provider disabled")
+            require(providers.get("abyss_machine_nervous", {}).get("enabled") is False, "optional provider enabled")
+            require(providers.get("abyss_stack_rag", {}).get("enabled") is False, "future provider enabled")
+            record(cases, "optional_providers_disabled", portable_route_available=True)
 
             state = AoASessionMemoryMCPState.discover(workspace_root=workspace)
             missing_proc = temp / "no-proc"
@@ -205,6 +236,13 @@ def main() -> int:
                 "missing bearer diagnostic",
             )
             record(cases, "http_client_bearer_absent", auth_ready=False)
+
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as unavailable_socket:
+                unavailable_socket.bind(("127.0.0.1", 0))
+                unavailable_port = int(unavailable_socket.getsockname()[1])
+                refused = asyncio.run(unavailable_http_probe(unavailable_port))
+            require(refused, "unavailable HTTP transport unexpectedly connected")
+            record(cases, "unavailable_loopback_http", connection_refused=True)
 
             server_result = run(
                 [args.server_command.as_posix(), "--workspace-root", workspace.as_posix()],
