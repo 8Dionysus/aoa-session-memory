@@ -1,358 +1,323 @@
-# AoA Session Memory
+# aoa-session-memory
 
-`aoa-session-memory` is a portable memory organ that preserves agent-session
-trajectories as evidence and turns them into queryable, provenance-carrying
-read models without confusing memory with truth.
+`aoa-session-memory` gives developers and agents a local, evidence-first way to
+recover what happened across long coding sessions without treating recall as
+proof.
 
-Its current production adapter is Codex. The architecture is intentionally
-broader than Codex: sessions, evidence, episodes, indexes, typed relationships,
-freshness, and review boundaries are the durable center.
+Long sessions compact, stop, and move between contexts. Summaries lose exact
+commands, failures, corrections, decisions, and verification; ordinary search
+can retrieve a phrase while hiding whether its source is stale or indirect.
+This project preserves session evidence, builds provenance-carrying and
+freshness-aware read models, and returns bounded packets that lead back to raw
+or owner evidence.
 
-## Why It Exists
+The practical result: ask for an exact identifier, a task episode, how a tool
+was used, or a typed graph relation, then inspect the returned evidence refs
+before relying on the answer.
 
-Long agent work does not fit safely inside active context.
+## Three-minute standalone quickstart
 
-Sessions compact, terminate, move between runtimes, and accumulate more exact
-evidence than a summary can preserve. Commands, corrections, failed branches,
-decisions, tool results, verification, and ownership boundaries must remain
-recoverable after the context that produced them is gone.
+Requirements: Git and Python 3.11 or newer. The standalone path does not need
+OS Abyss, `/srv`, `abyss-stack`, `abyss-machine`, systemd, a bearer token,
+sibling repositories, or private transcripts.
 
-`aoa-session-memory` separates:
+```bash
+git clone https://github.com/8Dionysus/aoa-session-memory.git
+cd aoa-session-memory
 
-- preserved evidence from interpretation;
-- retrieval from proof;
-- memory from current owner truth;
-- candidate learning from promoted capability;
-- portable source from local runtime state.
+python -m venv /tmp/aoa-session-memory-venv
+/tmp/aoa-session-memory-venv/bin/pip install 'build>=1.3,<2' 'jsonschema>=4.25,<5'
 
-## Current System
+/tmp/aoa-session-memory-venv/bin/python scripts/build_mcp_package.py \
+  --outdir /tmp/aoa-session-memory-artifacts \
+  --staging-root /tmp/aoa-session-memory-stage
 
-The portable implementation currently provides:
+/tmp/aoa-session-memory-venv/bin/pip install \
+  /tmp/aoa-session-memory-artifacts/aoa_session_memory_mcp-*.whl
 
-- Codex transcript capture and lifecycle receipts;
-- raw transcript mirrors and compaction-coordinate raw blocks;
-- readable segments plus machine indexes;
-- stable session identity, naming, and archive navigation;
-- typed agent events and task episodes;
-- exact/literal search and structured route filters;
-- entity registry, usage-chain, consequence, and neighborhood routes;
-- generated atlas, search, graph, and operational rollup projections;
-- bounded graph neighborhood, bridge, timeline, and GraphRAG-style packets;
-- projection freshness, maintenance coordination, and recovery routes;
-- read-only, plan-only MCP access;
-- clean export and installation into another workspace.
+/tmp/aoa-session-memory-venv/bin/python examples/synthetic/bootstrap_demo.py \
+  --destination /tmp/aoa-session-memory-demo
 
-These capabilities are read and evidence surfaces. They do not make generated
-classifications, graph edges, or summaries reviewed truth.
-
-## Direction of Growth
-
-The organ is intended to grow from reliable session recall toward cumulative
-agent experience:
-
-```text
-experience
-  -> evidence-backed memory
-  -> reviewed understanding
-  -> eval
-  -> skill / automation / dataset / training candidate
-  -> changed agent
-  -> new experience
+/tmp/aoa-session-memory-venv/bin/aoa-session-memory-mcp \
+  --workspace-root /tmp/aoa-session-memory-demo \
+  search DEMO-ANCHOR-42 --limit 5
 ```
 
-Future adapters may preserve dialogue-oriented sessions, model experiments,
-instrumentation, eval/training lineage, and experience across model versions.
-Those are architectural horizons, not claims about the current implementation.
+The demo destination must be absent or empty. It is built outside the
+repository from an invented transcript.
 
-The organ does not itself own eval verdicts, skills, automation policy, model
-training, or agent identity. It preserves the evidence and lineage from which
-their owners may make reviewed decisions.
+Try the other evidence routes:
 
-## Architecture at a Glance
+```bash
+/tmp/aoa-session-memory-venv/bin/aoa-session-memory-mcp \
+  --workspace-root /tmp/aoa-session-memory-demo \
+  usage-chain query_component --kind mcp_tool --limit 4
 
-```text
-agent runtime
-  -> adapter and lightweight capture
-  -> raw session evidence
-  -> segments, typed events, and task episodes
-  -> exact / structured / semantic / graph / narrative projections
-  -> bounded evidence packets with freshness and refs
-  -> human or agent review
-  -> owner-controlled promotion
+/tmp/aoa-session-memory-venv/bin/aoa-session-memory-mcp \
+  --workspace-root /tmp/aoa-session-memory-demo \
+  task-episodes latest --limit 5
+
+/tmp/aoa-session-memory-venv/bin/aoa-session-memory-mcp \
+  --workspace-root /tmp/aoa-session-memory-demo \
+  graph-neighborhood synthetic-catalog-mcp --kind mcp
+
+/tmp/aoa-session-memory-venv/bin/aoa-session-memory-mcp \
+  --workspace-root /tmp/aoa-session-memory-demo \
+  freshness-check raw:line:17 --session latest
 ```
 
-The downward route always remains available:
+Run the real stdio protocol smoke to list tools, resources, templates, and
+prompts; call the main route families; open a returned raw ref; and prove the
+archive hash tree is unchanged:
 
-```text
-narrative or answer
-  -> episode / graph / search hit
-  -> segment
-  -> raw or external owner evidence
+```bash
+/tmp/aoa-session-memory-venv/bin/python examples/synthetic/mcp_protocol_smoke.py \
+  --workspace-root /tmp/aoa-session-memory-demo \
+  --cwd /tmp
 ```
 
-## Evidence and Authority
+## MCP installation and configuration
 
-Use the source that owns the question:
+The distribution is `aoa-session-memory-mcp`. It installs two entrypoints:
 
-| Question | Authority |
+- `aoa-session-memory-mcp-server` — stdio MCP server;
+- `aoa-session-memory-mcp` — read-only command-line access to the same routes.
+
+Register the installed stdio server with current Codex CLI:
+
+```bash
+codex mcp add aoa_session_memory -- \
+  /tmp/aoa-session-memory-venv/bin/aoa-session-memory-mcp-server \
+  --workspace-root /tmp/aoa-session-memory-demo
+
+codex mcp get aoa_session_memory
+```
+
+Start a new Codex session if an already-running session does not see the newly
+registered server. Other MCP clients can launch the same command over stdio.
+The portable configuration needs no credential.
+
+The package is a deterministic projection of the authored MCP implementation
+in `abyss-stack`; it is not a second independently maintained server. Its
+manifest records owner commit, exporter identity, file modes and digests,
+entrypoints, compatibility, discovery behavior, authority boundaries, and the
+complete MCP catalog.
+
+## Synthetic demo
+
+`examples/synthetic/rollout-builder-week-demo.jsonl` is invented public-safe
+data. Its bootstrap creates a temporary standalone root with:
+
+- an exact identifier and explicit user intent;
+- a correlated MCP failure, recovery, and verified result;
+- a superseded decision;
+- a task episode and typed entity relationships;
+- search, atlas, entity-registry, and graph projections;
+- resolvable raw and segment refs plus freshness state.
+
+The demo's readiness packet is deliberately partial: one synthetic session is
+useful for route proof, not a claim of production coverage or retrieval
+quality. See [the demo guide](examples/synthetic/README.md).
+
+## Architecture
+
+```text
+agent runtime / transcript adapter
+              |
+              v
+       raw session evidence  <---------------------------+
+              |                                          |
+              v                                          |
+ segments + typed events + episodes                      |
+              |                                          |
+              v                                          |
+ search + atlas + graph + freshness projections          |
+              |                                          |
+              v                                          |
+ evidence packets with resolvable refs ------------------+
+              |
+              v
+       human or agent review -> current owner truth
+
+abyss-stack authored MCP source
+              |
+    allowlisted deterministic export
+              v
+packages/aoa-session-memory-mcp
+              |
+              +-- standalone stdio installation
+              +-- stack-owned system deployment remains in abyss-stack
+```
+
+Every derived layer can route downward. A narrative, graph edge, or search hit
+never replaces its segment, raw transcript, or stronger external owner.
+
+## Example evidence packet
+
+This shortened packet is derived from the synthetic exact-identifier route:
+
+```json
+{
+  "ok": true,
+  "query": "DEMO-ANCHOR-42",
+  "result_count": 1,
+  "provider": {
+    "authoritative_result_provider": "portable_sqlite",
+    "status": {
+      "providers": {
+        "portable_sqlite": {
+          "freshness": {
+            "status": "current"
+          }
+        }
+      }
+    }
+  },
+  "results": [
+    {
+      "event_type": "DECISION",
+      "session_id": "builder-week-synthetic-demo",
+      "refs": {
+        "raw": "raw:line:17",
+        "segment": "000__initial-to-latest.md#event-000017--decision--assistant-message"
+      },
+      "freshness": {
+        "status": "fresh",
+        "basis": "indexed_snapshot"
+      }
+    }
+  ],
+  "authority_boundary": "Raw and segment evidence remain authoritative."
+}
+```
+
+The packet routes review; it does not prove that the decision is currently
+correct in another repository or that one event caused another.
+
+## Evidence, projections, and owner truth
+
+| Layer | What it can establish | What it cannot establish |
+| --- | --- | --- |
+| Raw transcript and source metadata | What was recorded at a resolvable location | That every recorded claim was correct |
+| Segments, episodes, search, atlas, and graph | Where relevant evidence may be and how recorded entities relate | Reviewed truth, causality, or current external state |
+| Freshness and diagnostics | Whether a particular projection is current enough for its declared use | Semantic correctness of the source evidence |
+| Current repository, service, eval, or operator owner | Present truth for the owned question | The complete history of how a session reached it |
+
+Session memory can find stronger owner evidence. It does not replace that
+owner.
+
+## What it can do
+
+- **Exact retrieval** for identifiers, commands, errors, paths, and phrases.
+- **Task episodes** with boundaries, failure state, recovery, and verification
+  state.
+- **Typed entities and relations** that distinguish mention, selection,
+  invocation, result, verification, and consequence.
+- **Graph routes** for neighborhoods, bridges, timelines, and bounded paths.
+- **Freshness-aware answers** that expose current, stale, deferred, missing,
+  or unresolved projection state.
+- **Resolvable evidence refs** back to raw, segment, session, receipt, or owner
+  surfaces.
+- **Abstention and next actions** when evidence is missing, stale, unsupported,
+  or too weak for a current-state or causal claim.
+
+The MCP catalog is read-only or plan-only. It exposes no write, repair,
+reindex, export, install, distillation, or promotion tool.
+
+## Privacy and local-first posture
+
+The core runs locally over a filesystem root and SQLite. stdio is the default
+transport. Session evidence, indexes, and queries do not need a hosted service.
+
+Portable source and runtime evidence are separate. This repository excludes
+private sessions, raw transcripts, segment bodies, runtime databases,
+diagnostics, credentials, caches, and local profiles. The committed demo is
+synthetic. Run the safe current-tree gate before publication or contribution:
+
+```bash
+python scripts/audit_public_tree.py --root . --fail-on blocking
+```
+
+The report returns only finding class, path, line, reason, and a safe
+fingerprint — never a matched secret value. A clean current tree does not prove
+that Git history is safe; history is a separate publication gate.
+
+## Current limitations
+
+- The production adapter is currently Codex; universal agent-runtime support is
+  an architectural direction, not a present claim.
+- Generated episodes, entities, graph edges, and summaries need evidence review
+  and can be incomplete or stale.
+- The project does not yet claim measured retrieval quality across arbitrary
+  private corpora.
+- Semantic accelerators and resource-heavy graph expansions are optional and
+  may be unavailable on a standalone machine.
+- Session memory does not autonomously promote experience into doctrine,
+  skills, eval verdicts, automation, datasets, or model changes.
+- Causal and current-world claims require stronger admitted evidence; the MCP
+  should abstain when that evidence is absent.
+
+## Production adapter
+
+Codex is the current production capture adapter and evidence source. The
+portable organ's durable center is broader: session identity, evidence,
+episodes, provenance, typed relations, freshness, and review boundaries.
+Adapter-specific capture remains separate from the read-only MCP access plane.
+
+## Optional OS Abyss integration
+
+OS Abyss deployments can add managed lifecycle, authenticated loopback HTTP,
+host diagnostics, resource admission, `abyss_machine_nervous`, and future
+`abyss_stack_rag` acceleration. These integrations are disabled or unavailable
+by default and cannot replace `.aoa` evidence.
+
+The current system runtime remains owned, installed, configured, and serviced
+by `abyss-stack`. Its explicit workspace, Python, transport, bearer reference,
+and systemd profile are intentionally not portable defaults. See
+[the dependency boundary](docs/PORTABILITY.md).
+
+## Documentation map
+
+| Document | Use it for |
 | --- | --- |
-| What was recorded in the session? | raw transcript and source metadata |
-| Where is the relevant evidence? | generated indexes and route packets |
-| What does a repository do now? | that repository's current source |
-| What did an eval prove? | the eval owner and admitted evidence |
-| Is a projection current? | live projection and maintenance status |
-| Why does the architecture have this boundary? | `DESIGN.md` and owner decisions |
-
-Session memory can find owner truth. It does not replace it.
-
-## Repository and Install Shapes
-
-The same portable source can run as:
-
-```text
-standalone aoa-session-memory repository
-workspace/.aoa
-```
-
-A live workspace may contain private session archives, generated search/graph
-stores, and diagnostics. A portable bundle always excludes those runtime
-surfaces; private evidence transfer belongs to a separate owner-to-owner
-migration route.
-
-Before publication, run the same bounded public-safety gate used by
-`export-bundle`:
-
-```bash
-python3 scripts/aoa_session_memory.py portable-public-safety-audit \
-  --aoa-root /path/to/portable/.aoa
-```
-
-The gate fails closed on runtime evidence, credential-like values, private
-host paths, or incomplete scan coverage without echoing matched values.
-
-## Quick Start
-
-Validate a source or installed root:
-
-```bash
-python3 scripts/aoa_session_memory.py validate \
-  --workspace-root /path/to/workspace \
-  --aoa-root /path/to/workspace/.aoa
-```
-
-Inspect filesystem and adapter health:
-
-```bash
-python3 scripts/aoa_session_memory.py doctor \
-  --workspace-root /path/to/workspace \
-  --aoa-root /path/to/workspace/.aoa
-```
-
-Inspect projection and maintenance state without mutating:
-
-```bash
-python3 scripts/aoa_session_memory.py projection-status \
-  --workspace-root /path/to/workspace \
-  --aoa-root /path/to/workspace/.aoa
-
-python3 scripts/aoa_session_memory.py maintenance-status \
-  --workspace-root /path/to/workspace \
-  --aoa-root /path/to/workspace/.aoa \
-  --full
-```
-
-For installation, hooks, and clean export, use `INSTALL.md`.
-
-## Common Evidence Routes
-
-Plan an exact path, UUID, command, error, or literal phrase query:
-
-```bash
-python3 scripts/aoa_session_memory.py literal-query-plan \
-  "Traceback ValueError"
-```
-
-Verify an exact literal against one archived raw authority when the planner
-selects that fallback:
-
-```bash
-python3 scripts/aoa_session_memory.py archived-raw-search \
-  --session SESSION_ID_OR_LABEL --query "exact literal"
-```
-
-A complete negative result is authoritative only when the packet reports a
-digest-verified, non-truncated scan.
-
-Ask how an operational entity was used and what happened after:
-
-```bash
-python3 scripts/aoa_session_memory.py usage-chain \
-  aoa-session-memory-mcp --kind mcp
-```
-
-Validate and preview admission of an immutable reviewed skill-use receipt:
-
-```bash
-python3 scripts/aoa_session_memory.py skill-usage-receipt validate RECEIPT.json
-python3 scripts/aoa_session_memory.py skill-usage-receipt record RECEIPT.json
-```
-
-Only an explicit second call with `--apply` writes the receipt. A current
-reviewed receipt can support invocation, deflection, and verification claims,
-plus an effect-attribution candidate. It cannot issue a benefit or promotion
-verdict; that authority remains with `aoa-evals`.
-
-For a reproducible, evidence-first demonstration that another session can run
-without preselecting its target from retriever output, follow
-[`docs/SKILL-USAGE-EVIDENCE-DEMO.md`](docs/SKILL-USAGE-EVIDENCE-DEMO.md).
-
-Inspect one task interval:
-
-```bash
-python3 scripts/aoa_session_memory.py task-episodes latest \
-  --limit 10 --order recent
-```
-
-Inspect a bounded relation between known anchors:
-
-```bash
-python3 scripts/aoa_session_memory.py graph-bridge \
-  aoa-session-memory-mcp exec_command \
-  --source-kind mcp --target-kind tool
-```
-
-These commands return navigation and evidence packets. Open the returned raw,
-segment, session, receipt, or owner refs before relying on an important claim.
-
-The complete operational and recovery reference lives in `PIPELINE.md`.
-
-## Freshness Is Part of the Answer
-
-Generated projections may be:
-
-- `current`;
-- `stale-readable`;
-- `deferred`;
-- `blocked`;
-- `failed`;
-- `truncated`;
-- `fallback`;
-- `unresolved`.
-
-A stale packet can still route older evidence, but it cannot silently answer a
-current-state question. Use the packet's typed next action or the relevant
-maintenance route. A timer success is not proof that every semantic projection
-is current.
-
-Graph freshness includes the exact persisted entity-registry generation used
-to canonicalize its nodes and edges. Graph metadata and every source
-contribution pin that dependency. If the registry generation, semantic digest,
-source fingerprint, or stronger owner-source freshness changes, graph routes
-abstain until catch-up or full rebuild; they do not mix aliases dynamically
-inside one graph generation. A newer owner-source `mtime` triggers a live
-runtime-owner fingerprint check but is not itself semantic drift: a
-content-equivalent config or skill rewrite remains current when its versioned
-identity/content fingerprint matches. A changed or unavailable fingerprint
-still invalidates the registry dependency and blocks graph publication.
-
-## Agent Access
-
-Agents should use progressive disclosure:
-
-1. classify the question;
-2. select an exact or typed route;
-3. inspect the bounded packet and freshness;
-4. expand to episodes, graph, semantic, or narrative layers only when needed;
-5. open raw evidence for exact verification;
-6. return unknown when the evidence is insufficient.
-
-`DESIGN.AGENTS.md` defines this contract. The MCP surface follows the same
-read-only evidence route and does not own mutation or proof.
-
-## Automatic Maintenance
-
-Capture stays lightweight. Incremental workers and maintenance routes advance
-segments, indexes, search, atlas, registry, graph, and other generated
-projections.
-
-The intended happy path is automatic and observable:
-
-- dirty state propagates through projection dependencies;
-- active live tails wait for a quiet window;
-- bounded jobs resume after resource or lock deferral;
-- readers retain the last committed usable snapshot;
-- status distinguishes launcher success from semantic freshness.
-
-Manual commands remain available for diagnosis, controlled repair, deep
-rebuild, and recovery. See `PIPELINE.md`.
-
-## Documentation Map
-
-| File | Read it for |
-| --- | --- |
-| `AGENTS.md` | immediate laws, authority, and task routing |
-| `DESIGN.md` | identity, architecture, boundaries, and open horizon |
-| `DESIGN.AGENTS.md` | agent query and evidence-access contract |
-| `PIPELINE.md` | operational lifecycle, command reference, maintenance, and recovery |
-| `READINESS.md` | readiness states, proof requirements, and gate selection |
-| `INSTALL.md` | installation, hook generation, and portable export |
-| `NAMING.md` | archive labels and semantic naming |
-| `docs/decisions/` | durable rationale and generated decision lookup indexes |
-| `stats/` | bounded revision-level measurements over portable source surfaces |
-
-Source code, config, and schemas own runtime behavior. Live commands and
-generated diagnostics own current status. Git history and session evidence own
-historical development detail.
-
-The owner-local stats port currently measures portable scenario-fixture
-coverage at a named source revision. It does not inspect live archives or turn
-fixture coverage into memory quality, route correctness, or readiness.
-
-## Portability
-
-Export a clean bundle from the active authored source:
-
-```bash
-python3 scripts/aoa_session_memory.py export-bundle \
-  --source-aoa-root /path/to/source/.aoa \
-  --target-dir /path/to/aoa-session-memory \
-  --force
-```
-
-Install into a workspace:
-
-```bash
-python3 scripts/aoa_session_memory.py install \
-  --source-aoa-root /path/to/aoa-session-memory \
-  --workspace-root /path/to/workspace \
-  --force
-```
-
-Do not hand-copy generated hooks or portable consumers when the builder/export
-route exists.
-
-## What Does Not Belong Here
-
-The portable owner terrain should not accumulate:
-
-- private transcripts or session-specific notes;
-- experiment diaries, temporary benchmarks, or failed variants;
-- changing runtime counts and version snapshots;
-- local operator doctrine;
-- generated search/graph databases or maintenance reports;
-- model caches or training artifacts;
-- unreviewed claims promoted from session history.
-
-Keep construction history in session provenance and diagnostics. Promote only
-the smallest durable contract, invariant, fixture, or decision that the owner
-actually needs.
-
-## Core Rule
+| [INSTALL.md](INSTALL.md) | portable source install, hooks, and bundle lifecycle |
+| [DESIGN.md](DESIGN.md) | identity, architecture, evidence, and authority boundaries |
+| [DESIGN.AGENTS.md](DESIGN.AGENTS.md) | agent query and evidence-access contract |
+| [PIPELINE.md](PIPELINE.md) | capture, projections, maintenance, recovery, and CLI routes |
+| [READINESS.md](READINESS.md) | readiness states and proof requirements |
+| [MCP package README](packages/aoa-session-memory-mcp/README.md) | complete tool/resource/prompt contract and deployment diagnostics |
+| [Portability](docs/PORTABILITY.md) | dependency census and optional integration boundary |
+| [Build and release](docs/BUILD_AND_RELEASE.md) | external reproducible build and release gates |
+| [Licensing review](docs/LICENSING.md) | dependency inventory and unresolved root-license gate |
+| [Decisions](docs/decisions/README.md) | durable rationale and generated decision indexes |
+
+## Contributing and security
+
+Read [CONTRIBUTING.md](CONTRIBUTING.md) before changing evidence or generated
+surfaces. Report credential exposure, unsafe history, transcript leakage, path
+handling, or MCP authentication issues through the private route in
+[SECURITY.md](SECURITY.md), not a public issue containing sensitive material.
+
+## License
+
+The projected MCP package is Apache-2.0 and contains the exact owner license.
+The repository root license is not yet confirmed. Apache-2.0 is the documented
+proposal, but public visibility and release publication remain blocked until
+the repository owner explicitly chooses a root license and the corresponding
+`LICENSE` is added. See [the licensing review](docs/LICENSING.md).
+
+## OpenAI Builder Week context
+
+This standalone packaging and demo work was prepared for
+[OpenAI Builder Week](https://openai.com/build-week/). That context does not
+imply acceptance, judging outcome, partnership, or OpenAI endorsement.
+
+## Core rule
 
 ```text
 Preserve evidence.
 Project without replacing it.
-Route by intent.
 Expose freshness.
+Route back to sources.
 Review before promotion.
 ```
