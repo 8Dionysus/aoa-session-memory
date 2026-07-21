@@ -71244,6 +71244,11 @@ def test_live_tail_semantic_recent_reserve_recovers_gold_after_prefix_budget(
         "LIVE_TAIL_SEMANTIC_DISCOVERY_BUDGET_MS",
         1,
     )
+    monkeypatch.setattr(
+        module,
+        "LIVE_TAIL_SEMANTIC_RECENT_RESERVE_BUDGET_MS",
+        10_000,
+    )
     payload = module.live_tail_episode_search(
         aoa_root=aoa_root,
         session=session_id,
