@@ -1,0 +1,17 @@
+{
+  "allowed_bytes": 20922854,
+  "allowed_tracked_bytes": 20955612,
+  "approved_by": "repository-owner",
+  "base_ref": "536917fb8169a8157ced9c3e74f981c5022d3b89",
+  "changed_generated_bytes": 20922854,
+  "changed_generated_files": 340,
+  "decision_ref": "aoa-kag:docs/decisions/AOA-KAG-D-0017-portable-content-addressed-repository-family.md",
+  "default_limit_bytes": 1048576,
+  "head_family_digest": "539b7571f3e520cc25fc91a4488f7f7fad93f114ca688c27f362c7a10461b059",
+  "reason": "Intentional evidence-first session-memory producer, contracts, tests, decisions, demo guidance, and generated-source-return expansion for the Builder Week slice; raw/runtime/private evidence remains excluded.",
+  "repo": "aoa-session-memory",
+  "schema_version": "aoa-repo-local-kag-budget-receipt-v1",
+  "scope": "generated_delta_and_tracked_size",
+  "tracked_bytes": 20955612,
+  "tracked_bytes_max": 13631488
+}
