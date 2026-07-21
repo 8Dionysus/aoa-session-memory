@@ -1304,6 +1304,291 @@ def test_task_episode_replayed_intent_after_turn_abort_stays_in_one_semantic_lif
     assert "interrupted_by_new_user_prompt" not in episode["ambiguity_flags"]
 
 
+def test_task_episode_filters_runtime_content_items_but_keeps_mixed_operator_intent() -> None:
+    rows = [
+        {
+            "timestamp": "2026-07-20T01:00:00Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": (
+                            "<recommended_plugins>\n"
+                            "Use the repository helper.\n"
+                            "</recommended_plugins>"
+                        ),
+                    },
+                    {
+                        "type": "input_text",
+                        "text": (
+                            "# AGENTS.md instructions for /workspace\n"
+                            "<INSTRUCTIONS>Keep owner evidence authoritative.</INSTRUCTIONS>"
+                        ),
+                    },
+                    {
+                        "type": "input_text",
+                        "text": (
+                            "<environment_context><cwd>/workspace</cwd>"
+                            "</environment_context>"
+                        ),
+                    },
+                    {
+                        "type": "input_text",
+                        "text": (
+                            "Проверь конкретную causal chain и сохрани raw refs."
+                        ),
+                    },
+                ],
+            },
+        },
+        {
+            "timestamp": "2026-07-20T01:00:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "Готово: causal chain проверена.",
+                    }
+                ],
+            },
+        },
+    ]
+    events = [
+        module.classify_raw_event(
+            json.dumps(row, ensure_ascii=False),
+            row,
+            line_no,
+        )
+        for line_no, row in enumerate(rows, start=1)
+    ]
+
+    user_event = events[0]
+    components = user_event.facets["runtime_context_components"]
+    assert components["runtime_component_count"] == 3
+    assert components["operator_component_count"] == 1
+    assert components["mixed_runtime_and_operator"] is True
+    assert "source_envelope" not in user_event.facets
+    assert user_event.facets["conversation_act"]["kind"] == (
+        "operator_instruction"
+    )
+
+    episode = module.generated_task_episodes_for_events(events, [])[0]
+    assert episode["intent"] == (
+        "Проверь конкретную causal chain и сохрани raw refs."
+    )
+    assert "<recommended_plugins>" not in episode["semantic_text"]
+    assert "AGENTS.md instructions" not in episode["semantic_text"]
+    assert "<environment_context>" not in episode["semantic_text"]
+
+
+def test_task_episode_accepts_only_correlation_matched_explicit_verification_result() -> None:
+    rows = [
+        {
+            "timestamp": "2026-07-20T02:00:00Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "Проверь topology validator и focused tests.",
+                    }
+                ],
+            },
+        },
+        {
+            "timestamp": "2026-07-20T02:00:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "name": "exec",
+                "call_id": "call-verification",
+                "input": (
+                    "const r = await tools.exec_command({"
+                    '"cmd":"python scripts/validate_topology.py && '
+                    'python -m pytest -q tests/test_topology.py"'
+                    "}); text(r.output);"
+                ),
+            },
+        },
+        {
+            "timestamp": "2026-07-20T02:00:02Z",
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call_output",
+                "call_id": "call-verification",
+                "output": [
+                    {
+                        "type": "input_text",
+                        "text": (
+                            "Script completed\nOutput:\n"
+                            "[ok] topology\n14 passed in 0.09s"
+                        ),
+                    }
+                ],
+            },
+        },
+        {
+            "timestamp": "2026-07-20T02:00:03Z",
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call_output",
+                "call_id": "call-foreign",
+                "output": [
+                    {
+                        "type": "input_text",
+                        "text": "Script completed\nOutput:\n99 passed",
+                    }
+                ],
+            },
+        },
+        {
+            "timestamp": "2026-07-20T02:00:04Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "Готово: validator и tests проверены.",
+                    }
+                ],
+            },
+        },
+    ]
+    events = [
+        module.classify_raw_event(
+            json.dumps(row, ensure_ascii=False),
+            row,
+            line_no,
+        )
+        for line_no, row in enumerate(rows, start=1)
+    ]
+
+    assert events[1].facets["command_kind"] == "verification"
+    assert events[1].event_type == "COMMAND"
+    episode = module.generated_task_episodes_for_events(events, [])[0]
+    assert {
+        ref["raw_ref"]
+        for ref in episode["verification_refs"]
+    } == {"raw:line:2", "raw:line:3"}
+    verification = episode["representations"]["verification"]
+    assert len(verification) == 1
+    assert verification[0]["refs"]["raw"] == "raw:line:3"
+    assert verification[0]["admission_basis"] == (
+        "correlation_matched_structured_verification_result"
+    )
+    assert verification[0]["correlation_id"] == "call-verification"
+    assert all(
+        item["refs"]["raw"] != "raw:line:4"
+        for item in verification
+    )
+
+
+def test_runtime_complete_overrides_only_noncanonical_stream_terminal_status() -> None:
+    def build(blocker_source: str) -> dict[str, Any]:
+        blocker = (
+            {
+                "timestamp": "2026-07-20T03:00:01Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "agent_message",
+                    "message": "Blocked: cannot proceed without a dependency.",
+                },
+            }
+            if blocker_source == "stream"
+            else {
+                "timestamp": "2026-07-20T03:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": (
+                                "Blocked: cannot proceed without a dependency."
+                            ),
+                        }
+                    ],
+                },
+            }
+        )
+        rows = [
+            {
+                "timestamp": "2026-07-20T03:00:00Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Проверь текущий slice.",
+                        }
+                    ],
+                },
+            },
+            blocker,
+            {
+                "timestamp": "2026-07-20T03:00:02Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "Checkpoint: bounded slice inspected.",
+                        }
+                    ],
+                },
+            },
+            {
+                "timestamp": "2026-07-20T03:00:03Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "task_complete",
+                    "turn_id": "turn-proof",
+                },
+            },
+        ]
+        events = [
+            module.classify_raw_event(
+                json.dumps(row, ensure_ascii=False),
+                row,
+                line_no,
+            )
+            for line_no, row in enumerate(rows, start=1)
+        ]
+        return module.generated_task_episodes_for_events(
+            events,
+            [],
+        )[0]
+
+    stream_episode = build("stream")
+    canonical_episode = build("canonical")
+
+    assert stream_episode["status"] == "closed"
+    assert (
+        "noncanonical_terminal_status_overridden_by_runtime_complete"
+        in stream_episode["ambiguity_flags"]
+    )
+    assert canonical_episode["status"] == "blocked"
+    assert (
+        "noncanonical_terminal_status_overridden_by_runtime_complete"
+        not in canonical_episode["ambiguity_flags"]
+    )
+
+
 def test_task_episode_failure_observation_and_resume_stay_with_open_lifecycle() -> None:
     rows = [
         {
@@ -8106,6 +8391,59 @@ def test_decisive_sparse_evidence_anchor_survives_two_weak_rrf_votes() -> None:
     assert anchored_score > weak_consensus_score
     ranked[0]["rerank_score"] = 190.0
     assert module.episode_sparse_anchor_decision(ranked)["active"] is False
+
+
+def test_dense_top_missing_from_sparse_candidates_survives_mechanical_rrf_consensus() -> None:
+    dense_ranking = [
+        {"doc_id": "episode:dense-truth", "rank": 1, "score": 0.82},
+        {"doc_id": "episode:lexical-neighbor", "rank": 2, "score": 0.79},
+    ]
+    sparse_ranks = {"episode:lexical-neighbor": 1}
+
+    decision = module.episode_dense_recall_guard_decision(
+        dense_ranking,
+        sparse_ranks,
+        sparse_anchor={"active": False},
+        temporal_sparse_anchor={"active": False},
+    )
+    dense_top_score, _ = module.episode_hybrid_rrf_score(
+        sparse_rank=None,
+        dense_rank=1,
+    )
+    guarded_dense_top_score = (
+        dense_top_score + decision["bonus"]
+    )
+    weak_consensus_score, _ = module.episode_hybrid_rrf_score(
+        sparse_rank=1,
+        dense_rank=2,
+    )
+
+    assert decision["active"] is True
+    assert decision["status"] == (
+        "dense_top_absent_from_sparse_candidates"
+    )
+    assert decision["claim_admission"] is False
+    assert guarded_dense_top_score > weak_consensus_score
+
+    shared = module.episode_dense_recall_guard_decision(
+        dense_ranking,
+        {
+            "episode:dense-truth": 2,
+            "episode:lexical-neighbor": 1,
+        },
+    )
+    assert shared["active"] is False
+    assert shared["status"] == "dense_top_also_has_sparse_vote"
+
+    typed_sparse = module.episode_dense_recall_guard_decision(
+        dense_ranking,
+        sparse_ranks,
+        sparse_anchor={"active": True},
+    )
+    assert typed_sparse["active"] is False
+    assert typed_sparse["status"] == (
+        "decisive_sparse_anchor_takes_precedence"
+    )
 
 
 def test_verbose_coherent_sparse_winner_does_not_require_short_query_coverage() -> None:
@@ -16665,6 +17003,8 @@ def test_memory_query_intent_separates_exact_typed_episode_temporal_graph_and_di
         "какой terminal stack уже стоял и чего не хватало перед установкой Ghostty": "temporal_state",
         "MV3 background fix -> restart failure -> safer process selection -> successful capture": "causal_chain",
         "что вызвало restart failure после MV3 background fix": "causal_chain",
+        "Найди action/result/verification evidence chain для call_exact_123": "causal_chain",
+        "Какая команда дала коррелированный результат и чем он был подтверждён?": "causal_chain",
         "какие изменения последовали после решения добавить runtime adapter": "temporal_state",
         "Какая recovery-цепочка последовала после Ты завис": "temporal_state",
         "Где начинается локальная работа fork после parent history": "temporal_state",
@@ -16726,6 +17066,15 @@ def test_memory_query_intent_preserves_negative_polarity_and_quantitative_gate(
     assert negative_plan["answer_admission"]["claim_shape"] == (
         "negative_claim"
     )
+    assert negative_plan["answer_admission"][
+        "required_next_route"
+    ] == negative_plan["primary_route"]["route_id"]
+    assert negative_plan["answer_admission"][
+        "required_next_route_packet"
+    ] == negative_plan["next_route"]
+    assert negative_plan["evidence_envelope"][
+        "answer_admission"
+    ]["required_next_route_packet"] == negative_plan["next_route"]
     negative_gate = negative_plan["answer_admission"][
         "claim_shape_gate"
     ]
@@ -18104,6 +18453,12 @@ def test_session_evidence_window_reads_bounded_raw_block_and_correlated_result(
         "retrieval_candidates_are_claims"
     ] is False
     assert envelope["next_route"]["kind"] == "claim_shape_review"
+    assert envelope["answer_admission"]["required_next_route"] == (
+        "claim_shape_review"
+    )
+    assert envelope["answer_admission"][
+        "required_next_route_packet"
+    ] == envelope["next_route"]
 
     manifest_path = Path(packet["refs"]["session"])
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -18173,6 +18528,12 @@ def test_common_evidence_envelope_keeps_exact_candidates_navigation_only(
     assert admission["retrieval_candidates_are_claims"] is False
     assert envelope["insufficiency_reason"]
     assert envelope["next_route"]["kind"] == "bounded_evidence_read"
+    assert admission["required_next_route"] == (
+        "bounded_source_evidence_read"
+    )
+    assert admission["required_next_route_packet"] == (
+        envelope["next_route"]
+    )
     assert envelope["freshness"]["scoped"]["coverage"] == "partial"
     assert envelope["freshness"]["scoped"][
         "derived_return_coverage"
@@ -18230,6 +18591,10 @@ def test_common_evidence_envelope_marks_verified_raw_read_but_not_claim(
     assert admission["evidence_read_admitted"] is True
     assert envelope["insufficiency_reason"]
     assert envelope["next_route"]["kind"] == "claim_shape_review"
+    assert admission["required_next_route"] == "claim_shape_review"
+    assert admission["required_next_route_packet"] == (
+        envelope["next_route"]
+    )
 
 
 def test_common_evidence_envelope_lifts_only_admitted_temporal_claim_refs(
@@ -20652,11 +21017,21 @@ def test_graph_timeline_structured_correlation_admits_source_events_and_rejects_
     assert timeline["quality"]["structured_correlation_accepted_event_count"] == 2
     assert timeline["quality"]["structured_correlation_mention_only_rejected_count"] == 1
     assert timeline["quality"]["structured_correlation_unverifiable_count"] == 0
-    assert timeline["freshness"]["status"] == "scope_unverified"
+    assert timeline["freshness"]["status"] == "scope_current"
+    assert timeline["freshness"]["scope_status"] == "scope_current"
+    assert timeline["freshness"][
+        "accepted_search_freshness_statuses"
+    ] == ["fresh"]
     assert (
         timeline["freshness"]["global_freshness"]["status"]
         == "unresolved"
     )
+    assert timeline["freshness"]["scope_freshness"]["status"] == (
+        "scope_current"
+    )
+    assert timeline["freshness"]["scope_freshness"][
+        "coverage_truncated"
+    ] is False
     assert timeline["freshness"]["scope_freshness"][
         "does_not_upgrade_global_freshness"
     ] is True
@@ -21168,6 +21543,90 @@ def test_graph_store_missing_typed_anchor_defers_fuzzy_lookup_to_retrieval_seed(
     assert resolution["resolver_strategy"] == "indexed_exact_miss_requires_retrieval_seed"
     assert "graph_store_unindexed_payload_scan_skipped" in resolution["diagnostics"]
     assert not any("payload_json LIKE" in statement for statement in traced_sql)
+
+
+def test_graph_store_hook_kind_rejects_exact_mutation_surface_collision(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    store = module.GraphSqliteStore(aoa_root, reset=True)
+    node_id = module.graph_route_node_id(
+        "mutation_surface",
+        "codex_hooks_status",
+    )
+    payload = {
+        "id": node_id,
+        "type": module.graph_route_node_type(
+            "mutation_surface",
+            "codex_hooks_status",
+        ),
+        "route_layer": "mutation_surface",
+        "route_key": "codex_hooks_status",
+        "route_signal": "mutation_surface:codex_hooks_status",
+    }
+    try:
+        store.conn.execute(
+            "INSERT INTO nodes(id, node_type, payload_json, count) "
+            "VALUES (?, ?, ?, 1)",
+            (
+                node_id,
+                payload["type"],
+                json.dumps(payload, ensure_ascii=False),
+            ),
+        )
+        store.conn.commit()
+        named = module.graph_store_resolve_anchor(
+            store.conn,
+            "codex-hooks-status",
+            kind="hook",
+            limit=20,
+        )
+        explicit = module.graph_store_resolve_anchor(
+            store.conn,
+            node_id,
+            kind="hook",
+            limit=20,
+        )
+    finally:
+        store.close()
+
+    assert named["start_node_ids"] == []
+    assert named["resolver_strategy"] == (
+        "indexed_exact_miss_requires_retrieval_seed"
+    )
+    assert explicit["start_node_ids"] == []
+    assert explicit["resolver_strategy"] == (
+        "indexed_exact_miss_requires_retrieval_seed"
+    )
+    assert (
+        "exact_graph_node_kind_mismatch:"
+        "requested=hook:observed=mutation_surface"
+    ) in explicit["diagnostics"]
+
+
+def test_graph_quality_diagnostics_distinguish_protective_posture_from_failure() -> None:
+    protective = module.graph_quality_diagnostic_finding(
+        "graph_store_unindexed_payload_scan_skipped"
+    )
+    answer_gate = module.graph_quality_diagnostic_finding(
+        "answer_rule_gate:needs_review:raw_read_required"
+    )
+    unexpected = module.graph_quality_diagnostic_finding(
+        "graph_store_payload_corrupt"
+    )
+
+    assert protective == {
+        "code": "graph_store_unindexed_payload_scan_skipped",
+        "severity": "informational",
+        "category": "expected_bounded_route_posture",
+    }
+    assert answer_gate["severity"] == "informational"
+    assert answer_gate["category"] == "protective_answer_gate"
+    assert unexpected == {
+        "code": "graph_store_payload_corrupt",
+        "severity": "critical",
+        "category": "unexpected_retrieval_or_projection_diagnostic",
+    }
 
 
 def test_graph_timeline_exact_event_window_preserves_order_and_correlation(tmp_path: Path) -> None:
@@ -33823,6 +34282,177 @@ def test_route_signals_cover_operational_layers_and_search(tmp_path: Path) -> No
     assert provider["providers"]["portable_sqlite"]["route_term_count"] > 0
 
 
+def test_graph_materializes_observed_agent_lineage_with_source_evidence(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    session_id = "019f0000-1111-4222-8333-444444444444"
+    parent_session_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+    transcript = tmp_path / "agent-lineage.jsonl"
+    monkeypatch.setattr(
+        module,
+        "entity_registry_skill_roots",
+        lambda _root: [],
+    )
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-07-19T00:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": session_id,
+                    "cwd": str(repo),
+                    "thread_source": "subagent",
+                    "parent_thread_id": parent_session_id,
+                    "agent_path": "/root/graph_rag_evidence",
+                    "agent_nickname": "Banach",
+                },
+            },
+            {
+                "timestamp": "2026-07-19T00:00:00.100Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "developer",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": (
+                                "You are an agent in a team of agents "
+                                "collaborating to complete a task."
+                            ),
+                        }
+                    ],
+                },
+            },
+            {
+                "timestamp": "2026-07-19T00:00:00.200Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "task_started",
+                    "turn_id": "turn-agent-lineage",
+                    "started_at": 1784419200.2,
+                },
+            },
+            {
+                "timestamp": "2026-07-19T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Проверь evidence-backed graph lineage.",
+                        }
+                    ],
+                },
+            },
+            {
+                "timestamp": "2026-07-19T00:00:02Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "Lineage evidence verified.",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+
+    receipt = module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": session_id,
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    assert receipt["ok"] is True
+    assert module.search_index_sessions(
+        aoa_root=aoa_root,
+        target="all",
+    )["ok"] is True
+    graph = module.build_session_graph(
+        aoa_root=aoa_root,
+        target="all",
+        write=True,
+    )
+
+    assert graph["ok"] is True
+    assert graph["node_type_counts"]["agent"] == 1
+    assert graph["edge_type_counts"][
+        "session_has_agent_identity"
+    ] == 1
+    agent_node_id = module.graph_route_node_id(
+        "agent",
+        "/root/graph_rag_evidence",
+    )
+    agent_node = next(
+        node
+        for node in graph["nodes"]
+        if node.get("id") == agent_node_id
+    )
+    agent_edge = next(
+        edge
+        for edge in graph["edges"]
+        if edge.get("type") == "session_has_agent_identity"
+    )
+    assert agent_node["agent_nickname"] == "Banach"
+    assert agent_node["identity_scope"] == (
+        "observed_session_lineage_agent_path"
+    )
+    assert agent_node["canonical_person_identity_claim"] is False
+    assert agent_node["evidence_refs"][0]["refs"]["raw"] == (
+        "raw:line:1"
+    )
+    assert agent_edge["source"] == f"session:{session_id}"
+    assert agent_edge["target"] == agent_node_id
+    assert agent_edge["relation_family"] == "agent_lineage"
+    assert agent_edge["observed_vs_inferred"] == "observed"
+    assert agent_edge["domain_range_status"] == "valid"
+    assert agent_edge["answer_admissible"] is False
+    direct = module.graph_from_store_neighborhood(
+        aoa_root=aoa_root,
+        anchor="/root/graph_rag_evidence",
+        kind="agent",
+        depth=1,
+        limit=8,
+    )
+    assert direct is not None
+    assert direct["resolved"]["start_node_ids"] == [agent_node_id]
+    graph_index = json.loads(
+        module.graph_paths(aoa_root)["index"].read_text(
+            encoding="utf-8"
+        )
+    )
+    conn = sqlite3.connect(
+        str(module.graph_paths(aoa_root)["store"])
+    )
+    try:
+        physical_source_count = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM graph_sources"
+            ).fetchone()[0]
+        )
+    finally:
+        conn.close()
+    assert graph_index["source_count"] == physical_source_count
+
+
 def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(
     tmp_path: Path,
     monkeypatch: Any,
@@ -33851,11 +34481,11 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(
     write_jsonl(
         transcript,
         [
-            {
-                "timestamp": "2026-05-26T00:00:00Z",
-                "type": "session_meta",
-                "payload": {"id": graph_session_id, "cwd": str(repo), "model": "gpt-5"},
-            },
+                {
+                    "timestamp": "2026-05-26T00:00:00Z",
+                    "type": "session_meta",
+                    "payload": {"id": graph_session_id, "cwd": str(repo), "model": "gpt-5"},
+                },
             {
                 "timestamp": "2026-05-26T00:00:01Z",
                 "type": "response_item",
@@ -33977,7 +34607,13 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(
     assert (aoa_root / "graph" / "nodes.jsonl").exists()
     assert (aoa_root / "graph" / "edges.jsonl").exists()
     assert (aoa_root / "graph" / "graph.sqlite3").exists()
-    assert json.loads((aoa_root / "graph" / "index.json").read_text(encoding="utf-8"))["builder"] == "sqlite_graph_store"
+    graph_index = json.loads(
+        (aoa_root / "graph" / "index.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert graph_index["builder"] == "sqlite_graph_store"
+    assert graph_index["source_count"] == graph["source_count"]
     assert graph["node_type_counts"]["event"] >= 1
     assert graph["node_type_counts"].get("raw_ref", 0) == 0
     assert graph["edge_type_counts"].get("has_raw_ref", 0) == 0
@@ -39810,7 +40446,10 @@ def test_graph_relation_contract_rejects_inverted_action_result_time() -> None:
         }
     )
 
-    assert valid["relation_contract_version"] == 2
+    assert (
+        valid["relation_contract_version"]
+        == module.GRAPH_RELATION_CONTRACT_VERSION
+    )
     assert valid["temporal_order_status"] == "valid"
     assert valid["temporal_semantics"]["source_event_time"] == (
         "2026-07-18T20:00:00Z"
@@ -81774,6 +82413,72 @@ def test_episode_replay_alignment_requires_typed_relation_and_raw_refs() -> None
     assert missing_source_admission["status"] == (
         "requested_source_kind_evidence_unresolved"
     )
+
+
+def test_unadmitted_causal_relation_returns_exact_bounded_chain_read() -> None:
+    admission = {
+        "admitted": False,
+        "status": "causal_relation_evidence_unresolved",
+        "relation_gate": {
+            "gates": [
+                {
+                    "kind": "causal_attribution",
+                    "status": "ordered_action_result_attribution_chain",
+                    "admitted": False,
+                    "rejection_reasons": [
+                        "causal_claim_support_missing"
+                    ],
+                }
+            ]
+        },
+    }
+    result = {
+        "session_id": "session-causal-proof",
+        "causal_attribution": {
+            "active": True,
+            "status": "ordered_action_result_attribution_chain",
+            "chain": {
+                "action": {
+                    "line": 370,
+                    "correlation_id": "call-causal-proof",
+                    "refs": {"raw": "raw:line:370"},
+                },
+                "result": {
+                    "line": 371,
+                    "correlation_id": "call-causal-proof",
+                    "refs": {"raw": "raw:line:371"},
+                },
+                "verification": {
+                    "line": 381,
+                    "refs": {"raw": "raw:line:381"},
+                },
+                "correlation_id": "call-causal-proof",
+            },
+        },
+    }
+
+    route = module.episode_unadmitted_relation_next_route(
+        [result],
+        admission,
+    )
+
+    assert route["route_id"] == "bounded_causal_chain_read"
+    assert route["status"] == "ready"
+    assert route["command"] == (
+        "evidence-window session-causal-proof raw:line:370 "
+        "--before 1 --after 13"
+    )
+    assert route["expected_refs"] == [
+        "raw:line:370",
+        "raw:line:371",
+        "raw:line:381",
+    ]
+    assert route["rejection_reasons"] == [
+        "causal_claim_support_missing"
+    ]
+    assert "correlation identity" in route[
+        "claim_admission_requires"
+    ]
 
 
 def test_episode_lineage_alignment_ranks_boundary_and_history_sides() -> None:
