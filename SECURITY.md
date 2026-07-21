@@ -28,9 +28,10 @@ repository is public.
 - Public examples must be invented synthetic data, never edited owner
   transcripts.
 
-See the package [threat model](packages/aoa-session-memory-mcp/docs/THREAT_MODEL.md)
-and [public-tree audit](scripts/audit_public_tree.py) for the enforced local
-checks.
+See the package [threat model](packages/aoa-session-memory-mcp/docs/THREAT_MODEL.md),
+[public-tree audit](scripts/audit_public_tree.py), [full-history
+audit](scripts/audit_git_history.py), and [publication
+boundary](docs/PUBLICATION.md) for the enforced checks.
 
 Security fixes target the current maintained branch and any explicitly
 supported release. No public stable release is implied by this policy.

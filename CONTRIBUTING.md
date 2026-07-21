@@ -20,7 +20,8 @@ Run the standalone gates:
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 /tmp/aoa-session-memory-dev/bin/python \
-  -m pytest -q -p no:cacheprovider tests/test_session_memory.py tests/test_public_tree_audit.py
+  -m pytest -q -p no:cacheprovider tests/test_session_memory.py \
+  tests/test_public_tree_audit.py tests/test_git_history_audit.py
 /tmp/aoa-session-memory-dev/bin/python packages/aoa-session-memory-mcp/scripts/release_check.py
 /tmp/aoa-session-memory-dev/bin/python scripts/audit_public_tree.py --root . --fail-on blocking
 ```
@@ -41,6 +42,8 @@ outside that directory.
 - Preserve raw, segment, session, and freshness refs in derived packets.
 - State which owner surface changed and which checks passed.
 - Run the current-tree audit before requesting review.
+- Treat the full-history audit as a publication gate; an ordinary branch test
+  cannot prove that every remote ref or GitHub-hosted surface was fetched.
 - Do not include wheels, sdists, virtual environments, databases, caches, logs,
   diagnostics, or generated runtime sessions.
 

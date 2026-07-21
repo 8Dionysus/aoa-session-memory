@@ -240,7 +240,9 @@ python scripts/audit_public_tree.py --root . --fail-on blocking
 
 The report returns only finding class, path, line, reason, and a safe
 fingerprint — never a matched secret value. A clean current tree does not prove
-that Git history is safe; history is a separate publication gate.
+that Git history or GitHub-hosted surfaces are safe; they are separate
+publication gates. The predecessor history is not safe for a direct visibility
+change, so publication must follow the [clean-seed route](docs/PUBLICATION.md).
 
 ## Current limitations
 
@@ -288,6 +290,7 @@ and systemd profile are intentionally not portable defaults. See
 | [MCP package README](packages/aoa-session-memory-mcp/README.md) | complete tool/resource/prompt contract and deployment diagnostics |
 | [Portability](docs/PORTABILITY.md) | dependency census and optional integration boundary |
 | [Build and release](docs/BUILD_AND_RELEASE.md) | external reproducible build and release gates |
+| [Publication boundary](docs/PUBLICATION.md) | predecessor audit verdict and clean public-seed gates |
 | [Licensing review](docs/LICENSING.md) | dependency inventory and unresolved root-license gate |
 | [Decisions](docs/decisions/README.md) | durable rationale and generated decision indexes |
 
