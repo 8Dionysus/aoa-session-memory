@@ -80858,10 +80858,10 @@ def test_owner_path_inference_is_fail_open_when_home_is_missing(monkeypatch) -> 
 
     owner = module.inferred_owner_root_for_path("~/missing")
     try:
-        passwd_home = str(Path("~").expanduser())
+        account_home = str(Path("~").expanduser())
     except (OSError, RuntimeError, ValueError):
-        passwd_home = None
-    assert owner in {None, passwd_home}
+        account_home = None
+    assert owner in {None, account_home}
 
 
 def test_owner_resolution_uses_indexed_paths_when_grounding_falls_back(tmp_path: Path) -> None:
