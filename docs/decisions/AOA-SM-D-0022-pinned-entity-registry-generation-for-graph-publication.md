@@ -62,6 +62,14 @@ removes it from candidate admission. A locally verified evidence contribution
 may still be opened through its stronger ref, but it does not make global
 graph recall current.
 
+The persisted registry records a separate versioned fingerprint of current
+runtime owner identities and content-bearing source refs. A newer source
+`mtime` triggers recomputation of that fingerprint; it does not independently
+declare semantic drift. Matching fingerprints keep the dependency current
+after a content-equivalent rewrite. A mismatch, incomplete legacy coverage, or
+unavailable comparison keeps the registry stale and preserves the graph
+publication refusal.
+
 Incremental mutation checks the pinned dependency before mutation and again
 before commit. A change rolls back the transaction. Full rebuild writes a
 temporary store and rechecks the dependency before atomic publication; a
@@ -95,8 +103,11 @@ identity semantics.
   affected source rows; query routes abstain before traversal.
 - Positive: dependency races have executable rollback and last-good
   publication behavior.
+- Positive: content-equivalent owner rewrites do not discard a graph build only
+  because a file timestamp advanced.
 - Tradeoff: graph reads perform a bounded registry integrity and owner-source
-  freshness check.
+  freshness check, including runtime fingerprint recomputation after source
+  timestamp advance.
 - Tradeoff: an entity-registry correction can require graph-wide catch-up or a
   full rebuild before graph candidates are admitted again.
 - Follow-up: include the dependency packet in portable and MCP parity checks

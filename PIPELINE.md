@@ -155,6 +155,12 @@ an older operational rollup. The registry records both its history policy and a
 versioned semantic fingerprint of the observed route entries. A changed or
 unverifiable observed dependency makes the registry stale even when runtime
 source mtimes, schema, producer generation, and entity count are unchanged.
+The registry separately records a versioned runtime-owner fingerprint derived
+from stable entity identities and content-bearing source-ref tokens. A newer
+runtime-source `mtime` causes that fingerprint to be recomputed: an exact match
+proves a content-equivalent rewrite for registry purposes, while mismatch or
+missing legacy coverage requires registry catch-up. Timestamp advance alone is
+neither semantic freshness nor semantic staleness.
 Previous registries, rollups, and route terms remain generated navigation
 surfaces; their resolvable raw and owner refs remain the evidence authority.
 
@@ -268,9 +274,11 @@ visible.
 Graph freshness also verifies the pinned entity-registry schema, producer
 generation, source fingerprint, and semantic digest against the current
 persisted snapshot and its stronger owner sources. A missing, changed, or
-owner-obsolete dependency blocks graph candidate admission. It does not make a
-resolvable local evidence ref false; that ref remains available through its
-stronger source route.
+owner-obsolete dependency blocks graph candidate admission. Owner-source mtime
+advance is only a bounded recheck trigger; the versioned runtime-owner
+identity/content fingerprint decides whether the registry semantics changed.
+This does not make a resolvable local evidence ref false; that ref remains
+available through its stronger source route.
 
 ## 11. Maintenance coordination
 

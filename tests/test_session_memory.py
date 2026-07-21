@@ -22933,6 +22933,120 @@ def test_entity_registry_stale_snapshot_overlays_cli_subcommands(tmp_path: Path,
     assert plan["ordered_routes"][0]["route_id"] == "entity_usage_chain"
 
 
+def test_entity_registry_runtime_fingerprint_distinguishes_mtime_rewrite_from_owner_change(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    codex_home = tmp_path / "codex-home"
+    services_root = tmp_path / "empty-services"
+    codex_home.mkdir()
+    services_root.mkdir()
+    config_path = codex_home / "config.toml"
+    config_path.write_text(
+        'model = "before"\n\n'
+        "[mcp_servers.semantic_probe]\n"
+        'command = "probe-command"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setenv(
+        "AOA_ENTITY_REGISTRY_MCP_SERVICES_ROOTS",
+        str(services_root),
+    )
+
+    snapshot = module.build_entity_registry(
+        aoa_root=aoa_root,
+        write=True,
+        include_runtime=True,
+        observed_source="none",
+        history_policy="authoritative-rebuild",
+        limit=1_000_000,
+    )
+    stored_runtime = snapshot["runtime_source_fingerprint"]
+    assert stored_runtime["coverage"] == "complete"
+    assert stored_runtime["sha256"]
+    assert (
+        snapshot["generation_identity"]["source_fingerprint_mode"]
+        == "identity_candidate_and_source_ref_cli_contract_runtime_owner_digest_v3"
+    )
+
+    newer_mtime = float(snapshot["generated_at_epoch"]) + 10.0
+    config_path.write_text(
+        '# content-equivalent registry rewrite\nmodel = "after"\n\n'
+        "[mcp_servers.semantic_probe]\n"
+        'command = "probe-command"\n',
+        encoding="utf-8",
+    )
+    os.utime(config_path, (newer_mtime, newer_mtime))
+
+    needs_overlay, equivalent_state = (
+        module.entity_registry_snapshot_needs_runtime_source_overlay(
+            aoa_root,
+            snapshot,
+        )
+    )
+    equivalent_dependency = (
+        module.graph_entity_registry_dependency_snapshot(
+            aoa_root,
+            ensure_current=False,
+            allow_ephemeral=False,
+        )
+    )
+
+    assert needs_overlay is False
+    assert equivalent_state["source_mtime_advanced"] is True
+    assert (
+        equivalent_state["runtime_fingerprint_comparison"]
+        == "matched"
+    )
+    assert equivalent_state["reasons"] == []
+    assert equivalent_dependency["status"] == "current"
+    assert equivalent_dependency["runtime_overlay_required"] is False
+
+    legacy_snapshot = dict(snapshot)
+    legacy_snapshot.pop("runtime_source_fingerprint")
+    legacy_needs_overlay, legacy_state = (
+        module.entity_registry_snapshot_needs_runtime_source_overlay(
+            aoa_root,
+            legacy_snapshot,
+        )
+    )
+    assert legacy_needs_overlay is True
+    assert legacy_state["runtime_fingerprint_comparison"] == "unavailable"
+    assert "source_newer_than_entity_registry" in legacy_state["reasons"]
+
+    changed_mtime = newer_mtime + 10.0
+    config_path.write_text(
+        'model = "after"\n\n'
+        "[mcp_servers.semantic_probe]\n"
+        'command = "different-command"\n',
+        encoding="utf-8",
+    )
+    os.utime(config_path, (changed_mtime, changed_mtime))
+
+    changed_needs_overlay, changed_state = (
+        module.entity_registry_snapshot_needs_runtime_source_overlay(
+            aoa_root,
+            snapshot,
+        )
+    )
+    changed_dependency = module.graph_entity_registry_dependency_snapshot(
+        aoa_root,
+        ensure_current=False,
+        allow_ephemeral=False,
+    )
+
+    assert changed_needs_overlay is True
+    assert changed_state["runtime_fingerprint_comparison"] == "mismatch"
+    assert "source_newer_than_entity_registry" in changed_state["reasons"]
+    assert changed_dependency["status"] == "stale"
+    assert (
+        "entity_registry_owner_sources_newer"
+        in changed_dependency["reasons"]
+    )
+
+
 def test_entity_registry_cli_identities_are_per_subcommand_contract(
     tmp_path: Path,
 ) -> None:

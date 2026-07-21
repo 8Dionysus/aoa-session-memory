@@ -245,7 +245,11 @@ to canonicalize its nodes and edges. Graph metadata and every source
 contribution pin that dependency. If the registry generation, semantic digest,
 source fingerprint, or stronger owner-source freshness changes, graph routes
 abstain until catch-up or full rebuild; they do not mix aliases dynamically
-inside one graph generation.
+inside one graph generation. A newer owner-source `mtime` triggers a live
+runtime-owner fingerprint check but is not itself semantic drift: a
+content-equivalent config or skill rewrite remains current when its versioned
+identity/content fingerprint matches. A changed or unavailable fingerprint
+still invalidates the registry dependency and blocks graph publication.
 
 ## Agent Access
 
