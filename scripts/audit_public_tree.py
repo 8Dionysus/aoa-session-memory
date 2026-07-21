@@ -122,11 +122,9 @@ def content_findings(relative: Path, absolute: Path) -> list[dict[str, Any]]:
         return [finding("non_utf8_file", "review", relative, data[:256], "non-UTF-8 content requires explicit review")]
     results: list[dict[str, Any]] = []
     for class_name, severity, pattern, reason in content_rules():
-        match = pattern.search(text)
-        if match is None:
-            continue
-        line = text.count("\n", 0, match.start()) + 1
-        results.append(finding(class_name, severity, relative, match.group(0).encode("utf-8"), reason, line=line))
+        for match in pattern.finditer(text):
+            line = text.count("\n", 0, match.start()) + 1
+            results.append(finding(class_name, severity, relative, match.group(0).encode("utf-8"), reason, line=line))
     return results
 
 

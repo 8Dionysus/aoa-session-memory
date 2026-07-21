@@ -19,14 +19,14 @@ def load_auditor():
 
 def test_audit_reports_secret_fingerprints_without_values(tmp_path: Path) -> None:
     auditor = load_auditor()
-    secret = "sk-" + "A" * 32
-    (tmp_path / "config.txt").write_text(f"credential={secret}\n", encoding="utf-8")
+    secrets = ["sk-" + "A" * 32, "sk-" + "C" * 32]
+    (tmp_path / "config.txt").write_text("\n".join(secrets) + "\n", encoding="utf-8")
 
     report = auditor.audit(tmp_path)
 
     assert report["ok"] is False
-    assert any(item["class"] == "openai_api_key" for item in report["findings"])
-    assert secret not in json.dumps(report)
+    assert sum(item["class"] == "openai_api_key" for item in report["findings"]) == 2
+    assert all(secret not in json.dumps(report) for secret in secrets)
     assert all(item["fingerprint"].startswith("sha256:") for item in report["findings"])
 
 

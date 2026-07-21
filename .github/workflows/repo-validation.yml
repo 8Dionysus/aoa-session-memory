@@ -23,6 +23,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          fetch-depth: 0
 
       - name: Setup Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
@@ -44,11 +46,16 @@ jobs:
       - name: Audit current public tree
         run: python scripts/audit_public_tree.py --root . --fail-on blocking
 
+      - name: Audit reachable history on public repository
+        if: github.event.repository.visibility == 'public'
+        run: python scripts/audit_git_history.py --repo . --fail-on blocking
+
       - name: Run portable source tests
         run: >-
           PYTHONDONTWRITEBYTECODE=1 python -m pytest -q -p no:cacheprovider
           tests/test_session_memory.py
           tests/test_public_tree_audit.py
+          tests/test_git_history_audit.py
 
       - name: Run MCP package release check
         working-directory: packages/aoa-session-memory-mcp
