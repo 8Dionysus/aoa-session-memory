@@ -8893,6 +8893,130 @@ def test_episode_auto_rerank_trigger_does_not_confuse_kakoi_with_kak() -> None:
     assert module.episode_query_auto_rerank_reasons("какой terminal stack уже стоял") == []
 
 
+def test_episode_auto_rerank_weak_lexical_signal_does_not_spend_provider_cost() -> None:
+    plan = module.episode_auto_rerank_escalation_plan(
+        explicit=False,
+        requested_mode="auto",
+        effective_mode="hybrid",
+        has_results=True,
+        auto_reasons=[],
+        observed_signals=["weak_lexical_answer_evidence"],
+        provider_readiness={},
+    )
+
+    assert plan["apply"] is False
+    assert plan["trigger"] == "not_requested"
+    assert plan["status"] == "weak_lexical_signal_not_an_auto_trigger"
+    assert plan["policy_version"] == module.EPISODE_AUTO_RERANK_POLICY_VERSION
+
+
+def test_episode_auto_rerank_requires_warm_provider_for_structural_query() -> None:
+    deferred = module.episode_auto_rerank_escalation_plan(
+        explicit=False,
+        requested_mode="auto",
+        effective_mode="hybrid",
+        has_results=True,
+        auto_reasons=["causal_or_recovery_query"],
+        observed_signals=[],
+        provider_readiness={
+            "status": "cold_start_budget_deferred",
+            "automatic_start_allowed": False,
+        },
+    )
+    warm = module.episode_auto_rerank_escalation_plan(
+        explicit=False,
+        requested_mode="auto",
+        effective_mode="hybrid",
+        has_results=True,
+        auto_reasons=["causal_or_recovery_query"],
+        observed_signals=[],
+        provider_readiness={
+            "status": "warm_ready",
+            "automatic_start_allowed": True,
+        },
+    )
+    explicit = module.episode_auto_rerank_escalation_plan(
+        explicit=True,
+        requested_mode="hybrid",
+        effective_mode="hybrid",
+        has_results=True,
+        auto_reasons=[],
+        observed_signals=[],
+        provider_readiness={},
+    )
+
+    assert deferred["apply"] is False
+    assert deferred["trigger"] == "auto_deferred"
+    assert deferred["status"] == "cold_start_budget_deferred"
+    assert warm["apply"] is True
+    assert warm["trigger"] == "auto"
+    assert warm["status"] == "warm_structural_escalation"
+    assert explicit["apply"] is True
+    assert explicit["trigger"] == "explicit"
+
+
+def test_episode_auto_rerank_provider_readiness_is_compact_and_warm_only(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir()
+    monkeypatch.setattr(
+        module,
+        "episode_dense_provider",
+        lambda _root: {
+            "rerank_api_health_url": "http://127.0.0.1:5405/health",
+        },
+    )
+    responses = iter(
+        [
+            {
+                "ok": True,
+                "payload": {
+                    "ok": True,
+                    "loaded": False,
+                    "model": "test-reranker",
+                    "model_dir": "/private/not-returned",
+                    "load_ms": 7600.0,
+                    "idle_unload_sec": 900,
+                },
+            },
+            {
+                "ok": True,
+                "payload": {
+                    "ok": True,
+                    "loaded": True,
+                    "model": "test-reranker",
+                    "backend": "test-backend",
+                    "device": "CPU",
+                    "model_dir": "/private/not-returned",
+                    "load_ms": 7600.0,
+                    "idle_for_sec": 12.0,
+                    "idle_unload_sec": 900,
+                },
+            },
+        ]
+    )
+    monkeypatch.setattr(
+        module,
+        "run_json_url",
+        lambda *_args, **_kwargs: next(responses),
+    )
+
+    cold = module.episode_auto_rerank_provider_readiness(aoa_root)
+    warm = module.episode_auto_rerank_provider_readiness(aoa_root)
+
+    assert cold["status"] == "cold_start_budget_deferred"
+    assert cold["automatic_start_allowed"] is False
+    assert warm["status"] == "warm_ready"
+    assert warm["automatic_start_allowed"] is True
+    assert warm["cold_start_budget_ms"] == (
+        module.EPISODE_AUTO_RERANK_COLD_START_BUDGET_MS
+    )
+    assert "model_dir" not in cold
+    assert "model_dir" not in warm
+
+
 def test_episode_answer_admission_keeps_false_premise_candidate_navigation_only() -> None:
     weak = {
         "query_coverage": {"coverage": 3 / 7, "matched_term_count": 3},
