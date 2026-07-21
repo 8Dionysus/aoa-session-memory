@@ -104,8 +104,15 @@ Ready when:
 - generated intervals match preserved coordinates;
 - segment and session indexes resolve to raw evidence;
 - schema/classifier versions are visible;
+- generation identities name the producer bytes loaded by the writer, and a
+  changed producer source refuses publication;
 - stale indexes are detected and rebuildable;
 - compaction markers do not create false semantic microsegments.
+
+Progress transport is a separate runtime-observability gate. A disconnected
+heartbeat reader must not abort an otherwise valid atomic build, and delivered
+heartbeat events must not be accepted as evidence that the projection is
+current.
 
 ### 4. Episodes
 
@@ -137,6 +144,16 @@ Ready when:
   source-aware;
 - semantic improvements do not hide exact-recall regressions;
 - fusion/reranking adds lane-specific value under equal budgets;
+- a fusion override names its version, decisive margin, typed or coherent
+  evidence guard, and raw coordinates, and remains navigation rather than
+  answer admission;
+- weak lexical coverage alone does not trigger optional reranking;
+- automatic reranking names its policy and structural reason, does not wake a
+  cold provider, and preserves a separately measured explicit opt-in route;
+- cold-deferred, warm-applied, and provider-unavailable paths expose the same
+  admission boundary without leaking private host paths;
+- a reranker without demonstrated lane value remains optional even when its
+  runtime route is healthy;
 - insufficient evidence produces abstention.
 
 ### 7. Graph views
@@ -168,6 +185,10 @@ Ready when:
 - projection versions, dependencies, and watermarks are visible;
 - dirty state propagates;
 - incremental workers are idempotent and restartable;
+- pre-journal session stages distinguish live, dead, and legacy-unowned
+  producers; cleanup requires a verified stronger raw authority, reports
+  operational rather than semantic progress, preserves raw and last-good bytes,
+  and owner preflight rejects every remaining stage;
 - live tails wait for a quiet window without hiding stable evidence;
 - resource/lock deferral later resumes automatically;
 - no heavy necessary projection starves indefinitely;
@@ -184,6 +205,8 @@ Ready when:
 - MCP remains read-only and plan-only unless its owner contract explicitly
   changes;
 - payloads preserve refs, freshness, truncation, and next route;
+- language normalization keeps exact anchors, versions query-time expansion,
+  and rejects prefix-only morphology collisions before sparse evidence credit;
 - access-plane success is not treated as proof authority;
 - mutation stays behind explicit owner commands.
 
@@ -233,7 +256,7 @@ Use the narrowest sufficient route.
 | Capture or hooks | focused tests, adapter grounding, hook status, live lifecycle probe |
 | Classifier or taxonomy | reindex/catch-up, manual positive/negative samples, freshness |
 | Exact search | fixed gold refs, collision and fallback cases, latency |
-| Semantic/rerank | unchanged gold corpus, per-lane A/B, exact-recall guard |
+| Semantic/rerank | unchanged gold corpus, per-lane and production-auto A/B, cold/warm provider gates, exact-recall guard |
 | Episode formation | manually adjudicated boundaries and cross-compaction cases |
 | Graph semantics | relation/path review, hybrid-only comparison, cardinality |
 | Orchestration | real incremental, quiet-window, resource-block, restart, catch-up |
@@ -265,12 +288,27 @@ proof.
 For an architectural retrieval or projection change:
 
 - preserve baseline A before implementation;
+- capture a compatible semantic generation pin and hold the shared read lease
+  across candidate generation and its final drift check;
 - compare A and B on the same evidence, versions, budgets, and freshness;
 - report results by query lane;
 - do not accept a mean gain that hides critical exact, provenance, freshness,
   causality, or abstention loss;
 - rerun after cleanup;
 - return to earlier layers when later evidence invalidates their proof.
+
+A pin is admissible only when selected sources and every answer-bearing
+projection have current compatible generations. An active writer,
+incompatible or incomplete snapshot, or before/after semantic drift refuses
+the score. Filesystem and SQLite publication observations remain diagnostic and
+do not invalidate a semantically identical deterministic rebuild by
+themselves. Operational scan durations, shard-local path/mtime/size telemetry,
+and graph-ledger transition clocks are excluded only when query-bearing
+counts, statuses, source digests, generations, and evidence coordinates remain
+unchanged. A bounded snapshot settle retry is ready only when all failed
+attempts remain visible, its sole cause is capture-local physical publication
+drift, and source, semantic, schema, integrity, generation, or mixed failures
+refuse immediately.
 
 A layer is not complete forever. New episode, graph, narrative, or freshness
 evidence may reopen taxonomy, capture, indexing, routing, or presentation.

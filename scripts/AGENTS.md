@@ -37,6 +37,6 @@ Run:
 python3 -m py_compile scripts/aoa_session_memory.py
 python3 scripts/generate_decision_indexes.py --check
 PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider tests/test_session_memory.py
-python3 scripts/aoa_session_memory.py validate --workspace-root /srv/AbyssOS --aoa-root /srv/AbyssOS/.aoa
-python3 scripts/aoa_session_memory.py doctor --workspace-root /srv/AbyssOS --aoa-root /srv/AbyssOS/.aoa
+python3 scripts/aoa_session_memory.py validate --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa
+python3 scripts/aoa_session_memory.py doctor --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa
 ```

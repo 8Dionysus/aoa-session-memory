@@ -1,0 +1,17 @@
+{
+  "allowed_bytes": 20746303,
+  "allowed_tracked_bytes": 20736449,
+  "approved_by": "repository-owner",
+  "base_ref": "536917fb8169a8157ced9c3e74f981c5022d3b89",
+  "changed_generated_bytes": 20746303,
+  "changed_generated_files": 340,
+  "decision_ref": "aoa-kag:docs/decisions/AOA-KAG-D-0017-portable-content-addressed-repository-family.md",
+  "default_limit_bytes": 1048576,
+  "head_family_digest": "0fff81ab0f604a44d5d5e69d391e19bc8690855b1bb728089502ca5686e5f1c2",
+  "reason": "IDX-003 and AOA-SM-D-0028 remove the full-rebuild generated-history feedback loop, add observed-dependency freshness, and require a complete digest-bound KAG refresh without changing standing budgets.",
+  "repo": "aoa-session-memory",
+  "schema_version": "aoa-repo-local-kag-budget-receipt-v1",
+  "scope": "generated_delta_and_tracked_size",
+  "tracked_bytes": 20736449,
+  "tracked_bytes_max": 13631488
+}

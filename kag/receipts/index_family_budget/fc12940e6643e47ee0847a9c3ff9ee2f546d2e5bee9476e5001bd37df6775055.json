@@ -1,0 +1,17 @@
+{
+  "allowed_bytes": 20149205,
+  "allowed_tracked_bytes": 20646923,
+  "approved_by": "repository-owner",
+  "base_ref": "72d3fd3032d9ad06d02afe0740e7171504d72785",
+  "changed_generated_bytes": 20149205,
+  "changed_generated_files": 334,
+  "decision_ref": "aoa-kag:docs/decisions/AOA-KAG-D-0017-portable-content-addressed-repository-family.md",
+  "default_limit_bytes": 1048576,
+  "head_family_digest": "fc12940e6643e47ee0847a9c3ff9ee2f546d2e5bee9476e5001bd37df6775055",
+  "reason": "RET-009 moves raw-compatible evidence filters before bounded candidate ranking, adds scoped-negative and route-parity regression proof, and amends D-0003; admit only this digest-bound content-addressed KAG refresh without changing standing budgets.",
+  "repo": "aoa-session-memory",
+  "schema_version": "aoa-repo-local-kag-budget-receipt-v1",
+  "scope": "generated_delta_and_tracked_size",
+  "tracked_bytes": 20646923,
+  "tracked_bytes_max": 13631488
+}

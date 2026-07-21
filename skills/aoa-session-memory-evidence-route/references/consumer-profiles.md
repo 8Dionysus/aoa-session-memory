@@ -15,6 +15,22 @@ Use this card only after the main route has classified the question.
 | one dense entity neighborhood | `graph-cooccurrence` | bounded graph neighborhood |
 | route-quality regression | `live-scenario-corpus check` | one case-specific audit |
 
+## Entity identity
+
+For an `entity-registry` packet, read `identity_status`,
+`identity_candidate_ids`, `collision_preserved`,
+`agent_route_packet.identity_claim_admitted`, and each entry's
+`canonicalization` before attributing behavior to an implementation. The
+stable typed `kind:key` is a route aggregate, not proof that multiple source
+or installed copies are one identity.
+
+Schema-v2 candidates with the same content digest may share one candidate
+identity while retaining every owner and source ref. Distinct active
+fingerprints remain competing candidates. A legacy or incompatible registry
+generation is navigation-only and must route to
+`entity-registry-search-sync`; the consumer must not promote it into a
+resolved identity.
+
 ## Skill evidence
 
 `state_counts` is one canonical state per archived event.
@@ -55,10 +71,13 @@ and claim ceilings, not a benefit verdict.
 An admitted receipt must bind source, installed, prompt-visible, selected, and
 executed versions; package and installed fingerprints; one task episode;
 observed procedure sections; tools; checkpoints; a verifier; consequences;
-review; and alternative explanations. `identity_status=drift` remains useful
-diagnostic evidence but cannot prove invocation. Even a verified current
-receipt exposes only an effect-attribution candidate until `aoa-evals`
-resolves a controlled comparison.
+review; and alternative explanations. `identity_status=drift` can prove
+invocation of the explicitly matched historical selected/executed package
+when those identities agree, but it sets `source_current=false` and
+`promotion_identity_eligible=false`. It cannot prove that the current source
+was invoked. Even a verified current receipt exposes only an
+effect-attribution candidate until `aoa-evals` resolves a controlled
+comparison.
 
 If `quality.skill_text_fallback_deferred=true`, the bounded dispatch passes
 found no candidate and deliberately avoided broad FTS. This is not proof of
@@ -74,6 +93,22 @@ Read `literal_route_strategy`, `cost_profile`, `fallback_plan`, and
 `next_expansion_command` before opening raw. A concrete registered entity wins
 over broad class vocabulary. For exact session ids, prefer the rehydrate or
 session route.
+
+For coherent work, temporal intervals, quantitative comparisons, or causal
+questions, follow the episode route selected by `literal-query-plan`. Read its
+`answer_admission`, typed relation gates, generation identities, scoped and
+global freshness, and evidence refs before interpreting candidates. A
+`why`/`почему` query requires one correlation-matched, chronologically ordered
+action/result chain; lexical strength, adjacency, cooccurrence, and semantic
+similarity cannot admit causality.
+
+Explicitly quoted temporal endpoints remain exact anchors. They are
+navigation until one bounded, non-truncated, source-aware read proves the
+interior. If the episode generation is missing or incompatible, use the
+read-only status and exact-raw routes from
+`episode_projection_generation_recovery`. Its deep maintenance command is an
+explicit resource-gated mutation, and raw endpoint hits neither upgrade the
+projection nor answer the interval.
 
 `search-operational-route-rollup-query` and
 `search-operational-direct-event-rollup-query` are compact navigation read

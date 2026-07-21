@@ -115,8 +115,20 @@ workspace/.aoa
 ```
 
 A live workspace may contain private session archives, generated search/graph
-stores, and diagnostics. A clean portable bundle excludes those runtime
-surfaces by default.
+stores, and diagnostics. A portable bundle always excludes those runtime
+surfaces; private evidence transfer belongs to a separate owner-to-owner
+migration route.
+
+Before publication, run the same bounded public-safety gate used by
+`export-bundle`:
+
+```bash
+python3 scripts/aoa_session_memory.py portable-public-safety-audit \
+  --aoa-root /path/to/portable/.aoa
+```
+
+The gate fails closed on runtime evidence, credential-like values, private
+host paths, or incomplete scan coverage without echoing matched values.
 
 ## Quick Start
 
@@ -190,6 +202,10 @@ reviewed receipt can support invocation, deflection, and verification claims,
 plus an effect-attribution candidate. It cannot issue a benefit or promotion
 verdict; that authority remains with `aoa-evals`.
 
+For a reproducible, evidence-first demonstration that another session can run
+without preselecting its target from retriever output, follow
+[`docs/SKILL-USAGE-EVIDENCE-DEMO.md`](docs/SKILL-USAGE-EVIDENCE-DEMO.md).
+
 Inspect one task interval:
 
 ```bash
@@ -227,6 +243,17 @@ A stale packet can still route older evidence, but it cannot silently answer a
 current-state question. Use the packet's typed next action or the relevant
 maintenance route. A timer success is not proof that every semantic projection
 is current.
+
+Graph freshness includes the exact persisted entity-registry generation used
+to canonicalize its nodes and edges. Graph metadata and every source
+contribution pin that dependency. If the registry generation, semantic digest,
+source fingerprint, or stronger owner-source freshness changes, graph routes
+abstain until catch-up or full rebuild; they do not mix aliases dynamically
+inside one graph generation. A newer owner-source `mtime` triggers a live
+runtime-owner fingerprint check but is not itself semantic drift: a
+content-equivalent config or skill rewrite remains current when its versioned
+identity/content fingerprint matches. A changed or unavailable fingerprint
+still invalidates the registry dependency and blocks graph publication.
 
 ## Agent Access
 

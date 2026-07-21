@@ -1,0 +1,17 @@
+{
+  "allowed_bytes": 20167229,
+  "allowed_tracked_bytes": 20621917,
+  "approved_by": "repository-owner",
+  "base_ref": "72d3fd3032d9ad06d02afe0740e7171504d72785",
+  "changed_generated_bytes": 20167229,
+  "changed_generated_files": 334,
+  "decision_ref": "aoa-kag:docs/decisions/AOA-KAG-D-0017-portable-content-addressed-repository-family.md",
+  "default_limit_bytes": 1048576,
+  "head_family_digest": "c7ad3cf98727c0fa1cba36d82bb51eba6405dc3512c07e8b900b4a5a43bff6f1",
+  "reason": "RET-008 exact-fallback implementation, its reviewed regression/eval-source identity, and the D-0003 amendment intentionally require a complete content-addressed KAG family refresh; admit only this digest-bound derived projection without changing standing budgets.",
+  "repo": "aoa-session-memory",
+  "schema_version": "aoa-repo-local-kag-budget-receipt-v1",
+  "scope": "generated_delta_and_tracked_size",
+  "tracked_bytes": 20621917,
+  "tracked_bytes_max": 13631488
+}

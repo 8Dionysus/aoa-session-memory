@@ -1,0 +1,17 @@
+{
+  "allowed_bytes": 20899369,
+  "allowed_tracked_bytes": 20932467,
+  "approved_by": "repository-owner",
+  "base_ref": "536917fb8169a8157ced9c3e74f981c5022d3b89",
+  "changed_generated_bytes": 20899369,
+  "changed_generated_files": 340,
+  "decision_ref": "aoa-kag:docs/decisions/AOA-KAG-D-0017-portable-content-addressed-repository-family.md",
+  "default_limit_bytes": 1048576,
+  "head_family_digest": "7e13258dec5de89a16b73e7c1fa599ea0d080de1f2a18be1a7f4aab5cf218bba",
+  "reason": "RET-010, RET-011, PKT-003, and PKT-004 enforce exact-first retrieval, session-scoped source-verified graph recovery, and truth-qualified next-route/admission parity; admit only this digest-bound deterministic KAG refresh without changing standing budgets.",
+  "repo": "aoa-session-memory",
+  "schema_version": "aoa-repo-local-kag-budget-receipt-v1",
+  "scope": "generated_delta_and_tracked_size",
+  "tracked_bytes": 20932467,
+  "tracked_bytes_max": 13631488
+}

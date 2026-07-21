@@ -34,6 +34,14 @@ Readable source JSONL is mirrored into the local archive before semantic
 processing. Source metadata records origin, size, line count, and digest.
 Missing or unreadable raw material remains an explicit diagnostic state.
 
+Capture and indexing advance independently. When bounded foreground work
+cannot publish a complete session generation, it preserves a content-addressed
+raw snapshot and atomically advances `raw/capture.latest.json`. A capture ahead
+of the indexed digest makes dependent answer projections stale; it does not
+replace the last-good `raw/session.raw.jsonl`, manifest, segments, or indexes.
+Repeated capture of identical bytes is idempotent. Operational hook
+observations remain outside the semantic projection.
+
 Raw preservation is append-oriented. Repair may regenerate derived material,
 but ordinary cleanup never deletes raw session evidence.
 
@@ -69,11 +77,38 @@ agent events, goals, decisions, errors, and open threads.
 When raw metadata declares a fork, the manifest also records the parent and the
 structural child-work boundary. Replayed pre-boundary material stays preserved
 in raw evidence but is scoped separately from local fork work in task episodes.
+An adapter bootstrap immediately before `task_started` is a transport
+coordinate, not a delegated intent. The structured child task-start begins the
+local scope but contributes no task semantics by itself. A parsed inter-agent
+`NEW_TASK` envelope may contribute the initiating intent; unavailable or
+encrypted task content remains explicitly unavailable. Repeated envelopes may
+share one episode only while its lifecycle is open and must not overwrite the
+first admitted initiating delegation ref. `task_complete` closes that
+lifecycle; a later `task_started` opens a new structural episode whose
+`NEW_TASK` supplies intent. Without that coordinate, a post-terminal
+`NEW_TASK` is the bounded new-lifecycle fallback. Matching transport names do
+not prove semantic replay.
 Retrieval may consolidate it with an unambiguous parent episode only after an
 exact relevant-evidence comparison, and must retain both physical routes.
 
 The repository registry and archive indexes point to sessions. They do not
 replace the per-session manifest or raw evidence.
+
+Session raw, blocks, segment Markdown and indexes, manifest, session index, and
+indexed capture state publish as one validated file generation. Readers abstain
+while its publish journal exists. An interrupted replacement restores the
+complete prior generation and removes its stage and backup; it never repairs a
+mixed tree in place. Physical raw-block compression and confirmed plaintext
+removal use the same boundary while keeping stable evidence refs.
+
+Sibling session-projection stages name their producer PID before a publish
+journal exists. If that process terminates during construction, maintenance may
+remove the generated stage only after the PID is absent, while holding the
+shared lease, and after any staged raw copy matches either published owner raw
+or its resolvable external source. A legacy stage without producer identity is
+not guessed away: its reported content digest and quiet-age guard require
+explicit operator confirmation in addition to the raw-authority proof. Any
+journal-bearing stage remains owned by journal recovery.
 
 ## 6. Count-only accounting
 
@@ -105,6 +140,30 @@ Every projection reports freshness and retains a route back to session,
 segment, raw, or receipt evidence. Generated rows may be rebuilt after
 classifier or schema changes.
 
+The graph has an additional generated dependency: one verified persisted
+entity-registry snapshot is pinned for the complete build or maintenance
+operation. Every source contribution uses the immutable index from that
+snapshot, and both graph metadata and source rows record its dependency
+identity. Runtime aliases are not re-resolved independently per record.
+
+Entity-registry construction distinguishes incremental navigation history from
+an authoritative rebuild. Incremental refresh may retain bounded prior-snapshot
+aliases and retired identities under an explicit history policy. A full rebuild
+uses only current declared owner sources and route terms built in the same
+candidate search store; it cannot merge the prior generated registry or prefer
+an older operational rollup. The registry records both its history policy and a
+versioned semantic fingerprint of the observed route entries. A changed or
+unverifiable observed dependency makes the registry stale even when runtime
+source mtimes, schema, producer generation, and entity count are unchanged.
+The registry separately records a versioned runtime-owner fingerprint derived
+from stable entity identities and content-bearing source-ref tokens. A newer
+runtime-source `mtime` causes that fingerprint to be recomputed: an exact match
+proves a content-equivalent rewrite for registry purposes, while mismatch or
+missing legacy coverage requires registry catch-up. Timestamp advance alone is
+neither semantic freshness nor semantic staleness.
+Previous registries, rollups, and route terms remain generated navigation
+surfaces; their resolvable raw and owner refs remain the evidence authority.
+
 ## 8. Consumer routing
 
 Consumers should start with the cheapest typed route that matches the
@@ -113,12 +172,45 @@ Materialized rollups precede shard resampling. Graph packets are used for
 bounded topology, not for evidence-free conclusions. Raw or segment expansion
 is the final authority route when a claim matters.
 
+Default portable search enforces that order, not only the route planner. For
+exact identifiers, commands, and short literals it probes the compatible exact
+posting generation first and executes lexical FTS only after an exact miss.
+`route_selection` and the cost profile expose whether the fallback ran. A
+missing projection with automatic raw fallback disabled remains unresolved,
+but returns a truth-qualified explicit next route instead of an empty command.
+
 For a supported exact query scoped to one archived session, an insufficient or
 timed-out projected result may fall back to a bounded read of that session's
 raw JSONL before broader raw-text search. The pass writes no index and computes
 the manifest digest while scanning. Only a complete digest-verified pass can
 prove absence; partial or unverifiable scans must expose that state. The live
 append-only tail remains a separate freshness route.
+
+Episode query normalization retains the exact token. A bounded Russian
+instrumental-form expansion may use an FTS prefix to obtain candidates, but a
+sparse candidate receives semantic term credit only when the query and source
+tokens reduce to the same bounded morphology stem. Prefix-only collisions are
+rejected and counted in the packet; the query-time policy is independently
+versioned without rewriting episode projections.
+
+Hybrid episode fusion preserves one sparse rank-one candidate only when its
+lead is decisive and either coherent source evidence or a narrow typed
+structural relation with raw coordinates explains that lead. The packet names
+the guard, refs, score gap, fusion-policy version, and bonus. Ordinary
+candidates still use reciprocal-rank fusion; source-kind weight, semantic
+similarity, mention, or adjacency alone cannot activate the guard. This is a
+navigation rule and never admits the replay, fork, delegation, failure,
+recovery, or consequence claim without its normal evidence-reading gate.
+
+Local cross-encoder reranking has a separate escalation policy. Weak lexical
+coverage remains visible but cannot trigger automatic work by itself.
+Automatic reranking requires a structural causal, recovery, or
+explicit-sequence reason and a bounded provider-health result proving the
+optional model already loaded. Cold, unknown, or unavailable providers are
+reported as deferred and are not woken. Explicit reranking remains an opt-in
+route whose cold-start cost is shown separately. Health packets omit
+host-private model and cache paths, and reranker order remains navigation
+under the ordinary evidence and claim-shape gates.
 
 Search results, graph paths, atlas entries, registry states, and scenario
 checks are navigation packets. They may expose useful counts or confidence,
@@ -163,6 +255,13 @@ Deferred live state is not silently green and is not stable corruption. The
 next route is either to wait for quiet, run a targeted catch-up, or inspect raw
 evidence directly when authorized.
 
+A session-scoped skill or MCP usage probe may preserve a verified archived-raw
+source contribution even when the selected global search provider is missing,
+stale, or incomplete. `bounded_current` canonicalizes only that returned
+scope, carries its source fingerprint and evidence refs, and always states
+that it does not upgrade global freshness or authorize an exhaustive negative
+claim.
+
 Graph readers expose global recall freshness and bounded returned-evidence
 freshness as separate axes. Returned evidence-bearing nodes and edges are
 mapped through their source contributions, then checked against store
@@ -172,12 +271,52 @@ unverified contributor coverage never becomes `scope_current`. When a compact
 timeline is selected from a wider neighborhood, both scope states remain
 visible.
 
+Graph freshness also verifies the pinned entity-registry schema, producer
+generation, source fingerprint, and semantic digest against the current
+persisted snapshot and its stronger owner sources. A missing, changed, or
+owner-obsolete dependency blocks graph candidate admission. Owner-source mtime
+advance is only a bounded recheck trigger; the versioned runtime-owner
+identity/content fingerprint decides whether the registry semantics changed.
+This does not make a resolvable local evidence ref false; that ref remains
+available through its stronger source route.
+
 ## 11. Maintenance coordination
 
 All generated writers share a maintenance lease and coordinator packet. Hot,
 backlog, catch-up, deep, and manual-bulk profiles represent different resource
 and mutation envelopes. Timer-driven work yields to active owners and records
 resource-pressure deferrals.
+
+Each writer pins its generation identities to the producer bytes loaded by the
+current process. It rechecks the resolved producer source before atomic
+publication; a missing, unreadable, or changed source refuses publication and
+preserves the last-good projection. Re-reading a mutable script path must not
+make in-memory code claim a newer generation.
+
+Optional JSON progress events are best-effort observability. A broken progress
+pipe is detached and later heartbeat events are suppressed without aborting
+semantic work. The operation packet exposes delivery, failure, and suppression
+counts separately. Projection receipts, generation checks, resolvable evidence,
+and atomic publication prove semantic progress; heartbeat delivery, process
+exit, timer completion, and lock acquisition do not.
+
+Multi-lane evaluations use the same coordinator in read mode. They pin
+source and projection semantic identities before candidate generation, reject
+an active writer or incompatible generation without publishing a pin, and
+admit results only when a second snapshot under the same lease is semantically
+identical. Physical database bytes, inode, mtime, and observation clocks remain
+race diagnostics rather than evaluation identity. Operational rollup shard
+paths, source file size and mtime, scan duration, and graph-ledger clean/dirty
+clocks are likewise telemetry. Their query-bearing status, counts, source
+digests, generations, and evidence coordinates remain part of semantic
+identity.
+
+A cold reader can itself create or retire SQLite WAL/SHM observations while
+capturing an otherwise unchanged semantic snapshot. The reader may retry at
+most three immediate captures only when every failure diagnostic names that
+capture-local physical transition. Every attempt remains visible. Any source,
+schema, generation, semantic, integrity, or mixed diagnostic stops the retry
+and refuses the evaluation.
 
 Timer-originated `auto-maintenance-resource` deferrals are also written to the
 generated persistent retry queue under `diagnostics/`. The
@@ -192,11 +331,16 @@ maintenance success.
 
 Due retry items are ordered by a versioned profile-aware dispatch deadline,
 not by retry-ready time alone. Short hot and catch-up wait targets bound urgent
-latency, while longer backlog and deep targets age into priority instead of
-being permanently displaced. Automatic profiles also use a cooperative work
+latency. Once a backlog or deep target is breached, one earliest breached
+heavy item receives the first selection slot, after which ordinary deadline
+order continues. This reservation prevents an overloaded short-work stream
+from permanently displacing heavy work; it bounds queue selection only when
+the dispatcher receives execution opportunities and does not invent host
+capacity or semantic progress. Automatic profiles also use a cooperative work
 budget distinct from the longer host launcher timeout; explicit overrides
-remain visible. Queue and status packets expose the order, deadlines, breaches,
-and selected item. These scheduling signals do not make a projection current.
+remain visible. Queue and status packets expose the policy version, order,
+deadlines, breaches, fairness reservation, and selected item. These scheduling
+signals do not make a projection current.
 
 Observed query demand is a bounded scheduling input, not evidence authority.
 An automatic scoped profile may prepend only the configured bounded set of
@@ -217,6 +361,14 @@ advancing any actionable source while work remains reports a retryable
 `resource_blocked_graph_drip_no_progress`, not completion. Reports expose the
 existing queue count, reserve, requested top-up, progress, and remaining work.
 
+Conversely, a child may commit bounded mutations and then return deferred or
+budget-exhausted. Explicit allowlisted mutation counters in the action result
+admit only that bounded progress; generic processed, current, attempted,
+selected, or skipped counts do not. The wrapper must preserve both facts:
+mutation occurred and remaining work needs a persistent retry. Neither the
+child exit code nor the outer action status may erase an explicit mutation
+receipt or promote partial work to global freshness.
+
 Incremental maintenance repairs only dirty source contributions when possible.
 Missing schemas, corrupt stores, or large policy migrations route to explicit
 rebuilds. Interrupted generated-store temporary files are cleanup candidates;
@@ -226,8 +378,37 @@ A search schema mismatch is incremental only for an owner-declared additive
 version pair whose live store still has documents, route indexes, route terms,
 and no structural schema diagnostic. The first committed dirty-session repair
 may advance the store epoch; every untouched session remains dirty until its
-own projection state is regenerated. Unknown or structurally incomplete
-transitions keep the deep/full-rebuild boundary.
+own projection state is regenerated. Both outer preflight and the inner index
+planner use this same transition contract; a bounded automatic profile must
+not silently reinterpret an admitted incremental transition as a PID-local
+full rebuild. Unknown or structurally incomplete transitions keep the
+deep/full-rebuild boundary.
+
+`maintenance-cleanup` recognizes PID-tagged graph, search, and pre-journal
+session-projection temps, removes only those whose producer PID is absent while
+holding the shared maintenance lease, and leaves live stores, published
+last-good session files, and raw evidence untouched. Legacy unowned session
+stages require an exact reported content digest; a mismatch causes no mutation.
+An active writer defers cleanup rather than racing publication. Debris removal
+is operational progress and always reports `semantic_progress=false`.
+
+Graph incremental mutation checks its pinned registry dependency before
+mutation and before commit. A dependency race rolls back the transaction.
+Full rebuild publishes a temporary store only after the same recheck, so a
+rejected rebuild leaves the previous graph intact. A graph store from before
+the dependency contract requires an explicit full rebuild; a bounded
+maintenance batch cannot silently upgrade its global semantics.
+
+Optional graph sidecar export is a separate manifest-committed projection.
+Nodes and edges are rendered in private staging, the graph transaction and
+pinned dependency are checked before publication, and `graph/index.json` is
+written last with artifact hashes plus the committed store generation,
+dependency, and semantic digest. Readers reject a missing, mismatched, or
+interrupted manifest and return to the graph store or a bounded source-backed
+fallback; sidecar files never make a rolled-back graph mutation visible.
+A current clean graph store may publish a missing or stale sidecar without
+inventing a dirty source or rebuilding the graph. That packet reports sidecar
+publication separately and keeps semantic graph progress false.
 
 ## 12. Search and graph pressure
 
@@ -239,6 +420,11 @@ Search context-tail omission is permitted only where a current replacement
 rollup preserves route refs and bounded recall fallbacks. Graph high-fanout
 reduction requires equivalent evidence refs and query behavior before generated
 rows can be removed. Neither route changes raw or segment authority.
+
+An exact correlation graph request may carry `--session` through neighborhood
+and timeline continuation. This is a bounded retrieval-seed constraint, not a
+new graph identity or authority: recovered raw candidates still require exact
+structured source-event correlation admission before nodes or edges appear.
 
 ## 13. Naming and review
 

@@ -78,6 +78,15 @@ default orientation ritual.
 If the query is ambiguous, expose the competing interpretations or ask for a
 narrower anchor. Do not silently choose the broadest and most expensive route.
 
+For entity-registry lookups, read `identity_status`,
+`identity_candidate_ids`, `collision_preserved`,
+`agent_route_packet.identity_claim_admitted`, and each entry's
+`canonicalization` before attributing usage to an implementation. The stable
+`kind:key` value is a route identity; it is not proof that multiple installed
+or source copies are one implementation. Open candidate `source_refs` when the
+status is ambiguous or unproven. An incompatible registry generation may guide
+the next rebuild route but cannot admit an identity claim.
+
 Date bounds follow the evidence grain rather than one archive-wide coordinate.
 Exact event routes compare the recorded event timestamp and fall back to the
 session date only when that timestamp is unavailable. General search documents
@@ -150,6 +159,17 @@ Stop escalation when:
 - freshness is too weak;
 - the required owner or raw evidence is unavailable.
 
+Local reranking is an optional escalation after hybrid candidate generation,
+not a default semantic stage. Weak lexical coverage is an observed signal, not
+an automatic trigger: it is expected for multilingual and conceptual
+paraphrases. Automatic reranking requires a declared causal, recovery, or
+explicit-sequence query shape and a bounded health read proving the optional
+provider already warm. A cold or unknown provider returns a visible deferred
+state without being woken; an explicit caller may opt into the measured cold
+cost. The packet must preserve the policy, trigger, observed signals,
+readiness, budget, and applied or deferred reason. Neither a warm provider nor
+a reranker score changes the evidence or claim-admission requirements.
+
 ## Entity Usage Semantics
 
 Agents must keep the following states distinct:
@@ -209,12 +229,28 @@ operational words without providing operational evidence. Structured identity,
 correlation, status, action, and receipt evidence should outrank broad text
 association.
 
+For a query whose primary shape is an exact identifier, command, or short
+literal, execute compatible exact postings before lexical FTS. A sufficient
+exact result stops candidate expansion. Lexical search is a visible fallback
+only after an exact miss or an unavailable/incompatible exact generation;
+filters apply inside both lanes before ranking. The packet must name the first
+and selected lanes and whether broader text retrieval actually executed.
+
 A quantitative comparative claim requires evidence of the measurement, not
 only a highly similar episode. For a bounded session-scoped comparison, admit
 the answer only from a subject-, context-, and baseline-matched structured
 counting action plus its correlation-owned successful numeric result.
 Ambiguous, mismatched, or unresolved chains must abstain. Archive-wide
 comparisons require their own bounded global or narrative route.
+
+For a causal claim, a relation label or high relevance score is insufficient.
+Admission requires one uniquely qualified, chronologically ordered action and
+correlation-owned result with matching non-empty correlation identity and
+resolvable raw refs. If a later explicit verification is part of the chain,
+it also needs a later raw ref. A `why`/`почему` question remains causal even
+when it does not name a tool; without that typed chain it must return
+`unresolved`. Adjacency, cooccurrence, mention, and semantic similarity remain
+navigation evidence.
 
 For a query that asks what happened inside a temporal interval, an ordered
 pair of endpoint anchors is navigation, not the answer. Admit interval
@@ -224,6 +260,14 @@ scope, and no truncation. Hidden reasoning, token accounting, runtime message
 mirrors, and private collaboration-message bodies are not interval evidence.
 If the interior cannot be read under those guards, preserve the endpoint refs
 and abstain; lexical or semantic similarity cannot bypass this gate.
+When the two endpoints are explicitly quoted, the quoted bodies are the
+anchors; framing words such as “messages” or “события” must not contaminate
+their lexical coverage.
+
+If episode generation is missing or incompatible, follow the returned
+`episode_projection_generation_recovery` packet. Its status command and exact
+raw-anchor fallbacks are read-only; its deep rebuild is an explicit,
+resource-gated mutation. Exact endpoint hits do not answer an interval.
 
 ## Episode Route
 
@@ -243,6 +287,15 @@ A task episode should expose:
 For a declared fork, inspect episode lineage before attribution. A
 `pre_child_task_history_candidate` is replay candidate evidence, not proof that
 the child performed the work. A `local_fork_work` episode belongs to the child.
+Treat an adapter developer bootstrap as transport context and `task_started` as
+the structural beginning of local scope, not as task semantics. Admit a
+structured inter-agent `NEW_TASK` as intent only from its readable envelope.
+If its task body is encrypted or absent, preserve that uncertainty and do not
+infer the delegated details. Repeated task envelopes may retain separate refs
+inside one open lifecycle but must not replace its first admitted initiating
+delegation. `task_complete` is terminal; a later `task_started` opens a new
+structural lifecycle, and a post-terminal `NEW_TASK` is the fallback boundary
+when that coordinate is absent. Matching transport names do not prove replay.
 Only an exact, unambiguous parent-evidence match may form a consolidated group,
 and both parent and fork raw routes must remain readable.
 
@@ -266,6 +319,13 @@ The direct graph store resolves only indexed node and canonical route
 identities. It does not perform payload-wide fuzzy search. When exact graph
 identity is unavailable, use bounded trace/search retrieval to produce the
 seed and keep the first route, selected route, and fallback reason visible.
+
+For a structured correlation identifier, a caller may supply one session as a
+seed boundary. If graph and search projections are unavailable, the route may
+read that session's complete digest-verified archived raw as navigation, then
+admit only segment events whose structured correlation field matches exactly.
+Quoted identifiers and foreign-correlation results remain rejected context;
+the session boundary must survive in returned continuation commands.
 
 Cooccurrence and mention edges are discovery hints. They are not causality,
 usage, ownership, or consequence.
@@ -299,6 +359,14 @@ A stale-readable packet may still be useful for older evidence, but it cannot
 answer “current” without a stronger fallback or an explicit caveat. A timer
 success is not semantic freshness. A quiet-window defer is not corruption.
 
+For `auto-maintenance-resource` packets, read `completion_semantics` rather
+than inferring completion from `ok`, exit code, systemd result, or top-level
+status alone. `process`, `bounded_scope`, `semantic_progress`,
+`global_semantic_completion`, and `global_freshness` are separate claims. If
+`deferred_handoff.required=true`, follow its exact route or confirm the
+automatic retry packet transferred the intent to `handoff_queue_key`; do not
+describe the source profile as globally complete.
+
 When a packet is stale, return the stable evidence that remains usable and the
 narrowest catch-up or fallback route.
 
@@ -313,6 +381,32 @@ Episode semantic, typed-entity, and dense packets must also compare the
 classifier epoch stored by their own sidecar. Rows from a missing or older
 epoch are not answer candidates: return `insufficient_projection_coverage`
 and the bounded refresh or raw-evidence route instead.
+
+Treat generation compatibility and publish completeness as separate gates.
+The expected generation inventory covers task-episode source, lexical and
+exact search, episode semantic and dense projections, graph, entity registry,
+search catalog, and Atlas. Do not infer compatibility from a matching schema
+number alone.
+
+Before shard fan-out, require the search catalog generation to match its
+lexical/exact dependencies. Within the catalog, only a shard session state
+with the expected lexical generation is materialized. When either gate fails,
+show `search_catalog_generation_incompatible_fallback_monolith` or the
+session-level stale state and preserve the fallback reason in the packet.
+
+Atlas is current only when root index, every referenced axis index, and
+`maps/index-state.json` share both the expected generation and one publish
+epoch. An axis written by an interrupted rebuild is invisible even if its JSON
+is individually valid. Do not repair an incomplete epoch incrementally; use
+the explicit clean Atlas rebuild route. A clean rebuild that exhausts its
+budget has `publish_status=not_published` and leaves the last-good epoch
+authoritative.
+
+Dense repair is session-atomic. Embeddings are prepared before mutation and
+vector deletion/insertion plus session state replacement commit together.
+`store_failed` means the previous committed vectors remain the readable
+generation; it is not permission to treat the attempted generation as
+current.
 
 ## MCP and Other Access Planes
 
