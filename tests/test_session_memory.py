@@ -10025,7 +10025,7 @@ def test_causal_attribution_requires_correlation_owned_target_bearing_result() -
         "сессии alpha и beta имеют состояние завершёнными",
         correlation_id="call_search",
         admission_basis="structured_compact_success_observation",
-        event_type="COMMAND_OUTPUT",
+        event_type="TOOL_OUTPUT",
         source_lane="structured_tool_result",
         outcome="succeeded",
     )
@@ -20939,6 +20939,118 @@ def test_graph_timeline_explains_exact_store_miss_and_bounded_retrieval_seed(
     }
     assert "graph_store_unindexed_payload_scan_skipped" in timeline["diagnostics"]
     assert "graph_store_exact_miss_used_bounded_retrieval_seed" in timeline["diagnostics"]
+
+
+def test_graph_exact_correlation_uses_session_raw_seed_when_graph_and_search_are_missing(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    session_id = "30303030-4141-4252-8363-747474747474"
+    correlation_id = "call_missing_graph_seed_123456789"
+    foreign_correlation_id = "call_foreign_graph_seed_987654321"
+    transcript = tmp_path / "rollout-2026-07-20T22-30-00-raw-graph-seed.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-07-20T22:30:00Z",
+                "type": "session_meta",
+                "payload": {"id": session_id, "cwd": str(workspace)},
+            },
+            {
+                "timestamp": "2026-07-20T22:30:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": correlation_id,
+                    "arguments": json.dumps({"cmd": "python -m pytest -q"}),
+                },
+            },
+            {
+                "timestamp": "2026-07-20T22:30:02Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": foreign_correlation_id,
+                    "arguments": json.dumps({"cmd": "printf foreign"}),
+                },
+            },
+            {
+                "timestamp": "2026-07-20T22:30:03Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": foreign_correlation_id,
+                    "output": f"unrelated text quoting {correlation_id}",
+                },
+            },
+            {
+                "timestamp": "2026-07-20T22:30:04Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": correlation_id,
+                    "output": "8 passed in 0.4s",
+                },
+            },
+        ],
+    )
+    receipt = module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": session_id,
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    assert receipt["ok"] is True
+    assert module.search_db_path(aoa_root).exists() is False
+    assert module.graph_paths(aoa_root)["store"].exists() is False
+
+    neighborhood = module.graph_neighborhood(
+        aoa_root=aoa_root,
+        anchor=correlation_id,
+        kind="auto",
+        session=session_id,
+        depth=1,
+        limit=8,
+    )
+
+    assert neighborhood["ok"] is True
+    assert neighborhood["session"] == session_id
+    assert neighborhood["route_selection"]["selected_route"] == (
+        "source_verified_correlation_trace"
+    )
+    assert neighborhood["route_selection"][
+        "generic_fuzzy_graph_expansion_used"
+    ] is False
+    assert {node["refs"]["raw"] for node in neighborhood["nodes"]} == {
+        "raw:line:2",
+        "raw:line:5",
+    }
+    assert all(
+        node["correlation_id"] == correlation_id
+        for node in neighborhood["nodes"]
+    )
+    assert {edge["type"] for edge in neighborhood["edges"]} == {
+        "answered_by",
+        "responds_to",
+    }
+    assert neighborhood["quality"][
+        "structured_correlation_mention_only_rejected_count"
+    ] == 1
+    assert "--session" in neighborhood["next_command"]
+    assert session_id in neighborhood["next_command"]
+    parsed = module.build_parser().parse_args(
+        ["graph-neighborhood", correlation_id, "--session", session_id]
+    )
+    assert parsed.session_filter == session_id
 
 
 def test_graph_timeline_structured_correlation_admits_source_events_and_rejects_text_mentions(
@@ -66712,6 +66824,23 @@ def test_exact_literal_postings_recover_successful_command_output_without_semant
         explain=True,
         literal_postings_only=True,
     )
+    correlation_exact_default = module.search_sessions(
+        aoa_root=aoa_root,
+        query="call-exact-output",
+        session=session_id,
+        event_type="COMMAND_OUTPUT",
+        limit=1,
+        explain=True,
+        include_archived_raw_fallback=False,
+    )
+    exact_miss_default = module.search_sessions(
+        aoa_root=aoa_root,
+        query="call-exact-output-missing-123456789",
+        session=session_id,
+        limit=1,
+        explain=True,
+        include_archived_raw_fallback=False,
+    )
     provider_identifier_exact = module.search_sessions(
         aoa_root=aoa_root,
         query=provider_call_id,
@@ -67019,6 +67148,49 @@ def test_exact_literal_postings_recover_successful_command_output_without_semant
         item["match_channel"] == "exact_literal_postings"
         for item in correlation_exact["results"]
     )
+    assert correlation_exact_default["result_count"] == 1
+    assert correlation_exact_default["results"][0]["raw_ref"] == "raw:line:3"
+    assert (
+        correlation_exact_default["results"][0]["match_channel"]
+        == "exact_literal_postings"
+    )
+    assert correlation_exact_default["route_selection"] == {
+        "first_route": "exact_literal_postings",
+        "selected_route": "exact_literal_postings",
+        "fallback_reason": "",
+        "semantic_or_lexical_expansion_used": False,
+    }
+    assert (
+        correlation_exact_default["cost_profile"][
+            "literal_postings_exact_first"
+        ]
+        is True
+    )
+    assert (
+        correlation_exact_default["cost_profile"][
+            "lexical_search_executed"
+        ]
+        is False
+    )
+    assert correlation_exact_default["truth_status"] == (
+        "generated_search_candidate_navigation_not_source_truth"
+    )
+    assert exact_miss_default["result_count"] == 0
+    assert exact_miss_default["route_selection"]["first_route"] == (
+        "exact_literal_postings"
+    )
+    assert exact_miss_default["route_selection"]["selected_route"] == (
+        "unresolved"
+    )
+    assert exact_miss_default["route_selection"]["fallback_reason"] == (
+        "exact_literal_postings_miss_or_unavailable"
+    )
+    assert exact_miss_default["route_selection"][
+        "semantic_or_lexical_expansion_used"
+    ] is True
+    assert exact_miss_default["cost_profile"][
+        "lexical_fallback_after_exact_miss"
+    ] is True
     assert provider_identifier_exact["result_count"] == 1
     assert provider_identifier_exact["results"][0]["raw_ref"] == "raw:line:2"
     assert provider_identifier_exact["results"][0]["match_channel"] == "exact_literal_postings"
@@ -67774,6 +67946,15 @@ def test_archived_session_exact_fallback_recovers_literal_beyond_posting_text_bo
         explain=True,
         include_archived_raw_fallback=False,
     )
+    module.attach_session_memory_evidence_envelope(
+        missing_index_without_fallback,
+        aoa_root=aoa_root,
+        query=suffix_anchor,
+        route_id="exact_or_typed_search",
+        route_reason="test exact route after projection loss",
+        route_authority="generated_search_navigation_requires_ref_read",
+        budgets={"result_limit": 5, "bounded": True},
+    )
 
     assert indexed["ok"] is True
     assert postings_only["result_count"] == 0
@@ -67863,6 +68044,40 @@ def test_archived_session_exact_fallback_recovers_literal_beyond_posting_text_bo
     assert search_store.exists() is False
     assert missing_index_without_fallback["ok"] is False
     assert missing_index_without_fallback["result_count"] == 0
+    assert missing_index_without_fallback["truth_status"] == (
+        "generated_search_index_missing_automatic_raw_fallback_disabled"
+    )
+    assert missing_index_without_fallback["archived_raw_fallback"][
+        "status"
+    ] == "disabled"
+    assert missing_index_without_fallback["archived_raw_fallback"][
+        "eligible"
+    ] is True
+    assert missing_index_without_fallback["next_route"]["route_id"] == (
+        "session_archived_raw_exact_read"
+    )
+    assert missing_index_without_fallback["next_route"]["status"] == "ready"
+    assert missing_index_without_fallback["next_route"]["mutates"] is False
+    assert "archived-raw-search" in missing_index_without_fallback[
+        "next_route"
+    ]["command"]
+    assert session_id in missing_index_without_fallback["next_route"][
+        "command"
+    ]
+    assert missing_index_without_fallback["evidence_envelope"]["next_route"][
+        "route_id"
+    ] == "session_archived_raw_exact_read"
+    assert missing_index_without_fallback["evidence_envelope"]["next_route"][
+        "command"
+    ] == missing_index_without_fallback["next_route"]["command"]
+    assert missing_index_without_fallback["evidence_envelope"][
+        "answer_admission"
+    ]["required_next_route"] == "session_archived_raw_exact_read"
+    assert missing_index_without_fallback["evidence_envelope"][
+        "answer_admission"
+    ]["required_next_route_packet"] == missing_index_without_fallback[
+        "next_route"
+    ]
     assert (
         missing_index_without_fallback["cost_profile"][
             "archived_raw_fallback_attempted"

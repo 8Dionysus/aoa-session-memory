@@ -6,6 +6,14 @@ Use `search --explain` with the narrowest known filters. Literal FTS keeps its
 default timeout for live work; `--query-timeout-ms 0` is an explicit offline
 scan. A timeout should return `bounded_timeout.next_expansion_command`.
 
+Exact identifiers, commands, and short literal phrases use compatible exact
+postings before lexical FTS. Read `route_selection` plus
+`cost_profile.literal_postings_exact_first`, `lexical_search_executed`, and
+`lexical_fallback_after_exact_miss`; a successful exact lane must not silently
+pay for broad text expansion. If the projection is missing and automatic raw
+fallback was disabled for an A/B probe, follow the returned explicit
+session-scoped raw command or keep the answer unresolved.
+
 For assistant answers, closeouts, progress updates, or reasoning boundaries,
 prefer `agent-responses` with the matching `--agent-event`. For goals,
 episodes, route signals, session acts, and entity inventory, prefer their typed
@@ -37,4 +45,3 @@ A complete packet names:
 - source refs and freshness.
 
 An empty required lane is an orientation gap, not permission to guess.
-

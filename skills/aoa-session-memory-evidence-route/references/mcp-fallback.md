@@ -39,7 +39,7 @@ python3 scripts/aoa_session_memory.py entity-usage-neighborhood <anchor> --kind 
 python3 scripts/aoa_session_memory.py entity-registry --lookup <anchor> --kind <kind>
 python3 scripts/aoa_session_memory.py literal-query-plan "<query>" --kind auto
 python3 scripts/aoa_session_memory.py projection-status
-python3 scripts/aoa_session_memory.py graph-neighborhood <anchor> --kind <kind> --limit 12 --edge-limit 48
+python3 scripts/aoa_session_memory.py graph-neighborhood <anchor> --kind <kind> --session <session-if-known> --limit 12 --edge-limit 48
 python3 scripts/aoa_session_memory.py graph-bridge <source> <target> --source-kind <kind> --target-kind <kind>
 python3 scripts/aoa_session_memory.py live-scenario-corpus list
 python3 scripts/aoa_session_memory.py live-scenario-corpus check --case-limit 1
@@ -48,4 +48,3 @@ python3 scripts/aoa_session_memory.py live-scenario-corpus check --case-limit 1
 For a fresh transport diagnosis, resolve an `abyss-stack` checkout and use the
 service-owned preflight/validator there. Do not embed one host checkout path in
 this portable skill.
-

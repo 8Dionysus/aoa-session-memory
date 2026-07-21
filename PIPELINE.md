@@ -166,6 +166,13 @@ Materialized rollups precede shard resampling. Graph packets are used for
 bounded topology, not for evidence-free conclusions. Raw or segment expansion
 is the final authority route when a claim matters.
 
+Default portable search enforces that order, not only the route planner. For
+exact identifiers, commands, and short literals it probes the compatible exact
+posting generation first and executes lexical FTS only after an exact miss.
+`route_selection` and the cost profile expose whether the fallback ran. A
+missing projection with automatic raw fallback disabled remains unresolved,
+but returns a truth-qualified explicit next route instead of an empty command.
+
 For a supported exact query scoped to one archived session, an insufficient or
 timed-out projected result may fall back to a bounded read of that session's
 raw JSONL before broader raw-text search. The pass writes no index and computes
@@ -405,6 +412,11 @@ Search context-tail omission is permitted only where a current replacement
 rollup preserves route refs and bounded recall fallbacks. Graph high-fanout
 reduction requires equivalent evidence refs and query behavior before generated
 rows can be removed. Neither route changes raw or segment authority.
+
+An exact correlation graph request may carry `--session` through neighborhood
+and timeline continuation. This is a bounded retrieval-seed constraint, not a
+new graph identity or authority: recovered raw candidates still require exact
+structured source-event correlation admission before nodes or edges appear.
 
 ## 13. Naming and review
 

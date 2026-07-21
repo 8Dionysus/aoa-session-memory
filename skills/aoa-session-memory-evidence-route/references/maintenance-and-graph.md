@@ -56,6 +56,14 @@ and repair that session instead of admitting the attempted dense generation.
 
 ## Graph pressure
 
+For an exact structured correlation that is absent from the graph store, pass
+`--session <session>` to `graph-neighborhood` or `graph-timeline` when the
+session is known. The session is only a bounded retrieval-seed scope. Even if
+search is unavailable, complete digest-verified archived raw may seed the
+route, but only exact structured correlation fields admit source events;
+mentions and foreign results remain rejected context. Preserve `--session` in
+the packet's next command.
+
 Use `graph-high-fanout-policy` before proposing compaction or pruning. It is a
 policy packet, not delete permission. For one dense anchor, use
 `graph-entity-usage-replacement-proof`; for several, use the reviewed

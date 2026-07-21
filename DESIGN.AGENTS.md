@@ -229,6 +229,13 @@ operational words without providing operational evidence. Structured identity,
 correlation, status, action, and receipt evidence should outrank broad text
 association.
 
+For a query whose primary shape is an exact identifier, command, or short
+literal, execute compatible exact postings before lexical FTS. A sufficient
+exact result stops candidate expansion. Lexical search is a visible fallback
+only after an exact miss or an unavailable/incompatible exact generation;
+filters apply inside both lanes before ranking. The packet must name the first
+and selected lanes and whether broader text retrieval actually executed.
+
 A quantitative comparative claim requires evidence of the measurement, not
 only a highly similar episode. For a bounded session-scoped comparison, admit
 the answer only from a subject-, context-, and baseline-matched structured
@@ -312,6 +319,13 @@ The direct graph store resolves only indexed node and canonical route
 identities. It does not perform payload-wide fuzzy search. When exact graph
 identity is unavailable, use bounded trace/search retrieval to produce the
 seed and keep the first route, selected route, and fallback reason visible.
+
+For a structured correlation identifier, a caller may supply one session as a
+seed boundary. If graph and search projections are unavailable, the route may
+read that session's complete digest-verified archived raw as navigation, then
+admit only segment events whose structured correlation field matches exactly.
+Quoted identifiers and foreign-correlation results remain rejected context;
+the session boundary must survive in returned continuation commands.
 
 Cooccurrence and mention edges are discovery hints. They are not causality,
 usage, ownership, or consequence.

@@ -2,12 +2,12 @@
 
 Generated from owner capability contracts. This card is a retrieval read model, not procedure or proof authority.
 
-Source graph hash: `0b2daa870e905b2eda650edf98d0f6dc4e6a0c8cac4e305cc33e98ef5d56b114`
+Source graph hash: `3769e6c9c32d395834f925d70a7a1d88ac107f2b9f7a06e164c169839a6509ce`
 Federation: `aoa-session-memory` specializes `aoa-skills:sessions`.
 
 | skill | visibility | use when | do not use when | version | fingerprint |
 |---|---|---|---|---|---|
-| `aoa-session-memory-evidence-route` | advertised | The answer depends on what happened in prior .aoa sessions and must carry resolvable raw or segment refs. | Current repository or runtime state is the stronger source and no historical behavior question remains. | 1.0.0 | `eb702bf1cd5bf97b` |
+| `aoa-session-memory-evidence-route` | advertised | The answer depends on what happened in prior .aoa sessions and must carry resolvable raw or segment refs. | Current repository or runtime state is the stronger source and no historical behavior question remains. | 1.0.0 | `92be77eb5b0b2838` |
 | `aoa-session-memory-global-route` | advertised | The request names session memory; .aoa; transcripts; compaction; rehydration; hooks; or session-memory validation. | A narrower non-session-memory owner is already known and no session evidence or session-memory operation is required. | 1.0.0 | `f459356ad356a679` |
 | `aoa-codex-compact-probe` | deferred | The live Codex pre/post-compaction hook path requires an explicit behavioral probe. | Static hook registry inspection is sufficient and no behavioral probe is requested.; The runtime is not Codex. | 1.0.0 | `ef1990131b253144` |
 | `aoa-codex-hooks-status` | deferred | Native Codex hook registration or trust must be inspected for one selected root. | The runtime is not Codex or the question concerns archive content rather than hook state. | 1.0.0 | `adc1e110880d28ee` |
@@ -26,6 +26,6 @@ Federation: `aoa-session-memory` specializes `aoa-skills:sessions`.
 | `aoa-session-raw-diagnostic` | deferred | A transcript read failed during hook or manual archive processing. | The raw source is readable or no concrete archive failure exists. | 1.0.0 | `d31074a22beda78e` |
 | `aoa-session-rehydrate` | deferred | A named archived session must be resumed or inspected without full raw loading. | The current active session already contains the required state or raw forensic review is explicitly required. | 1.0.0 | `dfe4d4924145df48` |
 | `aoa-session-reindex` | deferred | Preserved archives require projection rebuild after source-owned classifier; schema; taxonomy; or relation changes. | Raw evidence itself is missing or the request only needs a query against a current index. | 1.0.0 | `5749a8e863003dac` |
-| `aoa-session-search` | deferred | A bounded archive query or explicit portable search-index refresh is required. | A current file; owner API; or typed entity route answers the question without archive search. | 1.0.0 | `fe158e89cc26fa2e` |
+| `aoa-session-search` | deferred | A bounded archive query or explicit portable search-index refresh is required. | A current file; owner API; or typed entity route answers the question without archive search. | 1.0.0 | `42e8da2474fb99d3` |
 
 Load the named `SKILL.md` for procedure. Use the full generated graph for ABI, effects, failures, relations, and composition; do not infer invocation or benefit from selection alone.
