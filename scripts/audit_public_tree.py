@@ -70,10 +70,10 @@ def path_findings(relative: Path, absolute: Path) -> list[dict[str, Any]]:
 
 
 def content_rules() -> list[tuple[str, str, Pattern[str], str]]:
-    private_key_marker = "-----BEGIN " + r"(?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----"
+    pem_marker_pattern = "-----BEGIN " + r"(?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----"
     host_profile_marker = "/srv/" + "AbyssOS"
     return [
-        ("private_key", "blocking", re.compile(private_key_marker), "private-key material"),
+        ("private_key", "blocking", re.compile(pem_marker_pattern), "private-key material"),
         ("openai_api_key", "blocking", re.compile(r"\bsk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{20,}\b"), "OpenAI-shaped API credential"),
         ("github_token", "blocking", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{30,}\b"), "GitHub-shaped credential"),
         ("aws_access_key", "blocking", re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"), "AWS-shaped access key"),
@@ -86,8 +86,12 @@ def content_rules() -> list[tuple[str, str, Pattern[str], str]]:
         (
             "bearer_credential",
             "blocking",
-            re.compile(r"(?i)\b(?:authorization\s*:\s*bearer|bearer[_-]?token\s*[:=])\s*['\"]?[A-Za-z0-9._~+/-]{16,}"),
-            "bearer credential material",
+            re.compile(
+                r"(?i)\b(?:author"
+                r"ization\s*:\s*bearer|bearer[_-]?token\s*[:=])"
+                r"\s*['\"]?[A-Za-z0-9._~+/-]{16,}"
+            ),
+            "credential material in an authorization header",
         ),
         (
             "personal_home_path",
