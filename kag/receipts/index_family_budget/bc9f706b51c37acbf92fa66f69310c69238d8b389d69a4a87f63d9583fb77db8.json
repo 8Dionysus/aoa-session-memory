@@ -1,0 +1,17 @@
+{
+  "allowed_bytes": 20925121,
+  "allowed_tracked_bytes": 20925427,
+  "approved_by": "repository-owner",
+  "base_ref": "536917fb8169a8157ced9c3e74f981c5022d3b89",
+  "changed_generated_bytes": 20925121,
+  "changed_generated_files": 341,
+  "decision_ref": "aoa-kag:docs/decisions/AOA-KAG-D-0017-portable-content-addressed-repository-family.md",
+  "default_limit_bytes": 1048576,
+  "head_family_digest": "bc9f706b51c37acbf92fa66f69310c69238d8b389d69a4a87f63d9583fb77db8",
+  "reason": "Final evidence-memory candidate refresh includes retrieval, episode, graph, admission, rerank policy, decision, and proof-law changes; preserve full source-linked family coverage without lowering standing budgets.",
+  "repo": "aoa-session-memory",
+  "schema_version": "aoa-repo-local-kag-budget-receipt-v1",
+  "scope": "generated_delta_and_tracked_size",
+  "tracked_bytes": 20925427,
+  "tracked_bytes_max": 13631488
+}
