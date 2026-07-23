@@ -246,7 +246,7 @@ TASK_EPISODE_REPRESENTATION_LIMITS = {
 GOAL_LIFECYCLE_SCHEMA_VERSION = 3
 WORK_CONTEXT_SCHEMA_VERSION = 1
 ROUTE_SIGNAL_SCHEMA_VERSION = 1
-ROUTE_SIGNAL_CLASSIFIER_VERSION = 44
+ROUTE_SIGNAL_CLASSIFIER_VERSION = 45
 TOKEN_ACCOUNTING_SCHEMA_VERSION = 1
 TOKEN_ACCOUNTING_GENERATOR_VERSION = 2
 TOKEN_ACCOUNTING_CONTRACT = "abyss_token_accounting_v1"
@@ -11418,7 +11418,7 @@ def route_signals_for_event(
     path_candidates.extend(extract_path_terms([route_semantic_limited, command], limit=8))
     for path_value in sorted(set(path_candidates))[:10]:
         add("path", route_key_slug(path_value, fallback="path", max_chars=96), confidence="medium", source="path_mention", detail=path_value)
-        owner_root = work_context_root_for_path(path_value)
+        owner_root = archived_path_route_owner_root(path_value)
         if owner_root:
             add("owner_route", owner_name_from_root(owner_root) or owner_root, confidence="medium", source="path_mention", detail=owner_root)
     entity_semantic_text = route_semantic_limited
@@ -48737,7 +48737,13 @@ def home_owner_coordinates(
     return None
 
 
-def inferred_owner_root_for_path(path_value: str) -> str | None:
+def lexical_owner_root_for_path(path_value: str) -> str | None:
+    """Return a stable owner root using path syntax alone.
+
+    Archived path mentions must not change meaning merely because the same
+    absolute path is later installed, deleted, or placed below a new
+    ``AGENTS.md``/``.git`` marker on the indexing host.
+    """
     raw = str(path_value or "").strip()
     if not raw or "\x00" in raw:
         return None
@@ -48745,18 +48751,6 @@ def inferred_owner_root_for_path(path_value: str) -> str | None:
         expanded = str(Path(raw).expanduser())
     except (OSError, RuntimeError, ValueError):
         return None
-    expanded_path = Path(expanded)
-    try:
-        expanded_exists = expanded_path.exists()
-    except (OSError, RuntimeError, ValueError):
-        expanded_exists = False
-    if expanded_exists:
-        start = expanded_path if expanded_path.is_dir() else expanded_path.parent
-        for parent in [start, *start.parents]:
-            if (parent / ".git").exists() or (parent / "AGENTS.md").exists():
-                return str(parent)
-            if parent.parent == parent:
-                break
     parts = Path(expanded).parts
     if len(parts) < 3 or parts[0] != "/":
         return None
@@ -48792,6 +48786,29 @@ def inferred_owner_root_for_path(path_value: str) -> str | None:
             return str(Path(*parts[: surface_index + 2]))
         return home_root
     return None
+
+
+def inferred_owner_root_for_path(path_value: str) -> str | None:
+    raw = str(path_value or "").strip()
+    if not raw or "\x00" in raw:
+        return None
+    try:
+        expanded = str(Path(raw).expanduser())
+    except (OSError, RuntimeError, ValueError):
+        return None
+    expanded_path = Path(expanded)
+    try:
+        expanded_exists = expanded_path.exists()
+    except (OSError, RuntimeError, ValueError):
+        expanded_exists = False
+    if expanded_exists:
+        start = expanded_path if expanded_path.is_dir() else expanded_path.parent
+        for parent in [start, *start.parents]:
+            if (parent / ".git").exists() or (parent / "AGENTS.md").exists():
+                return str(parent)
+            if parent.parent == parent:
+                break
+    return lexical_owner_root_for_path(expanded)
 
 
 def work_context_root_for_path(path_value: str) -> str | None:
@@ -48848,6 +48865,55 @@ def work_context_root_for_path(path_value: str) -> str | None:
         ):
             return str(Path(*parts[: child_index + 2]))
     return inferred_owner_root_for_path(expanded)
+
+
+def archived_path_route_owner_root(path_value: str) -> str | None:
+    """Classify an archived path mention without consulting the live host."""
+    raw = str(path_value or "").strip()
+    if not raw or "\x00" in raw:
+        return None
+    try:
+        expanded = str(Path(raw).expanduser())
+    except (OSError, RuntimeError, ValueError):
+        return None
+    parts = Path(expanded).parts
+    home_coordinates = home_owner_coordinates(parts)
+    if home_coordinates is not None:
+        _home_root, account_index = home_coordinates
+        surface_index = account_index + 1
+        if (
+            len(parts) > surface_index + 1
+            and parts[surface_index] == ".codex"
+        ):
+            return str(Path(*parts[: surface_index + 2]))
+    srv_index = srv_project_index(parts)
+    if srv_index is not None and len(parts) > srv_index:
+        project_name = parts[srv_index]
+        project_root = str(Path(*parts[: srv_index + 1]))
+        child_index = srv_index + 1
+        if project_name.casefold() == "abyssos":
+            if len(parts) > child_index:
+                child = parts[child_index]
+                if child == ".aoa":
+                    return str(Path(project_root) / ".aoa")
+                if child == "bundles" and len(parts) > child_index + 1:
+                    return str(Path(*parts[: child_index + 2]))
+                if (
+                    child
+                    and not child.startswith(".")
+                    and child not in {"generated", "worktrees"}
+                ):
+                    return str(Path(*parts[: child_index + 1]))
+            return project_root
+        if project_name == "work" and len(parts) > child_index:
+            return str(Path(*parts[: child_index + 1]))
+        if (
+            project_name == "games"
+            and len(parts) > child_index + 1
+            and parts[child_index] == "modding"
+        ):
+            return str(Path(*parts[: child_index + 2]))
+    return lexical_owner_root_for_path(expanded)
 
 
 def owner_name_from_root(owner_root: str | None) -> str | None:

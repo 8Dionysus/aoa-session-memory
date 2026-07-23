@@ -46339,6 +46339,57 @@ def test_route_signals_ignore_null_byte_path_mentions(tmp_path: Path) -> None:
             assert "\x00" not in str(signal.get("detail", ""))
 
 
+def test_archived_path_routing_does_not_depend_on_live_owner_markers(
+    monkeypatch,
+) -> None:
+    def fail_on_exists(_path: Path) -> bool:
+        raise AssertionError("projection-time path routing inspected the live filesystem")
+
+    with monkeypatch.context() as isolated:
+        isolated.setattr(Path, "exists", fail_on_exists)
+
+        assert (
+            module.archived_path_route_owner_root(
+                "/home/example/.codex/skills/aoa-eval/SKILL.md"
+            )
+            == "/home/example/.codex/skills"
+        )
+        assert (
+            module.archived_path_route_owner_root(
+                "/home/example/src/aoa-session-memory/scripts/aoa_session_memory.py"
+            )
+            == "/home/example/src/aoa-session-memory"
+        )
+        assert (
+            module.archived_path_route_owner_root(
+                "/srv/example/AbyssOS/aoa-session-memory/scripts/aoa_session_memory.py"
+            )
+            == "/srv/example/AbyssOS/aoa-session-memory"
+        )
+
+
+def test_archived_path_routing_is_stable_for_existing_and_missing_codex_paths(
+    tmp_path: Path,
+) -> None:
+    account_root = tmp_path / "home" / "example"
+    existing = account_root / ".codex" / "skills" / "aoa-eval" / "SKILL.md"
+    missing = account_root / ".codex" / "skills" / "missing" / "SKILL.md"
+    existing.parent.mkdir(parents=True)
+    existing.write_text("skill\n", encoding="utf-8")
+    (account_root / ".codex" / "AGENTS.md").write_text(
+        "owner marker\n",
+        encoding="utf-8",
+    )
+
+    # The temporary path belongs to the stable /srv owner namespace. The
+    # nested live marker must not make the existing path more specific than
+    # its missing sibling.
+    expected = module.lexical_owner_root_for_path(str(existing))
+    assert expected == module.lexical_owner_root_for_path(str(missing))
+    assert module.archived_path_route_owner_root(str(existing)) == expected
+    assert module.archived_path_route_owner_root(str(missing)) == expected
+
+
 def test_agent_atlas_build_generates_route_entries(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     repo = workspace / "aoa-techniques"
