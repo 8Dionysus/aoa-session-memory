@@ -20,6 +20,7 @@
 | loopback HTTP widens the caller surface beyond stdio | stdio remains the portable default; optional HTTP rejects non-loopback binds and requires the source-owned bearer credential under `ABYSS-STACK-D-0077` |
 | bearer value leaks into source, config, or diagnostics | systemd uses `LoadCredential`, Codex config stores only `bearer_token_env_var`, and preflight reports availability without the value |
 | arbitrary file read through route resources | resources resolve fixed URI shapes and `.aoa` map/session roots only |
+| a session selector, registry path, or symlink escapes the archive | session directories are canonicalized under `.aoa/sessions`; session files and raw-line refs fail closed before reading, and rehydrate receives only a validated session-directory name |
 | Codex treats an unannotated evidence read as a side-effecting MCP call | every tool advertises exact closed-world read-only, non-destructive, idempotent annotations and package validation rejects missing or contradictory metadata |
 
 ## Trust Boundary

@@ -78896,6 +78896,30 @@ def test_doctor_accepts_runtime_install_without_local_tests(
         overwrite=True,
     )
     assert full_install["install_profile"]["include_tests"] is True
+    full_result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "doctor",
+            "--workspace-root",
+            str(workspace),
+            "--aoa-root",
+            str(aoa_root),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    full_payload = json.loads(full_result.stdout)
+    assert full_result.returncode == 0, full_result.stdout + full_result.stderr
+    assert full_payload["ok"] is True
+    assert full_payload["status"] == "current"
+    assert full_payload["truth_status"] == "doctor_full_filesystem_contract"
+    assert full_payload["runtime_optional_absent_root_files"] == []
+    assert full_payload["runtime_install_profile"]["valid"] is True
+    assert full_payload["runtime_install_profile"]["include_tests"] is True
+    assert full_payload["problems"] == []
+
     shutil.rmtree(aoa_root / "tests")
     lost_tests_result = subprocess.run(
         [
@@ -79135,6 +79159,52 @@ def test_completion_audit_portable_bundle_accepts_clean_source_without_runtime_s
     assert maintenance["agent_route"]["bootstrap_required"] is True
     assert maintenance["portable_clean_runtime"]["ok"] is True
     assert maintenance["diagnostics"] == []
+
+
+def test_completion_audit_requires_skill_usage_receipt_schema(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source_aoa = SCRIPT.parents[1]
+    workspace = tmp_path / "TargetWorkspace"
+    bundle_root = tmp_path / "aoa-session-memory"
+    module.copy_portable_bundle(
+        source_aoa_root=source_aoa,
+        target_aoa_root=bundle_root,
+        overwrite=True,
+    )
+    (bundle_root / ".git").mkdir()
+    receipt_schema = bundle_root / "schemas" / "skill-usage-receipt.schema.json"
+    assert receipt_schema.is_file()
+    receipt_schema.unlink()
+
+    monkeypatch.setattr(
+        module,
+        "git_remote_url",
+        lambda repo_root, remote="origin": (
+            "git@github.com:8Dionysus/aoa-session-memory.git"
+            if repo_root == bundle_root
+            else None
+        ),
+    )
+
+    payload = module.completion_audit(
+        workspace_root=workspace,
+        aoa_root=bundle_root,
+        check_codex=False,
+        portable_bundle=True,
+    )
+
+    assert payload["ok"] is False
+    root_contract = next(
+        item
+        for item in payload["checklist"]
+        if item["requirement"]
+        == "Root kernel surfaces exist and are agent-readable"
+    )
+    assert root_contract["status"] == "missing"
+    assert root_contract["evidence"]["missing"] == [
+        "schemas/skill-usage-receipt.schema.json"
+    ]
 
 
 def test_force_export_clear_preserves_git_metadata(tmp_path: Path) -> None:

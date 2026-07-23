@@ -175131,6 +175131,7 @@ REQUIRED_ROOT_FILES = [
     "schemas/raw-capture-state.schema.json",
     "schemas/segment.index.schema.json",
     "schemas/session.manifest.schema.json",
+    "schemas/skill-usage-receipt.schema.json",
     "schemas/token-accounting.schema.json",
     "maps/AGENTS.md",
     "maps/START.md",

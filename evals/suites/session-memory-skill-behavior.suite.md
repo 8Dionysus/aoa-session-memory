@@ -16,7 +16,9 @@ critical capability branch and checks:
   ceiling;
 - mutating capture, projection, curation, and naming routes preserve their
   preview/apply, replay, recovery, and postcondition boundaries;
-- assurance routes remain bounded and read-only;
+- assurance routes remain bounded and read-only, accept an explicitly profiled
+  runtime-only install without tests, preserve the ordinary full-install pass,
+  and reject absent-profile, partial-tree, or accidental-loss lookalikes;
 - the Codex adapter preserves raw fixture evidence, executes the read-only
   hook-registry status procedure, and separately enforces the supported
   protocol-output boundary;

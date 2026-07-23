@@ -1485,11 +1485,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def main(argv: list[str] | None = None) -> None:
-    parse_args(argv)
-
+def _required_service_files(package_root: Path = REPO_ROOT) -> list[str]:
     required = [
-        "AGENTS.md",
         "README.md",
         "DESIGN.md",
         "docs/BOUNDARIES.md",
@@ -1498,6 +1495,15 @@ def main(argv: list[str] | None = None) -> None:
         "src/aoa_session_memory_mcp/server.py",
         "scripts/aoa_session_memory_mcp_server.py",
     ]
+    if not (package_root / "package.manifest.json").is_file():
+        required.insert(0, "AGENTS.md")
+    return required
+
+
+def main(argv: list[str] | None = None) -> None:
+    parse_args(argv)
+
+    required = _required_service_files()
     missing = [path for path in required if not (REPO_ROOT / path).exists()]
     if missing:
         raise SystemExit(f"missing required files: {missing}")

@@ -138,6 +138,31 @@ def run_global_route_case() -> None:
     assert compact_ids[0] == "skill.aoa-session-memory-global-route"
 
 
+def run_doctor_install_profile_case(
+    *,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    skill_text = (
+        REPO_ROOT / "skills" / "aoa-session-memory-doctor" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+    for required_contract in (
+        "runtime_install_profile",
+        "include_tests=false",
+        "doctor_runtime_filesystem_contract_with_tests_excluded",
+        "include_tests=true",
+        "A partial test tree is never treated",
+        "route installation repair through `aoa-session-archive-init`",
+    ):
+        assert required_contract in skill_text
+
+    run_legacy_case(
+        "test_doctor_accepts_runtime_install_without_local_tests",
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+    )
+
+
 def run_legacy_case(
     name: str,
     *,
@@ -175,6 +200,7 @@ def test_behavior_corpus_covers_every_critical_branch_and_pressure_kind() -> Non
         "negative-interface",
         "prompt-data-injection",
         "path-injection",
+        "installation-shape-recovery",
     } <= kinds
     assert all(
         case["skill_ids"] or case.get("capability_ids")
@@ -213,6 +239,11 @@ def test_controlled_skill_behavior_case(
     runner = str(case["runner"])
     if runner == "local:capability-route":
         run_global_route_case()
+    elif runner == "local:doctor-install-profile":
+        run_doctor_install_profile_case(
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+        )
     else:
         prefix = "legacy:"
         assert runner.startswith(prefix)

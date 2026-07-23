@@ -312,8 +312,9 @@ identity, file digests, entrypoints, compatibility ranges, root-discovery and
 authority contracts, and the complete MCP surface catalog.
 
 The owner-side route, allowlist, schema, drift behavior, and standalone
-validator are documented in [`projection/README.md`](projection/README.md).
-Export does not install, deploy, register, or restart the system MCP runtime.
+validator are documented as `projection/README.md` in `abyss-stack`. The
+exported package carries the same contract as `PROJECTION.md`. Export does not
+install, deploy, register, or restart the system MCP runtime.
 
 Codex discovers MCP tools when it attaches to the configured owner. The server
 auto-reloads the `core.py` implementation for existing tools when the source
@@ -337,6 +338,8 @@ failure when a fresh, authenticated loopback owner is configured.
 
 ## Agent Route
 
-Executable run, smoke, and validation commands live in
-[`AGENTS.md`](AGENTS.md#run). This README describes the service surface;
-`AGENTS.md` owns the operational route for agents.
+Owner-deployment run, smoke, and validation commands live in the owner-local
+`mcp/services/aoa-session-memory-mcp/AGENTS.md`. This README describes the
+portable service surface; that owner-local file remains the operational route
+for agents working inside `abyss-stack` and is intentionally not distributed
+with the standalone package.

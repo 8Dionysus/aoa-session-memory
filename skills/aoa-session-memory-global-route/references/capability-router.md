@@ -2,7 +2,7 @@
 
 Generated from owner capability contracts. This card is a retrieval read model, not procedure or proof authority.
 
-Source graph hash: `b65694714f8e40a82e0f0829efc460349efcdd54cdaf6f4c7d12ffa011090704`
+Source graph hash: `6a0df448fa4a2b0c2cb8fa3e0be313534edd2a3d12066c5222af1f883346c827`
 Federation: `aoa-session-memory` specializes `aoa-skills:sessions`.
 
 | skill | visibility | use when | do not use when | version | fingerprint |
@@ -18,7 +18,7 @@ Federation: `aoa-session-memory` specializes `aoa-skills:sessions`.
 | `aoa-session-history-import` | deferred | Historical Codex JSONL sources must be discovered and imported into one selected root. | Only the current live transcript needs archiving or the history source is not explicitly bound. | 1.0.0 | `9aa0e6b23b0a92fa` |
 | `aoa-session-manual-review` | deferred | Provisional candidates require bounded human review and owner resolution. | No provisional candidate or evidence packet exists. | 1.0.0 | `2f8c40371a91adf6` |
 | `aoa-session-memory-audit` | deferred | Completion or release readiness must be assessed across source; portable; and live axes. | Only one root health question exists; use doctor. | 1.0.0 | `abfdda57b01071c7` |
-| `aoa-session-memory-doctor` | deferred | A selected session-memory root needs current health diagnosis. | The task asks for release completion rather than root health; use audit. | 1.0.0 | `fb5ba247e4863ec8` |
+| `aoa-session-memory-doctor` | deferred | A selected session-memory root needs current health diagnosis. | The task asks for release completion rather than root health; use audit. | 1.0.0 | `84c5e85fbedda260` |
 | `aoa-session-memory-stress-pass` | deferred | A large archive or logical compaction boundary requires bounded stress validation. | A normal root health or release readiness check is sufficient. | 1.0.0 | `2f7b1a05b8f48775` |
 | `aoa-session-naming-readiness` | deferred | A naming wave or broad semantic renaming is being considered. | A single reviewed name is already ready for explicit application. | 1.0.0 | `fb178af39591faa8` |
 | `aoa-session-naming-wave` | deferred | A reviewed bounded set of phase or title candidates is ready for a guarded naming wave. | Readiness; phase candidates; review approval; or current index freshness is missing. | 1.0.0 | `79685864e99daf24` |

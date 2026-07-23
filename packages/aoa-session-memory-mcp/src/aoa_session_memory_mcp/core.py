@@ -768,14 +768,17 @@ def _session_date_from_entry(entry: dict[str, Any]) -> str | None:
 
 def _normalize_axis(axis: str) -> str:
     text = _ensure_short_text(axis, "axis", limit=80).casefold().replace("_", "-")
-    return text if text.startswith("by-") else f"by-{text}"
+    key = text.removeprefix("by-")
+    if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", key):
+        raise ValueError("axis contains unsupported characters")
+    return f"by-{key}"
 
 
 def _is_under(path: Path, root: Path) -> bool:
     try:
         path.resolve().relative_to(root.resolve())
         return True
-    except ValueError:
+    except (OSError, RuntimeError, ValueError):
         return False
 
 
@@ -5830,10 +5833,10 @@ class AoASessionMemoryMCPState:
         if session_dir is None:
             payload["diagnostics"].append(f"session filter did not resolve: {selector}")
             return payload
-        manifest_path = session_dir / "session.manifest.json"
-        index_path = session_dir / "session.index.json"
-        manifest = _read_json(manifest_path)
-        index = _read_json(index_path)
+        manifest_path = self._session_file(session_dir, "session.manifest.json")
+        index_path = self._session_file(session_dir, "session.index.json")
+        manifest = _read_json(manifest_path) if manifest_path is not None else None
+        index = _read_json(index_path) if index_path is not None else None
         if not isinstance(manifest, dict):
             payload["ok"] = False
             payload["diagnostics"].append(f"session manifest missing or invalid: {manifest_path}")
@@ -6868,10 +6871,10 @@ class AoASessionMemoryMCPState:
                 "diagnostics": ["session not found"],
                 "authority_boundary": self.authority_boundary(),
             }
-        manifest_path = session_dir / "session.manifest.json"
-        index_path = session_dir / "session.index.json"
-        manifest = _read_json(manifest_path)
-        index = _read_json(index_path)
+        manifest_path = self._session_file(session_dir, "session.manifest.json")
+        index_path = self._session_file(session_dir, "session.index.json")
+        manifest = _read_json(manifest_path) if manifest_path is not None else None
+        index = _read_json(index_path) if index_path is not None else None
         if not isinstance(manifest, dict):
             manifest = {}
         if not isinstance(index, dict):
@@ -6900,9 +6903,13 @@ class AoASessionMemoryMCPState:
                 "segment_count": manifest.get("segment_count") or index.get("segment_count"),
             },
             "refs": {
-                "manifest": manifest_path.as_posix(),
-                "index": index_path.as_posix(),
-                "session_md": (session_dir / "SESSION.md").as_posix(),
+                "manifest": manifest_path.as_posix() if manifest_path is not None else None,
+                "index": index_path.as_posix() if index_path is not None else None,
+                "session_md": (
+                    session_md.as_posix()
+                    if (session_md := self._session_file(session_dir, "SESSION.md")) is not None
+                    else None
+                ),
                 "raw": raw.get("path"),
                 "raw_sha256": raw.get("sha256"),
                 "blocks_index": raw.get("blocks_index") or raw_blocks.get("index"),
@@ -6975,7 +6982,8 @@ class AoASessionMemoryMCPState:
             return {value for value in values if value}
         values.add(session_dir.name)
         values.add(session_dir.as_posix())
-        manifest = _read_json(session_dir / "session.manifest.json")
+        manifest_path = self._session_file(session_dir, "session.manifest.json")
+        manifest = _read_json(manifest_path) if manifest_path is not None else None
         if isinstance(manifest, dict):
             for key in ("session_id", "session_label", "session_title"):
                 value = manifest.get(key)
@@ -8014,11 +8022,12 @@ class AoASessionMemoryMCPState:
         scanned_receipt_files = 0
 
         for session_dir in session_dirs:
-            receipt_path = session_dir / "hooks" / "receipts.jsonl"
-            if not receipt_path.is_file():
+            receipt_path = self._session_file(session_dir, "hooks/receipts.jsonl")
+            if receipt_path is None or not receipt_path.is_file():
                 continue
             scanned_receipt_files += 1
-            manifest = _read_json(session_dir / "session.manifest.json")
+            manifest_path = self._session_file(session_dir, "session.manifest.json")
+            manifest = _read_json(manifest_path) if manifest_path is not None else None
             if not isinstance(manifest, dict):
                 manifest = {}
             display = manifest.get("display") if isinstance(manifest.get("display"), dict) else {}
@@ -8094,7 +8103,7 @@ class AoASessionMemoryMCPState:
                             if typing_bridge
                             else None,
                             "refs": {
-                                "session": (session_dir / "session.manifest.json").as_posix(),
+                                "session": manifest_path.as_posix() if manifest_path is not None else None,
                                 "receipt": f"{receipt_path.as_posix()}#L{line_number}",
                             },
                         }
@@ -9914,7 +9923,14 @@ class AoASessionMemoryMCPState:
             if parts[1] == "index":
                 return self._read_session_file(session, "session.index.json")
             if parts[1] == "rehydrate":
-                return self._archive_command("rehydrate", [session, "--max-events", "20"])
+                session_dir = self._resolve_session_dir(session)
+                if session_dir is None:
+                    return {
+                        "ok": False,
+                        "diagnostics": ["session not found"],
+                        "authority_boundary": self.authority_boundary(),
+                    }
+                return self._archive_command("rehydrate", [session_dir.name, "--max-events", "20"])
         if netloc == "route" and parts:
             axis = parts[0]
             key = parts[1] if len(parts) > 1 else ""
@@ -10062,7 +10078,8 @@ class AoASessionMemoryMCPState:
         terms = [selector] if selector else []
         session_dir = self._resolve_session_dir(selector) if selector else None
         if session_dir is not None:
-            manifest = _read_json(session_dir / "session.manifest.json")
+            manifest_path = self._session_file(session_dir, "session.manifest.json")
+            manifest = _read_json(manifest_path) if manifest_path is not None else None
             display = manifest.get("display") if isinstance(manifest.get("display"), dict) else {}
             for value in (
                 manifest.get("session_id"),
@@ -10082,10 +10099,15 @@ class AoASessionMemoryMCPState:
         selector = (session or "latest").strip()
         sessions = self._registry_sessions()
         if selector == "latest":
-            if sessions:
-                latest = sorted(sessions, key=self._session_recency_key, reverse=True)[0]
-                return self._session_path_from_registry(latest)
-            dirs = sorted((self.aoa_root / "sessions").glob("*"))
+            for item in sorted(sessions, key=self._session_recency_key, reverse=True):
+                session_dir = self._session_path_from_registry(item)
+                if session_dir is not None:
+                    return session_dir
+            dirs = [
+                session_dir
+                for candidate in sorted((self.aoa_root / "sessions").glob("*"))
+                if (session_dir := self._safe_session_dir(candidate)) is not None
+            ]
             return dirs[-1] if dirs else None
         lowered = selector.casefold()
         for item in sessions:
@@ -10095,9 +10117,11 @@ class AoASessionMemoryMCPState:
                 values.extend(str(display.get(key) or "") for key in ("label", "title", "path", "archive_path", "navigation_path"))
             values.extend(str(item.get(key) or "") for key in ("session_label", "session_title", "path"))
             if any(lowered in value.casefold() for value in values):
-                return self._session_path_from_registry(item)
+                session_dir = self._session_path_from_registry(item)
+                if session_dir is not None:
+                    return session_dir
         direct = self.aoa_root / "sessions" / selector
-        return direct if direct.exists() else None
+        return self._safe_session_dir(direct)
 
     def _receipt_session_dirs(self, session: str = "") -> list[Path]:
         if session:
@@ -10106,7 +10130,11 @@ class AoASessionMemoryMCPState:
         sessions_root = self.aoa_root / "sessions"
         if not sessions_root.exists():
             return []
-        return sorted(path for path in sessions_root.iterdir() if path.is_dir())
+        return sorted(
+            session_dir
+            for path in sessions_root.iterdir()
+            if (session_dir := self._safe_session_dir(path)) is not None
+        )
 
     def _session_sort_key(self, item: dict[str, Any]) -> tuple[str, int, str]:
         display = item.get("display") if isinstance(item.get("display"), dict) else {}
@@ -10151,13 +10179,34 @@ class AoASessionMemoryMCPState:
         date, sequence, label = self._session_sort_key(item)
         return (str(item.get("updated_at") or date), sequence, label, self._session_activity_mtime(item))
 
+    def _safe_session_dir(self, path: Path) -> Path | None:
+        sessions_root = (self.aoa_root / "sessions").resolve()
+        try:
+            resolved = path.expanduser().resolve(strict=True)
+            resolved.relative_to(sessions_root)
+        except (OSError, RuntimeError, ValueError):
+            return None
+        return resolved if resolved.parent == sessions_root and resolved.is_dir() else None
+
     def _session_path_from_registry(self, item: dict[str, Any]) -> Path | None:
         display = item.get("display") if isinstance(item.get("display"), dict) else {}
         path = display.get("path") or display.get("archive_path") or display.get("navigation_path") or item.get("path")
         if path:
-            return Path(str(path))
+            candidate = Path(str(path)).expanduser()
+            if not candidate.is_absolute():
+                candidate = self.aoa_root / candidate if candidate.parts[:1] == ("sessions",) else self.aoa_root / "sessions" / candidate
+            return self._safe_session_dir(candidate)
         label = display.get("label") or item.get("session_label")
-        return self.aoa_root / "sessions" / str(label) if label else None
+        return self._safe_session_dir(self.aoa_root / "sessions" / str(label)) if label else None
+
+    def _session_file(self, session_dir: Path, filename: str) -> Path | None:
+        path = session_dir / filename
+        if path.is_symlink():
+            try:
+                path.resolve(strict=True)
+            except (OSError, RuntimeError):
+                return None
+        return path if _is_under(path, session_dir) else None
 
     def _segment_preview(self, index: dict[str, Any], manifest: dict[str, Any], limit: int) -> list[dict[str, Any]]:
         for key in ("segments_preview", "segments"):
@@ -10184,7 +10233,13 @@ class AoASessionMemoryMCPState:
         session_dir = self._resolve_session_dir(session)
         if session_dir is None:
             return {"ok": False, "diagnostics": ["session not found"], "authority_boundary": self.authority_boundary()}
-        path = session_dir / filename
+        path = self._session_file(session_dir, filename)
+        if path is None:
+            return {
+                "ok": False,
+                "diagnostics": ["session evidence path escapes archive"],
+                "authority_boundary": self.authority_boundary(),
+            }
         payload = _read_json(path)
         return {
             "schema": "aoa_session_memory_resource_file_v1",
@@ -10264,6 +10319,14 @@ class AoASessionMemoryMCPState:
         raw_path = session_dir / "raw" / "session.raw.jsonl"
         if not raw_path.exists():
             return {"ref": ref, "status": "missing", "path": raw_path.as_posix(), "reason": "session raw file missing"}
+        if not _is_under(raw_path, session_dir):
+            return {
+                "ref": ref,
+                "status": "invalid",
+                "path": raw_path.resolve().as_posix(),
+                "inside_aoa_root": False,
+                "reason": "session evidence path escapes archive",
+            }
         if line_number < 1:
             return {"ref": ref, "status": "invalid", "path": raw_path.as_posix(), "reason": "raw line must be positive"}
         line_count = 0

@@ -2074,6 +2074,77 @@ def test_latest_session_resolution_uses_registry_updated_at(tmp_path: Path) -> N
     assert brief["session"]["session_id"] == "session-1"
 
 
+def test_session_resources_reject_traversal_external_registry_and_symlink_roots(tmp_path: Path) -> None:
+    state = state_with_fixture(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    write_json(outside / "session.manifest.json", {"private": "must-not-be-read"})
+
+    traversal = state.read_resource("aoa-session-memory://session/..%2F..%2Foutside/manifest")
+    rehydrate = state.read_resource("aoa-session-memory://session/..%2F..%2Foutside/rehydrate")
+
+    assert traversal["ok"] is False
+    assert traversal["diagnostics"] == ["session not found"]
+    assert rehydrate["ok"] is False
+    assert rehydrate["diagnostics"] == ["session not found"]
+
+    registry_path = state.aoa_root / "session-registry.json"
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    registry["sessions"][0]["display"]["path"] = outside.as_posix()
+    write_json(registry_path, registry)
+    assert state.session_brief("session-1")["ok"] is False
+
+    linked = state.aoa_root / "sessions" / "linked-outside"
+    linked.symlink_to(outside, target_is_directory=True)
+    assert state.session_brief("linked-outside")["ok"] is False
+
+    with pytest.raises(ValueError, match="axis contains unsupported characters"):
+        state.session_route("by-../../../outside")
+
+
+def test_session_resources_reject_symlinked_evidence_files(tmp_path: Path) -> None:
+    state = state_with_fixture(tmp_path)
+    session_dir = state.aoa_root / "sessions/2026-05-26__001__session-memory-mcp"
+    outside_manifest = tmp_path / "outside-manifest.json"
+    write_json(outside_manifest, {"private": "must-not-be-read"})
+    manifest_path = session_dir / "session.manifest.json"
+    manifest_path.unlink()
+    manifest_path.symlink_to(outside_manifest)
+
+    resource = state.read_resource("aoa-session-memory://session/session-1/manifest")
+    brief = state.session_brief("session-1")
+
+    assert resource["ok"] is False
+    assert resource["diagnostics"] == ["session evidence path escapes archive"]
+    assert "must-not-be-read" not in json.dumps(resource)
+    assert "must-not-be-read" not in json.dumps(brief)
+
+    manifest_path.unlink()
+    manifest_path.symlink_to(manifest_path.name)
+    looped_resource = state.read_resource("aoa-session-memory://session/session-1/manifest")
+    assert looped_resource["ok"] is False
+    assert looped_resource["diagnostics"] == ["session evidence path escapes archive"]
+
+
+def test_raw_line_freshness_rejects_symlink_escape_before_open(tmp_path: Path) -> None:
+    state = state_with_fixture(tmp_path)
+    session_dir = state.aoa_root / "sessions/2026-05-26__001__session-memory-mcp"
+    outside_raw = tmp_path / "outside.raw.jsonl"
+    outside_raw.write_text('{"private":"must-not-be-read"}\n', encoding="utf-8")
+    raw_path = session_dir / "raw/session.raw.jsonl"
+    raw_path.unlink()
+    raw_path.symlink_to(outside_raw)
+
+    freshness = state.session_freshness_check(["raw:line:1"], session="session-1")
+    check = freshness["checks"][0]
+
+    assert freshness["ok"] is False
+    assert check["status"] == "invalid"
+    assert check["inside_aoa_root"] is False
+    assert check["reason"] == "session evidence path escapes archive"
+    assert "must-not-be-read" not in json.dumps(freshness)
+
+
 def test_latest_session_resolution_prefers_registry_recency_over_stale_raw_mtime(tmp_path: Path) -> None:
     aoa = seed_archive(tmp_path)
     registry_path = aoa / "session-registry.json"

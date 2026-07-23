@@ -57,16 +57,23 @@
     },
     {
       "mode": "0644",
+      "path": "MANIFEST.in",
+      "sha256": "eead0cde8223d86119f504653be0971b8720a0b73fe3fffd83c807d6a098b647",
+      "size": 334,
+      "source": "owner:projection/MANIFEST.in"
+    },
+    {
+      "mode": "0644",
       "path": "PROJECTION.md",
-      "sha256": "22e5e11b8b39e9331b65bcbcf682e7aa43135fb2ec349ffad3097e0ab7b2e085",
-      "size": 1614,
+      "sha256": "a35b50fb37f122ce50794eb59df0036b8ff903ac20d38a2170088d04e7f8b8bc",
+      "size": 1914,
       "source": "owner:projection/README.md"
     },
     {
       "mode": "0644",
       "path": "README.md",
-      "sha256": "073844b8d62aa1d4c2395c738f2397551d88c4dfa05548781c6b30554772121c",
-      "size": 27299,
+      "sha256": "2bec0e98326668f6ffa9b7a408901513d2a111acc19a0641653a3a68be7e2ab6",
+      "size": 27516,
       "source": "owner:README.md"
     },
     {
@@ -79,15 +86,15 @@
     {
       "mode": "0644",
       "path": "docs/THREAT_MODEL.md",
-      "sha256": "640475f1e57f92e2e1eeb1b2165e08dc710a82a9d1b3bad54706e03dcd0bd2da",
-      "size": 4138,
+      "sha256": "05edd78ab92fc21a304239a582ca2285e239144a65e243238b3de68619a41356",
+      "size": 4394,
       "source": "owner:docs/THREAT_MODEL.md"
     },
     {
       "mode": "0644",
       "path": "package.export.policy.json",
-      "sha256": "7d5b13ad05e884af84332775322257d2b9c8dfec6c67bda2cb73e198a9ca0668",
-      "size": 2190,
+      "sha256": "fed3864265ed2e4ccb29e72fe0fa8c1b7a942ab556cfea63f32515e7c90b08b1",
+      "size": 2280,
       "source": "owner:projection/package-export.policy.json"
     },
     {
@@ -121,15 +128,15 @@
     {
       "mode": "0755",
       "path": "scripts/validate_package_projection.py",
-      "sha256": "984051d81a2c8a5351948bd628ad30bf98fdf2e4a2b9c5bbf6de7f1a90cf05e8",
-      "size": 6042,
+      "sha256": "ad369d5dfe2899d7cf5a6eb1c96ee4a628ad56969790608c4433c3987f9dbb83",
+      "size": 6493,
       "source": "owner:projection/validate_package_projection.py"
     },
     {
       "mode": "0644",
       "path": "scripts/validate_session_memory_mcp.py",
-      "sha256": "070daa0b9b79b59a7afd44d94ef27e8ee606dc24ce57a76472e49c766a4bb8de",
-      "size": 89725,
+      "sha256": "42978e2811b674c96dcb139b92d06a0a10e4def2a3039f587e9295fa576cb333",
+      "size": 89944,
       "source": "owner:scripts/validate_session_memory_mcp.py"
     },
     {
@@ -163,8 +170,8 @@
     {
       "mode": "0644",
       "path": "src/aoa_session_memory_mcp/core.py",
-      "sha256": "bd9802281596f25b8729da0f3fc2f4d0cc175ac54d37220abfc44803de96578e",
-      "size": 439808,
+      "sha256": "3acc5fa4fa66861f981865f4c9016e56b2fb31b6d99d3a253961f9dc6659afba",
+      "size": 443083,
       "source": "owner:src/aoa_session_memory_mcp/core.py"
     },
     {
@@ -184,15 +191,15 @@
     {
       "mode": "0644",
       "path": "tests/test_package_projection.py",
-      "sha256": "e62bb21774f55819713ef2ad740e34c618674a07bc066f19427145eb92a9eb3d",
-      "size": 553,
+      "sha256": "360bf714417a5d947bffa187164fd4a713e21cf3a7fd3107ce14bf54bf1b5bd3",
+      "size": 816,
       "source": "owner:projection/test_package_projection.py"
     },
     {
       "mode": "0644",
       "path": "tests/test_session_memory_mcp.py",
-      "sha256": "1a24533bced9f473f85412e10a818c3d1c5e87ba0d4be1dd0b62b02ecf68789a",
-      "size": 341820,
+      "sha256": "0fdbac810fc3efd1bc1719a06501e754422493e9d7ef2f33177a5046412dfaa3",
+      "size": 345057,
       "source": "owner:tests/test_session_memory_mcp.py"
     }
   ],
@@ -2464,7 +2471,7 @@
     "owner_decision": "ABYSS-STACK-D-0084",
     "policy": {
       "schema": "aoa_session_memory_mcp_package_export_policy_v1",
-      "sha256": "7d5b13ad05e884af84332775322257d2b9c8dfec6c67bda2cb73e198a9ca0668"
+      "sha256": "fed3864265ed2e4ccb29e72fe0fa8c1b7a942ab556cfea63f32515e7c90b08b1"
     }
   },
   "root_discovery": {
@@ -2498,8 +2505,8 @@
   "schema": "aoa_session_memory_mcp_package_manifest_v1",
   "schema_version": 1,
   "upstream": {
-    "commit": "df9d416a8df23c47ff67d2428ee8116a4cc51dd6",
-    "commit_epoch": 1784613113,
+    "commit": "4e7ca900810bd0e1bf98a1c905757f2fc4a450ae",
+    "commit_epoch": 1784801511,
     "repository": "https://github.com/8Dionysus/abyss-stack",
     "source_path": "mcp/services/aoa-session-memory-mcp"
   }

@@ -19,6 +19,10 @@
   ],
   "mapped_files": [
     {
+      "source": "projection/MANIFEST.in",
+      "destination": "MANIFEST.in"
+    },
+    {
       "source": "projection/README.md",
       "destination": "PROJECTION.md"
     },
