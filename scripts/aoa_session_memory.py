@@ -244,9 +244,9 @@ TASK_EPISODE_REPRESENTATION_LIMITS = {
     "reasoning": 12,
 }
 GOAL_LIFECYCLE_SCHEMA_VERSION = 3
-WORK_CONTEXT_SCHEMA_VERSION = 2
+WORK_CONTEXT_SCHEMA_VERSION = 3
 ROUTE_SIGNAL_SCHEMA_VERSION = 1
-ROUTE_SIGNAL_CLASSIFIER_VERSION = 46
+ROUTE_SIGNAL_CLASSIFIER_VERSION = 47
 TOKEN_ACCOUNTING_SCHEMA_VERSION = 1
 TOKEN_ACCOUNTING_GENERATOR_VERSION = 2
 TOKEN_ACCOUNTING_CONTRACT = "abyss_token_accounting_v1"
@@ -48765,6 +48765,30 @@ def abyssos_owner_root_from_parts(
     return None
 
 
+def archived_home_owner_root(path_value: str) -> str | None:
+    """Resolve a recorded ``~`` path without consulting this host's home map."""
+    raw = str(path_value or "").strip()
+    if not raw.startswith("~") or "\x00" in raw:
+        return None
+    home_token, separator, remainder = raw.partition("/")
+    if not home_token:
+        return None
+    if not separator or not remainder:
+        return home_token
+    parts = Path(remainder).parts
+    if (
+        len(parts) > 1
+        and parts[0] == ".codex"
+    ):
+        return str(Path(home_token) / ".codex" / parts[1])
+    if (
+        len(parts) > 1
+        and parts[0] == "src"
+    ):
+        return str(Path(home_token) / "src" / parts[1])
+    return home_token
+
+
 def lexical_owner_root_for_path(path_value: str) -> str | None:
     """Return a stable owner root using path syntax alone.
 
@@ -48903,6 +48927,9 @@ def archived_path_route_owner_root(path_value: str) -> str | None:
     raw = str(path_value or "").strip()
     if not raw or "\x00" in raw:
         return None
+    archived_home_root = archived_home_owner_root(raw)
+    if archived_home_root:
+        return archived_home_root
     try:
         expanded = str(Path(raw).expanduser())
     except (OSError, RuntimeError, ValueError):
