@@ -2,7 +2,7 @@
 
 Derived from `capabilities/families/*.yaml`. This file is a read model, not capability authority.
 
-Source content hash: `6a0df448fa4a2b0c2cb8fa3e0be313534edd2a3d12066c5222af1f883346c827`
+Source content hash: `4d6a600a134f5aab6e050b2b46c97b046af8890598e46c37245cb965c19a58b9`
 
 ## Semantic tree
 
@@ -47,6 +47,7 @@ Source content hash: `6a0df448fa4a2b0c2cb8fa3e0be313534edd2a3d12066c5222af1f8833
 | conflicts-with | `skill.aoa-session-reindex` | `skill.aoa-session-naming-wave` | Do not rebuild projections and mutate names for the same session set concurrently. |
 | generalizes | `skill.aoa-session-first-pass-distill` | `skill.aoa-session-batch-distill` | Single-session extraction is the reusable procedure generalized by bounded batch orchestration. |
 | hands-off-to | `skill.aoa-codex-hooks-status` | `skill.aoa-codex-compact-probe` | Current trusted hook runtime status is required before the behavioral compact probe. |
+| hands-off-to | `skill.aoa-codex-session-segment-archive` | `skill.aoa-session-raw-diagnostic` | If transcript validation or reading fails before a verified archive is emitted, hand off the typed raw-read-failure and stop archive processing. |
 | hands-off-to | `skill.aoa-codex-session-segment-archive` | `skill.aoa-session-reindex` | Newly archived sessions may be projected only after raw preservation validates. |
 | hands-off-to | `skill.aoa-session-archive-init` | `skill.aoa-codex-hooks-status` | The initialized root emits the memory-root binding consumed by Codex hook inspection. |
 | hands-off-to | `skill.aoa-session-batch-distill` | `skill.aoa-session-manual-review` | The batch candidate queue remains provisional and enters bounded manual review. |

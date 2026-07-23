@@ -2,7 +2,7 @@
 
 Generated from owner capability contracts. This card is a retrieval read model, not procedure or proof authority.
 
-Source graph hash: `6a0df448fa4a2b0c2cb8fa3e0be313534edd2a3d12066c5222af1f883346c827`
+Source graph hash: `4d6a600a134f5aab6e050b2b46c97b046af8890598e46c37245cb965c19a58b9`
 Federation: `aoa-session-memory` specializes `aoa-skills:sessions`.
 
 | skill | visibility | use when | do not use when | version | fingerprint |
@@ -11,7 +11,7 @@ Federation: `aoa-session-memory` specializes `aoa-skills:sessions`.
 | `aoa-session-memory-global-route` | advertised | The request names session memory; .aoa; transcripts; compaction; rehydration; hooks; or session-memory validation. | A narrower non-session-memory owner is already known and no session evidence or session-memory operation is required. | 1.0.0 | `f459356ad356a679` |
 | `aoa-codex-compact-probe` | deferred | The live Codex pre/post-compaction hook path requires an explicit behavioral probe. | Static hook registry inspection is sufficient and no behavioral probe is requested.; The runtime is not Codex. | 1.0.0 | `ef1990131b253144` |
 | `aoa-codex-hooks-status` | deferred | Native Codex hook registration or trust must be inspected for one selected root. | The runtime is not Codex or the question concerns archive content rather than hook state. | 1.0.0 | `adc1e110880d28ee` |
-| `aoa-codex-session-segment-archive` | deferred | A concrete Codex transcript must be archived or a missed archive event must be replayed. | The source is not a Codex transcript or the raw source cannot be read and verified. | 1.0.0 | `b123a7f45def661e` |
+| `aoa-codex-session-segment-archive` | deferred | A concrete Codex transcript must be archived or a missed archive event must be replayed. | The source is not a Codex transcript or the raw source cannot be read and verified. | 1.0.0 | `06f718756dbb22dd` |
 | `aoa-session-archive-init` | deferred | A workspace lacks a valid session-memory root or requires an explicit install or repair. | The selected root is already healthy and no install or repair was requested. | 1.0.0 | `87fec5f9466556ab` |
 | `aoa-session-batch-distill` | deferred | A reviewed set of indexed sessions needs a bounded provisional distillation wave. | Exactly one indexed session is in scope; use first-pass distill.; The operator expects automatic promotion. | 1.0.0 | `653ff014b7b39c0f` |
 | `aoa-session-first-pass-distill` | deferred | One indexed session needs provisional candidate extraction. | The task asks for reviewed truth; final promotion; or a multi-session conveyor. | 1.0.0 | `2b577834951dd51f` |

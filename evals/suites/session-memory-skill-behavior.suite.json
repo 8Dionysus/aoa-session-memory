@@ -40,12 +40,12 @@
     {
       "path": "capabilities",
       "kind": "tree",
-      "sha256": "a0d676b80f5bc1166e0d2e2c96d553da9837524d41b5c57f9ca9fdebbc1e2920"
+      "sha256": "ee57943a63663ef3afaf0fb851ec660f6e2ab96fe0732a39da3179e3c1e4a99f"
     },
     {
       "path": "skills",
       "kind": "tree",
-      "sha256": "b57b870fd69cf0d5456bbaeb6ad135cc55bac37ce0369329bef7c2c43c18956f"
+      "sha256": "0bc6f5c2517d8cc727bcbe5a0ea6010cd518c49bd1526a5210663b055cb2e6f0"
     },
     {
       "path": "config",
@@ -65,7 +65,7 @@
     {
       "path": "generated/capability_graph.json",
       "kind": "file",
-      "sha256": "81abe5b4812786194e3e3d37724697910bd314b279c90944c3578a94921a4e48"
+      "sha256": "c85ab928e8810ebbc32dd59d6dff725a64b840c1c8bdd321f279dc93ed10159d"
     }
   ],
   "auto_run_allowed": false,

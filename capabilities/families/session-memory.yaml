@@ -392,9 +392,10 @@ nodes:
       ambiguous_when: [A runtime transcript handle exists but its ownership or session identity is unresolved.]
     abi:
       inputs:
-        - {name: transcript, type: codex-transcript, required: true, description: Verified raw Codex JSONL source and session identity.}
+        - {name: transcript, type: codex-transcript, required: true, description: Concrete raw Codex JSONL source handle and session identity; readability is verified before mutation.}
       outputs:
         - {name: archive, type: archived-session-set, required: true, description: "Raw-preserving archive, manifests, segments, and registry refs."}
+        - {name: failure, type: raw-read-failure, required: false, description: Fail-closed source failure emitted instead of an archive when transcript validation or reading fails.}
     binding: {kind: skill, ref: skills/aoa-codex-session-segment-archive/SKILL.md, operation: archive, availability: available}
     execution:
       freedom: deterministic
@@ -1014,6 +1015,7 @@ relations:
   - {kind: hands-off-to, source: skill.aoa-session-archive-init, target: skill.aoa-codex-hooks-status, condition: The initialized root emits the memory-root binding consumed by Codex hook inspection.}
   - {kind: hands-off-to, source: skill.aoa-codex-hooks-status, target: skill.aoa-codex-compact-probe, condition: Current trusted hook runtime status is required before the behavioral compact probe.}
   - {kind: hands-off-to, source: skill.aoa-codex-session-segment-archive, target: skill.aoa-session-reindex, condition: Newly archived sessions may be projected only after raw preservation validates.}
+  - {kind: hands-off-to, source: skill.aoa-codex-session-segment-archive, target: skill.aoa-session-raw-diagnostic, condition: "If transcript validation or reading fails before a verified archive is emitted, hand off the typed raw-read-failure and stop archive processing."}
   - {kind: hands-off-to, source: skill.aoa-session-history-import, target: skill.aoa-session-reindex, condition: The bounded import set is complete and raw-preserving before projection rebuild.}
   - {kind: produces, source: skill.aoa-session-reindex, target: skill.aoa-session-search, condition: Current indexed-session output supplies the optional search projection input.}
   - {kind: hands-off-to, source: skill.aoa-session-first-pass-distill, target: skill.aoa-session-manual-review, condition: Provisional candidates require owner-aware manual disposition before any promotion.}

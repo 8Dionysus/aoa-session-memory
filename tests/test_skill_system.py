@@ -458,6 +458,75 @@ def test_task_local_dag_connects_data_handoffs_and_verifiers() -> None:
     ) == []
 
 
+def test_raw_archive_failure_handoff_is_typed_and_fail_closed() -> None:
+    graph = owner_graph()
+    nodes = capability_system.graph_node_map(graph)
+    archive = nodes["skill.aoa-codex-session-segment-archive"]
+    failure_outputs = [
+        output
+        for output in archive["abi"]["outputs"]
+        if output["type"] == "raw-read-failure"
+    ]
+    ready = capability_system.build_task_dag(
+        graph,
+        query=(
+            "archive a Codex transcript, but fail closed into a diagnostic "
+            "if the source cannot be read"
+        ),
+        selected_capabilities=[
+            "skill.aoa-codex-session-segment-archive",
+            "skill.aoa-session-raw-diagnostic",
+        ],
+        external_inputs=[
+            {"type": "codex-transcript", "ref": "adapter://transcript"},
+        ],
+    )
+
+    assert failure_outputs == [
+        {
+            "name": "failure",
+            "type": "raw-read-failure",
+            "required": False,
+            "description": (
+                "Fail-closed source failure emitted instead of an archive "
+                "when transcript validation or reading fails."
+            ),
+        }
+    ]
+    assert ready["status"] == "ready"
+    assert ready["execution_stages"] == [
+        ["skill.aoa-codex-session-segment-archive"],
+        ["skill.aoa-session-raw-diagnostic"],
+    ]
+    assert {
+        (
+            edge["kind"],
+            edge["source"],
+            edge["target"],
+            edge.get("artifact_type"),
+        )
+        for edge in ready["edges"]
+    } >= {
+        (
+            "data",
+            "skill.aoa-codex-session-segment-archive",
+            "skill.aoa-session-raw-diagnostic",
+            "raw-read-failure",
+        ),
+        (
+            "handoff",
+            "skill.aoa-codex-session-segment-archive",
+            "skill.aoa-session-raw-diagnostic",
+            None,
+        ),
+    }
+    assert capability_home_port.validate_task_dag(
+        owner_port(),
+        graph,
+        ready,
+    ) == []
+
+
 def test_task_local_dag_blocks_conflicts_missing_inputs_and_versions() -> None:
     graph = owner_graph()
     conflict = capability_system.build_task_dag(
