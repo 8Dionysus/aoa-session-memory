@@ -44303,6 +44303,140 @@ def test_graph_maintenance_mutating_scan_writes_hash_cache_by_default(tmp_path: 
     assert len(warmed["entries"]) == 3
 
 
+def test_graph_contributions_reuse_shared_source_hashes_within_one_record(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    transcript = (
+        tmp_path
+        / "rollout-2026-06-21T00-30-00-graph-hash-reuse.jsonl"
+    )
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-06-21T00:30:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "graph-hash-reuse",
+                    "cwd": str(repo),
+                    "model": "gpt-5",
+                },
+            },
+            {
+                "timestamp": "2026-06-21T00:30:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Build a graph fingerprint.",
+                        }
+                    ],
+                },
+            },
+            {
+                "timestamp": "2026-06-21T00:30:02Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "The graph fingerprint is ready.",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "graph-hash-reuse",
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    record = module.resolve_session_record(
+        aoa_root,
+        "graph-hash-reuse",
+    )
+    observed_caches: list[dict[str, dict[str, Any]]] = []
+    observed_stats: list[dict[str, int]] = []
+    original = module.graph_source_hash_stat_item
+
+    def observed_hash(
+        path: Path,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        cache_entries = kwargs.get("cache_entries")
+        cache_updates = kwargs.get("cache_updates")
+        stats = kwargs.get("stats")
+        if isinstance(stats, dict):
+            assert isinstance(cache_entries, dict)
+            assert cache_entries is cache_updates
+            observed_caches.append(cache_entries)
+            observed_stats.append(stats)
+        return original(path, **kwargs)
+
+    monkeypatch.setattr(
+        module,
+        "graph_source_hash_stat_item",
+        observed_hash,
+    )
+    first, diagnostics = module.graph_contributions_for_record(record)
+
+    assert diagnostics == []
+    segment_count = sum(
+        1
+        for item in first
+        if item["source"]["source_type"] == "segment"
+    )
+    assert segment_count >= 1
+    assert observed_caches
+    assert len({id(item) for item in observed_caches}) == 1
+    assert len({id(item) for item in observed_stats}) == 1
+    stats = observed_stats[0]
+    unique_path_count = 2 + segment_count
+    assert stats["computed"] == unique_path_count
+    assert stats["persistent_miss"] == unique_path_count
+    assert stats["persistent_hit"] == 2 * segment_count
+    assert len(observed_caches[0]) == unique_path_count
+    first_cache = observed_caches[0]
+    first_source_shas = {
+        item["source"]["source_key"]: item["source"]["source_sha"]
+        for item in first
+    }
+    assert all(first_source_shas.values())
+
+    observed_caches.clear()
+    observed_stats.clear()
+    second, second_diagnostics = (
+        module.graph_contributions_for_record(record)
+    )
+    second_source_shas = {
+        item["source"]["source_key"]: item["source"]["source_sha"]
+        for item in second
+    }
+
+    assert second_diagnostics == []
+    assert second_source_shas == first_source_shas
+    assert observed_stats[0]["computed"] == unique_path_count
+    assert observed_stats[0]["persistent_hit"] == 2 * segment_count
+    assert observed_caches[0] is not first_cache
+
+
 def test_graph_source_hash_cache_reuses_stat_matched_hashes_and_exact_bypasses(tmp_path: Path, monkeypatch: Any) -> None:
     aoa_root = tmp_path / ".aoa"
     source_a = tmp_path / "session.manifest.json"

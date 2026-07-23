@@ -108566,6 +108566,12 @@ def graph_contributions_for_record(
 ) -> tuple[list[dict[str, Any]], list[str]]:
     diagnostics: list[str] = []
     contributions: list[dict[str, Any]] = []
+    # A session contribution and every segment contribution share the same
+    # manifest and session index.  Reuse their stat-qualified fingerprints
+    # only inside this one record build; a later record, scan, or rebuild must
+    # establish its own source identity.
+    source_hash_cache: dict[str, dict[str, Any]] = {}
+    source_hash_stats: dict[str, int] = {}
     source_filter = {str(item) for item in source_keys or set() if str(item)}
     include_all_sources = not source_filter
     session_dir = session_dir_from_record(record)
@@ -109040,6 +109046,9 @@ def graph_contributions_for_record(
                             session_index.get("generation_id")
                         ),
                     },
+                    source_hash_cache_entries=source_hash_cache,
+                    source_hash_cache_updates=source_hash_cache,
+                    source_hash_stats=source_hash_stats,
                 ),
                 "nodes": node_rows,
                 "edges": edge_rows,
@@ -109473,6 +109482,9 @@ def graph_contributions_for_record(
                             segment_index.get("generation_id")
                         ),
                     },
+                    source_hash_cache_entries=source_hash_cache,
+                    source_hash_cache_updates=source_hash_cache,
+                    source_hash_stats=source_hash_stats,
                 ),
                 "nodes": node_rows,
                 "edges": edge_rows,
