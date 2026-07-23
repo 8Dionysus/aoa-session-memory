@@ -57,3 +57,54 @@ def test_audit_keeps_generic_examples_and_host_profiles_distinct(tmp_path: Path)
     assert report["counts"] == {"blocking": 0, "review": 1}
     assert report["findings"][0]["class"] == "host_profile_path"
     assert host_profile not in json.dumps(report)
+
+
+def test_audit_accepts_only_the_verified_empty_portable_session_skeleton(
+    tmp_path: Path,
+) -> None:
+    auditor = load_auditor()
+    session_root = tmp_path / "sessions"
+    session_root.mkdir()
+    payload = {
+        "schema_version": 1,
+        "artifact_type": "sessions_directory_index",
+        "generated_at": "2026-07-23T18:00:07Z",
+        "session_count": 0,
+        "named_session_count": 0,
+        "naming_readiness_counts": {"by_status": {}, "by_route": {}},
+        "naming_work_queue": [],
+        "sessions_root": "sessions",
+        "read_order": auditor.EMPTY_SESSION_READ_ORDER,
+        "by_date": {},
+        "largest_sessions": [],
+        "named_sessions": [],
+        "sessions": [],
+    }
+    (session_root / "AGENTS.md").write_text("# Sessions\n", encoding="utf-8")
+    (session_root / "index.json").write_text(
+        json.dumps(payload, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    (session_root / "INDEX.md").write_text(
+        auditor.empty_session_index_markdown(payload),
+        encoding="utf-8",
+    )
+
+    report = auditor.audit(tmp_path)
+
+    assert report["ok"] is True
+    assert report["findings"] == []
+
+    (session_root / "INDEX.md").write_text(
+        auditor.empty_session_index_markdown(payload)
+        + "\nprivate session narrative\n",
+        encoding="utf-8",
+    )
+    tampered_report = auditor.audit(tmp_path)
+
+    assert tampered_report["ok"] is False
+    assert {
+        item["path"]
+        for item in tampered_report["findings"]
+        if item["class"] == "session_material"
+    } == {"sessions/INDEX.md", "sessions/index.json"}

@@ -17,6 +17,23 @@ RUNTIME_PARTS = {"attachments", "diagnostics", "raw", "segments"}
 BLOCKING_SUFFIXES = {".db", ".log", ".pyo", ".pyc", ".sqlite", ".sqlite3", ".whl"}
 ARCHIVE_SUFFIXES = (".tar.gz", ".tgz")
 SEVERITY_RANK = {"none": 99, "review": 1, "blocking": 2}
+EMPTY_SESSION_SKELETON_PATHS = frozenset(
+    {
+        Path("sessions/INDEX.md"),
+        Path("sessions/index.json"),
+    }
+)
+EMPTY_SESSION_READ_ORDER = [
+    "AGENTS.md",
+    "INDEX.md",
+    "../SESSION_NAMES.md",
+    "../session-registry.json",
+    "<session>/AGENTS.md",
+    "<session>/SESSION.md",
+    "<session>/session.index.json",
+    "<session>/session.manifest.json",
+    "<session>/segments/*.index.json",
+]
 
 
 def fingerprint(class_name: str, value: bytes) -> str:
@@ -45,7 +62,92 @@ def finding(
     return result
 
 
-def path_findings(relative: Path, absolute: Path) -> list[dict[str, Any]]:
+def empty_session_index_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Sessions Directory Index",
+        "",
+        "Generated table of contents for the session archive directory.",
+        "",
+        f"- generated_at: `{payload['generated_at']}`",
+        "- session_count: `0`",
+        "- named_session_count: `0`",
+        "- machine index: `./index.json`",
+        "- name map: `../SESSION_NAMES.md`",
+        "",
+        "## Read Order",
+        "",
+    ]
+    lines.extend(
+        f"{index}. `{item}`"
+        for index, item in enumerate(EMPTY_SESSION_READ_ORDER, start=1)
+    )
+    lines.extend(
+        [
+            "",
+            "## Naming Readiness",
+            "",
+            "- No readiness data generated.",
+            "",
+            "## Naming Work Queue",
+            "",
+            "- No naming work is currently queued.",
+            "",
+            "## Named Sessions",
+            "",
+            "- No semantic session names have been attached yet.",
+            "",
+            "## Largest Sessions",
+            "",
+            "",
+            "## All Sessions By Date",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def verified_empty_session_skeleton_paths(root: Path) -> frozenset[Path]:
+    index_path = root / "sessions" / "index.json"
+    markdown_path = root / "sessions" / "INDEX.md"
+    if not index_path.is_file() or not markdown_path.is_file():
+        return frozenset()
+    try:
+        payload = json.loads(index_path.read_text(encoding="utf-8"))
+        markdown = markdown_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return frozenset()
+    generated_at = payload.get("generated_at") if isinstance(payload, dict) else None
+    if not isinstance(generated_at, str) or re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z",
+        generated_at,
+    ) is None:
+        return frozenset()
+    expected_payload = {
+        "schema_version": 1,
+        "artifact_type": "sessions_directory_index",
+        "generated_at": generated_at,
+        "session_count": 0,
+        "named_session_count": 0,
+        "naming_readiness_counts": {"by_status": {}, "by_route": {}},
+        "naming_work_queue": [],
+        "sessions_root": "sessions",
+        "read_order": EMPTY_SESSION_READ_ORDER,
+        "by_date": {},
+        "largest_sessions": [],
+        "named_sessions": [],
+        "sessions": [],
+    }
+    if payload != expected_payload or markdown != empty_session_index_markdown(payload):
+        return frozenset()
+    return EMPTY_SESSION_SKELETON_PATHS
+
+
+def path_findings(
+    relative: Path,
+    absolute: Path,
+    *,
+    allowed_session_paths: frozenset[Path] = frozenset(),
+) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     encoded = relative.as_posix().encode("utf-8")
     parts = set(relative.parts)
@@ -58,7 +160,12 @@ def path_findings(relative: Path, absolute: Path) -> list[dict[str, Any]]:
         results.append(finding("build_artifact", "blocking", relative, encoded, "generated package build state is not public source"))
     if parts & RUNTIME_PARTS:
         results.append(finding("runtime_evidence", "blocking", relative, encoded, "runtime evidence must not ship in the source tree"))
-    if len(relative.parts) > 1 and relative.parts[:1] == ("sessions",) and relative != Path("sessions/AGENTS.md"):
+    if (
+        len(relative.parts) > 1
+        and relative.parts[:1] == ("sessions",)
+        and relative != Path("sessions/AGENTS.md")
+        and relative not in allowed_session_paths
+    ):
         results.append(finding("session_material", "blocking", relative, encoded, "session material is private runtime evidence"))
     if name == ".env" or (name.startswith(".env.") and name not in {".env.example", ".env.sample"}):
         results.append(finding("environment_file", "blocking", relative, encoded, "environment files may contain credentials"))
@@ -136,13 +243,18 @@ def audit(root: Path) -> dict[str, Any]:
     root = root.expanduser().resolve()
     findings: list[dict[str, Any]] = []
     file_count = 0
+    allowed_session_paths = verified_empty_session_skeleton_paths(root)
     for directory, dirnames, filenames in os.walk(root, followlinks=False):
         current = Path(directory)
         dirnames[:] = sorted(name for name in dirnames if name != ".git")
         for name in list(dirnames):
             path = current / name
             relative = path.relative_to(root)
-            directory_findings = path_findings(relative, path)
+            directory_findings = path_findings(
+                relative,
+                path,
+                allowed_session_paths=allowed_session_paths,
+            )
             findings.extend(directory_findings)
             if any(item["severity"] == "blocking" for item in directory_findings):
                 dirnames.remove(name)
@@ -150,7 +262,13 @@ def audit(root: Path) -> dict[str, Any]:
             path = current / name
             relative = path.relative_to(root)
             file_count += 1
-            findings.extend(path_findings(relative, path))
+            findings.extend(
+                path_findings(
+                    relative,
+                    path,
+                    allowed_session_paths=allowed_session_paths,
+                )
+            )
             if not path.is_symlink():
                 findings.extend(content_findings(relative, path))
     findings.sort(key=lambda item: (item["severity"] != "blocking", item["class"], item["path"], item.get("line", 0)))
