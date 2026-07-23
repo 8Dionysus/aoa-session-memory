@@ -244,9 +244,9 @@ TASK_EPISODE_REPRESENTATION_LIMITS = {
     "reasoning": 12,
 }
 GOAL_LIFECYCLE_SCHEMA_VERSION = 3
-WORK_CONTEXT_SCHEMA_VERSION = 1
+WORK_CONTEXT_SCHEMA_VERSION = 2
 ROUTE_SIGNAL_SCHEMA_VERSION = 1
-ROUTE_SIGNAL_CLASSIFIER_VERSION = 45
+ROUTE_SIGNAL_CLASSIFIER_VERSION = 46
 TOKEN_ACCOUNTING_SCHEMA_VERSION = 1
 TOKEN_ACCOUNTING_GENERATOR_VERSION = 2
 TOKEN_ACCOUNTING_CONTRACT = "abyss_token_accounting_v1"
@@ -11076,7 +11076,9 @@ def route_signals_for_event(
                 if payload.get(key):
                     add("runtime_environment", key, confidence="high", source="session_meta", detail=payload.get(key))
                     if key == "cwd":
-                        owner_root = work_context_root_for_path(str(payload.get(key)))
+                        owner_root = archived_path_route_owner_root(
+                            str(payload.get(key))
+                        )
                         if owner_root:
                             add("owner_route", owner_name_from_root(owner_root) or owner_root, confidence="high", source="cwd", detail=owner_root)
 
@@ -48737,6 +48739,32 @@ def home_owner_coordinates(
     return None
 
 
+def abyssos_owner_root_from_parts(
+    parts: tuple[str, ...],
+) -> str | None:
+    """Resolve an AbyssOS owner namespace from path syntax at any depth."""
+    for abyssos_index in range(len(parts) - 1, 1, -1):
+        if parts[abyssos_index].casefold() != "abyssos":
+            continue
+        project_root = str(Path(*parts[: abyssos_index + 1]))
+        child_index = abyssos_index + 1
+        if len(parts) <= child_index:
+            return project_root
+        child = parts[child_index]
+        if child == ".aoa":
+            return str(Path(project_root) / ".aoa")
+        if child == "bundles" and len(parts) > child_index + 1:
+            return str(Path(*parts[: child_index + 2]))
+        if (
+            child
+            and not child.startswith(".")
+            and child not in {"generated", "worktrees"}
+        ):
+            return str(Path(*parts[: child_index + 1]))
+        return project_root
+    return None
+
+
 def lexical_owner_root_for_path(path_value: str) -> str | None:
     """Return a stable owner root using path syntax alone.
 
@@ -48754,6 +48782,9 @@ def lexical_owner_root_for_path(path_value: str) -> str | None:
     parts = Path(expanded).parts
     if len(parts) < 3 or parts[0] != "/":
         return None
+    abyssos_root = abyssos_owner_root_from_parts(parts)
+    if abyssos_root:
+        return abyssos_root
     srv_index = srv_project_index(parts)
     if srv_index is not None and len(parts) > srv_index:
         project_name = parts[srv_index]
@@ -48886,6 +48917,9 @@ def archived_path_route_owner_root(path_value: str) -> str | None:
             and parts[surface_index] == ".codex"
         ):
             return str(Path(*parts[: surface_index + 2]))
+    abyssos_root = abyssos_owner_root_from_parts(parts)
+    if abyssos_root:
+        return abyssos_root
     srv_index = srv_project_index(parts)
     if srv_index is not None and len(parts) > srv_index:
         project_name = parts[srv_index]
@@ -48978,10 +49012,20 @@ def work_context_for_session_events(source: dict[str, Any], events: list[RawEven
 
     cwd_value = source.get("cwd") if isinstance(source, dict) else ""
     if cwd_value:
-        add(work_context_root_for_path(str(cwd_value)), score=20, kind="cwd", value=cwd_value)
+        add(
+            archived_path_route_owner_root(str(cwd_value)),
+            score=20,
+            kind="cwd",
+            value=cwd_value,
+        )
     transcript_path = source.get("transcript_path") if isinstance(source, dict) else ""
     if transcript_path:
-        add(work_context_root_for_path(str(transcript_path)), score=1, kind="transcript_path", value=transcript_path)
+        add(
+            archived_path_route_owner_root(str(transcript_path)),
+            score=1,
+            kind="transcript_path",
+            value=transcript_path,
+        )
 
     codex_home = Path(
         os.environ.get("CODEX_HOME") or (Path.home() / ".codex")
@@ -49002,7 +49046,13 @@ def work_context_for_session_events(source: dict[str, Any], events: list[RawEven
             payload = event.parsed.get("payload") if isinstance(event.parsed.get("payload"), dict) else event.parsed
             cwd_value = payload.get("cwd") if isinstance(payload, dict) else None
             if cwd_value:
-                add(work_context_root_for_path(str(cwd_value)), score=18, kind="raw_session_meta_cwd", value=cwd_value, ref=f"raw:line:{event.line_no}")
+                add(
+                    archived_path_route_owner_root(str(cwd_value)),
+                    score=18,
+                    kind="raw_session_meta_cwd",
+                    value=cwd_value,
+                    ref=f"raw:line:{event.line_no}",
+                )
         texts: list[str] = [event.title, " ".join(event.tags)]
         for key in ("command", "tool_name", "path"):
             value = event.facets.get(key)
@@ -49018,7 +49068,13 @@ def work_context_for_session_events(source: dict[str, Any], events: list[RawEven
             add(str(session_memory_root), score=5, kind="memory_surface", value=surface, ref=f"raw:line:{event.line_no}")
         for text in texts:
             for mention in path_mentions_from_text(text):
-                add(work_context_root_for_path(mention), score=4, kind="indexed_path", value=mention, ref=f"raw:line:{event.line_no}")
+                add(
+                    archived_path_route_owner_root(mention),
+                    score=4,
+                    kind="indexed_path",
+                    value=mention,
+                    ref=f"raw:line:{event.line_no}",
+                )
 
     if not scores:
         return {

@@ -46390,6 +46390,72 @@ def test_archived_path_routing_is_stable_for_existing_and_missing_codex_paths(
     assert module.archived_path_route_owner_root(str(missing)) == expected
 
 
+def test_archived_session_context_projections_do_not_read_live_owner_markers(
+    monkeypatch,
+) -> None:
+    archived_path = "/home/example/.codex/skills/aoa-eval/SKILL.md"
+    transcript_path = (
+        "/home/example/.codex/sessions/2026/07/23/"
+        "rollout-archived.jsonl"
+    )
+    event = module.RawEvent(
+        event_id="evt-archived-owner",
+        line_no=1,
+        raw="{}",
+        parsed={"payload": {"cwd": archived_path}},
+        event_type="SESSION_META",
+        source_type="session_meta",
+        title=archived_path,
+        timestamp="2026-07-23T00:00:00Z",
+        tags=[],
+        importance="medium",
+        compaction_boundary=False,
+        facets={"path": archived_path},
+    )
+
+    def fail_on_exists(_path: Path) -> bool:
+        raise AssertionError(
+            "archived context projection inspected the live filesystem"
+        )
+
+    with monkeypatch.context() as isolated:
+        isolated.setattr(Path, "exists", fail_on_exists)
+        route_signals = module.route_signals_for_event(
+            event.event_type,
+            event.source_type,
+            event.parsed["payload"],
+            event.title,
+            event.raw,
+            set(event.tags),
+            event.facets,
+            event.outcome,
+            event.correlation_id,
+        )
+        work_context = module.work_context_for_session_events(
+            {
+                "cwd": archived_path,
+                "transcript_path": transcript_path,
+            },
+            [event],
+        )
+
+    assert {
+        (signal["layer"], signal["key"], signal.get("detail"))
+        for signal in route_signals
+        if signal["layer"] == "owner_route"
+    } == {
+        (
+            "owner_route",
+            "skills",
+            "/home/example/.codex/skills",
+        )
+    }
+    assert work_context["schema_version"] == 2
+    assert work_context["work_root"] == "/home/example/.codex/skills"
+    assert work_context["work_name"] == "skills"
+    assert work_context["work_family"] == "codex-memory"
+
+
 def test_agent_atlas_build_generates_route_entries(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     repo = workspace / "aoa-techniques"
