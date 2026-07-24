@@ -170,8 +170,8 @@
     {
       "mode": "0644",
       "path": "src/aoa_session_memory_mcp/core.py",
-      "sha256": "3acc5fa4fa66861f981865f4c9016e56b2fb31b6d99d3a253961f9dc6659afba",
-      "size": 443083,
+      "sha256": "8fc1dac391273b3a02c0ad8a222b5327116217315ac3151a6ba1232ec2fa0f24",
+      "size": 444648,
       "source": "owner:src/aoa_session_memory_mcp/core.py"
     },
     {
@@ -198,8 +198,8 @@
     {
       "mode": "0644",
       "path": "tests/test_session_memory_mcp.py",
-      "sha256": "0fdbac810fc3efd1bc1719a06501e754422493e9d7ef2f33177a5046412dfaa3",
-      "size": 345057,
+      "sha256": "d3581bf8824fcf019db34d89209275574d4120a2295870db98f330be245b073b",
+      "size": 347052,
       "source": "owner:tests/test_session_memory_mcp.py"
     }
   ],
@@ -2505,8 +2505,8 @@
   "schema": "aoa_session_memory_mcp_package_manifest_v1",
   "schema_version": 1,
   "upstream": {
-    "commit": "4e7ca900810bd0e1bf98a1c905757f2fc4a450ae",
-    "commit_epoch": 1784801511,
+    "commit": "46a2ecbb1d418ed093ddb362e42daca26178d5f1",
+    "commit_epoch": 1784860972,
     "repository": "https://github.com/8Dionysus/abyss-stack",
     "source_path": "mcp/services/aoa-session-memory-mcp"
   }

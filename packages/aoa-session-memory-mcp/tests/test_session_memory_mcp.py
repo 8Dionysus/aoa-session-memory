@@ -5141,6 +5141,12 @@ def test_entity_registry_mcp_preserves_candidates_and_blocks_incompatible_genera
         "source_fingerprint_mode": (
             module.ENTITY_REGISTRY_EXPECTED_SOURCE_FINGERPRINT_MODE
         ),
+        "observed_dependency_contract_version": (
+            module.ENTITY_REGISTRY_EXPECTED_OBSERVED_DEPENDENCY_CONTRACT_VERSION
+        ),
+        "history_policy_contract": (
+            module.ENTITY_REGISTRY_EXPECTED_HISTORY_POLICY_CONTRACT
+        ),
     }
     snapshot["generation_identity"]["generation_id"] = (
         module._entity_registry_generation_digest(
@@ -5166,6 +5172,9 @@ def test_entity_registry_mcp_preserves_candidates_and_blocks_incompatible_genera
     compact = module._compact_entity_registry_entry(
         resolved["entries"][0]
     )
+    compact_generation = module._compact_generation_identity(
+        resolved["generation_identity"]
+    )
 
     assert resolved["identity_status"] == "resolved"
     assert resolved["identity_claim_admitted"] is True
@@ -5183,6 +5192,12 @@ def test_entity_registry_mcp_preserves_candidates_and_blocks_incompatible_genera
     assert resolved["projection_freshness"][
         "current_state_claim_admitted"
     ] is False
+    assert resolved["projection_freshness"][
+        "generation_policy_compatible"
+    ] is True
+    assert resolved["projection_freshness"][
+        "expected_generation_policy"
+    ]["observed_dependency_contract_version"] == 1
     assert resolved["identity_candidate_ids"] == [
         candidate["candidate_id"]
     ]
@@ -5196,6 +5211,50 @@ def test_entity_registry_mcp_preserves_candidates_and_blocks_incompatible_genera
     assert compact["identity_candidates"][0]["source_refs"][0][
         "registry_owner"
     ] == "aoa-skills"
+    assert compact_generation[
+        "observed_dependency_contract_version"
+    ] == 1
+    assert compact_generation["history_policy_contract"] == (
+        module.ENTITY_REGISTRY_EXPECTED_HISTORY_POLICY_CONTRACT
+    )
+
+    snapshot["generation_identity"][
+        "observed_dependency_contract_version"
+    ] = 2
+    snapshot["generation_identity"]["generation_id"] = (
+        module._entity_registry_generation_digest(
+            snapshot["generation_identity"]
+        )
+    )
+    write_json(registry_path, snapshot)
+
+    policy_incompatible = state.session_entity_registry(
+        kind="skill",
+        lookup="aoa-decision",
+        limit=5,
+    )
+
+    assert policy_incompatible["identity_status"] == (
+        "incompatible_generation"
+    )
+    assert policy_incompatible["identity_claim_admitted"] is False
+    assert policy_incompatible["projection_freshness"][
+        "generation_policy_compatible"
+    ] is False
+    assert (
+        "entity_registry_generation_policy_incompatible"
+        in policy_incompatible["diagnostics"]
+    )
+    snapshot["generation_identity"][
+        "observed_dependency_contract_version"
+    ] = (
+        module.ENTITY_REGISTRY_EXPECTED_OBSERVED_DEPENDENCY_CONTRACT_VERSION
+    )
+    snapshot["generation_identity"]["generation_id"] = (
+        module._entity_registry_generation_digest(
+            snapshot["generation_identity"]
+        )
+    )
 
     snapshot["source_fingerprint"] = "0" * 64
     write_json(registry_path, snapshot)

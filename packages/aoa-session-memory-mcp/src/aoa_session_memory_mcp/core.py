@@ -337,10 +337,16 @@ ENTITY_REGISTRY_EXPECTED_PRODUCER_IDENTITY_MODE = (
 )
 ENTITY_REGISTRY_EXPECTED_NORMALIZATION = (
     "typed_kind_key_content_candidate_alias_provenance_"
-    "cli_subcommand_contract_identity_v2"
+    "cli_subcommand_contract_identity_observed_dependency_"
+    "authoritative_rebuild_runtime_owner_fingerprint_v4"
 )
 ENTITY_REGISTRY_EXPECTED_SOURCE_FINGERPRINT_MODE = (
-    "identity_candidate_and_source_ref_cli_contract_digest_v2"
+    "identity_candidate_and_source_ref_cli_contract_"
+    "runtime_owner_digest_v3"
+)
+ENTITY_REGISTRY_EXPECTED_OBSERVED_DEPENDENCY_CONTRACT_VERSION = 1
+ENTITY_REGISTRY_EXPECTED_HISTORY_POLICY_CONTRACT = (
+    "incremental_history_or_authoritative_rebuild_v1"
 )
 ENTITY_REGISTRY_CANDIDATE_SAMPLE_LIMIT = 8
 ENTITY_REGISTRY_SOURCE_REF_SAMPLE_LIMIT = 6
@@ -1671,6 +1677,8 @@ def _compact_generation_identity(value: Any) -> dict[str, Any]:
             "tokenizer",
             "normalization",
             "source_fingerprint_mode",
+            "observed_dependency_contract_version",
+            "history_policy_contract",
             "chunking_policy",
             "boundary_policy_version",
             "representation_version",
@@ -3318,6 +3326,10 @@ def _entity_registry_generation_compatibility(
         == ENTITY_REGISTRY_EXPECTED_NORMALIZATION
         and generation.get("source_fingerprint_mode")
         == ENTITY_REGISTRY_EXPECTED_SOURCE_FINGERPRINT_MODE
+        and generation.get("observed_dependency_contract_version")
+        == ENTITY_REGISTRY_EXPECTED_OBSERVED_DEPENDENCY_CONTRACT_VERSION
+        and generation.get("history_policy_contract")
+        == ENTITY_REGISTRY_EXPECTED_HISTORY_POLICY_CONTRACT
     )
     generation_shape_compatible = bool(
         stored_generation_id
@@ -3417,6 +3429,30 @@ def _entity_registry_generation_compatibility(
         "expected_schema_version": (
             ENTITY_REGISTRY_EXPECTED_SCHEMA_VERSION
         ),
+        "expected_generation_policy": {
+            "contract_version": (
+                ENTITY_REGISTRY_EXPECTED_CONTRACT_VERSION
+            ),
+            "canonicalization_version": (
+                ENTITY_REGISTRY_EXPECTED_CANONICALIZATION_VERSION
+            ),
+            "producer": ENTITY_REGISTRY_EXPECTED_PRODUCER,
+            "producer_identity_mode": (
+                ENTITY_REGISTRY_EXPECTED_PRODUCER_IDENTITY_MODE
+            ),
+            "normalization": (
+                ENTITY_REGISTRY_EXPECTED_NORMALIZATION
+            ),
+            "source_fingerprint_mode": (
+                ENTITY_REGISTRY_EXPECTED_SOURCE_FINGERPRINT_MODE
+            ),
+            "observed_dependency_contract_version": (
+                ENTITY_REGISTRY_EXPECTED_OBSERVED_DEPENDENCY_CONTRACT_VERSION
+            ),
+            "history_policy_contract": (
+                ENTITY_REGISTRY_EXPECTED_HISTORY_POLICY_CONTRACT
+            ),
+        },
         "generation_identity": generation,
         "stored_generation_id": stored_generation_id,
         "calculated_generation_id": calculated_generation_id,
