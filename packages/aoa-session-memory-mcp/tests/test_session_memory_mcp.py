@@ -779,6 +779,71 @@ MAINTENANCE_STATUS = {
     "mcp_boundary": "MCP may expose this packet read-only; repair/reindex/maintenance commands stay outside MCP.",
 }
 
+PROJECTION_STATUS = {
+    "schema_version": 1,
+    "schema": "aoa_session_memory_projection_status_v1",
+    "artifact_type": "session_memory_projection_status",
+    "generated_at": "2026-05-26T00:04:00Z",
+    "ok": True,
+    "status": "current_with_deferred_live",
+    "mutates": False,
+    "source": "refreshed_maintenance_status",
+    "projection_completeness": {
+        "schema_version": 1,
+        "artifact_type": "session_memory_projection_completeness",
+        "status": "current_with_deferred_live",
+        "actionable_surface_ids": [],
+        "deferred_surface_ids": ["live_tail"],
+        "surfaces": {
+            "search_index": {"status": "current", "needs_maintenance": False},
+            "entity_registry": {
+                "status": "current",
+                "needs_maintenance": False,
+                "entity_count": 12,
+            },
+            "graph": {"status": "current", "needs_maintenance": False},
+            "live_tail": {
+                "status": "deferred",
+                "needs_maintenance": False,
+                "reason": "waiting_for_quiet_window",
+            },
+        },
+    },
+    "projection_completeness_source": "refreshed_maintenance_status",
+    "latest_projection_catchup": {
+        "path": "/tmp/.aoa/diagnostics/projection-catchup.json",
+        "payload": None,
+        "used_as_current_basis": False,
+    },
+    "current_maintenance": {
+        "snapshot_mode": "refreshed_hot",
+        "refreshed": True,
+        "recommendation": "wait_live_catchup",
+    },
+    "current_maintenance_freshness": {
+        "snapshot_mode": "refreshed_hot",
+        "refreshed": True,
+        "refresh_required_for_current_truth": False,
+    },
+    "next_operator_route": {
+        "id": "wait_live_catchup",
+        "status": "deferred",
+        "reason": "recent_live_sources_deferred_until_quiet_window",
+        "command": ["python3", "scripts/aoa_session_memory.py", "maintenance-status", "--no-timers"],
+    },
+    "exact_next_command": "python3 scripts/aoa_session_memory.py maintenance-status --no-timers",
+    "diagnostics": [],
+    "mcp_access": {
+        "mutates": False,
+        "archive_command": None,
+        "read_only": True,
+        "does_not_run_projection_catchup": True,
+        "writer_route_stays_outside_mcp": True,
+        "archive_fallback_command": "projection-status",
+    },
+    "authority_boundary": "raw evidence remains authority; projection status is read-only route guidance",
+}
+
 SEARCH_RESULTS = {
     "schema_version": 1,
     "artifact_type": "search_results",
@@ -1828,6 +1893,8 @@ class FakeRunner:
             payload = ROUTE_READINESS_FAST_GATE
         elif command == "maintenance-status":
             payload = MAINTENANCE_STATUS
+        elif command == "projection-status":
+            payload = PROJECTION_STATUS
         elif command == "search-operational-route-rollup-query":
             payload = OPERATIONAL_ROUTE_ROLLUP_QUERY
         elif command == "search-operational-direct-event-rollup-query":
@@ -1886,6 +1953,28 @@ class FakeRunner:
         else:
             return CommandOutput(argv, 2, "{}", f"unexpected command {command}", 1.0)
         return CommandOutput(argv, 0, json.dumps(payload), "", 1.0)
+
+
+class ProjectionStatusRunner(FakeRunner):
+    def __init__(self, payload: dict[str, Any], *, returncode: int = 0) -> None:
+        super().__init__()
+        self.payload = payload
+        self.returncode = returncode
+
+    def __call__(self, argv: list[str], timeout: float) -> CommandOutput:
+        command = argv[2]
+        args = tuple(argv[3:])
+        if command == "projection-status":
+            self.calls.append((command, args))
+            self.timeouts.append((command, timeout))
+            return CommandOutput(
+                argv,
+                self.returncode,
+                json.dumps(self.payload),
+                "",
+                1.0,
+            )
+        return super().__call__(argv, timeout)
 
 
 class SessionProviderTimeoutRunner(FakeRunner):
@@ -2506,42 +2595,69 @@ def test_projection_status_reads_latest_completeness_without_running_catchup(tmp
 
     assert status["schema"] == "aoa_session_memory_projection_status_v1"
     assert status["ok"] is True
+    assert status["status"] == "current_with_deferred_live"
     assert status["mutates"] is False
-    assert status["source"] == "latest_projection_catchup_diagnostic"
-    assert status["projection_completeness"]["status"] == "current"
+    assert status["source"] == "refreshed_maintenance_status"
+    assert status["projection_completeness"]["status"] == "current_with_deferred_live"
     assert status["projection_completeness"]["surfaces"]["entity_registry"]["entity_count"] == 12
-    assert status["next_operator_route"]["id"] == "verify_projection_status"
-    assert status["mcp_access"]["archive_command"] is None
+    assert status["next_operator_route"]["id"] == "wait_live_catchup"
+    assert status["mcp_access"]["archive_command"] == "projection-status"
     assert status["mcp_access"]["does_not_run_projection_catchup"] is True
-    assert any(call[0] == "maintenance-status" for call in runner.calls)
+    assert any(call[0] == "projection-status" for call in runner.calls)
+    assert not any(call[0] == "maintenance-status" for call in runner.calls)
     assert not any(call[0] == "projection-catchup" for call in runner.calls)
 
     resource = state.read_resource("aoa-session-memory://projection/status")
     assert resource["projection_completeness"]["surfaces"]["search_index"]["status"] == "current"
 
 
+def test_projection_status_delegates_to_owner_packet_and_preserves_envelope(tmp_path: Path) -> None:
+    runner = FakeRunner()
+    state = state_with_fixture(tmp_path, runner)
+
+    status = state.session_projection_status(include_payload=True)
+
+    assert status["schema_version"] == 1
+    assert status["schema"] == "aoa_session_memory_projection_status_v1"
+    assert status["artifact_type"] == "session_memory_projection_status"
+    assert status["status"] == "current_with_deferred_live"
+    assert status["source"] == "refreshed_maintenance_status"
+    assert status["projection_completeness_source"] == "refreshed_maintenance_status"
+    assert status["current_maintenance_freshness"]["refreshed"] is True
+    assert status["exact_next_command"].endswith("maintenance-status --no-timers")
+    assert status["mcp_access"]["archive_command"] == "projection-status"
+    assert status["mcp_access"]["read_only"] is True
+    assert status["mcp_access"]["does_not_run_projection_catchup"] is True
+    assert status["mcp_access"]["writer_route_stays_outside_mcp"] is True
+    projection_calls = [args for command, args in runner.calls if command == "projection-status"]
+    assert len(projection_calls) == 1
+    assert "--refresh-maintenance" in projection_calls[0]
+    assert "--include-payload" in projection_calls[0]
+    assert not any(command == "maintenance-status" for command, _args in runner.calls)
+    assert not any(command == "projection-catchup" for command, _args in runner.calls)
+
+
 def test_projection_status_treats_stale_completeness_as_not_ok(tmp_path: Path) -> None:
     aoa = seed_archive(tmp_path)
-    write_json(
-        aoa / "diagnostics/20260526T000200Z__projection-catchup-catchup.json",
+    stale = json.loads(json.dumps(PROJECTION_STATUS))
+    stale.update(
         {
-            "schema_version": 1,
-            "artifact_type": "session_memory_projection_catchup",
-            "ok": True,
-            "projection_completeness": {
-                "schema_version": 1,
-                "artifact_type": "session_memory_projection_completeness",
-                "status": "stale",
-                "actionable_surface_ids": ["search_index"],
-                "deferred_surface_ids": [],
-                "surfaces": {
-                    "search_index": {"status": "stale", "needs_maintenance": True},
-                    "entity_registry": {"status": "current", "needs_maintenance": False},
-                },
+            "ok": False,
+            "status": "stale",
+            "source": "refreshed_maintenance_status",
+            "diagnostics": ["projection_completeness_stale"],
+            "next_operator_route": {
+                "id": "run_projection_catchup_outside_mcp",
+                "status": "needed",
+                "reason": "projection_completeness_stale",
+                "command": ["python3", "scripts/aoa_session_memory.py", "projection-catchup", "all", "--write-report"],
             },
-        },
+        }
     )
-    runner = FakeRunner()
+    stale["projection_completeness"]["status"] = "stale"
+    stale["projection_completeness"]["actionable_surface_ids"] = ["search_index"]
+    stale["projection_completeness"]["deferred_surface_ids"] = []
+    runner = ProjectionStatusRunner(stale, returncode=1)
     state = AoASessionMemoryMCPState.discover(
         workspace_root=tmp_path,
         aoa_root=aoa,
@@ -2553,27 +2669,35 @@ def test_projection_status_treats_stale_completeness_as_not_ok(tmp_path: Path) -
     status = state.session_projection_status()
 
     assert status["ok"] is False
-    assert status["source"] == "stale_projection_catchup_diagnostic"
+    assert status["status"] == "stale"
+    assert status["source"] == "refreshed_maintenance_status"
     assert status["next_operator_route"]["id"] == "run_projection_catchup_outside_mcp"
     assert status["next_operator_route"]["reason"] == "projection_completeness_stale"
     assert "projection_completeness_stale" in status["diagnostics"]
+    assert status["mcp_access"]["returncode"] == 1
+    assert any(command == "projection-status" for command, _args in runner.calls)
     assert not any(call[0] == "projection-catchup" for call in runner.calls)
 
 
 def test_projection_status_flags_legacy_completeness_diagnostic(tmp_path: Path) -> None:
     aoa = seed_archive(tmp_path)
-    write_json(
-        aoa / "diagnostics/20260526T000200Z__projection-catchup-catchup.json",
+    missing = json.loads(json.dumps(PROJECTION_STATUS))
+    missing.update(
         {
-            "artifact_type": "session_memory_projection_catchup",
-            "ok": True,
-            "completeness_check": {
-                "freshness_before_after": True,
-                "schema_classifier_dirty_detection": "legacy string-only status",
+            "ok": False,
+            "status": "missing",
+            "source": "refreshed_maintenance_status",
+            "projection_completeness": {},
+            "diagnostics": ["projection_completeness_missing_or_legacy"],
+            "next_operator_route": {
+                "id": "run_projection_catchup_outside_mcp",
+                "status": "needed",
+                "reason": "projection_completeness_missing_or_legacy",
+                "command": ["python3", "scripts/aoa_session_memory.py", "projection-catchup", "all", "--write-report"],
             },
-        },
+        }
     )
-    runner = FakeRunner()
+    runner = ProjectionStatusRunner(missing, returncode=1)
     state = AoASessionMemoryMCPState.discover(
         workspace_root=tmp_path,
         aoa_root=aoa,
@@ -2585,9 +2709,12 @@ def test_projection_status_flags_legacy_completeness_diagnostic(tmp_path: Path) 
     status = state.session_projection_status()
 
     assert status["ok"] is False
-    assert status["source"] == "legacy_projection_catchup_diagnostic"
+    assert status["status"] == "missing"
+    assert status["source"] == "refreshed_maintenance_status"
     assert status["next_operator_route"]["id"] == "run_projection_catchup_outside_mcp"
     assert "projection_completeness_missing_or_legacy" in status["diagnostics"]
+    assert status["mcp_access"]["returncode"] == 1
+    assert any(command == "projection-status" for command, _args in runner.calls)
     assert not any(call[0] == "projection-catchup" for call in runner.calls)
 
 
@@ -5141,6 +5268,12 @@ def test_entity_registry_mcp_preserves_candidates_and_blocks_incompatible_genera
         "source_fingerprint_mode": (
             module.ENTITY_REGISTRY_EXPECTED_SOURCE_FINGERPRINT_MODE
         ),
+        "observed_dependency_contract_version": (
+            module.ENTITY_REGISTRY_EXPECTED_OBSERVED_DEPENDENCY_CONTRACT_VERSION
+        ),
+        "history_policy_contract": (
+            module.ENTITY_REGISTRY_EXPECTED_HISTORY_POLICY_CONTRACT
+        ),
     }
     snapshot["generation_identity"]["generation_id"] = (
         module._entity_registry_generation_digest(
@@ -5166,6 +5299,9 @@ def test_entity_registry_mcp_preserves_candidates_and_blocks_incompatible_genera
     compact = module._compact_entity_registry_entry(
         resolved["entries"][0]
     )
+    compact_generation = module._compact_generation_identity(
+        resolved["generation_identity"]
+    )
 
     assert resolved["identity_status"] == "resolved"
     assert resolved["identity_claim_admitted"] is True
@@ -5183,6 +5319,12 @@ def test_entity_registry_mcp_preserves_candidates_and_blocks_incompatible_genera
     assert resolved["projection_freshness"][
         "current_state_claim_admitted"
     ] is False
+    assert resolved["projection_freshness"][
+        "generation_policy_compatible"
+    ] is True
+    assert resolved["projection_freshness"][
+        "expected_generation_policy"
+    ]["observed_dependency_contract_version"] == 1
     assert resolved["identity_candidate_ids"] == [
         candidate["candidate_id"]
     ]
@@ -5196,6 +5338,50 @@ def test_entity_registry_mcp_preserves_candidates_and_blocks_incompatible_genera
     assert compact["identity_candidates"][0]["source_refs"][0][
         "registry_owner"
     ] == "aoa-skills"
+    assert compact_generation[
+        "observed_dependency_contract_version"
+    ] == 1
+    assert compact_generation["history_policy_contract"] == (
+        module.ENTITY_REGISTRY_EXPECTED_HISTORY_POLICY_CONTRACT
+    )
+
+    snapshot["generation_identity"][
+        "observed_dependency_contract_version"
+    ] = 2
+    snapshot["generation_identity"]["generation_id"] = (
+        module._entity_registry_generation_digest(
+            snapshot["generation_identity"]
+        )
+    )
+    write_json(registry_path, snapshot)
+
+    policy_incompatible = state.session_entity_registry(
+        kind="skill",
+        lookup="aoa-decision",
+        limit=5,
+    )
+
+    assert policy_incompatible["identity_status"] == (
+        "incompatible_generation"
+    )
+    assert policy_incompatible["identity_claim_admitted"] is False
+    assert policy_incompatible["projection_freshness"][
+        "generation_policy_compatible"
+    ] is False
+    assert (
+        "entity_registry_generation_policy_incompatible"
+        in policy_incompatible["diagnostics"]
+    )
+    snapshot["generation_identity"][
+        "observed_dependency_contract_version"
+    ] = (
+        module.ENTITY_REGISTRY_EXPECTED_OBSERVED_DEPENDENCY_CONTRACT_VERSION
+    )
+    snapshot["generation_identity"]["generation_id"] = (
+        module._entity_registry_generation_digest(
+            snapshot["generation_identity"]
+        )
+    )
 
     snapshot["source_fingerprint"] = "0" * 64
     write_json(registry_path, snapshot)

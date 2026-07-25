@@ -337,10 +337,16 @@ ENTITY_REGISTRY_EXPECTED_PRODUCER_IDENTITY_MODE = (
 )
 ENTITY_REGISTRY_EXPECTED_NORMALIZATION = (
     "typed_kind_key_content_candidate_alias_provenance_"
-    "cli_subcommand_contract_identity_v2"
+    "cli_subcommand_contract_identity_observed_dependency_"
+    "authoritative_rebuild_runtime_owner_fingerprint_v4"
 )
 ENTITY_REGISTRY_EXPECTED_SOURCE_FINGERPRINT_MODE = (
-    "identity_candidate_and_source_ref_cli_contract_digest_v2"
+    "identity_candidate_and_source_ref_cli_contract_"
+    "runtime_owner_digest_v3"
+)
+ENTITY_REGISTRY_EXPECTED_OBSERVED_DEPENDENCY_CONTRACT_VERSION = 1
+ENTITY_REGISTRY_EXPECTED_HISTORY_POLICY_CONTRACT = (
+    "incremental_history_or_authoritative_rebuild_v1"
 )
 ENTITY_REGISTRY_CANDIDATE_SAMPLE_LIMIT = 8
 ENTITY_REGISTRY_SOURCE_REF_SAMPLE_LIMIT = 6
@@ -1671,6 +1677,8 @@ def _compact_generation_identity(value: Any) -> dict[str, Any]:
             "tokenizer",
             "normalization",
             "source_fingerprint_mode",
+            "observed_dependency_contract_version",
+            "history_policy_contract",
             "chunking_policy",
             "boundary_policy_version",
             "representation_version",
@@ -3318,6 +3326,10 @@ def _entity_registry_generation_compatibility(
         == ENTITY_REGISTRY_EXPECTED_NORMALIZATION
         and generation.get("source_fingerprint_mode")
         == ENTITY_REGISTRY_EXPECTED_SOURCE_FINGERPRINT_MODE
+        and generation.get("observed_dependency_contract_version")
+        == ENTITY_REGISTRY_EXPECTED_OBSERVED_DEPENDENCY_CONTRACT_VERSION
+        and generation.get("history_policy_contract")
+        == ENTITY_REGISTRY_EXPECTED_HISTORY_POLICY_CONTRACT
     )
     generation_shape_compatible = bool(
         stored_generation_id
@@ -3417,6 +3429,30 @@ def _entity_registry_generation_compatibility(
         "expected_schema_version": (
             ENTITY_REGISTRY_EXPECTED_SCHEMA_VERSION
         ),
+        "expected_generation_policy": {
+            "contract_version": (
+                ENTITY_REGISTRY_EXPECTED_CONTRACT_VERSION
+            ),
+            "canonicalization_version": (
+                ENTITY_REGISTRY_EXPECTED_CANONICALIZATION_VERSION
+            ),
+            "producer": ENTITY_REGISTRY_EXPECTED_PRODUCER,
+            "producer_identity_mode": (
+                ENTITY_REGISTRY_EXPECTED_PRODUCER_IDENTITY_MODE
+            ),
+            "normalization": (
+                ENTITY_REGISTRY_EXPECTED_NORMALIZATION
+            ),
+            "source_fingerprint_mode": (
+                ENTITY_REGISTRY_EXPECTED_SOURCE_FINGERPRINT_MODE
+            ),
+            "observed_dependency_contract_version": (
+                ENTITY_REGISTRY_EXPECTED_OBSERVED_DEPENDENCY_CONTRACT_VERSION
+            ),
+            "history_policy_contract": (
+                ENTITY_REGISTRY_EXPECTED_HISTORY_POLICY_CONTRACT
+            ),
+        },
         "generation_identity": generation,
         "stored_generation_id": stored_generation_id,
         "calculated_generation_id": calculated_generation_id,
@@ -4548,7 +4584,13 @@ class AoASessionMemoryMCPState:
             payload = {"ok": False, "payload": payload, "diagnostics": ["command returned non-object JSON"]}
         if output.returncode != 0 and not allow_nonzero_json:
             payload.setdefault("ok", False)
+        owner_mcp_access = (
+            payload.get("mcp_access")
+            if isinstance(payload.get("mcp_access"), dict)
+            else {}
+        )
         payload["mcp_access"] = {
+            **owner_mcp_access,
             "mutates": False,
             "archive_command": command,
             "returncode": output.returncode,
@@ -8479,75 +8521,32 @@ class AoASessionMemoryMCPState:
         return payload
 
     def session_projection_status(self, include_payload: bool = False) -> dict[str, Any]:
-        diagnostics = self.latest_diagnostics(kind="projection-catchup", limit=1, include_payload=True)
-        reports = diagnostics.get("reports") if isinstance(diagnostics.get("reports"), list) else []
-        latest = reports[0] if reports and isinstance(reports[0], dict) else {}
-        latest_payload = latest.get("payload") if isinstance(latest.get("payload"), dict) else {}
-        completeness = latest_payload.get("projection_completeness")
-        if not isinstance(completeness, dict):
-            completeness = latest_payload.get("completeness_check") if isinstance(latest_payload.get("completeness_check"), dict) else {}
-        completeness_has_current_schema = (
-            isinstance(completeness, dict)
-            and completeness.get("artifact_type") == "session_memory_projection_completeness"
-            and isinstance(completeness.get("surfaces"), dict)
+        args = ["--refresh-maintenance"]
+        if include_payload:
+            args.append("--include-payload")
+        payload = self._archive_command(
+            "projection-status",
+            args,
+            allow_nonzero_json=True,
+            timeout_seconds=max(self.timeout_seconds, STATUS_TIMEOUT_SECONDS),
         )
-        completeness_current = (
-            completeness_has_current_schema
-            and completeness.get("status") == "current"
-            and not completeness.get("actionable_surface_ids")
-            and not completeness.get("deferred_surface_ids")
-            and all(
-                isinstance(surface, dict)
-                and surface.get("status") == "current"
-                and surface.get("needs_maintenance") is not True
-                for surface in completeness.get("surfaces", {}).values()
-            )
+        payload.setdefault("mutates", False)
+        payload.setdefault("authority_boundary", self.authority_boundary())
+        mcp_access = (
+            payload.get("mcp_access")
+            if isinstance(payload.get("mcp_access"), dict)
+            else {}
         )
-        next_route = latest_payload.get("next_route") if isinstance(latest_payload.get("next_route"), dict) else {}
-        maintenance = self._maintenance_summary_for_status()
-        refresh_route = {
-            "id": "run_projection_catchup_outside_mcp",
-            "status": "needed",
-            "reason": (
-                "projection_completeness_stale"
-                if completeness_has_current_schema
-                else "projection_completeness_missing_or_legacy"
-            ),
-            "command": self._archive_argv("projection-catchup", ["all", "--write-report"]),
-        }
-        payload = {
-            "schema": "aoa_session_memory_projection_status_v1",
-            "ok": completeness_current,
-            "mutates": False,
-            "source": (
-                "latest_projection_catchup_diagnostic"
-                if completeness_current
-                else (
-                    "stale_projection_catchup_diagnostic"
-                    if completeness_has_current_schema
-                    else ("legacy_projection_catchup_diagnostic" if completeness else "missing_projection_catchup_diagnostic")
-                )
-            ),
-            "projection_completeness": completeness,
-            "latest_projection_catchup": {
-                "path": latest.get("path"),
-                "mtime": latest.get("mtime"),
-                "summary": latest.get("summary"),
-                "payload": latest_payload if include_payload else None,
-            },
-            "current_maintenance": maintenance,
-            "next_operator_route": next_route if completeness_current and next_route else refresh_route,
-            "diagnostics": [] if completeness_current else [refresh_route["reason"]],
-            "mcp_access": {
+        mcp_access.update(
+            {
                 "mutates": False,
-                "archive_command": None,
                 "read_only": True,
                 "does_not_run_projection_catchup": True,
                 "writer_route_stays_outside_mcp": True,
-                "elapsed_ms": (maintenance.get("mcp_access") or {}).get("elapsed_ms") if isinstance(maintenance.get("mcp_access"), dict) else None,
-            },
-            "authority_boundary": self.authority_boundary(),
-        }
+                "owner_packet_source": "projection-status --refresh-maintenance",
+            }
+        )
+        payload["mcp_access"] = mcp_access
         return payload
 
     def graph_neighborhood(
