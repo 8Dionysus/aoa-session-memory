@@ -21405,6 +21405,12 @@ def test_graph_neighborhood_explains_exact_store_miss_and_bounded_retrieval_seed
         "first_route_resolution": "indexed_exact_miss_requires_retrieval_seed",
         "selected_route": "bounded_trace_search",
         "fallback_reason": "exact_graph_anchor_unresolved",
+        "text_fallback_policy": None,
+        "text_search_attempted": False,
+        "text_search_skipped": False,
+        "text_search_skip_reason": None,
+        "text_fallback_already_attempted": False,
+        "duplicate_text_fallback_suppressed": False,
     }
     assert "graph_store_unindexed_payload_scan_skipped" in neighborhood["diagnostics"]
     assert "graph_store_exact_miss_used_bounded_retrieval_seed" in neighborhood["diagnostics"]
@@ -21419,6 +21425,446 @@ def test_graph_neighborhood_explains_exact_store_miss_and_bounded_retrieval_seed
         ]
         is False
     )
+
+
+def test_trace_route_graph_seed_policy_skips_text_after_specific_route_hit(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def fake_search_sessions(**kwargs: Any) -> dict[str, Any]:
+        calls.append(kwargs)
+        if kwargs.get("query"):
+            raise AssertionError(
+                "graph seed policy must not start text search after a "
+                "specific typed route hit"
+            )
+        return {
+            "ok": True,
+            "result_count": 1,
+            "results": [
+                {
+                    "doc_id": "event:s:001:000010",
+                    "refs": {
+                        "raw": "raw:line:10",
+                        "segment": "001.md#event-000010",
+                    },
+                }
+            ],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr(module, "search_sessions", fake_search_sessions)
+
+    trace = module.trace_route(
+        aoa_root=tmp_path / ".aoa",
+        anchor="codex-hooks-status",
+        kind="auto",
+        limit=12,
+        per_route_limit=12,
+        text_fallback_policy=(
+            module.TRACE_TEXT_FALLBACK_SPECIFIC_ROUTE_HIT
+        ),
+    )
+
+    assert trace["result_count"] == 1
+    assert trace["route_hit_count_before_text_fallback"] == 1
+    assert trace["text_fallback_policy"] == (
+        module.TRACE_TEXT_FALLBACK_SPECIFIC_ROUTE_HIT
+    )
+    assert trace["text_search_skipped"] is True
+    assert trace["text_search_attempted"] is False
+    assert trace["text_search_skip_reason"] == (
+        "specific_route_hit_sufficient_for_bounded_seed"
+    )
+    assert all(not call.get("query") for call in calls)
+
+
+def test_trace_route_graph_seed_policy_rejects_auto_partial_candidate_without_text(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def fake_search_sessions(**kwargs: Any) -> dict[str, Any]:
+        calls.append(kwargs)
+        if kwargs.get("query"):
+            raise AssertionError(
+                "an inferred partial auto candidate is not permission for "
+                "payload-wide fuzzy graph seeding"
+            )
+        return {
+            "ok": True,
+            "result_count": 0,
+            "results": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr(module, "search_sessions", fake_search_sessions)
+
+    trace = module.trace_route(
+        aoa_root=tmp_path / ".aoa",
+        anchor="codex-hooks-status",
+        kind="auto",
+        limit=12,
+        per_route_limit=12,
+        text_fallback_policy=(
+            module.TRACE_TEXT_FALLBACK_SPECIFIC_ROUTE_HIT
+        ),
+    )
+
+    assert trace["result_count"] == 0
+    assert trace["specific_lookup_candidate_present"] is True
+    assert trace["exact_anchor_lookup_candidate_present"] is False
+    assert trace["text_search_skipped"] is True
+    assert trace["text_search_attempted"] is False
+    assert trace["text_search_skip_reason"] == (
+        "auto_partial_route_candidates_not_exact_graph_seed"
+    )
+    assert all(not call.get("query") for call in calls)
+
+
+def test_bounded_graph_preserves_exact_matched_posting_beyond_route_preview(
+    tmp_path: Path,
+) -> None:
+    exact_route = "skill:aoa_session_memory_evidence_route"
+    graph = module.graph_from_search_results(
+        aoa_root=tmp_path / ".aoa",
+        hits=[
+            {
+                "doc_id": "task_episode:s:task-0001",
+                "doc_type": "task_episode",
+                "session_id": "s",
+                "segment_id": "task-0001",
+                "route_signals": "|path:preview_only|",
+                "matched_routes": [exact_route],
+                "refs": {
+                    "raw": "raw:line:10",
+                    "segment": "001.md#event-000010",
+                    "session": "session.manifest.json",
+                },
+            },
+            {
+                "doc_id": (
+                    "entity_registry:skill:"
+                    "aoa_session_memory_evidence_route"
+                ),
+                "doc_type": "entity_registry",
+                "session_id": "entity-registry",
+                "segment_id": (
+                    "aoa_session_memory_evidence_route"
+                ),
+                "route_signals": f"|{exact_route}|",
+                "matched_routes": [exact_route],
+                "refs": {
+                    "segment": "maps/entity-registry.json",
+                    "session": "maps/entity-registry.json",
+                },
+            },
+        ],
+        source="bounded_trace_search",
+    )
+
+    route_id = module.graph_route_node_id(
+        "skill",
+        "aoa_session_memory_evidence_route",
+    )
+    assert route_id in {
+        str(node.get("id") or "")
+        for node in graph["nodes"]
+    }
+    episode = next(
+        node
+        for node in graph["nodes"]
+        if node.get("id") == "task_episode:s:task-0001"
+    )
+    assert episode["type"] == "task_episode"
+    assert episode["session_id"] == "s"
+    assert episode["task_episode_id"] == "task-0001"
+    assert episode["segment_id"] == ""
+    assert (
+        "segment_id"
+        not in episode["evidence_refs"][0]
+    )
+    assert not any(
+        str(node.get("id") or "").startswith(
+            "segment:s:task-0001"
+        )
+        for node in graph["nodes"]
+    )
+    assert not any(
+        node.get("id") == "session:entity-registry"
+        for node in graph["nodes"]
+    )
+    exact_edges = [
+        edge
+        for edge in graph["edges"]
+        if edge.get("target") == route_id
+    ]
+    assert len(exact_edges) == 2
+    episode_edge = next(
+        edge
+        for edge in exact_edges
+        if edge["source"] == "task_episode:s:task-0001"
+    )
+    assert episode_edge["source"] == (
+        "task_episode:s:task-0001"
+    )
+    assert episode_edge["type"] == (
+        "task_episode_has_route_signal"
+    )
+    assert episode_edge["route_signal"] == exact_route
+    assert episode_edge["evidence_refs"][0]["refs"]["raw"] == (
+        "raw:line:10"
+    )
+    registry_edge = next(
+        edge
+        for edge in exact_edges
+        if edge["type"] == "registry_entity_has_route_signal"
+    )
+    assert registry_edge["source"].startswith(
+        "entity_registry:"
+    )
+    registry = next(
+        node
+        for node in graph["nodes"]
+        if node.get("id") == registry_edge["source"]
+    )
+    assert registry["session_id"] == ""
+    assert registry["segment_id"] == ""
+    assert registry["entity_id"] == (
+        "skill:aoa_session_memory_evidence_route"
+    )
+    assert (
+        "session_id"
+        not in registry["evidence_refs"][0]
+    )
+    assert (
+        "segment_id"
+        not in registry["evidence_refs"][0]
+    )
+
+
+def test_graph_neighborhood_does_not_repeat_trace_text_fallback(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(
+        module,
+        "graph_from_store_neighborhood",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        module,
+        "graph_source_verified_correlation_timeline",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        module,
+        "trace_route",
+        lambda **kwargs: (
+            {
+                "ok": False,
+                "result_count": 0,
+                "results": [],
+                "route_candidates": [],
+                "diagnostics": ["search_fts_query_timeout:8000ms"],
+                "text_fallback_policy": kwargs.get(
+                    "text_fallback_policy"
+                ),
+                "text_search_skipped": False,
+                "text_search_attempted": True,
+                "text_search_skip_reason": "",
+            }
+            if kwargs.get("doc_type") is None
+            else (_ for _ in ()).throw(
+                AssertionError(
+                    "graph route seed must query current route-posting "
+                    "projections, not only retired event postings"
+                )
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "search_sessions",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError(
+                "graph-neighborhood must not repeat trace text fallback"
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "graph_from_search_results",
+        lambda **_kwargs: {
+            "ok": False,
+            "source": "bounded_trace_search",
+            "generated_at": "2026-07-25T00:00:00Z",
+            "nodes": [],
+            "edges": [],
+            "diagnostics": [],
+        },
+    )
+
+    neighborhood = module.graph_neighborhood(
+        aoa_root=tmp_path / ".aoa",
+        anchor="aoa-session-memory-deliberately-absent-skill",
+        kind="skill",
+        limit=12,
+    )
+
+    assert neighborhood["ok"] is False
+    assert neighborhood["route_selection"][
+        "text_fallback_already_attempted"
+    ] is True
+    assert neighborhood["route_selection"][
+        "duplicate_text_fallback_suppressed"
+    ] is True
+
+
+def test_auto_graph_seed_keeps_partial_route_candidate_unadmitted(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    route_id = module.graph_route_node_id("entity", "codex")
+    event_id = "event:s:001:000010"
+    refs = {
+        "raw": "raw:line:10",
+        "segment": "001.md#event-000010",
+    }
+    monkeypatch.setattr(
+        module,
+        "graph_from_store_neighborhood",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        module,
+        "graph_source_verified_correlation_timeline",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        module,
+        "trace_route",
+        lambda **kwargs: {
+            "ok": True,
+            "result_count": 1,
+            "results": [{"doc_id": event_id, "refs": refs}],
+            "route_candidates": module.trace_route_lookup_candidates(
+                module.trace_route_candidates(
+                    "codex-hooks-status",
+                    kind="auto",
+                )
+            ),
+            "diagnostics": [],
+            "text_fallback_policy": kwargs.get("text_fallback_policy"),
+            "text_search_skipped": True,
+            "text_search_attempted": False,
+            "text_search_skip_reason": (
+                "specific_route_hit_sufficient_for_bounded_seed"
+            ),
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "graph_from_search_results",
+        lambda **_kwargs: {
+            "ok": True,
+            "source": "bounded_trace_search",
+            "generated_at": "2026-07-25T00:00:00Z",
+            "nodes": [
+                {
+                    "id": route_id,
+                    "type": "entity",
+                    "route_layer": "entity",
+                    "route_key": "codex",
+                    "evidence_refs": [{"refs": refs}],
+                },
+                {
+                    "id": event_id,
+                    "type": "event",
+                    "refs": refs,
+                    "evidence_refs": [{"refs": refs}],
+                },
+            ],
+            "edges": [
+                {
+                    "id": "edge:partial-auto-seed",
+                    "source": event_id,
+                    "target": route_id,
+                    "type": "mentions_route_signal",
+                    "evidence_refs": [{"refs": refs}],
+                }
+            ],
+            "diagnostics": [],
+        },
+    )
+
+    neighborhood = module.graph_neighborhood(
+        aoa_root=tmp_path / ".aoa",
+        anchor="codex-hooks-status",
+        kind="auto",
+        limit=12,
+    )
+
+    assert neighborhood["ok"] is False
+    assert neighborhood["nodes"] == []
+    assert route_id in [
+        node["id"] for node in neighborhood["candidate_nodes"]
+    ]
+    assert neighborhood["resolved"]["start_node_ids"] == []
+    assert neighborhood["resolved"]["resolver_strategy"] == (
+        "auto_anchor_unresolved_candidate_navigation"
+    )
+    assert neighborhood["route_selection"]["selected_route"] == (
+        "bounded_trace_search_candidate_only"
+    )
+    assert neighborhood["answer_admission"]["admitted"] is False
+
+
+def test_graph_store_auto_resolver_rejects_partial_inferred_route_as_exact(
+    tmp_path: Path,
+) -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE nodes (id TEXT PRIMARY KEY, payload_json TEXT NOT NULL)"
+    )
+    for layer, key in (
+        ("entity", "codex"),
+        ("mutation_surface", "hooks"),
+    ):
+        node_id = module.graph_route_node_id(layer, key)
+        conn.execute(
+            "INSERT INTO nodes(id, payload_json) VALUES (?, ?)",
+            (
+                node_id,
+                json.dumps(
+                    {
+                        "id": node_id,
+                        "route_layer": layer,
+                        "route_key": key,
+                    }
+                ),
+            ),
+        )
+
+    resolved = module.graph_store_resolve_anchor(
+        conn,
+        "codex-hooks-status",
+        kind="auto",
+        limit=12,
+    )
+    conn.close()
+
+    assert resolved["start_node_ids"] == []
+    assert resolved["resolver_strategy"] == (
+        "indexed_exact_miss_requires_retrieval_seed"
+    )
+    assert "graph_store_unindexed_payload_scan_skipped" in resolved[
+        "diagnostics"
+    ]
 
 
 def test_graph_neighborhood_uses_source_verified_exact_correlation_before_fuzzy_seed(

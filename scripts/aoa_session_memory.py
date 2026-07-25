@@ -99712,6 +99712,12 @@ TRACE_ROUTE_KIND_ALIASES = {
     "route": "owner_route",
 }
 TRACE_ROUTE_KIND_CHOICES = sorted(TRACE_ROUTE_KINDS | set(TRACE_ROUTE_KIND_ALIASES))
+TRACE_TEXT_FALLBACK_RECALL_THRESHOLD = "recall_threshold"
+TRACE_TEXT_FALLBACK_SPECIFIC_ROUTE_HIT = "specific_route_hit"
+TRACE_TEXT_FALLBACK_POLICIES = {
+    TRACE_TEXT_FALLBACK_RECALL_THRESHOLD,
+    TRACE_TEXT_FALLBACK_SPECIFIC_ROUTE_HIT,
+}
 
 def normalize_trace_route_kind(kind: str | None) -> str:
     normalized = str(kind or "auto").strip().lower()
@@ -99851,6 +99857,21 @@ def trace_route_candidate_is_generic(candidate: dict[str, Any]) -> bool:
 
 def trace_route_candidate_is_specific(candidate: dict[str, Any]) -> bool:
     return bool(candidate.get("key")) and not trace_route_candidate_is_generic(candidate)
+
+
+def trace_route_candidate_matches_anchor(
+    candidate: dict[str, Any],
+    *,
+    anchor: str,
+) -> bool:
+    if not trace_route_candidate_is_specific(candidate):
+        return False
+    alias_keys = {
+        route_key_slug(alias, fallback="")
+        for alias in trace_anchor_aliases(anchor)
+        if route_key_slug(alias, fallback="")
+    }
+    return str(candidate.get("key") or "") in alias_keys
 
 
 def trace_route_owner_anchor_is_specific(anchor: str) -> bool:
@@ -100202,6 +100223,7 @@ def trace_route(
     session: str | None = None,
     explain: bool = True,
     write_report: bool = False,
+    text_fallback_policy: str = TRACE_TEXT_FALLBACK_RECALL_THRESHOLD,
 ) -> dict[str, Any]:
     now = utc_now()
     normalized_kind = normalize_trace_route_kind(kind)
@@ -100219,6 +100241,26 @@ def trace_route(
         }
     limit = max(1, int_value(limit, 40))
     per_route_limit = max(1, int_value(per_route_limit, 12))
+    selected_text_fallback_policy = str(
+        text_fallback_policy
+        or TRACE_TEXT_FALLBACK_RECALL_THRESHOLD
+    ).strip()
+    if selected_text_fallback_policy not in TRACE_TEXT_FALLBACK_POLICIES:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "artifact_type": "route_trace",
+            "generated_at": now,
+            "ok": False,
+            "anchor": anchor,
+            **trace_kind_payload_fields(kind, normalized_kind),
+            "result_count": 0,
+            "results": [],
+            "text_fallback_policy": selected_text_fallback_policy,
+            "diagnostics": [
+                "unknown trace text fallback policy: "
+                f"{selected_text_fallback_policy}"
+            ],
+        }
     resolved_doc_type = None if str(doc_type or "").lower() in {"", "all"} else str(doc_type)
     diagnostics: list[str] = trace_identity_diagnostics(anchor, kind=normalized_kind)
     candidates = trace_route_candidates(anchor, kind=normalized_kind)
@@ -100278,15 +100320,61 @@ def trace_route(
 
     route_hit_count = len(merged)
     text_search_skipped = False
+    text_search_skip_reason = ""
     skip_text_search = bool(diagnostics) and not lookup_candidates
+    route_hit_threshold = max(1, min(limit, per_route_limit))
+    specific_lookup_candidate_present = any(
+        trace_route_candidate_is_specific(candidate)
+        for candidate in lookup_candidates
+    )
+    exact_anchor_lookup_candidate_present = any(
+        trace_route_candidate_matches_anchor(
+            candidate,
+            anchor=anchor,
+        )
+        for candidate in lookup_candidates
+    )
     if (
         not skip_text_search
         and lookup_candidates
-        and route_hit_count >= max(1, min(limit, per_route_limit))
-        and normalized_kind not in {"auto", "entity", "path"}
+        and (
+            (
+                selected_text_fallback_policy
+                == TRACE_TEXT_FALLBACK_SPECIFIC_ROUTE_HIT
+                and specific_lookup_candidate_present
+                and route_hit_count > 0
+            )
+            or (
+                selected_text_fallback_policy
+                == TRACE_TEXT_FALLBACK_RECALL_THRESHOLD
+                and route_hit_count >= route_hit_threshold
+                and normalized_kind not in {"auto", "entity", "path"}
+            )
+        )
     ):
         skip_text_search = True
         text_search_skipped = True
+        text_search_skip_reason = (
+            "specific_route_hit_sufficient_for_bounded_seed"
+            if selected_text_fallback_policy
+            == TRACE_TEXT_FALLBACK_SPECIFIC_ROUTE_HIT
+            else "typed_route_recall_threshold_satisfied"
+        )
+    elif (
+        not skip_text_search
+        and selected_text_fallback_policy
+        == TRACE_TEXT_FALLBACK_SPECIFIC_ROUTE_HIT
+        and normalized_kind == "auto"
+        and specific_lookup_candidate_present
+        and not exact_anchor_lookup_candidate_present
+    ):
+        skip_text_search = True
+        text_search_skipped = True
+        text_search_skip_reason = (
+            "auto_partial_route_candidates_not_exact_graph_seed"
+        )
+    elif skip_text_search:
+        text_search_skip_reason = "unknown_typed_identity"
     if skip_text_search:
         text_payload = {
             "ok": False,
@@ -100328,7 +100416,17 @@ def trace_route(
         "candidate_diagnostics": diagnostics,
         "route_result_summaries": route_results,
         "route_hit_count_before_text_fallback": route_hit_count,
+        "text_fallback_policy": selected_text_fallback_policy,
+        "text_fallback_route_hit_threshold": route_hit_threshold,
+        "specific_lookup_candidate_present": (
+            specific_lookup_candidate_present
+        ),
+        "exact_anchor_lookup_candidate_present": (
+            exact_anchor_lookup_candidate_present
+        ),
         "text_search_skipped": text_search_skipped,
+        "text_search_attempted": not skip_text_search,
+        "text_search_skip_reason": text_search_skip_reason,
         "text_result_count": text_payload.get("result_count"),
         "result_count": len(results),
         "results": results,
@@ -107405,6 +107503,16 @@ GRAPH_RELATION_CONTRACTS: dict[str, dict[str, Any]] = {
     "mentions_route_signal": {
         "family": "mention",
         "domain": ("event",),
+        "range": ("route",),
+    },
+    "task_episode_has_route_signal": {
+        "family": "derived_anchor",
+        "domain": ("task_episode",),
+        "range": ("route",),
+    },
+    "document_has_route_signal": {
+        "family": "derived_anchor",
+        "domain": ("*",),
         "range": ("route",),
     },
     "event_mentions_registered_entity": {
@@ -123419,6 +123527,28 @@ def graph_typed_route_layer_is_compatible(
     return route_layer in allowed
 
 
+def graph_route_candidate_is_exact_anchor(
+    candidate: dict[str, Any],
+    *,
+    anchor: str,
+    route_kind: str,
+) -> bool:
+    layer = str(candidate.get("layer") or "")
+    key = str(candidate.get("key") or "")
+    if (
+        not key
+        or trace_route_candidate_is_generic(candidate)
+        or not graph_typed_route_layer_is_compatible(route_kind, layer)
+    ):
+        return False
+    if route_kind != "auto":
+        return True
+    return trace_route_candidate_matches_anchor(
+        candidate,
+        anchor=anchor,
+    )
+
+
 def graph_store_fetch_payloads(conn: sqlite3.Connection, table: str, ids: list[str]) -> list[dict[str, Any]]:
     if not ids:
         return []
@@ -123464,10 +123594,10 @@ def graph_store_resolve_anchor(
         layer = str(candidate.get("layer") or "")
         key = str(candidate.get("key") or "")
         if (
-            key
-            and graph_typed_route_layer_is_compatible(
-                route_kind,
-                layer,
+            graph_route_candidate_is_exact_anchor(
+                candidate,
+                anchor=anchor,
+                route_kind=route_kind,
             )
         ):
             route_node = graph_route_node_id(layer, key)
@@ -124071,7 +124201,11 @@ def resolve_graph_anchor(
     for candidate in ordered_lookup_candidates:
         layer = str(candidate.get("layer") or "")
         key = str(candidate.get("key") or "")
-        if key:
+        if graph_route_candidate_is_exact_anchor(
+            candidate,
+            anchor=anchor,
+            route_kind=route_kind,
+        ):
             route_node = graph_route_node_id(layer, key)
             if route_node in node_map and route_node not in start_node_ids:
                 start_node_ids.append(route_node)
@@ -124529,6 +124663,17 @@ def graph_route_signals_from_pipe(value: Any) -> list[dict[str, str]]:
     return graph_route_signals_from_values(value)
 
 
+def graph_search_hit_route_relation(doc_type: str) -> str:
+    return {
+        "event": "mentions_route_signal",
+        "task_episode": "task_episode_has_route_signal",
+        "entity_registry": "registry_entity_has_route_signal",
+        "segment": "segment_has_route_signal",
+        "session": "session_has_route_signal",
+        "goal_lifecycle": "goal_lifecycle_has_route_signal",
+    }.get(str(doc_type or ""), "document_has_route_signal")
+
+
 def graph_from_search_results(
     *,
     aoa_root: Path,
@@ -124543,33 +124688,106 @@ def graph_from_search_results(
         if not isinstance(hit, dict):
             continue
         doc_id = str(hit.get("doc_id") or "")
+        parts = doc_id.split(":")
+        doc_type = str(
+            hit.get("doc_type")
+            or ("event" if doc_id.startswith("event:") else "search_hit")
+        )
         session_id = str(hit.get("session_id") or "")
-        session_label = str(hit.get("session_label") or session_id)
         segment_id = str(hit.get("segment_id") or "")
         event_id = str(hit.get("event_id") or "")
-        parts = doc_id.split(":")
-        if not session_id and len(parts) >= 2:
-            session_id = parts[1]
-        if not segment_id and len(parts) >= 3:
-            segment_id = parts[2]
-        if not event_id and len(parts) >= 4:
-            event_id = parts[3]
-        refs = hit.get("refs") if isinstance(hit.get("refs"), dict) else {}
-        session_node_id = f"session:{session_id or session_label or 'unknown'}"
-        graph_add_node(
-            nodes,
-            {
-                "id": session_node_id,
-                "type": "session",
-                "label": session_label,
-                "session_id": session_id,
-                "session_label": session_label,
-                "refs": {"session": refs.get("session")} if refs.get("session") else {},
-                "evidence_refs": [{"session_id": session_id, "refs": refs}],
-            },
+        task_episode_id = str(
+            hit.get("task_episode_id") or ""
         )
-        parent_node_id = session_node_id
+        goal_id = str(hit.get("goal_id") or "")
+        entity_id = str(hit.get("entity_id") or "")
+        if doc_type == "entity_registry":
+            # Search tables reuse session/segment columns for portable
+            # document grouping.  Those values are not evidence coordinates
+            # for the owner registry and must not fabricate an archived
+            # ``entity-registry`` session.
+            session_id = ""
+            segment_id = ""
+            event_id = ""
+            if not entity_id and len(parts) >= 2:
+                entity_id = ":".join(parts[1:])
+        else:
+            if not session_id and len(parts) >= 2:
+                session_id = parts[1]
+            if doc_type == "event":
+                if not segment_id and len(parts) >= 3:
+                    segment_id = parts[2]
+                if not event_id and len(parts) >= 4:
+                    event_id = parts[3]
+            elif doc_type == "segment":
+                if not segment_id and len(parts) >= 3:
+                    segment_id = parts[2]
+                event_id = ""
+            elif doc_type == "task_episode":
+                if not task_episode_id:
+                    task_episode_id = (
+                        parts[2]
+                        if len(parts) >= 3
+                        else segment_id
+                    )
+                segment_id = ""
+                event_id = ""
+            elif doc_type == "goal_lifecycle":
+                if not goal_id:
+                    goal_id = (
+                        parts[2]
+                        if len(parts) >= 3
+                        else segment_id
+                    )
+                segment_id = ""
+                event_id = ""
+            elif doc_type == "session":
+                segment_id = ""
+                event_id = ""
+        session_label = str(
+            hit.get("session_label") or session_id
+        )
+        if doc_type == "entity_registry":
+            session_label = ""
+        refs = hit.get("refs") if isinstance(hit.get("refs"), dict) else {}
+        evidence_ref = {
+            "doc_id": doc_id,
+            "refs": refs,
+        }
+        if session_id:
+            evidence_ref["session_id"] = session_id
         if segment_id:
+            evidence_ref["segment_id"] = segment_id
+        if event_id:
+            evidence_ref["event_id"] = event_id
+        if task_episode_id:
+            evidence_ref["task_episode_id"] = (
+                task_episode_id
+            )
+        if goal_id:
+            evidence_ref["goal_id"] = goal_id
+        if entity_id:
+            evidence_ref["entity_id"] = entity_id
+        session_node_id = f"session:{session_id or session_label or 'unknown'}"
+        if doc_type != "entity_registry":
+            graph_add_node(
+                nodes,
+                {
+                    "id": session_node_id,
+                    "type": "session",
+                    "label": session_label,
+                    "session_id": session_id,
+                    "session_label": session_label,
+                    "refs": (
+                        {"session": refs.get("session")}
+                        if refs.get("session")
+                        else {}
+                    ),
+                    "evidence_refs": [evidence_ref],
+                },
+            )
+        parent_node_id = session_node_id
+        if doc_type == "event" and segment_id:
             segment_node_id = f"segment:{session_id}:{segment_id}"
             graph_add_node(
                 nodes,
@@ -124581,7 +124799,7 @@ def graph_from_search_results(
                     "session_label": session_label,
                     "segment_id": segment_id,
                     "refs": {key: refs.get(key) for key in ("session", "session_index", "segment", "segment_index") if refs.get(key)},
-                    "evidence_refs": [{"session_id": session_id, "segment_id": segment_id, "refs": refs}],
+                    "evidence_refs": [evidence_ref],
                 },
             )
             graph_add_edge(
@@ -124592,22 +124810,49 @@ def graph_from_search_results(
                     "type": "has_segment",
                     "session_id": session_id,
                     "segment_id": segment_id,
-                    "evidence_refs": [{"session_id": session_id, "segment_id": segment_id, "refs": refs}],
+                    "evidence_refs": [evidence_ref],
                 },
             )
             parent_node_id = segment_node_id
-        event_node_id = doc_id if doc_id.startswith("event:") else f"event:{session_id}:{segment_id}:{event_id or route_key_slug(doc_id, fallback='event')}"
+        if doc_type == "session":
+            evidence_node_id = session_node_id
+        elif doc_type == "segment":
+            evidence_node_id = (
+                doc_id
+                if doc_id.startswith("segment:")
+                else f"segment:{session_id}:{segment_id}"
+            )
+        elif doc_type == "event":
+            evidence_node_id = (
+                doc_id
+                if doc_id.startswith("event:")
+                else (
+                    f"event:{session_id}:{segment_id}:"
+                    f"{event_id or route_key_slug(doc_id, fallback='event')}"
+                )
+            )
+        else:
+            evidence_node_id = (
+                doc_id
+                or (
+                    f"{route_key_slug(doc_type, fallback='search_hit')}:"
+                    f"{session_id}:{route_key_slug(segment_id, fallback='document')}"
+                )
+            )
         graph_add_node(
             nodes,
             {
-                "id": event_node_id,
-                "type": "event" if str(hit.get("doc_type") or "") == "event" else str(hit.get("doc_type") or "search_hit"),
+                "id": evidence_node_id,
+                "type": doc_type,
                 "label": hit.get("title") or doc_id,
                 "title": hit.get("title"),
                 "session_id": session_id,
                 "session_label": session_label,
                 "segment_id": segment_id,
                 "event_id": event_id,
+                "task_episode_id": task_episode_id,
+                "goal_id": goal_id,
+                "entity_id": entity_id,
                 "event_type": hit.get("event_type"),
                 "family": hit.get("family"),
                 "phase": hit.get("phase"),
@@ -124619,22 +124864,38 @@ def graph_from_search_results(
                 "route_signals": graph_route_signals_from_pipe(hit.get("route_signals")),
                 "refs": refs,
                 "freshness": hit.get("freshness"),
-                "evidence_refs": [{"session_id": session_id, "segment_id": segment_id, "event_id": event_id, "refs": refs}],
+                "evidence_refs": [evidence_ref],
             },
         )
-        graph_add_edge(
-            edges,
-            {
-                "source": parent_node_id,
-                "target": event_node_id,
-                "type": "has_event",
-                "session_id": session_id,
-                "segment_id": segment_id,
-                "event_id": event_id,
-                "evidence_refs": [{"session_id": session_id, "segment_id": segment_id, "event_id": event_id, "refs": refs}],
-            },
-        )
-        if refs.get("raw") and GRAPH_MATERIALIZE_RAW_REF_NODES:
+        containment_relation = {
+            "event": "has_event",
+            "task_episode": "has_task_episode",
+            "goal_lifecycle": "has_goal_lifecycle",
+            "segment": "has_segment",
+        }.get(doc_type)
+        if (
+            containment_relation
+            and parent_node_id != evidence_node_id
+        ):
+            graph_add_edge(
+                edges,
+                {
+                    "source": parent_node_id,
+                    "target": evidence_node_id,
+                    "type": containment_relation,
+                    "session_id": session_id,
+                    "segment_id": segment_id,
+                    "event_id": event_id,
+                    "task_episode_id": task_episode_id,
+                    "goal_id": goal_id,
+                    "evidence_refs": [evidence_ref],
+                },
+            )
+        if (
+            doc_type == "event"
+            and refs.get("raw")
+            and GRAPH_MATERIALIZE_RAW_REF_NODES
+        ):
             raw_node_id = graph_raw_ref_node_id(session_id, str(refs.get("raw")))
             graph_add_node(
                 nodes,
@@ -124645,22 +124906,34 @@ def graph_from_search_results(
                     "session_id": session_id,
                     "session_label": session_label,
                     "raw_ref": refs.get("raw"),
-                    "evidence_refs": [{"session_id": session_id, "segment_id": segment_id, "event_id": event_id, "refs": refs}],
+                    "evidence_refs": [evidence_ref],
                 },
             )
             graph_add_edge(
                 edges,
                 {
-                    "source": event_node_id,
+                    "source": evidence_node_id,
                     "target": raw_node_id,
                     "type": "has_raw_ref",
                     "session_id": session_id,
                     "segment_id": segment_id,
                     "event_id": event_id,
-                    "evidence_refs": [{"session_id": session_id, "segment_id": segment_id, "event_id": event_id, "refs": refs}],
+                    "evidence_refs": [evidence_ref],
                 },
             )
         signals = graph_route_signals_from_pipe(hit.get("route_signals"))
+        # ``route_signals`` in the compact document row is a bounded preview.
+        # The normalized posting that actually selected this document remains
+        # authoritative navigation metadata even when that preview is
+        # truncated before the matched token.  Preserve only the exact
+        # matched postings reported by trace_route, not every inferred
+        # candidate.
+        signals.extend(
+            graph_route_signals_from_values(
+                hit.get("matched_routes")
+            )
+        )
+        signals = graph_unique_records(signals, limit=80)
         if not signals and route_candidates:
             for candidate in route_candidates:
                 if isinstance(candidate, dict) and candidate.get("layer") and candidate.get("key"):
@@ -124685,20 +124958,20 @@ def graph_from_search_results(
                     "route_key": signal["key"],
                     "route_signal": signal.get("route_signal") or route_signal_token(str(signal["layer"]), str(signal["key"])),
                     "axis": ROUTE_SIGNAL_LAYER_TO_AXIS.get(str(signal["layer"]), ""),
-                    "evidence_refs": [{"session_id": session_id, "segment_id": segment_id, "event_id": event_id, "refs": refs}],
+                    "evidence_refs": [evidence_ref],
                 },
             )
             graph_add_edge(
                 edges,
                 {
-                    "source": event_node_id,
+                    "source": evidence_node_id,
                     "target": route_node_id,
-                    "type": "mentions_route_signal",
+                    "type": graph_search_hit_route_relation(doc_type),
                     "session_id": session_id,
                     "segment_id": segment_id,
                     "event_id": event_id,
                     "route_signal": signal.get("route_signal") or route_signal_token(str(signal["layer"]), str(signal["key"])),
-                    "evidence_refs": [{"session_id": session_id, "segment_id": segment_id, "event_id": event_id, "refs": refs}],
+                    "evidence_refs": [evidence_ref],
                 },
             )
     node_rows = sorted(nodes.values(), key=lambda item: str(item.get("id") or ""))
@@ -125058,22 +125331,32 @@ def graph_neighborhood(
         session=session,
         limit=max(1, min(int_value(limit, 40), 200)),
         per_route_limit=max(5, min(int_value(limit, 40), 50)),
-        doc_type="event",
+        # Route postings may be compacted out of event documents and retained
+        # by stronger task-episode/entity-registry projections.  The exact
+        # route filter remains the selector; restricting this navigation seed
+        # to ``event`` would silently query a retired storage layer after a
+        # deterministic rebuild.
+        doc_type=None,
         explain=True,
+        text_fallback_policy=(
+            TRACE_TEXT_FALLBACK_SPECIFIC_ROUTE_HIT
+        ),
     )
     hits = trace.get("results", []) if isinstance(trace.get("results"), list) else []
     trace_diagnostics = trace.get("diagnostics", []) if isinstance(trace.get("diagnostics"), list) else []
-    trace_identity_blocked = any(str(item).startswith("unknown_mcp_service_identity:") for item in trace_diagnostics)
-    if not hits and not trace_identity_blocked:
-        fallback = search_sessions(
-            aoa_root=aoa_root,
-            query=anchor,
-            session=session,
-            limit=max(1, min(int_value(limit, 40), 100)),
-            doc_type="event",
-            explain=True,
+    trace_text_search_attempted = bool(
+        trace.get("text_search_attempted")
+    )
+    trace_text_search_skipped = bool(
+        trace.get("text_search_skipped")
+    )
+    duplicate_text_fallback_suppressed = bool(
+        not hits
+        and (
+            trace_text_search_attempted
+            or trace_text_search_skipped
         )
-        hits = fallback.get("results", []) if isinstance(fallback.get("results"), list) else []
+    )
     graph = graph_from_search_results(
         aoa_root=aoa_root,
         hits=hits,
@@ -125119,18 +125402,20 @@ def graph_neighborhood(
         resolved["resolver_strategy"] = (
             "typed_retrieval_seed_exact_route_key"
         )
-    typed_candidate_only = bool(
-        route_kind != "auto"
-        and str(resolved.get("resolver_strategy") or "")
+    retrieval_candidate_only = bool(
+        str(resolved.get("resolver_strategy") or "")
         == "fuzzy_alias_candidates"
+        and not resolved.get("exact_start_node_ids")
     )
-    if typed_candidate_only:
+    if retrieval_candidate_only:
         resolved["candidate_node_ids"] = list(
             resolved.get("start_node_ids") or []
         )
         resolved["start_node_ids"] = []
         resolved["resolver_strategy"] = (
             "typed_anchor_unresolved_fuzzy_candidates"
+            if route_kind != "auto"
+            else "auto_anchor_unresolved_candidate_navigation"
         )
         resolved["diagnostics"] = list(
             dict.fromkeys(
@@ -125143,17 +125428,14 @@ def graph_neighborhood(
                         )
                         else []
                     ),
-                    "typed_anchor_fuzzy_candidates_not_promoted",
+                    (
+                        "typed_anchor_fuzzy_candidates_not_promoted"
+                        if route_kind != "auto"
+                        else "auto_anchor_partial_route_candidates_not_promoted"
+                    ),
                 ]
             )
         )
-    if (
-        route_kind == "auto"
-        and not resolved.get("start_node_ids")
-        and resolved.get("resolver_strategy")
-        != "identity_diagnostic_no_route"
-    ):
-        resolved["start_node_ids"] = [str(node.get("id")) for node in graph.get("nodes", [])[: max(1, min(limit, 20))] if isinstance(node, dict)]
     depth = max(0, min(int_value(depth, 1), 3))
     limit = max(1, min(int_value(limit, 40), 200))
     selected_node_ids, selected_edge_ids, expansion_quality = graph_expand_node_ids(
@@ -125188,7 +125470,7 @@ def graph_neighborhood(
         ]
     selected_seed_route = (
         "bounded_trace_search_candidate_only"
-        if typed_candidate_only
+        if retrieval_candidate_only
         else str(graph.get("source") or "bounded_trace_search")
     )
     current_command = graph_packet_command_line(
@@ -125258,12 +125540,30 @@ def graph_neighborhood(
             ),
             "selected_route": selected_seed_route,
             "fallback_reason": (
-                "typed_exact_anchor_unresolved_candidate_navigation_only"
-                if typed_candidate_only
+                (
+                    "typed_exact_anchor_unresolved_candidate_navigation_only"
+                    if route_kind != "auto"
+                    else "auto_exact_anchor_unresolved_candidate_navigation_only"
+                )
+                if retrieval_candidate_only
                 else
                 "exact_graph_anchor_unresolved"
                 if store_resolution_strategy == "indexed_exact_miss_requires_retrieval_seed"
                 else "direct_graph_store_unavailable_or_incomplete"
+            ),
+            "text_fallback_policy": trace.get(
+                "text_fallback_policy"
+            ),
+            "text_search_attempted": trace_text_search_attempted,
+            "text_search_skipped": trace_text_search_skipped,
+            "text_search_skip_reason": trace.get(
+                "text_search_skip_reason"
+            ),
+            "text_fallback_already_attempted": (
+                trace_text_search_attempted
+            ),
+            "duplicate_text_fallback_suppressed": (
+                duplicate_text_fallback_suppressed
             ),
         },
         "evidence_ref_limit": evidence_ref_limit,
