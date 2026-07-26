@@ -2,12 +2,12 @@
 
 Generated from owner capability contracts. This card is a retrieval read model, not procedure or proof authority.
 
-Source graph hash: `c87aa54863a52406ec2f978b87b0a82e40afbeba6407282530831bdac0588d9e`
+Source graph hash: `06c191c4291e42c644eba74bf47039a9f9cd8290b58f73898d9d23af2b7a2ec2`
 Federation: `aoa-session-memory` specializes `aoa-skills:sessions`.
 
 | skill | visibility | use when | do not use when | version | fingerprint |
 |---|---|---|---|---|---|
-| `aoa-session-memory-evidence-route` | advertised | The answer depends on what happened in prior .aoa sessions and must carry resolvable raw or segment refs. | Current repository or runtime state is the stronger source and no historical behavior question remains. | 1.0.0 | `e0a14deeccea568c` |
+| `aoa-session-memory-evidence-route` | advertised | The answer depends on what happened in prior .aoa sessions and must carry resolvable raw or segment refs. | Current repository or runtime state is the stronger source and no historical behavior question remains. | 1.0.0 | `383667122ea265f7` |
 | `aoa-session-memory-global-route` | advertised | The request names session memory; .aoa; transcripts; compaction; rehydration; hooks; or session-memory validation. | A narrower non-session-memory owner is already known and no session evidence or session-memory operation is required. | 1.0.0 | `f459356ad356a679` |
 | `aoa-codex-compact-probe` | deferred | The live Codex pre/post-compaction hook path requires an explicit behavioral probe. | Static hook registry inspection is sufficient and no behavioral probe is requested.; The runtime is not Codex. | 1.0.0 | `ef1990131b253144` |
 | `aoa-codex-hooks-status` | deferred | Native Codex hook registration or trust must be inspected for one selected root. | The runtime is not Codex or the question concerns archive content rather than hook state. | 1.0.0 | `adc1e110880d28ee` |

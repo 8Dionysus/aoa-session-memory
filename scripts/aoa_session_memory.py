@@ -65,6 +65,187 @@ ENTITY_REGISTRY_INDEX_CACHE: dict[str, tuple[tuple[float, float, int], dict[tupl
 SESSION_MEMORY_PRODUCER_IDENTITY_MODE = (
     "process_loaded_source_snapshot_v1"
 )
+PROJECTION_PRODUCER_CONTRACT_VERSION = 1
+PROJECTION_PRODUCER_IDENTITY_MODE = (
+    "projection_source_contract_ranges_v1"
+)
+PROJECTION_PRODUCER_SOURCE_RANGES: dict[
+    str,
+    tuple[tuple[str, str], ...],
+] = {
+    "segment_index": (
+        ("def parse_raw_events(", "def task_episode_lineage_for_range("),
+        ("def write_raw_block_artifacts(", "def write_session_index("),
+    ),
+    "task_episode_source": (
+        (
+            "def task_episode_lineage_for_range(",
+            "def write_raw_block_artifacts(",
+        ),
+    ),
+    "session_index": (
+        ("def write_session_index(", "def write_session_agents("),
+    ),
+    "first_pass_distillation": (
+        (
+            "def first_pass_distillation_projection(",
+            "def first_pass_distillation_stale_reasons(",
+        ),
+    ),
+    "episode_semantic": (
+        (
+            "def episode_semantic_role_text(",
+            "def search_freshness_actionable_dirty_session_ids(",
+        ),
+    ),
+    "exact_literal_postings": (
+        (
+            "def search_index_name_from_statement(",
+            "def search_tokenize(",
+        ),
+        (
+            "def search_doc_payload(",
+            "def episode_semantic_index_sessions(",
+        ),
+    ),
+    "portable_lexical_search": (
+        (
+            "def search_index_name_from_statement(",
+            "def search_tokenize(",
+        ),
+        (
+            "def search_doc_payload(",
+            "def episode_semantic_index_sessions(",
+        ),
+    ),
+    "search_catalog": (
+        (
+            "def search_catalog_semantic_digest(",
+            "def search_records_for_target(",
+        ),
+    ),
+    "episode_dense": (
+        (
+            "def episode_dense_tail_text(",
+            "def episode_semantic_token_has_prefix(",
+        ),
+        (
+            "def episode_dense_index_sessions(",
+            "def episode_dense_optional_provider_unavailable(",
+        ),
+    ),
+    "session_graph": (
+        (
+            "def graph_route_node_type(",
+            "GRAPH_PROJECTION_SEMANTIC_DIGEST_VERSION =",
+        ),
+        ("class GraphSqliteStore:", "def graph_session_records("),
+    ),
+    "agent_atlas": (
+        ("def atlas_policy_axes(", "def atlas_build_report_markdown("),
+    ),
+    "entity_registry": (
+        ("def entity_registry_id(", "def load_entity_registry("),
+        ("def build_parser()", "def main("),
+    ),
+}
+
+
+def projection_producer_contract_from_source_bytes(
+    source_bytes: bytes,
+    projection: str,
+) -> dict[str, Any]:
+    ranges = PROJECTION_PRODUCER_SOURCE_RANGES.get(
+        str(projection or ""),
+        (),
+    )
+    digest = hashlib.sha256()
+    chunks: list[dict[str, Any]] = []
+    diagnostics: list[str] = []
+    for ordinal, (start_token, end_token) in enumerate(ranges):
+        start_bytes = ("\n" + start_token).encode("utf-8")
+        end_bytes = ("\n" + end_token).encode("utf-8")
+        start_anchor = source_bytes.find(start_bytes)
+        start = (
+            start_anchor + 1
+            if start_anchor >= 0
+            else (
+                0
+                if source_bytes.startswith(
+                    start_token.encode("utf-8")
+                )
+                else -1
+            )
+        )
+        end = (
+            source_bytes.find(
+                end_bytes,
+                start + len(start_token.encode("utf-8")),
+            )
+            if start >= 0
+            else -1
+        )
+        if end >= 0:
+            end += 1
+        if start < 0:
+            diagnostics.append(
+                f"projection_producer_start_anchor_missing:{start_token}"
+            )
+            continue
+        if source_bytes.find(
+            start_bytes,
+            start + len(start_token.encode("utf-8")),
+        ) >= 0:
+            diagnostics.append(
+                f"projection_producer_start_anchor_ambiguous:{start_token}"
+            )
+            continue
+        if end < 0:
+            diagnostics.append(
+                f"projection_producer_end_anchor_missing:{end_token}"
+            )
+            continue
+        if source_bytes.find(
+            end_bytes,
+            end + len(end_token.encode("utf-8")),
+        ) >= 0:
+            diagnostics.append(
+                f"projection_producer_end_anchor_ambiguous:{end_token}"
+            )
+            continue
+        chunk = source_bytes[start:end]
+        chunk_sha256 = hashlib.sha256(chunk).hexdigest()
+        digest.update(
+            (
+                f"{ordinal}:{start_token}:{end_token}:"
+                f"{len(chunk)}:{chunk_sha256}\n"
+            ).encode("utf-8")
+        )
+        chunks.append(
+            {
+                "ordinal": ordinal,
+                "start_anchor": start_token,
+                "end_anchor": end_token,
+                "byte_count": len(chunk),
+                "sha256": chunk_sha256,
+            }
+        )
+    status = (
+        "current"
+        if ranges and len(chunks) == len(ranges) and not diagnostics
+        else "blocked"
+    )
+    return {
+        "contract_version": PROJECTION_PRODUCER_CONTRACT_VERSION,
+        "identity_mode": PROJECTION_PRODUCER_IDENTITY_MODE,
+        "projection": projection,
+        "status": status,
+        "sha256": digest.hexdigest() if status == "current" else "",
+        "chunks": chunks,
+        "diagnostics": diagnostics,
+    }
+
+
 SESSION_MEMORY_LOADED_PRODUCER_PATH = Path(__file__).resolve()
 try:
     _session_memory_loaded_producer_bytes = (
@@ -76,8 +257,21 @@ else:
     SESSION_MEMORY_LOADED_PRODUCER_SHA256 = hashlib.sha256(
         _session_memory_loaded_producer_bytes
     ).hexdigest()
+    SESSION_MEMORY_LOADED_PROJECTION_PRODUCER_CONTRACTS = {
+        projection: projection_producer_contract_from_source_bytes(
+            _session_memory_loaded_producer_bytes,
+            projection,
+        )
+        for projection in PROJECTION_PRODUCER_SOURCE_RANGES
+    }
 finally:
     _session_memory_loaded_producer_bytes = b""
+
+if "SESSION_MEMORY_LOADED_PROJECTION_PRODUCER_CONTRACTS" not in globals():
+    SESSION_MEMORY_LOADED_PROJECTION_PRODUCER_CONTRACTS: dict[
+        str,
+        dict[str, Any],
+    ] = {}
 
 
 def literal_eval_untrusted_source(value: Any) -> Any:
@@ -7561,7 +7755,8 @@ def entity_registry_runtime_source_entries(aoa_root: Path) -> list[dict[str, Any
 
 
 def entity_registry_generation_identity() -> dict[str, Any]:
-    identity = {
+    return canonical_generation_identity(
+        {
         "contract_version": SESSION_MEMORY_GENERATION_IDENTITY_VERSION,
         "projection": "entity_registry",
         "schema_version": ENTITY_REGISTRY_SCHEMA_VERSION,
@@ -7590,16 +7785,8 @@ def entity_registry_generation_identity() -> dict[str, Any]:
         "history_policy_contract": (
             "incremental_history_or_authoritative_rebuild_v1"
         ),
-    }
-    generation_id = hashlib.sha256(
-        json.dumps(
-            identity,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
-    return {**identity, "generation_id": generation_id}
+        }
+    )
 
 
 def entity_registry_source_fingerprint(
@@ -7720,7 +7907,7 @@ def entity_registry_runtime_source_fingerprint(
     }
 
 
-ENTITY_REGISTRY_SEMANTIC_DIGEST_VERSION = 2
+ENTITY_REGISTRY_SEMANTIC_DIGEST_VERSION = 3
 ENTITY_REGISTRY_SEMANTIC_DIGEST_VOLATILE_KEYS = frozenset(
     {
         *PROJECTION_SEMANTIC_VOLATILE_KEYS,
@@ -7732,8 +7919,35 @@ ENTITY_REGISTRY_SEMANTIC_DIGEST_VOLATILE_KEYS = frozenset(
         "source_db_mtime",
         "semantic_digest",
         "mutates",
+        "producer_source_state",
     }
 )
+
+
+def entity_registry_semantic_digest_value(
+    value: Any,
+) -> Any:
+    if isinstance(value, list):
+        return [
+            entity_registry_semantic_digest_value(item)
+            for item in value
+        ]
+    if not isinstance(value, dict):
+        return value
+    result = {
+        key: entity_registry_semantic_digest_value(item)
+        for key, item in value.items()
+    }
+    if result.get("identity_sha256"):
+        for key in (
+            "sha256",
+            "sha256_mode",
+            "sha256_file_count",
+            "sha256_byte_count",
+            "sha256_truncated",
+        ):
+            result.pop(key, None)
+    return result
 
 
 def entity_registry_semantic_digest(
@@ -7741,12 +7955,19 @@ def entity_registry_semantic_digest(
     *,
     aoa_root: Path | None = None,
 ) -> dict[str, Any]:
+    logical_root = (
+        aoa_root.resolve(strict=False)
+        if aoa_root is not None
+        else None
+    )
     comparable = projection_semantic_digest_value(
-        payload if isinstance(payload, dict) else {},
+        entity_registry_semantic_digest_value(
+            payload if isinstance(payload, dict) else {}
+        ),
         volatile_keys=(
             ENTITY_REGISTRY_SEMANTIC_DIGEST_VOLATILE_KEYS
         ),
-        logical_root=aoa_root,
+        logical_root=logical_root,
     )
     return {
         "version": ENTITY_REGISTRY_SEMANTIC_DIGEST_VERSION,
@@ -8308,7 +8529,7 @@ def entity_registry_entries_from_route_terms(
     *,
     db_path: Path | None = None,
     source_ref_path: Path | None = None,
-    limit_per_layer: int = 400,
+    limit_per_layer: int = 0,
 ) -> list[dict[str, Any]]:
     db_path = db_path or search_db_path(aoa_root)
     stable_source_ref_path = source_ref_path or db_path
@@ -8324,8 +8545,7 @@ def entity_registry_entries_from_route_terms(
         )
         conn.row_factory = sqlite3.Row
         for layer in sorted(ENTITY_REGISTRY_KIND_BY_ROUTE_LAYER):
-            rows = conn.execute(
-                """
+            query = """
                 SELECT route_terms.key AS key, route_terms.route_signal AS route_signal,
                        COUNT(*) AS signal_count, COUNT(DISTINCT documents.session_id) AS session_count,
                        MAX(documents.session_date) AS latest_session_date
@@ -8336,10 +8556,12 @@ def entity_registry_entries_from_route_terms(
                   AND documents.doc_type <> 'entity_registry'
                 GROUP BY route_terms.key, route_terms.route_signal
                 ORDER BY signal_count DESC, session_count DESC, key ASC
-                LIMIT ?
-                """,
-                (layer, limit_per_layer),
-            ).fetchall()
+            """
+            query_args: tuple[Any, ...] = (layer,)
+            if limit_per_layer > 0:
+                query += "\nLIMIT ?"
+                query_args = (layer, limit_per_layer)
+            rows = conn.execute(query, query_args).fetchall()
             for row in rows:
                 key = str(row["key"] or "")
                 if not key:
@@ -8639,8 +8861,12 @@ def entity_registry_retained_observed_entries_from_previous_snapshot(
     entries: list[dict[str, Any]] = []
     observed_source_types = {"search_route_terms", "operational_route_rollup"}
     observed_source_surfaces = {"archived_route_terms", "operational_route_rollup"}
-    target_counts = target_counts_by_kind if isinstance(target_counts_by_kind, dict) else {}
-    current_counts = current_counts_by_kind if current_counts_by_kind is not None else Counter()
+    # Kept in the signature for backward-compatible internal callers. Counts
+    # are deliberately not an identity-retention criterion: a top-k rollup can
+    # replace one exact entity with another while preserving the same count.
+    # Dropping the displaced ID would break stable historical graph edges even
+    # though their raw/search evidence is still available.
+    del target_counts_by_kind, current_counts_by_kind
     for previous_entry in previous.get("entries", []) if isinstance(previous.get("entries"), list) else []:
         if not isinstance(previous_entry, dict):
             continue
@@ -8648,9 +8874,6 @@ def entity_registry_retained_observed_entries_from_previous_snapshot(
         if not entity_id or entity_id in current_entity_ids:
             continue
         kind = str(previous_entry.get("kind") or "entity")
-        target_count = int_value(target_counts.get(kind))
-        if target_count > 0 and current_counts.get(kind, 0) >= target_count:
-            continue
         refs = previous_entry.get("source_refs") if isinstance(previous_entry.get("source_refs"), list) else []
         has_observed_ref = any(
             isinstance(ref, dict) and str(ref.get("source_type") or "") in observed_source_types
@@ -8682,12 +8905,14 @@ def entity_registry_retained_observed_entries_from_previous_snapshot(
             "path": str(path),
             "generated_at": previous.get("generated_at"),
             "reason": "fast_observed_route_uses_operational_rollup",
+            "retention_basis": (
+                "stable_exact_identity_not_kind_cardinality"
+            ),
         }
         retained_freshness = retained_entry.get("freshness") if isinstance(retained_entry.get("freshness"), dict) else {}
         retained_freshness["diagnostics"] = ["observed_entity_retained_from_previous_snapshot"]
         retained_entry["freshness"] = retained_freshness
         entries.append(retained_entry)
-        current_counts[kind] += 1
     return entries
 
 
@@ -57253,6 +57478,8 @@ def refresh_entity_registry_search_documents_only(
             conn,
             aoa_root=aoa_root,
             registry_state=registry_state,
+            observed_source=observed_source,
+            history_policy=history_policy,
         )
         record_phase("entity_registry_search_sync_current_noop", noop_started, skipped=registry_refresh is not None)
         if registry_refresh is None:
@@ -90125,12 +90352,57 @@ def entity_registry_search_sync_current_noop(
     *,
     aoa_root: Path,
     registry_state: dict[str, Any],
+    observed_source: str = "auto",
+    history_policy: str = (
+        ENTITY_REGISTRY_HISTORY_POLICY_INCREMENTAL
+    ),
 ) -> dict[str, Any] | None:
     if registry_state.get("needs_maintenance"):
         return None
     registry_path = aoa_root / ENTITY_REGISTRY_PATH
     registry = read_json(registry_path, {})
     if not isinstance(registry, dict) or registry.get("artifact_type") != "entity_registry_snapshot":
+        return None
+    requested_observed_source = route_key_slug(
+        observed_source,
+        fallback="auto",
+    ).replace("_", "-")
+    if requested_observed_source not in {
+        "auto",
+        "route-rollup",
+        "route-terms",
+        "none",
+    }:
+        requested_observed_source = "auto"
+    history_policy_aliases = {
+        "incremental": (
+            ENTITY_REGISTRY_HISTORY_POLICY_INCREMENTAL
+        ),
+        "authoritative-rebuild": (
+            ENTITY_REGISTRY_HISTORY_POLICY_AUTHORITATIVE_REBUILD
+        ),
+    }
+    requested_history_policy = history_policy_aliases.get(
+        str(history_policy or "").strip(),
+        str(history_policy or "").strip(),
+    )
+    if requested_history_policy not in {
+        ENTITY_REGISTRY_HISTORY_POLICY_INCREMENTAL,
+        ENTITY_REGISTRY_HISTORY_POLICY_AUTHORITATIVE_REBUILD,
+    }:
+        requested_history_policy = (
+            ENTITY_REGISTRY_HISTORY_POLICY_INCREMENTAL
+        )
+    if (
+        requested_observed_source != "auto"
+        and str(registry.get("observed_source") or "")
+        != requested_observed_source
+    ):
+        return None
+    if (
+        str(registry.get("history_policy") or "")
+        != requested_history_policy
+    ):
         return None
     entity_count = int_value(registry.get("entity_count"))
     actual_count = int_value(conn.execute("SELECT COUNT(*) FROM documents WHERE doc_type = 'entity_registry'").fetchone()[0])
@@ -90963,6 +91235,9 @@ def search_documents_for_record(
     )
 
     task_episodes = session_index_payload.get("task_episodes") if isinstance(session_index_payload.get("task_episodes"), list) else []
+    task_episode_ranges = session_index_task_episode_ranges(
+        session_index_payload
+    )
     event_episode_ids: dict[str, str] = {}
     for episode in task_episodes:
         if not isinstance(episode, dict):
@@ -91243,10 +91518,19 @@ def search_documents_for_record(
             session_act = facets.get("session_act") if isinstance(facets.get("session_act"), dict) else {}
             agent_event = facets.get("agent_event") if isinstance(facets.get("agent_event"), dict) else {}
             agent_event_class = str(agent_event.get("class") or "")
-            task_episode_id = event_episode_ids.get(str(event.get("event_id") or ""), "")
+            line_no = int_value(event.get("line"))
+            task_episode_id = (
+                event_episode_ids.get(
+                    str(event.get("event_id") or ""),
+                    "",
+                )
+                or task_episode_id_for_indexed_event_line(
+                    line_no,
+                    task_episode_ranges,
+                )
+            )
             route_layers, route_signals = route_fields_from_signals(facets.get("route_signals")) if segment_route_index_current else ("", "")
             event_type = str(event.get("type") or "")
-            line_no = int_value(event.get("line"))
             raw_text = raw_text_by_line.get(line_no, "")
             exact_literal_text = event_exact_literal_posting_text(
                 raw_exact_literal_by_line.get(line_no, ""),
@@ -91924,26 +92208,44 @@ def search_index_sessions(
             registry_started = time.monotonic()
             progress_event("search_index_phase_start", {"phase": "entity_registry_refresh"})
             registry_state = entity_registry_maintenance_status(aoa_root)
+            registry_snapshot = read_json(
+                aoa_root / ENTITY_REGISTRY_PATH,
+                {},
+            )
+            registry_observed_source = (
+                "route-terms"
+                if rebuild
+                else str(
+                    registry_snapshot.get("observed_source")
+                    if isinstance(registry_snapshot, dict)
+                    else ""
+                )
+                or "auto"
+            )
+            registry_history_policy = (
+                ENTITY_REGISTRY_HISTORY_POLICY_AUTHORITATIVE_REBUILD
+                if rebuild
+                else str(
+                    registry_snapshot.get("history_policy")
+                    if isinstance(registry_snapshot, dict)
+                    else ""
+                )
+                or ENTITY_REGISTRY_HISTORY_POLICY_INCREMENTAL
+            )
             registry_refresh = entity_registry_search_sync_current_noop(
                 conn,
                 aoa_root=aoa_root,
                 registry_state=registry_state,
+                observed_source=registry_observed_source,
+                history_policy=registry_history_policy,
             )
             if registry_refresh is None:
                 registry_refresh = refresh_search_entity_registry_documents(
                     conn,
                     aoa_root=aoa_root,
                     route_terms_db_path=write_db_path,
-                    observed_source=(
-                        "route-terms"
-                        if rebuild
-                        else "auto"
-                    ),
-                    history_policy=(
-                        ENTITY_REGISTRY_HISTORY_POLICY_AUTHORITATIVE_REBUILD
-                        if rebuild
-                        else ENTITY_REGISTRY_HISTORY_POLICY_INCREMENTAL
-                    ),
+                    observed_source=registry_observed_source,
+                    history_policy=registry_history_policy,
                 )
             entity_registry_document_count = int_value(registry_refresh.get("target_count"))
             inserted_entity_registry_document_count = int_value(registry_refresh.get("inserted_count"))
@@ -102517,7 +102819,73 @@ def current_state_owner_handoff(query: str) -> dict[str, Any]:
     }
 
 
-def canonical_generation_identity(payload: dict[str, Any]) -> dict[str, Any]:
+def projection_producer_generation_fields(
+    projection: Any,
+) -> dict[str, Any]:
+    projection_key = str(projection or "")
+    contract = (
+        SESSION_MEMORY_LOADED_PROJECTION_PRODUCER_CONTRACTS.get(
+            projection_key
+        )
+    )
+    if (
+        isinstance(contract, dict)
+        and contract.get("status") == "current"
+        and contract.get("sha256")
+    ):
+        return {
+            "producer": "aoa_session_memory.py",
+            "producer_identity_mode": (
+                PROJECTION_PRODUCER_IDENTITY_MODE
+            ),
+            "producer_sha256": str(contract["sha256"]),
+            "producer_contract_version": (
+                PROJECTION_PRODUCER_CONTRACT_VERSION
+            ),
+            "producer_contract_status": "current",
+            "producer_contract_chunks": [
+                {
+                    key: item.get(key)
+                    for key in (
+                        "ordinal",
+                        "start_anchor",
+                        "end_anchor",
+                        "byte_count",
+                        "sha256",
+                    )
+                }
+                for item in contract.get("chunks", [])
+                if isinstance(item, dict)
+            ],
+        }
+    return {
+        "producer": "aoa_session_memory.py",
+        "producer_identity_mode": (
+            SESSION_MEMORY_PRODUCER_IDENTITY_MODE
+        ),
+        "producer_sha256": (
+            SESSION_MEMORY_LOADED_PRODUCER_SHA256
+        ),
+        "producer_contract_version": (
+            PROJECTION_PRODUCER_CONTRACT_VERSION
+        ),
+        "producer_contract_status": (
+            "whole_source_fail_closed_fallback"
+            if projection_key
+            in PROJECTION_PRODUCER_SOURCE_RANGES
+            else "whole_source_unmapped_projection"
+        ),
+        "producer_contract_diagnostics": (
+            list(contract.get("diagnostics", []))
+            if isinstance(contract, dict)
+            else ["projection_producer_contract_missing"]
+        ),
+    }
+
+
+def generation_identity_with_id(
+    payload: dict[str, Any],
+) -> dict[str, Any]:
     identity = {
         key: value
         for key, value in payload.items()
@@ -102532,6 +102900,20 @@ def canonical_generation_identity(payload: dict[str, Any]) -> dict[str, Any]:
         ).encode("utf-8")
     ).hexdigest()
     return {**identity, "generation_id": generation_id}
+
+
+def canonical_generation_identity(payload: dict[str, Any]) -> dict[str, Any]:
+    identity = {
+        key: value
+        for key, value in payload.items()
+        if key not in {"generation_id", "generated_at"}
+    }
+    identity.update(
+        projection_producer_generation_fields(
+            identity.get("projection")
+        )
+    )
+    return generation_identity_with_id(identity)
 
 
 def session_metadata_generation_identity(
@@ -102747,10 +103129,17 @@ def task_episode_source_generation_identity(
 def segment_index_generation_identity(
     *,
     common: dict[str, Any] | None = None,
+    episode_source: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    effective_common = common or session_memory_generation_common()
+    effective_episode = episode_source or (
+        task_episode_source_generation_identity(
+            common=effective_common
+        )
+    )
     return canonical_generation_identity(
         {
-            **(common or session_memory_generation_common()),
+            **effective_common,
             "projection": "segment_index",
             "schema_version": SCHEMA_VERSION,
             "conversation_act_schema_version": (
@@ -102771,6 +103160,11 @@ def segment_index_generation_identity(
             "source_fingerprint_mode": (
                 "raw_digest_block_and_line_range_v1"
             ),
+            "dependency_generations": {
+                "task_episode_source": (
+                    effective_episode["generation_id"]
+                ),
+            },
         }
     )
 
@@ -102786,7 +103180,10 @@ def session_index_generation_identity(
         task_episode_source_generation_identity(common=effective_common)
     )
     effective_segment = segment_index or (
-        segment_index_generation_identity(common=effective_common)
+        segment_index_generation_identity(
+            common=effective_common,
+            episode_source=effective_episode,
+        )
     )
     return canonical_generation_identity(
         {
@@ -102878,10 +103275,14 @@ def session_memory_expected_generation_identities(
     aoa_root: Path,
 ) -> dict[str, dict[str, Any]]:
     common = session_memory_generation_common()
+    entity_registry = entity_registry_generation_identity()
     episode_source = task_episode_source_generation_identity(
         common=common
     )
-    segment_index = segment_index_generation_identity(common=common)
+    segment_index = segment_index_generation_identity(
+        common=common,
+        episode_source=episode_source,
+    )
     session_index = session_index_generation_identity(
         common=common,
         episode_source=episode_source,
@@ -102918,6 +103319,11 @@ def session_memory_expected_generation_identities(
             "route_signal_classifier_version": (
                 ROUTE_SIGNAL_CLASSIFIER_VERSION
             ),
+            "dependency_generations": {
+                "entity_registry": entity_registry[
+                    "generation_id"
+                ],
+            },
         }
     )
     lexical = canonical_generation_identity(
@@ -102931,6 +103337,11 @@ def session_memory_expected_generation_identities(
             "route_signal_classifier_version": (
                 ROUTE_SIGNAL_CLASSIFIER_VERSION
             ),
+            "dependency_generations": {
+                "entity_registry": entity_registry[
+                    "generation_id"
+                ],
+            },
         }
     )
     search_catalog = canonical_generation_identity(
@@ -102987,11 +103398,7 @@ def session_memory_expected_generation_identities(
             ),
             "dependency_generations": {
                 "task_episode_source": episode_source["generation_id"],
-                "entity_registry": (
-                    entity_registry_generation_identity()[
-                        "generation_id"
-                    ]
-                ),
+                "entity_registry": entity_registry["generation_id"],
             },
         }
     )
@@ -103024,7 +103431,6 @@ def session_memory_expected_generation_identities(
             },
         }
     )
-    entity_registry = entity_registry_generation_identity()
     first_pass_distillation = (
         first_pass_distillation_generation_identity(
             aoa_root,
@@ -109815,6 +110221,2240 @@ def graph_projection_semantic_digest(
     }
 
 
+GRAPH_ENTITY_REGISTRY_REBIND_CONTRACT_VERSION = 2
+GRAPH_ENTITY_REGISTRY_NODE_SEMANTIC_FIELDS = (
+    "entity_id",
+    "entity_kind",
+    "canonical_key",
+    "status",
+    "route_layer",
+    "route_signal",
+    "source_surface",
+    "owner",
+    "canonicalization",
+    "identity_candidate_ids",
+)
+
+
+def graph_entity_registry_entry_for_route(
+    registry_index: dict[tuple[str, str], dict[str, Any]],
+    layer: str,
+    key: str,
+) -> dict[str, Any] | None:
+    route_layer = route_key_slug(layer, fallback="")
+    route_key = route_key_slug(
+        key,
+        fallback="",
+        max_chars=120,
+    )
+    kind = (
+        "mcp_tool"
+        if (
+            route_layer == "tool"
+            and entity_registry_tool_key_is_mcp_tool(route_key)
+        )
+        else ENTITY_REGISTRY_KIND_BY_ROUTE_LAYER.get(
+            route_layer,
+            route_layer,
+        )
+    )
+    return registry_index.get((kind, route_key))
+
+
+def graph_entity_registry_node_semantic_projection(
+    entry: dict[str, Any],
+) -> dict[str, Any]:
+    canonicalization = (
+        entry.get("canonicalization")
+        if isinstance(entry.get("canonicalization"), dict)
+        else {}
+    )
+    return {
+        "entity_id": entry.get("entity_id"),
+        "entity_kind": entry.get("kind"),
+        "canonical_key": entry.get("canonical_key"),
+        "status": entry.get("status"),
+        "route_layer": entry.get("route_layer"),
+        "route_signal": entry.get("route_signal"),
+        "source_surface": entry.get("source_surface"),
+        "owner": entry.get("owner"),
+        "canonicalization": {
+            "schema_version": canonicalization.get(
+                "schema_version"
+            ),
+            "status": canonicalization.get("status"),
+            "identity_claim_allowed": canonicalization.get(
+                "identity_claim_allowed"
+            ),
+            "collision_preserved": canonicalization.get(
+                "collision_preserved"
+            ),
+            "candidate_count": canonicalization.get(
+                "candidate_count"
+            ),
+            "active_candidate_count": canonicalization.get(
+                "active_candidate_count"
+            ),
+            "selected_candidate_id": canonicalization.get(
+                "selected_candidate_id"
+            ),
+        },
+        "identity_candidate_ids": canonicalization.get(
+            "candidate_ids",
+            [],
+        ),
+    }
+
+
+def graph_entity_registry_node(
+    entry: dict[str, Any],
+    *,
+    aoa_root: Path,
+    evidence_refs: list[Any],
+) -> dict[str, Any]:
+    return {
+        "id": f"entity_registry:{entry.get('entity_id')}",
+        "type": "entity_registry",
+        "label": (
+            f"{entry.get('kind')}:{entry.get('canonical_key')}"
+        ),
+        **graph_entity_registry_node_semantic_projection(entry),
+        "refs": {
+            "registry": str(aoa_root / ENTITY_REGISTRY_PATH)
+        },
+        "evidence_refs": evidence_refs,
+    }
+
+
+GRAPH_PROJECTION_CONTENT_DIGEST_VERSION = 2
+GRAPH_PROJECTION_CONTENT_DIGEST_EXCLUDED_COLUMNS = frozenset(
+    {
+        *GRAPH_PROJECTION_SEMANTIC_DIGEST_VOLATILE_COLUMNS,
+        "generation_id",
+        "generation_identity_json",
+        "entity_registry_dependency_id",
+        "entity_registry_dependency_json",
+    }
+)
+GRAPH_PROJECTION_CONTENT_DIGEST_EXCLUDED_METADATA_KEYS = frozenset(
+    {
+        "graph_generation_id",
+        "graph_generation_identity_json",
+        "entity_registry_dependency_id",
+        "entity_registry_dependency_json",
+        "graph_registry_rebind_contract_version",
+        "graph_registry_dependency_rebound_at",
+        "graph_registry_dependency_rebound_from",
+        "graph_generation_rebound_at",
+        "graph_generation_rebound_from",
+        "graph_generation_rebound_previous_source_sha256",
+    }
+)
+
+
+def graph_projection_content_digest(
+    conn: sqlite3.Connection,
+) -> dict[str, Any]:
+    """Hash query-bearing graph content without its registry binding."""
+
+    digest = hashlib.sha256()
+    table_counts: dict[str, int] = {}
+    for table, order_by in GRAPH_PROJECTION_SEMANTIC_DIGEST_TABLE_ORDER:
+        if not sqlite_table_exists(conn, table):
+            continue
+        columns = [
+            str(row[1])
+            for row in conn.execute(
+                f"PRAGMA table_info({table})"
+            ).fetchall()
+            if str(row[1])
+            not in GRAPH_PROJECTION_CONTENT_DIGEST_EXCLUDED_COLUMNS
+        ]
+        if not columns:
+            continue
+        quoted_columns = ", ".join(
+            '"' + column.replace('"', '""') + '"'
+            for column in columns
+        )
+        row_count = 0
+        digest.update(f"table:{table}\n".encode("utf-8"))
+        where_clause = ""
+        parameters: tuple[Any, ...] = ()
+        if table == "metadata":
+            placeholders = ",".join(
+                "?"
+                for _ in (
+                    GRAPH_PROJECTION_CONTENT_DIGEST_EXCLUDED_METADATA_KEYS
+                )
+            )
+            where_clause = f"WHERE key NOT IN ({placeholders})"
+            parameters = tuple(
+                sorted(
+                    GRAPH_PROJECTION_CONTENT_DIGEST_EXCLUDED_METADATA_KEYS
+                )
+            )
+        for row in conn.execute(
+            f"""
+            SELECT {quoted_columns}
+            FROM {table}
+            {where_clause}
+            ORDER BY {order_by}
+            """,
+            parameters,
+        ):
+            canonical_values = [
+                (
+                    {
+                        "blob_sha256": hashlib.sha256(
+                            bytes(value)
+                        ).hexdigest(),
+                        "blob_bytes": len(bytes(value)),
+                    }
+                    if isinstance(
+                        value,
+                        (bytes, bytearray, memoryview),
+                    )
+                    else value
+                )
+                for value in row
+            ]
+            digest.update(
+                json.dumps(
+                    canonical_values,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            )
+            digest.update(b"\n")
+            row_count += 1
+        table_counts[table] = row_count
+    return {
+        "version": GRAPH_PROJECTION_CONTENT_DIGEST_VERSION,
+        "sha256": digest.hexdigest(),
+        "table_counts": table_counts,
+        "excluded_columns": sorted(
+            GRAPH_PROJECTION_CONTENT_DIGEST_EXCLUDED_COLUMNS
+        ),
+        "excluded_metadata_keys": sorted(
+            GRAPH_PROJECTION_CONTENT_DIGEST_EXCLUDED_METADATA_KEYS
+        ),
+        "truth_status": (
+            "graph_query_content_digest_excluding_generation_and_"
+            "registry_bindings_not_projection_freshness"
+        ),
+    }
+
+
+GRAPH_NON_REGISTRY_CONTENT_DIGEST_VERSION = 1
+
+
+def graph_non_registry_content_digest(
+    conn: sqlite3.Connection,
+) -> dict[str, Any]:
+    """Hash every graph row a registry-only refresh must preserve."""
+
+    digest = hashlib.sha256()
+    table_counts: dict[str, int] = {}
+    queries = (
+        (
+            "graph_sources",
+            """
+            SELECT
+              source_key, source_type, session_id, session_label,
+              segment_id, source_sha, graph_schema_version,
+              graph_store_schema_version,
+              graph_event_route_signal_edge_policy,
+              route_signal_classifier_version, status, diagnostic
+            FROM graph_sources
+            ORDER BY source_key
+            """,
+        ),
+        (
+            "node_contribs_non_registry",
+            """
+            SELECT source_key, node_id, node_type, payload_json, count
+            FROM node_contribs
+            WHERE node_type != 'entity_registry'
+            ORDER BY source_key, node_id
+            """,
+        ),
+        (
+            "edge_contribs_non_registry",
+            """
+            SELECT
+              source_key, edge_id, edge_type, source_node,
+              target_node, payload_json, count
+            FROM edge_contribs
+            WHERE source_node NOT LIKE 'entity_registry:%'
+              AND target_node NOT LIKE 'entity_registry:%'
+            ORDER BY source_key, edge_id
+            """,
+        ),
+        (
+            "nodes_non_registry",
+            """
+            SELECT id, node_type, payload_json, count
+            FROM nodes
+            WHERE node_type != 'entity_registry'
+            ORDER BY id
+            """,
+        ),
+        (
+            "edges_non_registry",
+            """
+            SELECT
+              id, edge_type, source_node, target_node,
+              payload_json, count
+            FROM edges
+            WHERE source_node NOT LIKE 'entity_registry:%'
+              AND target_node NOT LIKE 'entity_registry:%'
+            ORDER BY id
+            """,
+        ),
+    )
+    for label, query in queries:
+        count = 0
+        digest.update(f"table:{label}\n".encode("utf-8"))
+        for row in conn.execute(query):
+            digest.update(
+                json.dumps(
+                    list(row),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            )
+            digest.update(b"\n")
+            count += 1
+        table_counts[label] = count
+    return {
+        "version": GRAPH_NON_REGISTRY_CONTENT_DIGEST_VERSION,
+        "sha256": digest.hexdigest(),
+        "table_counts": table_counts,
+        "truth_status": (
+            "complete_non_registry_graph_row_digest_for_registry_"
+            "refresh_invariant"
+        ),
+    }
+
+
+def graph_entity_registry_dependency_packet(
+    dependency: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        key: dependency.get(key)
+        for key in (
+            "schema_version",
+            "artifact_type",
+            "status",
+            "dependency_id",
+            "identity",
+            "snapshot_ref",
+            "truth_status",
+        )
+    }
+
+
+PROJECTION_PRODUCER_GENERATION_FIELD_NAMES = frozenset(
+    {
+        "producer",
+        "producer_identity_mode",
+        "producer_sha256",
+        "producer_contract_version",
+        "producer_contract_status",
+        "producer_contract_chunks",
+        "producer_contract_diagnostics",
+    }
+)
+
+
+def legacy_whole_source_generation_identity(
+    current_identity: dict[str, Any],
+    *,
+    producer_sha256: str,
+    dependency_generations: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    legacy = {
+        key: value
+        for key, value in current_identity.items()
+        if key not in (
+            {"generation_id", "generated_at"}
+            | PROJECTION_PRODUCER_GENERATION_FIELD_NAMES
+        )
+    }
+    legacy.update(
+        {
+            "producer": "aoa_session_memory.py",
+            "producer_identity_mode": (
+                SESSION_MEMORY_PRODUCER_IDENTITY_MODE
+            ),
+            "producer_sha256": producer_sha256,
+        }
+    )
+    if dependency_generations is not None:
+        legacy["dependency_generations"] = dict(
+            dependency_generations
+        )
+    return generation_identity_with_id(legacy)
+
+
+def graph_declared_generation_transition(
+    *,
+    aoa_root: Path,
+    stored_identity: dict[str, Any],
+    previous_producer_source: Path | None,
+) -> dict[str, Any]:
+    expected_identities = (
+        session_memory_expected_generation_identities(aoa_root)
+    )
+    expected_graph = expected_identities["graph"]
+    stored_generation_id = str(
+        stored_identity.get("generation_id") or ""
+    )
+    expected_generation_id = str(
+        expected_graph.get("generation_id") or ""
+    )
+    base = {
+        "schema_version": 1,
+        "artifact_type": (
+            "session_memory_graph_generation_transition"
+        ),
+        "stored_generation_id": stored_generation_id,
+        "expected_generation_id": expected_generation_id,
+        "requires_previous_producer_source": False,
+        "previous_producer_source": (
+            str(previous_producer_source)
+            if previous_producer_source is not None
+            else ""
+        ),
+    }
+    if (
+        stored_generation_id
+        and stored_generation_id == expected_generation_id
+        and stored_identity == expected_graph
+    ):
+        return {
+            **base,
+            "status": "current",
+            "compatible": True,
+            "changes_generation": False,
+            "diagnostics": [],
+        }
+    if (
+        str(stored_identity.get("producer_identity_mode") or "")
+        != SESSION_MEMORY_PRODUCER_IDENTITY_MODE
+    ):
+        return {
+            **base,
+            "status": "blocked",
+            "compatible": False,
+            "changes_generation": False,
+            "diagnostics": [
+                "graph_generation_transition_stored_mode_not_legacy"
+            ],
+        }
+    previous_sha256 = str(
+        stored_identity.get("producer_sha256") or ""
+    )
+    if previous_producer_source is None:
+        return {
+            **base,
+            "status": "blocked",
+            "compatible": False,
+            "changes_generation": False,
+            "requires_previous_producer_source": True,
+            "diagnostics": [
+                "graph_generation_transition_previous_source_required"
+            ],
+        }
+    try:
+        previous_source_bytes = (
+            previous_producer_source.read_bytes()
+        )
+    except OSError as exc:
+        return {
+            **base,
+            "status": "blocked",
+            "compatible": False,
+            "changes_generation": False,
+            "requires_previous_producer_source": True,
+            "diagnostics": [
+                "graph_generation_transition_previous_source_unreadable:"
+                f"{exc}"
+            ],
+        }
+    observed_previous_sha256 = hashlib.sha256(
+        previous_source_bytes
+    ).hexdigest()
+    if (
+        not previous_sha256
+        or observed_previous_sha256 != previous_sha256
+    ):
+        return {
+            **base,
+            "status": "blocked",
+            "compatible": False,
+            "changes_generation": False,
+            "requires_previous_producer_source": True,
+            "observed_previous_producer_sha256": (
+                observed_previous_sha256
+            ),
+            "diagnostics": [
+                "graph_generation_transition_previous_source_sha_mismatch"
+            ],
+        }
+    contracts: dict[str, dict[str, Any]] = {}
+    diagnostics: list[str] = []
+    for projection in (
+        "task_episode_source",
+        "session_graph",
+    ):
+        previous_contract = (
+            projection_producer_contract_from_source_bytes(
+                previous_source_bytes,
+                projection,
+            )
+        )
+        current_contract = (
+            SESSION_MEMORY_LOADED_PROJECTION_PRODUCER_CONTRACTS.get(
+                projection,
+                {},
+            )
+        )
+        equal = bool(
+            previous_contract.get("status") == "current"
+            and current_contract.get("status") == "current"
+            and previous_contract.get("sha256")
+            == current_contract.get("sha256")
+        )
+        contracts[projection] = {
+            "previous": previous_contract,
+            "current": current_contract,
+            "equal": equal,
+        }
+        if not equal:
+            diagnostics.append(
+                f"graph_generation_transition_{projection}_contract_changed"
+            )
+    legacy_task_episode = legacy_whole_source_generation_identity(
+        expected_identities["task_episode_source"],
+        producer_sha256=previous_sha256,
+    )
+    legacy_entity_registry = (
+        legacy_whole_source_generation_identity(
+            expected_identities["entity_registry"],
+            producer_sha256=previous_sha256,
+        )
+    )
+    legacy_graph = legacy_whole_source_generation_identity(
+        expected_graph,
+        producer_sha256=previous_sha256,
+        dependency_generations={
+            "task_episode_source": legacy_task_episode[
+                "generation_id"
+            ],
+            "entity_registry": legacy_entity_registry[
+                "generation_id"
+            ],
+        },
+    )
+    if legacy_graph != stored_identity:
+        diagnostics.append(
+            "graph_generation_transition_legacy_identity_mismatch"
+        )
+    compatible = not diagnostics
+    return {
+        **base,
+        "status": "ready" if compatible else "blocked",
+        "compatible": compatible,
+        "changes_generation": compatible,
+        "requires_previous_producer_source": True,
+        "previous_producer_sha256": previous_sha256,
+        "observed_previous_producer_sha256": (
+            observed_previous_sha256
+        ),
+        "contracts": contracts,
+        "legacy_dependency_generations": {
+            "task_episode_source": legacy_task_episode[
+                "generation_id"
+            ],
+            "entity_registry": legacy_entity_registry[
+                "generation_id"
+            ],
+        },
+        "legacy_graph_identity": legacy_graph,
+        "diagnostics": diagnostics,
+        "truth_status": (
+            "declared_legacy_whole_source_to_projection_contract_"
+            "transition_not_graph_content_proof"
+        ),
+    }
+
+
+def graph_registry_materialization_route_target(
+    payload: dict[str, Any],
+    registry_index: dict[tuple[str, str], dict[str, Any]],
+) -> str:
+    layer = route_key_slug(
+        payload.get("route_layer"),
+        fallback="",
+    )
+    key = route_key_slug(
+        payload.get("route_key"),
+        fallback="",
+        max_chars=120,
+    )
+    if not layer or not key:
+        return ""
+    entry = graph_entity_registry_entry_for_route(
+        registry_index,
+        layer,
+        key,
+    )
+    return (
+        f"entity_registry:{entry.get('entity_id')}"
+        if entry
+        else ""
+    )
+
+
+def graph_registry_materialization_node_mismatch(
+    payload: dict[str, Any],
+    entries_by_id: dict[str, dict[str, Any]],
+) -> list[str]:
+    entity_id = str(payload.get("entity_id") or "")
+    entry = entries_by_id.get(entity_id)
+    if not entry:
+        return ["entity_registry_entry_missing"]
+    expected = graph_entity_registry_node_semantic_projection(
+        entry
+    )
+    return [
+        field
+        for field in GRAPH_ENTITY_REGISTRY_NODE_SEMANTIC_FIELDS
+        if payload.get(field) != expected.get(field)
+    ]
+
+
+def graph_registry_entry_from_route_signal(
+    route_signal: Any,
+    registry_index: dict[tuple[str, str], dict[str, Any]],
+) -> dict[str, Any] | None:
+    layer, separator, key = str(route_signal or "").partition(":")
+    if not separator or not layer or not key:
+        return None
+    return graph_entity_registry_entry_for_route(
+        registry_index,
+        layer,
+        key,
+    )
+
+
+def graph_registry_materialization_refresh(
+    *,
+    aoa_root: Path,
+    conn: sqlite3.Connection,
+    dependency: dict[str, Any],
+) -> dict[str, Any]:
+    """Rebuild only registry-derived contributions and aggregates."""
+
+    started = time.monotonic()
+    registry_entries = (
+        dependency.get("entries")
+        if isinstance(dependency.get("entries"), list)
+        else []
+    )
+    registry_index = (
+        dependency.get("index")
+        if isinstance(dependency.get("index"), dict)
+        else {}
+    )
+    entries_by_id = {
+        str(entry.get("entity_id") or ""): entry
+        for entry in registry_entries
+        if isinstance(entry, dict) and entry.get("entity_id")
+    }
+    nodes_by_source: defaultdict[
+        str,
+        dict[str, dict[str, Any]],
+    ] = defaultdict(dict)
+    edges_by_source: defaultdict[
+        str,
+        dict[str, dict[str, Any]],
+    ] = defaultdict(dict)
+    diagnostics: list[str] = []
+    counts: Counter[str] = Counter()
+
+    def add_registry_node(
+        source_key: str,
+        entry: dict[str, Any],
+        evidence_refs: list[Any],
+    ) -> str:
+        node = graph_entity_registry_node(
+            entry,
+            aoa_root=aoa_root,
+            evidence_refs=evidence_refs,
+        )
+        graph_add_node(nodes_by_source[source_key], node)
+        return str(node["id"])
+
+    route_payloads: dict[
+        tuple[str, str],
+        dict[str, Any],
+    ] = {}
+    for row in conn.execute(
+        """
+        SELECT source_key, node_id, node_type, payload_json, count
+        FROM node_contribs
+        WHERE node_type != 'entity_registry'
+        ORDER BY source_key, node_id
+        """
+    ):
+        source_key = str(row["source_key"] or "")
+        node_id = str(row["node_id"] or "")
+        try:
+            payload = json.loads(str(row["payload_json"]))
+        except (TypeError, json.JSONDecodeError):
+            diagnostics.append(
+                "graph_registry_refresh_malformed_route_node_payload:"
+                f"{source_key}:{node_id}"
+            )
+            continue
+        if not isinstance(payload, dict):
+            continue
+        payload = {
+            **payload,
+            "id": node_id,
+            "type": str(row["node_type"] or "unknown"),
+            "count": int_value(row["count"], 1),
+        }
+        layer = route_key_slug(
+            payload.get("route_layer"),
+            fallback="",
+        )
+        key = route_key_slug(
+            payload.get("route_key"),
+            fallback="",
+            max_chars=120,
+        )
+        if not layer or not key:
+            continue
+        entry = graph_entity_registry_entry_for_route(
+            registry_index,
+            layer,
+            key,
+        )
+        if not entry:
+            continue
+        route_payloads[(source_key, node_id)] = payload
+        evidence_refs = (
+            payload.get("evidence_refs")
+            if isinstance(payload.get("evidence_refs"), list)
+            else []
+        )
+        registry_node_id = add_registry_node(
+            source_key,
+            entry,
+            evidence_refs,
+        )
+        graph_add_edge(
+            edges_by_source[source_key],
+            {
+                "source": registry_node_id,
+                "target": node_id,
+                "type": "registry_entity_has_route_signal",
+                "session_id": payload.get("session_id"),
+                "route_signal": (
+                    payload.get("route_signal")
+                    or route_signal_token(layer, key)
+                ),
+                "evidence_refs": evidence_refs,
+            },
+        )
+        counts["route_mapping_count"] += 1
+
+    for row in conn.execute(
+        """
+        SELECT
+          source_key, edge_id, edge_type, source_node,
+          target_node, payload_json, count
+        FROM edge_contribs
+        WHERE source_node LIKE 'entity_registry:%'
+           OR target_node LIKE 'entity_registry:%'
+        ORDER BY source_key, edge_id
+        """
+    ):
+        source_key = str(row["source_key"] or "")
+        edge_type = str(row["edge_type"] or "")
+        if edge_type == "registry_entity_has_route_signal":
+            continue
+        source_node = str(row["source_node"] or "")
+        target_node = str(row["target_node"] or "")
+        try:
+            payload = json.loads(str(row["payload_json"]))
+        except (TypeError, json.JSONDecodeError):
+            diagnostics.append(
+                "graph_registry_refresh_malformed_incident_edge_payload:"
+                f"{source_key}:{row['edge_id']}"
+            )
+            continue
+        if not isinstance(payload, dict):
+            diagnostics.append(
+                "graph_registry_refresh_non_object_incident_edge_payload:"
+                f"{source_key}:{row['edge_id']}"
+            )
+            continue
+        evidence_refs = (
+            payload.get("evidence_refs")
+            if isinstance(payload.get("evidence_refs"), list)
+            else []
+        )
+        entry = graph_registry_entry_from_route_signal(
+            payload.get("route_signal"),
+            registry_index,
+        )
+        if entry is None:
+            existing_registry_id = (
+                target_node.removeprefix("entity_registry:")
+                if target_node.startswith("entity_registry:")
+                else source_node.removeprefix("entity_registry:")
+                if source_node.startswith("entity_registry:")
+                else ""
+            )
+            entry = entries_by_id.get(existing_registry_id)
+        if entry is None:
+            diagnostics.append(
+                "graph_registry_refresh_incident_edge_identity_unresolved:"
+                f"{source_key}:{row['edge_id']}"
+            )
+            continue
+        registry_node_id = add_registry_node(
+            source_key,
+            entry,
+            evidence_refs,
+        )
+        if target_node.startswith("entity_registry:"):
+            target_node = registry_node_id
+        if source_node.startswith("entity_registry:"):
+            source_node = registry_node_id
+        graph_add_edge(
+            edges_by_source[source_key],
+            {
+                **payload,
+                "id": "",
+                "source": source_node,
+                "target": target_node,
+                "type": edge_type,
+                "count": int_value(row["count"], 1),
+                "evidence_refs": evidence_refs,
+            },
+        )
+        counts["incident_edge_mapping_count"] += 1
+
+    if diagnostics:
+        return {
+            "status": "blocked",
+            "ok": False,
+            "mutates": False,
+            "diagnostics": diagnostics[:40],
+            "counts": dict(counts),
+            "elapsed_ms": int(
+                (time.monotonic() - started) * 1000
+            ),
+        }
+
+    old_registry_node_counts = {
+        str(row["source_key"] or ""): int_value(row["item_count"])
+        for row in conn.execute(
+            """
+            SELECT source_key, COUNT(*) AS item_count
+            FROM node_contribs
+            WHERE node_type = 'entity_registry'
+            GROUP BY source_key
+            """
+        )
+    }
+    old_registry_edge_counts = {
+        str(row["source_key"] or ""): int_value(row["item_count"])
+        for row in conn.execute(
+            """
+            SELECT source_key, COUNT(*) AS item_count
+            FROM edge_contribs
+            WHERE source_node LIKE 'entity_registry:%'
+               OR target_node LIKE 'entity_registry:%'
+            GROUP BY source_key
+            """
+        )
+    }
+    old_node_ids = {
+        str(row["node_id"] or "")
+        for row in conn.execute(
+            "SELECT DISTINCT node_id FROM node_contribs "
+            "WHERE node_type = 'entity_registry'"
+        )
+        if row["node_id"]
+    }
+    old_edge_ids = {
+        str(row["edge_id"] or "")
+        for row in conn.execute(
+            "SELECT DISTINCT edge_id FROM edge_contribs "
+            "WHERE source_node LIKE 'entity_registry:%' "
+            "OR target_node LIKE 'entity_registry:%'"
+        )
+        if row["edge_id"]
+    }
+    conn.execute(
+        "DELETE FROM node_contribs "
+        "WHERE node_type = 'entity_registry'"
+    )
+    conn.execute(
+        "DELETE FROM edge_contribs "
+        "WHERE source_node LIKE 'entity_registry:%' "
+        "OR target_node LIKE 'entity_registry:%'"
+    )
+
+    new_node_ids: set[str] = set()
+    new_edge_ids: set[str] = set()
+    new_registry_node_counts: dict[str, int] = {}
+    new_registry_edge_counts: dict[str, int] = {}
+    for source_key, nodes in sorted(nodes_by_source.items()):
+        new_registry_node_counts[source_key] = len(nodes)
+        for node_id, node in sorted(nodes.items()):
+            payload = graph_compact_contribution_payload(
+                node,
+                kind="node",
+            )
+            count = int_value(payload.get("count"), 1)
+            conn.execute(
+                """
+                INSERT INTO node_contribs(
+                  source_key, node_id, node_type, payload_json, count
+                ) VALUES (?, ?, 'entity_registry', ?, ?)
+                """,
+                (source_key, node_id, graph_json(payload), count),
+            )
+            new_node_ids.add(node_id)
+    for source_key, edges in sorted(edges_by_source.items()):
+        new_registry_edge_counts[source_key] = len(edges)
+        for edge_id, edge in sorted(edges.items()):
+            normalized = graph_relation_contract_payload(edge)
+            if not normalized.get("navigation_admissible"):
+                diagnostics.append(
+                    "graph_registry_refresh_reconstructed_edge_rejected:"
+                    f"{source_key}:{edge_id}"
+                )
+                continue
+            source_node = str(normalized.get("source") or "")
+            target_node = str(normalized.get("target") or "")
+            edge_type = str(normalized.get("type") or "")
+            payload = graph_compact_contribution_payload(
+                normalized,
+                kind="edge",
+            )
+            count = int_value(payload.get("count"), 1)
+            conn.execute(
+                """
+                INSERT INTO edge_contribs(
+                  source_key, edge_id, edge_type, source_node,
+                  target_node, payload_json, count
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    source_key,
+                    edge_id,
+                    edge_type,
+                    source_node,
+                    target_node,
+                    graph_json(payload),
+                    count,
+                ),
+            )
+            new_edge_ids.add(edge_id)
+    if diagnostics:
+        return {
+            "status": "blocked",
+            "ok": False,
+            "mutates": True,
+            "diagnostics": diagnostics[:40],
+            "counts": dict(counts),
+            "elapsed_ms": int(
+                (time.monotonic() - started) * 1000
+            ),
+        }
+
+    for source_key in sorted(
+        set(old_registry_node_counts)
+        | set(new_registry_node_counts)
+        | set(old_registry_edge_counts)
+        | set(new_registry_edge_counts)
+    ):
+        node_delta = (
+            new_registry_node_counts.get(source_key, 0)
+            - old_registry_node_counts.get(source_key, 0)
+        )
+        edge_delta = (
+            new_registry_edge_counts.get(source_key, 0)
+            - old_registry_edge_counts.get(source_key, 0)
+        )
+        conn.execute(
+            """
+            UPDATE graph_sources
+            SET node_count = MAX(0, node_count + ?),
+                edge_count = MAX(0, edge_count + ?)
+            WHERE source_key = ?
+            """,
+            (node_delta, edge_delta, source_key),
+        )
+
+    refresher = GraphSqliteStore.__new__(GraphSqliteStore)
+    refresher.aoa_root = aoa_root
+    refresher.paths = graph_paths(aoa_root)
+    refresher.db_path = graph_paths(aoa_root)["store"]
+    refresher.conn = conn
+    refresher.refresh_chunk_size = (
+        GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE
+    )
+    node_refresh, edge_refresh, refresh_timing = (
+        refresher._refresh_touched_aggregates_with_type_counts(
+            old_node_ids | new_node_ids,
+            old_edge_ids | new_edge_ids,
+        )
+    )
+    # The generic maintenance refresher intentionally reuses an existing
+    # aggregate payload for high-fanout node types. That is safe when only
+    # counts change, but not for this migration: registry semantic fields may
+    # have changed while the stable entity ID stayed the same. Rewrite these
+    # bounded aggregates from the pinned current registry after the generic
+    # count/type refresh so no stale representative survives.
+    registry_aggregate_rewrite_count = 0
+    for chunk in refresher._id_chunks(new_node_ids):
+        placeholders = ",".join("?" for _ in chunk)
+        summary_rows = conn.execute(
+            f"""
+            SELECT node_id, SUM(count) AS aggregate_count,
+                   COUNT(*) AS contrib_row_count
+            FROM node_contribs
+            WHERE node_type = 'entity_registry'
+              AND node_id IN ({placeholders})
+            GROUP BY node_id
+            """,
+            chunk,
+        ).fetchall()
+        for row in summary_rows:
+            node_id = str(row["node_id"] or "")
+            entry = entries_by_id.get(
+                node_id.removeprefix("entity_registry:")
+            )
+            if entry is None:
+                diagnostics.append(
+                    "graph_registry_refresh_aggregate_identity_unresolved:"
+                    f"{node_id}"
+                )
+                continue
+            aggregate = graph_entity_registry_node(
+                entry,
+                aoa_root=aoa_root,
+                evidence_refs=[],
+            )
+            aggregate["count"] = int_value(
+                row["aggregate_count"],
+                1,
+            )
+            aggregate["evidence_ref_count"] = min(
+                int_value(row["contrib_row_count"]),
+                graph_aggregate_evidence_limit("node"),
+            )
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO nodes(
+                  id, node_type, payload_json, count
+                ) VALUES (?, 'entity_registry', ?, ?)
+                """,
+                (
+                    node_id,
+                    graph_json(
+                        graph_compact_aggregate_payload(
+                            aggregate,
+                            kind="node",
+                        )
+                    ),
+                    int_value(aggregate["count"], 1),
+                ),
+            )
+            registry_aggregate_rewrite_count += 1
+    if diagnostics:
+        return {
+            "status": "blocked",
+            "ok": False,
+            "mutates": True,
+            "diagnostics": diagnostics[:40],
+            "counts": dict(counts),
+            "elapsed_ms": int(
+                (time.monotonic() - started) * 1000
+            ),
+        }
+    return {
+        "status": "refreshed",
+        "ok": True,
+        "mutates": True,
+        "diagnostics": [],
+        "counts": {
+            **dict(counts),
+            "old_registry_node_contribution_count": sum(
+                old_registry_node_counts.values()
+            ),
+            "new_registry_node_contribution_count": sum(
+                new_registry_node_counts.values()
+            ),
+            "old_registry_edge_contribution_count": sum(
+                old_registry_edge_counts.values()
+            ),
+            "new_registry_edge_contribution_count": sum(
+                new_registry_edge_counts.values()
+            ),
+            "affected_node_id_count": len(
+                old_node_ids | new_node_ids
+            ),
+            "affected_edge_id_count": len(
+                old_edge_ids | new_edge_ids
+            ),
+            "registry_aggregate_rewrite_count": (
+                registry_aggregate_rewrite_count
+            ),
+        },
+        "node_refresh": node_refresh,
+        "edge_refresh": edge_refresh,
+        "aggregate_refresh_timing": refresh_timing,
+        "elapsed_ms": int(
+            (time.monotonic() - started) * 1000
+        ),
+    }
+
+
+def graph_entity_registry_materialization_compatibility(
+    *,
+    aoa_root: Path,
+    conn: sqlite3.Connection,
+    dependency: dict[str, Any],
+    previous_producer_source: Path | None = None,
+    sample_limit: int = 8,
+    include_content_digest: bool = True,
+) -> dict[str, Any]:
+    """Prove that rebinding the registry cannot change graph content."""
+
+    started = time.monotonic()
+    bounded_sample_limit = max(
+        1,
+        min(int_value(sample_limit, 8), 40),
+    )
+    dependency_packet = graph_entity_registry_dependency_packet(
+        dependency
+    )
+    expected_dependency_id = str(
+        dependency.get("dependency_id") or ""
+    )
+    expected_generation = (
+        session_memory_expected_generation_identities(aoa_root)[
+            "graph"
+        ]
+    )
+    expected_generation_id = str(
+        expected_generation.get("generation_id") or ""
+    )
+    registry_entries = (
+        dependency.get("entries")
+        if isinstance(dependency.get("entries"), list)
+        else []
+    )
+    registry_index = (
+        dependency.get("index")
+        if isinstance(dependency.get("index"), dict)
+        else {}
+    )
+    entries_by_id = {
+        str(entry.get("entity_id") or ""): entry
+        for entry in registry_entries
+        if isinstance(entry, dict) and entry.get("entity_id")
+    }
+    diagnostics: list[str] = []
+    samples: list[dict[str, Any]] = []
+    required_tables = {
+        "metadata",
+        "graph_sources",
+        "node_contribs",
+        "edge_contribs",
+        "nodes",
+        "edges",
+        "graph_type_counts",
+    }
+    table_names = {
+        str(row["name"] if isinstance(row, sqlite3.Row) else row[0])
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+    }
+    missing_tables = sorted(required_tables - table_names)
+    if missing_tables:
+        diagnostics.extend(
+            f"graph_registry_rebind_table_missing:{table}"
+            for table in missing_tables
+        )
+        return {
+            "schema_version": (
+                GRAPH_ENTITY_REGISTRY_REBIND_CONTRACT_VERSION
+            ),
+            "artifact_type": (
+                "session_memory_graph_registry_rebind_compatibility"
+            ),
+            "status": "blocked",
+            "compatible": False,
+            "mutates": False,
+            "dependency": dependency_packet,
+            "diagnostics": diagnostics,
+            "samples": samples,
+            "elapsed_ms": int(
+                (time.monotonic() - started) * 1000
+            ),
+        }
+
+    metadata = {
+        str(row["key"]): str(row["value"])
+        for row in conn.execute(
+            "SELECT key, value FROM metadata"
+        ).fetchall()
+    }
+    stored_dependency_id = str(
+        metadata.get("entity_registry_dependency_id") or ""
+    )
+    stored_generation_id = str(
+        metadata.get("graph_generation_id") or ""
+    )
+    try:
+        stored_generation_identity = json.loads(
+            str(
+                metadata.get(
+                    "graph_generation_identity_json"
+                )
+                or "{}"
+            )
+        )
+    except json.JSONDecodeError:
+        stored_generation_identity = {}
+    if not isinstance(stored_generation_identity, dict):
+        stored_generation_identity = {}
+    generation_transition = graph_declared_generation_transition(
+        aoa_root=aoa_root,
+        stored_identity=stored_generation_identity,
+        previous_producer_source=previous_producer_source,
+    )
+    if (
+        int_value(metadata.get("graph_store_schema_version"))
+        != GRAPH_STORE_SCHEMA_VERSION
+    ):
+        diagnostics.append("graph_store_schema_mismatch")
+    if (
+        int_value(metadata.get("graph_schema_version"))
+        != GRAPH_SCHEMA_VERSION
+    ):
+        diagnostics.append("graph_schema_mismatch")
+    if not generation_transition.get("compatible"):
+        diagnostics.extend(
+            str(item)
+            for item in generation_transition.get(
+                "diagnostics",
+                [],
+            )
+            if item
+        )
+    if not expected_dependency_id:
+        diagnostics.append(
+            "graph_registry_rebind_current_dependency_missing"
+        )
+    if not stored_dependency_id:
+        diagnostics.append(
+            "graph_registry_rebind_stored_dependency_missing"
+        )
+
+    source_rows = conn.execute(
+        """
+        SELECT
+          COUNT(*) AS source_count,
+          SUM(
+            CASE
+              WHEN graph_schema_version != ?
+                OR graph_store_schema_version != ?
+                OR graph_event_route_signal_edge_policy != ?
+                OR route_signal_classifier_version != ?
+              THEN 1 ELSE 0
+            END
+          ) AS static_version_mismatch_count
+        FROM graph_sources
+        """,
+        (
+            GRAPH_SCHEMA_VERSION,
+            GRAPH_STORE_SCHEMA_VERSION,
+            GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
+            ROUTE_SIGNAL_CLASSIFIER_VERSION,
+        ),
+    ).fetchone()
+    source_count = int_value(source_rows["source_count"])
+    static_version_mismatch_count = int_value(
+        source_rows["static_version_mismatch_count"]
+    )
+    source_generation_rows = conn.execute(
+        """
+        SELECT
+          generation_id,
+          generation_identity_json,
+          COUNT(*) AS item_count
+        FROM graph_sources
+        GROUP BY generation_id, generation_identity_json
+        ORDER BY generation_id, generation_identity_json
+        """
+    ).fetchall()
+    source_generation_counts = [
+        {
+            "generation_id": str(row["generation_id"] or ""),
+            "generation_identity_json": str(
+                row["generation_identity_json"] or ""
+            ),
+            "item_count": int_value(row["item_count"]),
+        }
+        for row in source_generation_rows
+    ]
+    dependency_counts = {
+        str(row["entity_registry_dependency_id"] or ""): int_value(
+            row["item_count"]
+        )
+        for row in conn.execute(
+            """
+            SELECT entity_registry_dependency_id, COUNT(*) AS item_count
+            FROM graph_sources
+            GROUP BY entity_registry_dependency_id
+            ORDER BY entity_registry_dependency_id
+            """
+        ).fetchall()
+    }
+    if source_count <= 0:
+        diagnostics.append("graph_registry_rebind_source_rows_empty")
+    if static_version_mismatch_count:
+        diagnostics.append(
+            "graph_registry_rebind_static_version_mismatch"
+        )
+    expected_stored_identity_json = graph_json(
+        stored_generation_identity
+    )
+    if source_generation_counts != [
+        {
+            "generation_id": stored_generation_id,
+            "generation_identity_json": expected_stored_identity_json,
+            "item_count": source_count,
+        }
+    ]:
+        diagnostics.append(
+            "graph_registry_rebind_mixed_stored_generations"
+        )
+    if dependency_counts != {stored_dependency_id: source_count}:
+        diagnostics.append(
+            "graph_registry_rebind_mixed_stored_dependencies"
+        )
+
+    counts: Counter[str] = Counter()
+    aggregate_route_payloads: dict[str, dict[str, Any]] = {}
+    aggregate_registry_pairs: set[tuple[str, str]] = set()
+    aggregate_node_mismatches: list[dict[str, Any]] = []
+    for row in conn.execute(
+        "SELECT id, node_type, payload_json FROM nodes ORDER BY id"
+    ):
+        counts["aggregate_node_count"] += 1
+        try:
+            payload = json.loads(str(row["payload_json"]))
+        except (TypeError, json.JSONDecodeError):
+            counts["malformed_payload_count"] += 1
+            if len(samples) < bounded_sample_limit:
+                samples.append(
+                    {
+                        "table": "nodes",
+                        "id": str(row["id"]),
+                        "reason": "malformed_payload",
+                    }
+                )
+            continue
+        if not isinstance(payload, dict):
+            counts["malformed_payload_count"] += 1
+            continue
+        aggregate_route_payloads[str(row["id"])] = payload
+        if str(row["node_type"] or "") == "entity_registry":
+            counts["aggregate_registry_node_count"] += 1
+            mismatched_fields = (
+                graph_registry_materialization_node_mismatch(
+                    payload,
+                    entries_by_id,
+                )
+            )
+            if mismatched_fields:
+                aggregate_node_mismatches.append(
+                    {
+                        "table": "nodes",
+                        "id": str(row["id"]),
+                        "fields": mismatched_fields,
+                    }
+                )
+
+    for row in conn.execute(
+        """
+        SELECT id, source_node, target_node
+        FROM edges
+        WHERE edge_type = 'registry_entity_has_route_signal'
+        ORDER BY id
+        """
+    ):
+        counts["aggregate_registry_edge_count"] += 1
+        aggregate_registry_pairs.add(
+            (
+                str(row["source_node"] or ""),
+                str(row["target_node"] or ""),
+            )
+        )
+    expected_aggregate_pairs = {
+        (registry_node_id, node_id)
+        for node_id, payload in aggregate_route_payloads.items()
+        if (
+            registry_node_id
+            := graph_registry_materialization_route_target(
+                payload,
+                registry_index,
+            )
+        )
+    }
+    missing_aggregate_pairs = (
+        expected_aggregate_pairs - aggregate_registry_pairs
+    )
+    extra_aggregate_pairs = (
+        aggregate_registry_pairs - expected_aggregate_pairs
+    )
+
+    contribution_route_payloads: dict[
+        tuple[str, str],
+        dict[str, Any],
+    ] = {}
+    contribution_node_mismatches: list[dict[str, Any]] = []
+    for row in conn.execute(
+        """
+        SELECT source_key, node_id, node_type, payload_json
+        FROM node_contribs
+        ORDER BY source_key, node_id
+        """
+    ):
+        counts["contribution_node_count"] += 1
+        source_key = str(row["source_key"] or "")
+        node_id = str(row["node_id"] or "")
+        try:
+            payload = json.loads(str(row["payload_json"]))
+        except (TypeError, json.JSONDecodeError):
+            counts["malformed_payload_count"] += 1
+            if len(samples) < bounded_sample_limit:
+                samples.append(
+                    {
+                        "table": "node_contribs",
+                        "source_key": source_key,
+                        "id": node_id,
+                        "reason": "malformed_payload",
+                    }
+                )
+            continue
+        if not isinstance(payload, dict):
+            counts["malformed_payload_count"] += 1
+            continue
+        contribution_route_payloads[(source_key, node_id)] = (
+            payload
+        )
+        if str(row["node_type"] or "") == "entity_registry":
+            counts["contribution_registry_node_count"] += 1
+            mismatched_fields = (
+                graph_registry_materialization_node_mismatch(
+                    payload,
+                    entries_by_id,
+                )
+            )
+            if mismatched_fields:
+                contribution_node_mismatches.append(
+                    {
+                        "table": "node_contribs",
+                        "source_key": source_key,
+                        "id": node_id,
+                        "fields": mismatched_fields,
+                    }
+                )
+
+    contribution_registry_pairs: set[
+        tuple[str, str, str]
+    ] = set()
+    for row in conn.execute(
+        """
+        SELECT source_key, source_node, target_node
+        FROM edge_contribs
+        WHERE edge_type = 'registry_entity_has_route_signal'
+        ORDER BY source_key, edge_id
+        """
+    ):
+        counts["contribution_registry_edge_count"] += 1
+        contribution_registry_pairs.add(
+            (
+                str(row["source_key"] or ""),
+                str(row["source_node"] or ""),
+                str(row["target_node"] or ""),
+            )
+        )
+    expected_contribution_pairs = {
+        (source_key, registry_node_id, node_id)
+        for (
+            source_key,
+            node_id,
+        ), payload in contribution_route_payloads.items()
+        if (
+            registry_node_id
+            := graph_registry_materialization_route_target(
+                payload,
+                registry_index,
+            )
+        )
+    }
+    missing_contribution_pairs = (
+        expected_contribution_pairs
+        - contribution_registry_pairs
+    )
+    extra_contribution_pairs = (
+        contribution_registry_pairs
+        - expected_contribution_pairs
+    )
+
+    counts["aggregate_registry_node_mismatch_count"] = len(
+        aggregate_node_mismatches
+    )
+    counts["contribution_registry_node_mismatch_count"] = len(
+        contribution_node_mismatches
+    )
+    counts["missing_aggregate_registry_edge_count"] = len(
+        missing_aggregate_pairs
+    )
+    counts["extra_aggregate_registry_edge_count"] = len(
+        extra_aggregate_pairs
+    )
+    counts["missing_contribution_registry_edge_count"] = len(
+        missing_contribution_pairs
+    )
+    counts["extra_contribution_registry_edge_count"] = len(
+        extra_contribution_pairs
+    )
+    if counts["malformed_payload_count"]:
+        diagnostics.append(
+            "graph_registry_rebind_malformed_materialization"
+        )
+    if aggregate_node_mismatches:
+        diagnostics.append(
+            "graph_registry_rebind_aggregate_node_mismatch"
+        )
+    if contribution_node_mismatches:
+        diagnostics.append(
+            "graph_registry_rebind_contribution_node_mismatch"
+        )
+    if missing_aggregate_pairs or extra_aggregate_pairs:
+        diagnostics.append(
+            "graph_registry_rebind_aggregate_route_mapping_mismatch"
+        )
+    if (
+        missing_contribution_pairs
+        or extra_contribution_pairs
+    ):
+        diagnostics.append(
+            "graph_registry_rebind_contribution_route_mapping_mismatch"
+        )
+
+    for rows in (
+        aggregate_node_mismatches,
+        contribution_node_mismatches,
+        [
+            {
+                "table": "edges",
+                "source_node": source,
+                "target_node": target,
+                "reason": "missing_expected_registry_edge",
+            }
+            for source, target in sorted(
+                missing_aggregate_pairs
+            )
+        ],
+        [
+            {
+                "table": "edges",
+                "source_node": source,
+                "target_node": target,
+                "reason": "unexpected_registry_edge",
+            }
+            for source, target in sorted(
+                extra_aggregate_pairs
+            )
+        ],
+        [
+            {
+                "table": "edge_contribs",
+                "source_key": source_key,
+                "source_node": source,
+                "target_node": target,
+                "reason": "missing_expected_registry_edge",
+            }
+            for source_key, source, target in sorted(
+                missing_contribution_pairs
+            )
+        ],
+        [
+            {
+                "table": "edge_contribs",
+                "source_key": source_key,
+                "source_node": source,
+                "target_node": target,
+                "reason": "unexpected_registry_edge",
+            }
+            for source_key, source, target in sorted(
+                extra_contribution_pairs
+            )
+        ],
+    ):
+        for item in rows:
+            if len(samples) >= bounded_sample_limit:
+                break
+            samples.append(item)
+    compatible = not diagnostics
+    refreshable_diagnostics = {
+        "graph_registry_rebind_aggregate_node_mismatch",
+        "graph_registry_rebind_contribution_node_mismatch",
+        "graph_registry_rebind_aggregate_route_mapping_mismatch",
+        "graph_registry_rebind_contribution_route_mapping_mismatch",
+    }
+    registry_materialization_refreshable = bool(
+        diagnostics
+        and set(diagnostics).issubset(refreshable_diagnostics)
+        and generation_transition.get("compatible")
+        and static_version_mismatch_count == 0
+    )
+    content_digest = (
+        graph_projection_content_digest(conn)
+        if include_content_digest
+        else {}
+    )
+    semantic_digest = (
+        graph_projection_semantic_digest(conn)
+        if include_content_digest
+        else {}
+    )
+    return {
+        "schema_version": (
+            GRAPH_ENTITY_REGISTRY_REBIND_CONTRACT_VERSION
+        ),
+        "artifact_type": (
+            "session_memory_graph_registry_rebind_compatibility"
+        ),
+        "status": (
+            "current_noop"
+            if compatible
+            and stored_dependency_id == expected_dependency_id
+            and generation_transition.get("status") == "current"
+            else "ready_refresh"
+            if registry_materialization_refreshable
+            else "ready"
+            if compatible
+            else "blocked"
+        ),
+        "compatible": compatible,
+        "registry_materialization_refreshable": (
+            registry_materialization_refreshable
+        ),
+        "mutates": False,
+        "stored_dependency_id": stored_dependency_id,
+        "current_dependency_id": expected_dependency_id,
+        "stored_generation_id": stored_generation_id,
+        "current_generation_id": expected_generation_id,
+        "generation_transition": generation_transition,
+        "generation_changed": bool(
+            stored_generation_id
+            and expected_generation_id
+            and stored_generation_id != expected_generation_id
+        ),
+        "dependency_changed": bool(
+            stored_dependency_id
+            and expected_dependency_id
+            and stored_dependency_id != expected_dependency_id
+        ),
+        "dependency": dependency_packet,
+        "source_count": source_count,
+        "stored_dependency_counts": dependency_counts,
+        "stored_generation_counts": source_generation_counts,
+        "static_version_mismatch_count": (
+            static_version_mismatch_count
+        ),
+        "materialization_counts": dict(counts),
+        "content_digest": content_digest,
+        "semantic_digest": semantic_digest,
+        "diagnostics": list(dict.fromkeys(diagnostics)),
+        "samples": samples,
+        "truth_status": (
+            "complete_graph_registry_materialization_equivalence_"
+            "proof_not_owner_truth"
+        ),
+        "elapsed_ms": int(
+            (time.monotonic() - started) * 1000
+        ),
+    }
+
+
+def graph_entity_registry_dependency_rebind(
+    *,
+    aoa_root: Path,
+    apply: bool = False,
+    previous_producer_source: Path | None = None,
+    sample_limit: int = 8,
+    fail_before_commit: bool = False,
+) -> dict[str, Any]:
+    """Rebind a graph only after complete registry materialization proof."""
+
+    started = time.monotonic()
+    store_path = graph_paths(aoa_root)["store"]
+    dependency = graph_entity_registry_dependency_snapshot(
+        aoa_root,
+        ensure_current=apply,
+        allow_ephemeral=False,
+    )
+    dependency_packet = graph_entity_registry_dependency_packet(
+        dependency
+    )
+    base = {
+        "schema_version": (
+            GRAPH_ENTITY_REGISTRY_REBIND_CONTRACT_VERSION
+        ),
+        "artifact_type": (
+            "session_memory_graph_registry_dependency_rebind"
+        ),
+        "generated_at": utc_now(),
+        "apply": bool(apply),
+        "db_path": str(store_path),
+        "previous_producer_source": (
+            str(previous_producer_source)
+            if previous_producer_source is not None
+            else ""
+        ),
+        "dependency": dependency_packet,
+        "authority_boundary": (
+            "raw sessions and external owner sources remain stronger; "
+            "this operation changes only a proved generated graph "
+            "dependency binding"
+        ),
+    }
+    if dependency.get("status") != "current":
+        return {
+            **base,
+            "ok": False,
+            "status": "blocked",
+            "mutates": False,
+            "dependency_binding_changed": False,
+            "graph_content_changed": False,
+            "diagnostics": [
+                "graph_registry_rebind_current_dependency_not_current",
+                *[
+                    str(item)
+                    for item in dependency.get("reasons", [])
+                    if item
+                ],
+            ],
+            "elapsed_ms": int(
+                (time.monotonic() - started) * 1000
+            ),
+        }
+    if not store_path.is_file():
+        return {
+            **base,
+            "ok": False,
+            "status": "blocked",
+            "mutates": False,
+            "dependency_binding_changed": False,
+            "graph_content_changed": False,
+            "diagnostics": ["graph_store_missing"],
+            "elapsed_ms": int(
+                (time.monotonic() - started) * 1000
+            ),
+    }
+
+    conn: sqlite3.Connection | None = None
+    phase = "open_graph_store"
+    try:
+        if apply:
+            conn = sqlite3.connect(str(store_path))
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA busy_timeout=120000")
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("BEGIN IMMEDIATE")
+        else:
+            conn = sqlite3.connect(
+                f"{store_path.resolve().as_uri()}?mode=ro",
+                uri=True,
+            )
+            conn.row_factory = sqlite3.Row
+        phase = "initial_materialization_proof"
+        plan = graph_entity_registry_materialization_compatibility(
+            aoa_root=aoa_root,
+            conn=conn,
+            dependency=dependency,
+            previous_producer_source=(
+                previous_producer_source
+            ),
+            sample_limit=sample_limit,
+            include_content_digest=True,
+        )
+        refresh_required = bool(
+            plan.get("registry_materialization_refreshable")
+        )
+        if not plan.get("compatible") and not refresh_required:
+            if apply:
+                conn.rollback()
+            return {
+                **base,
+                "ok": False,
+                "status": "blocked",
+                "mutates": False,
+                "dependency_binding_changed": False,
+                "graph_content_changed": False,
+                "plan": plan,
+                "diagnostics": list(
+                    plan.get("diagnostics", [])
+                ),
+                "next_route": (
+                    "Refresh only affected graph source contributions "
+                    "when the mismatch set is bounded; otherwise use "
+                    "graph-build all --write --store-only."
+                ),
+                "elapsed_ms": int(
+                    (time.monotonic() - started) * 1000
+                ),
+            }
+        if plan.get("status") == "current_noop":
+            if apply:
+                conn.rollback()
+            return {
+                **base,
+                "ok": True,
+                "status": "current_noop",
+                "mutates": False,
+                "dependency_binding_changed": False,
+                "graph_content_changed": False,
+                "plan": plan,
+                "content_digest_before": plan.get(
+                    "content_digest"
+                ),
+                "content_digest_after": plan.get(
+                    "content_digest"
+                ),
+                "diagnostics": [],
+                "elapsed_ms": int(
+                    (time.monotonic() - started) * 1000
+                ),
+            }
+        if not apply:
+            return {
+                **base,
+                "ok": True,
+                "status": (
+                    "ready_refresh"
+                    if refresh_required
+                    else "ready"
+                ),
+                "mutates": False,
+                "dependency_binding_changed": False,
+                "graph_content_changed": False,
+                "registry_materialization_refresh_required": (
+                    refresh_required
+                ),
+                "plan": plan,
+                "content_digest_before": plan.get(
+                    "content_digest"
+                ),
+                "diagnostics": [],
+                "exact_apply_command": (
+                    "python3 scripts/aoa_session_memory.py "
+                    "graph-registry-rebind "
+                    f"--aoa-root {shlex.quote(str(aoa_root))} "
+                    + (
+                        "--previous-producer-source "
+                        f"{shlex.quote(str(previous_producer_source))} "
+                        if previous_producer_source is not None
+                        else ""
+                    )
+                    + "--apply --write-report"
+                ),
+                "elapsed_ms": int(
+                    (time.monotonic() - started) * 1000
+                ),
+            }
+
+        phase = "pre_mutation_guards"
+        expected_dependency_id = str(
+            dependency.get("dependency_id") or ""
+        )
+        graph_assert_entity_registry_dependency_current(
+            aoa_root,
+            expected_dependency_id,
+        )
+        producer_before_commit = (
+            session_memory_loaded_producer_source_state()
+        )
+        if not producer_before_commit.get("stable"):
+            raise GraphEntityRegistryDependencyChanged(
+                "producer_source_changed_before_graph_registry_rebind"
+            )
+        phase = "non_registry_digest_before"
+        non_registry_digest_before = (
+            graph_non_registry_content_digest(conn)
+        )
+        materialization_refresh: dict[str, Any] = {
+            "status": "not_required",
+            "ok": True,
+            "mutates": False,
+        }
+        if refresh_required:
+            phase = "registry_materialization_refresh"
+            materialization_refresh = (
+                graph_registry_materialization_refresh(
+                    aoa_root=aoa_root,
+                    conn=conn,
+                    dependency=dependency,
+                )
+            )
+            if not materialization_refresh.get("ok"):
+                raise RuntimeError(
+                    "graph_registry_materialization_refresh_failed:"
+                    + ",".join(
+                        str(item)
+                        for item in materialization_refresh.get(
+                            "diagnostics",
+                            [],
+                        )
+                    )
+                )
+            phase = "non_registry_digest_after_refresh"
+            non_registry_digest_after_refresh = (
+                graph_non_registry_content_digest(conn)
+            )
+            if (
+                non_registry_digest_before.get("sha256")
+                != non_registry_digest_after_refresh.get("sha256")
+            ):
+                raise RuntimeError(
+                    "graph_registry_refresh_changed_non_registry_content"
+                )
+            phase = "refreshed_materialization_proof"
+            refreshed_plan = (
+                graph_entity_registry_materialization_compatibility(
+                    aoa_root=aoa_root,
+                    conn=conn,
+                    dependency=dependency,
+                    previous_producer_source=(
+                        previous_producer_source
+                    ),
+                    sample_limit=sample_limit,
+                    include_content_digest=True,
+                )
+            )
+            if not refreshed_plan.get("compatible"):
+                raise RuntimeError(
+                    "graph_registry_refresh_post_proof_failed:"
+                    + ",".join(
+                        str(item)
+                        for item in refreshed_plan.get(
+                            "diagnostics",
+                            [],
+                        )
+                    )
+                )
+        else:
+            non_registry_digest_after_refresh = (
+                non_registry_digest_before
+            )
+            refreshed_plan = plan
+        phase = "generation_and_dependency_binding"
+        dependency_json = graph_json(dependency_packet)
+        expected_generation = (
+            session_memory_expected_generation_identities(
+                aoa_root
+            )["graph"]
+        )
+        expected_generation_id = str(
+            expected_generation.get("generation_id") or ""
+        )
+        expected_generation_json = graph_json(
+            expected_generation
+        )
+        source_cursor = conn.execute(
+            """
+            UPDATE graph_sources
+            SET generation_id = ?,
+                generation_identity_json = ?,
+                entity_registry_dependency_id = ?,
+                entity_registry_dependency_json = ?
+            """,
+            (
+                expected_generation_id,
+                expected_generation_json,
+                expected_dependency_id,
+                dependency_json,
+            ),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO metadata(key, value) "
+            "VALUES ('graph_generation_id', ?)",
+            (expected_generation_id,),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO metadata(key, value) "
+            "VALUES ('graph_generation_identity_json', ?)",
+            (expected_generation_json,),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO metadata(key, value) "
+            "VALUES ('entity_registry_dependency_id', ?)",
+            (expected_dependency_id,),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO metadata(key, value) "
+            "VALUES ('entity_registry_dependency_json', ?)",
+            (dependency_json,),
+        )
+        rebound_at = utc_now()
+        for key, value in (
+            (
+                "graph_registry_rebind_contract_version",
+                GRAPH_ENTITY_REGISTRY_REBIND_CONTRACT_VERSION,
+            ),
+            (
+                "graph_registry_dependency_rebound_at",
+                rebound_at,
+            ),
+            (
+                "graph_registry_dependency_rebound_from",
+                plan.get("stored_dependency_id") or "",
+            ),
+            (
+                "graph_generation_rebound_at",
+                rebound_at,
+            ),
+            (
+                "graph_generation_rebound_from",
+                plan.get("stored_generation_id") or "",
+            ),
+            (
+                "graph_generation_rebound_previous_source_sha256",
+                (
+                    plan.get("generation_transition", {})
+                    if isinstance(
+                        plan.get("generation_transition"),
+                        dict,
+                    )
+                    else {}
+                ).get("previous_producer_sha256")
+                or "",
+            ),
+        ):
+            conn.execute(
+                "INSERT OR REPLACE INTO metadata(key, value) "
+                "VALUES (?, ?)",
+                (key, str(value)),
+            )
+        if fail_before_commit:
+            phase = "injected_pre_commit_failure"
+            raise RuntimeError(
+                "injected_graph_registry_rebind_failure"
+            )
+        phase = "pre_commit_guards"
+        graph_assert_entity_registry_dependency_current(
+            aoa_root,
+            expected_dependency_id,
+        )
+        producer_at_commit = (
+            session_memory_loaded_producer_source_state()
+        )
+        if not producer_at_commit.get("stable"):
+            raise GraphEntityRegistryDependencyChanged(
+                "producer_source_changed_during_graph_registry_rebind"
+            )
+        phase = "content_digest_after"
+        content_digest_after = graph_projection_content_digest(
+            conn
+        )
+        if (
+            not refresh_required
+            and
+            str(
+                (
+                    plan.get("content_digest")
+                    if isinstance(
+                        plan.get("content_digest"),
+                        dict,
+                    )
+                    else {}
+                ).get("sha256")
+                or ""
+            )
+            != str(content_digest_after.get("sha256") or "")
+        ):
+            raise RuntimeError(
+                "graph_registry_rebind_content_digest_changed"
+            )
+        phase = "semantic_digest_after"
+        semantic_digest_after = (
+            graph_projection_semantic_digest(conn)
+        )
+        phase = "commit"
+        conn.commit()
+    except (
+        GraphEntityRegistryDependencyChanged,
+        RuntimeError,
+        sqlite3.Error,
+    ) as exc:
+        if conn is not None:
+            conn.rollback()
+        return {
+            **base,
+            "ok": False,
+            "status": "rolled_back",
+            "mutates": False,
+            "dependency_binding_changed": False,
+            "graph_content_changed": False,
+            "diagnostics": [f"{phase}:{exc}"],
+            "next_route": (
+                "Refresh the current registry and retry the read-only "
+                "rebind plan; use source contribution refresh when "
+                "materialization changed."
+            ),
+            "elapsed_ms": int(
+                (time.monotonic() - started) * 1000
+            ),
+        }
+    finally:
+        if conn is not None:
+            conn.close()
+
+    post_commit_conn = sqlite3.connect(
+        f"{store_path.resolve().as_uri()}?mode=ro",
+        uri=True,
+    )
+    post_commit_conn.row_factory = sqlite3.Row
+    try:
+        post_commit_proof = (
+            graph_entity_registry_materialization_compatibility(
+                aoa_root=aoa_root,
+                conn=post_commit_conn,
+                dependency=dependency,
+                previous_producer_source=None,
+                sample_limit=sample_limit,
+                include_content_digest=True,
+            )
+        )
+    finally:
+        post_commit_conn.close()
+    final_state = graph_store_query_state(aoa_root)
+    sidecar_state = graph_sidecar_commit_validation(
+        aoa_root,
+        read_json(graph_paths(aoa_root)["index"], {}),
+        verify_content=False,
+        verify_store_semantics=False,
+    )
+    return {
+        **base,
+        "ok": bool(
+            post_commit_proof.get("compatible")
+            and post_commit_proof.get("status")
+            == "current_noop"
+            and final_state.get("status") == "current"
+        ),
+        "status": (
+            "applied"
+            if (
+                post_commit_proof.get("compatible")
+                and post_commit_proof.get("status")
+                == "current_noop"
+                and final_state.get("status") == "current"
+            )
+            else "applied_but_not_current"
+        ),
+        "mutates": True,
+        "dependency_binding_changed": True,
+        "generation_binding_changed": bool(
+            plan.get("generation_changed")
+        ),
+        "graph_content_changed": bool(refresh_required),
+        "registry_materialization_refreshed": bool(
+            refresh_required
+        ),
+        "projection_freshness_progress": True,
+        "semantic_graph_progress": bool(refresh_required),
+        "source_rows_rebound": max(
+            0,
+            int_value(source_cursor.rowcount),
+        ),
+        "rebound_at": rebound_at,
+        "plan": plan,
+        "materialization_refresh": materialization_refresh,
+        "refreshed_plan": refreshed_plan,
+        "post_commit_proof": post_commit_proof,
+        "non_registry_content_digest_before": (
+            non_registry_digest_before
+        ),
+        "non_registry_content_digest_after": (
+            non_registry_digest_after_refresh
+        ),
+        "content_digest_before": plan.get("content_digest"),
+        "content_digest_after": content_digest_after,
+        "semantic_digest_before": plan.get("semantic_digest"),
+        "semantic_digest_after": semantic_digest_after,
+        "final_graph_state": {
+            key: final_state.get(key)
+            for key in (
+                "status",
+                "reasons",
+                "generation_identity",
+                "entity_registry_dependency",
+                "source_version_state",
+            )
+        },
+        "sidecar": {
+            "status": sidecar_state.get("status"),
+            "ok": sidecar_state.get("ok"),
+            "diagnostics": sidecar_state.get("diagnostics"),
+            "truth_status": sidecar_state.get("truth_status"),
+        },
+        "diagnostics": (
+            []
+            if (
+                post_commit_proof.get("compatible")
+                and post_commit_proof.get("status")
+                == "current_noop"
+                and final_state.get("status") == "current"
+            )
+            else [
+                "graph_registry_rebind_final_store_not_current"
+            ]
+        ),
+        "next_route": (
+            "Publish the optional sidecar from the current graph store "
+            "only when an offline sidecar consumer requires it."
+            if not sidecar_state.get("ok")
+            else "The graph store and optional sidecar are current."
+        ),
+        "elapsed_ms": int(
+            (time.monotonic() - started) * 1000
+        ),
+    }
+
+
 class GraphSqliteStore:
     """Durable source-contribution graph store for incremental maintenance."""
 
@@ -110162,6 +112802,207 @@ class GraphSqliteStore:
         return graph_assert_entity_registry_dependency_current(
             self.aoa_root,
             self.entity_registry_dependency_id,
+        )
+
+    def reconcile_entity_registry_dependency(
+        self,
+        *,
+        max_attempts: int = 3,
+    ) -> dict[str, Any]:
+        """Adopt registry-only drift without rebuilding session contributions."""
+
+        attempts: list[dict[str, Any]] = []
+        bounded_attempts = max(1, min(int_value(max_attempts, 3), 5))
+        for attempt_number in range(1, bounded_attempts + 1):
+            dependency = graph_entity_registry_dependency_snapshot(
+                self.aoa_root,
+                ensure_current=True,
+                allow_ephemeral=False,
+            )
+            dependency_id = str(
+                dependency.get("dependency_id") or ""
+            )
+            attempt: dict[str, Any] = {
+                "attempt": attempt_number,
+                "stored_dependency_id": (
+                    self.entity_registry_dependency_id
+                ),
+                "current_dependency_id": dependency_id,
+                "dependency_status": dependency.get("status"),
+                "registry_refreshed": bool(
+                    dependency.get("refreshed")
+                ),
+            }
+            attempts.append(attempt)
+            if (
+                dependency.get("status") != "current"
+                or not dependency_id
+            ):
+                attempt["status"] = "blocked"
+                attempt["diagnostics"] = list(
+                    dependency.get("reasons")
+                    if isinstance(dependency.get("reasons"), list)
+                    else []
+                )
+                raise GraphEntityRegistryDependencyChanged(
+                    "graph_entity_registry_dependency_reconciliation_"
+                    "not_current:"
+                    + ",".join(
+                        str(item)
+                        for item in attempt["diagnostics"]
+                    )
+                )
+            if dependency_id == self.entity_registry_dependency_id:
+                attempt["status"] = "current_noop"
+                return {
+                    "status": "current_noop",
+                    "reconciled": False,
+                    "attempt_count": attempt_number,
+                    "attempts": attempts,
+                    "entity_registry_dependency": (
+                        graph_entity_registry_dependency_packet(
+                            dependency
+                        )
+                    ),
+                    "truth_status": (
+                        "current_persisted_registry_dependency_verified"
+                    ),
+                }
+
+            savepoint = (
+                f"graph_registry_reconcile_{attempt_number}"
+            )
+            self.conn.execute(f"SAVEPOINT {savepoint}")
+            try:
+                non_registry_before = (
+                    graph_non_registry_content_digest(self.conn)
+                )
+                materialization_refresh = (
+                    graph_registry_materialization_refresh(
+                        aoa_root=self.aoa_root,
+                        conn=self.conn,
+                        dependency=dependency,
+                    )
+                )
+                if not materialization_refresh.get("ok"):
+                    raise RuntimeError(
+                        "graph_registry_materialization_refresh_failed:"
+                        + ",".join(
+                            str(item)
+                            for item in materialization_refresh.get(
+                                "diagnostics",
+                                [],
+                            )
+                        )
+                    )
+                non_registry_after = (
+                    graph_non_registry_content_digest(self.conn)
+                )
+                if (
+                    non_registry_before.get("sha256")
+                    != non_registry_after.get("sha256")
+                ):
+                    raise RuntimeError(
+                        "graph_registry_reconciliation_changed_"
+                        "non_registry_content"
+                    )
+
+                dependency_packet = (
+                    graph_entity_registry_dependency_packet(
+                        dependency
+                    )
+                )
+                dependency_json = graph_json(dependency_packet)
+                self.entity_registry_dependency = (
+                    dependency_packet
+                )
+                self.entity_registry_dependency_id = dependency_id
+                self.entity_registry_dependency_json = (
+                    dependency_json
+                )
+                self.enforce_entity_registry_dependency = True
+                self.conn.execute(
+                    """
+                    UPDATE graph_sources
+                    SET entity_registry_dependency_id = ?,
+                        entity_registry_dependency_json = ?
+                    """,
+                    (dependency_id, dependency_json),
+                )
+                self._mark_generation_current()
+                proof = (
+                    graph_entity_registry_materialization_compatibility(
+                        aoa_root=self.aoa_root,
+                        conn=self.conn,
+                        dependency=dependency,
+                        sample_limit=8,
+                        include_content_digest=True,
+                    )
+                )
+                if not proof.get("compatible"):
+                    raise RuntimeError(
+                        "graph_registry_reconciliation_proof_failed:"
+                        + ",".join(
+                            str(item)
+                            for item in proof.get(
+                                "diagnostics",
+                                [],
+                            )
+                        )
+                    )
+                graph_assert_entity_registry_dependency_current(
+                    self.aoa_root,
+                    dependency_id,
+                )
+                self.conn.execute(f"RELEASE {savepoint}")
+                attempt.update(
+                    {
+                        "status": "reconciled",
+                        "materialization_refresh": (
+                            materialization_refresh
+                        ),
+                        "proof_status": proof.get("status"),
+                        "proof_compatible": proof.get(
+                            "compatible"
+                        ),
+                        "non_registry_content_digest_before": (
+                            non_registry_before
+                        ),
+                        "non_registry_content_digest_after": (
+                            non_registry_after
+                        ),
+                    }
+                )
+                return {
+                    "status": "reconciled",
+                    "reconciled": True,
+                    "attempt_count": attempt_number,
+                    "attempts": attempts,
+                    "entity_registry_dependency": (
+                        dependency_packet
+                    ),
+                    "truth_status": (
+                        "registry_only_drift_reconciled_inside_"
+                        "unpublished_atomic_graph_store"
+                    ),
+                }
+            except GraphEntityRegistryDependencyChanged as exc:
+                self.conn.execute(
+                    f"ROLLBACK TO {savepoint}"
+                )
+                self.conn.execute(f"RELEASE {savepoint}")
+                attempt["status"] = "retry_dependency_changed"
+                attempt["diagnostics"] = [str(exc)]
+                continue
+            except (RuntimeError, sqlite3.Error):
+                self.conn.execute(
+                    f"ROLLBACK TO {savepoint}"
+                )
+                self.conn.execute(f"RELEASE {savepoint}")
+                raise
+        raise GraphEntityRegistryDependencyChanged(
+            "graph_entity_registry_dependency_reconciliation_"
+            f"retry_exhausted:{bounded_attempts}"
         )
 
     def _mark_generation_current(self) -> None:
@@ -111594,6 +114435,9 @@ class GraphSqliteStore:
         self._upsert_metadata("graph_store_contrib_payload_mode", GRAPH_STORE_CONTRIB_PAYLOAD_MODE)
         self._upsert_metadata("graph_event_route_signal_edge_policy", GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY)
         self._upsert_metadata("graph_event_relationship_edge_policy", GRAPH_EVENT_RELATIONSHIP_EDGE_POLICY)
+        entity_registry_reconciliation = (
+            self.reconcile_entity_registry_dependency()
+        )
         type_counts_projection = self.refresh_type_counts(commit=False)
         relation_projection = (
             graph_relation_projection_state_from_connection(self.conn)
@@ -111611,6 +114455,14 @@ class GraphSqliteStore:
             "type_counts_projection": type_counts_projection,
             "relation_projection": relation_projection,
             "semantic_digest": semantic_digest,
+            "entity_registry_reconciliation": (
+                entity_registry_reconciliation
+            ),
+            "entity_registry_dependency": (
+                graph_entity_registry_dependency_packet(
+                    self.entity_registry_dependency
+                )
+            ),
         }
 
     def state_counts(self) -> dict[str, int]:
@@ -113185,9 +116037,19 @@ def build_session_graph(
         rebuild_succeeded = False
         replace_tmp_store = False
         prune_sidecar_after_store_success = False
+        published_entity_registry_dependency_packet = dict(
+            entity_registry_dependency_packet
+        )
         started_at = time.monotonic()
         try:
             rebuild_result = store.rebuild(iter_contributions())
+            final_dependency = rebuild_result.get(
+                "entity_registry_dependency"
+            )
+            if isinstance(final_dependency, dict):
+                published_entity_registry_dependency_packet = (
+                    dict(final_dependency)
+                )
             sidecar = (
                 store.write_sidecar(
                     reclaim_existing=reclaim_existing_sidecar
@@ -113220,10 +116082,15 @@ def build_session_graph(
                     "processed_record_count": processed_record_count,
                     "source_count": int_value(rebuild_result.get("result_count")),
                     "rebuild_result": {key: rebuild_result.get(key) for key in ("status", "result_count", "generated_at")},
+                    "entity_registry_reconciliation": (
+                        rebuild_result.get(
+                            "entity_registry_reconciliation"
+                        )
+                    ),
                     "sidecar": sidecar,
                     "elapsed_ms": int((time.monotonic() - started_at) * 1000),
                     "entity_registry_dependency": (
-                        entity_registry_dependency_packet
+                        published_entity_registry_dependency_packet
                     ),
                 }
             )
@@ -113271,7 +116138,7 @@ def build_session_graph(
                         graph_assert_entity_registry_dependency_current(
                             aoa_root,
                             str(
-                                entity_registry_dependency.get(
+                                published_entity_registry_dependency_packet.get(
                                     "dependency_id"
                                 )
                                 or ""
@@ -113299,13 +116166,13 @@ def build_session_graph(
                     published_store = GraphSqliteStore(
                         aoa_root,
                         entity_registry_dependency=(
-                            entity_registry_dependency_packet
+                            published_entity_registry_dependency_packet
                         ),
                     )
                     graph_assert_entity_registry_dependency_current(
                         aoa_root,
                         str(
-                            entity_registry_dependency.get(
+                            published_entity_registry_dependency_packet.get(
                                 "dependency_id"
                             )
                             or ""
@@ -114437,6 +117304,28 @@ def graph_source_maintenance_recommendation(
     ledger_store_mismatch = int_value(reason_group_counts.get("graph_source_ledger_store_count_mismatch"))
     ledger_coverage_gap = int_value(reason_group_counts.get("graph_source_ledger_coverage_gap"))
     missing_paths = int_value(reason_group_counts.get("missing_graph_source_path"))
+    registry_dependency_mismatch = int_value(
+        reason_group_counts.get(
+            "graph_entity_registry_dependency_mismatch"
+        )
+    )
+    non_registry_reason_count = sum(
+        int_value(value)
+        for key, value in reason_group_counts.items()
+        if (
+            key
+            != "graph_entity_registry_dependency_mismatch"
+            and int_value(value) > 0
+        )
+    )
+    registry_dependency_only = bool(
+        actionable_count > 0
+        and int_value(dirty_count) == actionable_count
+        and int_value(missing_count) == 0
+        and int_value(orphaned_count) == 0
+        and registry_dependency_mismatch >= actionable_count
+        and non_registry_reason_count == 0
+    )
     blocked = max(0, int_value(blocked_count))
     root_args = f"--workspace-root {workspace_root} --aoa-root {aoa_root}"
     bounded_batch_limit = GRAPH_MAINTENANCE_AUTO_BATCH_LIMIT
@@ -114469,6 +117358,13 @@ def graph_source_maintenance_recommendation(
         return (
             "python3 scripts/aoa_session_memory.py graph-build all "
             f"{root_args} --write --store-only --progress-every 10"
+        )
+
+    def graph_registry_rebind_command() -> str:
+        return (
+            "python3 scripts/aoa_session_memory.py "
+            "graph-registry-rebind "
+            f"{root_args} --apply --write-report"
         )
 
     def graph_event_sequence_prune_command() -> str:
@@ -114540,6 +117436,13 @@ def graph_source_maintenance_recommendation(
         route = "none"
         reason = "graph_sources_current"
         command = ""
+    elif registry_dependency_only:
+        route = "graph_registry_dependency_rebind"
+        reason = (
+            "entity_registry_dependency_only_drift_requires_"
+            "materialization_proof"
+        )
+        command = graph_registry_rebind_command()
     elif mostly_missing_partial_store:
         route = "store_only_rebuild"
         reason = "graph_store_mostly_missing_sources_store_only_rebuild"
@@ -114641,6 +117544,15 @@ def graph_source_maintenance_recommendation(
     if route == "store_only_rebuild":
         notes.append("store_only_rebuild_is_manual_resource_gated")
         notes.append("use_in_place_only_when_storage_headroom_is_low")
+    if route == "graph_registry_dependency_rebind":
+        notes.append(
+            "rebind_runs_complete_registry_node_and_route_mapping_"
+            "equivalence_before_atomic_publish"
+        )
+        notes.append(
+            "materialization_mismatch_refuses_and_returns_to_source_"
+            "contribution_refresh"
+        )
     if route == "graph_event_sequence_prune":
         notes.append("generated_sequence_edges_can_be_pruned_without_full_source_regeneration")
         notes.append("raw_session_and_segment_order_remain_authoritative")
@@ -115055,6 +117967,19 @@ def graph_store_state(
             ),
         )
     )
+    dependency_rebind_needed = bool(
+        entity_registry_dependency_state.get("status") == "stale"
+        and entity_registry_dependency_state.get(
+            "expected_dependency_id"
+        )
+        and entity_registry_dependency_state.get(
+            "observed_dependency_id"
+        )
+        and set(
+            entity_registry_dependency_state.get("reasons", [])
+        )
+        == {"graph_entity_registry_dependency_mismatch"}
+    )
     reasons: list[str] = []
     if int_value(metadata.get("graph_store_schema_version")) != GRAPH_STORE_SCHEMA_VERSION:
         reasons.append("graph_store_schema_mismatch")
@@ -115092,7 +118017,10 @@ def graph_store_state(
         entity_registry_dependency_state.get("compatible")
     )
     full_rebuild_reasons = [reason for reason in reasons if reason in {"graph_store_schema_mismatch", "graph_schema_mismatch", "graph_store_nodes_empty", "graph_store_edges_empty"}]
-    if not entity_registry_dependency_compatible:
+    if (
+        not entity_registry_dependency_compatible
+        and not dependency_rebind_needed
+    ):
         full_rebuild_reasons.extend(
             str(reason)
             for reason in entity_registry_dependency_state.get(
@@ -115186,6 +118114,9 @@ def graph_store_state(
         },
         "entity_registry_dependency": (
             entity_registry_dependency_state
+        ),
+        "needs_dependency_rebind": (
+            dependency_rebind_needed
         ),
         "global_freshness": {
             "status": global_freshness_status,
@@ -120574,6 +123505,19 @@ def graph_store_query_state(aoa_root: Path) -> dict[str, Any]:
             ),
         )
     )
+    query_dependency_rebind_needed = bool(
+        entity_registry_dependency_state.get("status") == "stale"
+        and entity_registry_dependency_state.get(
+            "expected_dependency_id"
+        )
+        and entity_registry_dependency_state.get(
+            "observed_dependency_id"
+        )
+        and set(
+            entity_registry_dependency_state.get("reasons", [])
+        )
+        == {"graph_entity_registry_dependency_mismatch"}
+    )
     reasons: list[str] = []
     if int_value(metadata.get("graph_store_schema_version")) != GRAPH_STORE_SCHEMA_VERSION:
         reasons.append("graph_store_schema_mismatch")
@@ -120620,6 +123564,9 @@ def graph_store_query_state(aoa_root: Path) -> dict[str, Any]:
         },
         "entity_registry_dependency": (
             entity_registry_dependency_state
+        ),
+        "needs_dependency_rebind": (
+            query_dependency_rebind_needed
         ),
         "source_version_state": source_version_state,
         "global_freshness": {
@@ -144280,7 +147227,34 @@ def session_memory_maintenance_next_actions(
         # Search shards and operational route-rollup have narrower next actions
         # added by the maintenance-status composition layer.
         pass
-    if graph.get("needs_full_rebuild"):
+    if graph.get("needs_dependency_rebind"):
+        actions.append(
+            {
+                "id": "repair_graph_registry_dependency",
+                "reason": (
+                    "entity_registry_dependency_changed_with_"
+                    "current_graph_generation"
+                ),
+                "route_kind": (
+                    "graph_registry_dependency_rebind"
+                ),
+                "command": [
+                    *cli,
+                    "graph-registry-rebind",
+                    *root_args,
+                    "--apply",
+                    "--write-report",
+                ],
+                "note": (
+                    "This bounded route proves every materialized "
+                    "registry node and registry-to-route relation "
+                    "against the current registry before one atomic "
+                    "dependency-only publication. A mismatch refuses "
+                    "and returns to source-contribution refresh."
+                ),
+            }
+        )
+    elif graph.get("needs_full_rebuild"):
         empty_store = any(reason in graph_diagnostics for reason in ("graph_store_nodes_empty", "graph_store_edges_empty"))
         schema_or_store_version_rebuild = any(
             reason in graph_diagnostics for reason in ("graph_store_schema_mismatch", "graph_schema_mismatch")
@@ -144923,6 +147897,26 @@ def entity_registry_maintenance_status(aoa_root: Path) -> dict[str, Any]:
         diagnostics.append("entity_registry_source_fingerprint_missing")
     if payload.get("artifact_type") != "entity_registry_snapshot":
         diagnostics.append("entity_registry_artifact_type_mismatch")
+    stored_semantic_digest = (
+        payload.get("semantic_digest")
+        if isinstance(payload.get("semantic_digest"), dict)
+        else {}
+    )
+    calculated_semantic_digest = (
+        entity_registry_semantic_digest(
+            payload,
+            aoa_root=aoa_root,
+        )
+        if payload
+        else {}
+    )
+    semantic_digest_verified = bool(
+        str(stored_semantic_digest.get("sha256") or "")
+        and str(stored_semantic_digest.get("sha256") or "")
+        == str(calculated_semantic_digest.get("sha256") or "")
+    )
+    if not semantic_digest_verified:
+        diagnostics.append("entity_registry_semantic_digest_unverified")
     stored_observed_dependency = (
         payload.get("observed_source_dependency")
         if isinstance(
@@ -144990,18 +147984,22 @@ def entity_registry_maintenance_status(aoa_root: Path) -> dict[str, Any]:
     entity_count = int_value(payload.get("entity_count"))
     if entity_count <= 0:
         diagnostics.append("entity_registry_empty")
-    generated_at = parse_utc_timestamp(str(payload.get("generated_at") or ""))
-    try:
-        generated_at_epoch = float(payload.get("generated_at_epoch") or 0.0)
-    except (TypeError, ValueError):
-        generated_at_epoch = 0.0
-    if generated_at_epoch <= 0 and generated_at is not None:
-        generated_at_epoch = generated_at.timestamp() + 1.0
-    latest_source_mtime = float(source_state.get("latest_source_mtime") or 0.0)
-    if generated_at is None and generated_at_epoch <= 0 and latest_source_mtime:
-        diagnostics.append("entity_registry_generated_at_unreadable")
-    elif generated_at_epoch > 0 and latest_source_mtime > generated_at_epoch + 0.001:
-        diagnostics.append("source_newer_than_entity_registry")
+    runtime_overlay_required = False
+    runtime_overlay_state: dict[str, Any] = {}
+    if payload:
+        (
+            runtime_overlay_required,
+            runtime_overlay_state,
+        ) = entity_registry_snapshot_needs_runtime_source_overlay(
+            aoa_root,
+            payload,
+        )
+        diagnostics.extend(
+            str(reason)
+            for reason in runtime_overlay_state.get("reasons", [])
+            if str(reason)
+        )
+    diagnostics = list(dict.fromkeys(diagnostics))
     return {
         "status": "needs_maintenance" if diagnostics else "current",
         "needs_maintenance": bool(diagnostics),
@@ -145013,6 +148011,10 @@ def entity_registry_maintenance_status(aoa_root: Path) -> dict[str, Any]:
         "generation_identity": stored_generation_identity,
         "expected_generation_identity": expected_generation_identity,
         "source_fingerprint": payload.get("source_fingerprint"),
+        "semantic_digest": stored_semantic_digest,
+        "semantic_digest_verified": semantic_digest_verified,
+        "runtime_overlay_required": runtime_overlay_required,
+        "runtime_overlay_state": runtime_overlay_state,
         "history_policy": payload.get("history_policy"),
         "observed_route_source": payload.get(
             "observed_route_source"
@@ -147799,6 +150801,19 @@ def graph_store_hot_state(
             ),
         )
     )
+    dependency_rebind_needed = bool(
+        entity_registry_dependency_state.get("status") == "stale"
+        and entity_registry_dependency_state.get(
+            "expected_dependency_id"
+        )
+        and entity_registry_dependency_state.get(
+            "observed_dependency_id"
+        )
+        and set(
+            entity_registry_dependency_state.get("reasons", [])
+        )
+        == {"graph_entity_registry_dependency_mismatch"}
+    )
     if not entity_registry_dependency_state.get("compatible"):
         diagnostics.extend(
             str(reason)
@@ -147826,7 +150841,6 @@ def graph_store_hot_state(
         "graph_store_nodes_empty",
         "graph_store_edges_empty",
         "graph_entity_registry_dependency_missing",
-        "graph_entity_registry_dependency_mismatch",
         "entity_registry_dependency_not_current",
         "entity_registry_snapshot_missing",
         "entity_registry_generation_incompatible",
@@ -147860,6 +150874,9 @@ def graph_store_hot_state(
             or not generation_compatible
         ),
         "needs_full_rebuild": needs_full_rebuild,
+        "needs_dependency_rebind": (
+            dependency_rebind_needed
+        ),
         "db_path": str(paths["store"]),
         "db_mtime": path_mtime(paths["store"]),
         "metadata": metadata,
@@ -168267,7 +171284,11 @@ def command_graph_sqlite_compact(args: argparse.Namespace) -> int:
             mode="manual-bulk",
             target="graph/sqlite_compaction",
             reason="operator_requested",
-            touched_surfaces=maintenance_surfaces(repair_indexes=False, repair_graph=False, graph=True),
+            touched_surfaces=maintenance_surfaces(
+                repair_indexes=False,
+                repair_graph=False,
+                graph=True,
+            ),
         )
         if args.apply
         else run_compact()
@@ -168371,10 +171392,112 @@ def command_graph_build(args: argparse.Namespace) -> int:
             mode="manual-bulk",
             target=args.session,
             reason="operator_requested",
-            touched_surfaces=maintenance_surfaces(repair_indexes=False, repair_graph=False, graph=True),
+            touched_surfaces=maintenance_surfaces(
+                repair_indexes=False,
+                repair_graph=False,
+                graph=True,
+                entity_registry=True,
+            ),
         )
         if args.write
         else run_build()
+    )
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
+def command_graph_registry_rebind(
+    args: argparse.Namespace,
+) -> int:
+    explicit_workspace = (
+        Path(args.workspace_root)
+        if args.workspace_root
+        else None
+    )
+    root = aoa_root_for(
+        explicit_workspace,
+        Path(args.aoa_root) if args.aoa_root else None,
+    )
+
+    def run_rebind() -> dict[str, Any]:
+        payload = graph_entity_registry_dependency_rebind(
+            aoa_root=root,
+            apply=bool(args.apply),
+            previous_producer_source=(
+                Path(args.previous_producer_source)
+                if args.previous_producer_source
+                else None
+            ),
+            sample_limit=args.sample_limit,
+        )
+        if args.write_report:
+            report_root = root / "diagnostics"
+            report_root.mkdir(parents=True, exist_ok=True)
+            stem = (
+                f"{compact_stamp()}__graph-registry-rebind"
+            )
+            report_json = report_root / f"{stem}.json"
+            report_markdown = report_root / f"{stem}.md"
+            payload["report_json"] = str(report_json)
+            payload["report_markdown"] = str(report_markdown)
+            payload["report_written"] = True
+            payload["graph_mutates"] = bool(
+                payload.get("mutates")
+            )
+            payload["mutates"] = True
+            write_json(report_json, payload)
+            write_markdown(
+                report_markdown,
+                "\n".join(
+                    [
+                        "# Graph registry dependency rebind",
+                        "",
+                        f"- status: `{payload.get('status')}`",
+                        f"- ok: `{payload.get('ok')}`",
+                        f"- apply: `{payload.get('apply')}`",
+                        (
+                            "- dependency binding changed: "
+                            f"`{payload.get('dependency_binding_changed')}`"
+                        ),
+                        (
+                            "- graph content changed: "
+                            f"`{payload.get('graph_content_changed')}`"
+                        ),
+                        (
+                            "- source rows rebound: "
+                            f"`{payload.get('source_rows_rebound', 0)}`"
+                        ),
+                        (
+                            "- diagnostics: "
+                            f"`{', '.join(payload.get('diagnostics', [])) or 'none'}`"
+                        ),
+                        "",
+                        (
+                            "Raw sessions and external owner sources remain "
+                            "stronger than this generated dependency binding."
+                        ),
+                    ]
+                )
+                + "\n",
+            )
+        return payload
+
+    payload = (
+        run_with_maintenance_lock(
+            root,
+            run_rebind,
+            owner_job="graph-registry-rebind",
+            mode="manual-bulk",
+            target="graph/entity-registry-dependency",
+            reason="operator_requested",
+            touched_surfaces=maintenance_surfaces(
+                repair_indexes=False,
+                repair_graph=False,
+                graph=True,
+            ),
+        )
+        if args.apply or args.write_report
+        else run_rebind()
     )
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
@@ -177751,6 +180874,56 @@ def build_parser() -> argparse.ArgumentParser:
     graph_build.add_argument("--force-large-export", action="store_true", help="Allow unbounded graph-build all --write as an explicit offline rebuild.")
     graph_build.add_argument("--full", action="store_true", help="Print all generated nodes and edges. Default prints samples only.")
     graph_build.set_defaults(func=command_graph_build)
+
+    graph_registry_rebind_parser = sub.add_parser(
+        "graph-registry-rebind",
+        help=(
+            "Plan or atomically rebind a changed entity-registry "
+            "dependency after complete graph-materialization "
+            "equivalence proof."
+        ),
+    )
+    graph_registry_rebind_parser.add_argument(
+        "--workspace-root",
+    )
+    graph_registry_rebind_parser.add_argument("--aoa-root")
+    graph_registry_rebind_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help=(
+            "Update graph source and metadata dependency identities "
+            "inside one transaction only when the complete "
+            "materialization proof passes."
+        ),
+    )
+    graph_registry_rebind_parser.add_argument(
+        "--previous-producer-source",
+        help=(
+            "Exact previous aoa_session_memory.py source whose SHA "
+            "matches a legacy whole-file graph generation. Required "
+            "only for a declared transition to projection-scoped "
+            "producer identity."
+        ),
+    )
+    graph_registry_rebind_parser.add_argument(
+        "--sample-limit",
+        type=int,
+        default=8,
+        help=(
+            "Maximum mismatch samples returned by the proof packet."
+        ),
+    )
+    graph_registry_rebind_parser.add_argument(
+        "--write-report",
+        action="store_true",
+        help=(
+            "Write the proof packet under .aoa/diagnostics. "
+            "This uses the shared maintenance lock."
+        ),
+    )
+    graph_registry_rebind_parser.set_defaults(
+        func=command_graph_registry_rebind
+    )
 
     graph_maintenance_parser = sub.add_parser(
         "graph-maintenance",

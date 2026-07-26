@@ -143,3 +143,26 @@ from the same route terms produce the same dependency and semantic digests.
 The final evidence class remains a sealed, resource-observed, full H1/H2
 rebuild with raw-authority equality and dependent graph comparison; that
 runtime proof is not replaced by this record or its generated indexes.
+
+## Review 2026-07-26
+
+An explicit registry search-sync request is part of the projection contract.
+The no-op gate compares the requested observed source and history policy with
+the persisted snapshot before declaring the registry and search documents
+current. A request for authoritative archived route terms cannot be satisfied
+by a current snapshot built from the narrower operational rollup, and a change
+between bounded incremental history and authoritative rebuild cannot be
+silently skipped.
+
+The archived route-term route enumerates the complete retained exact-identity
+surface by default. Bounded per-layer enumeration remains an explicit
+diagnostic choice, not the source for an authoritative rebuild. This
+clarification preserves historical exact navigation without promoting route
+terms above their resolvable owner and raw evidence refs.
+
+An incidental incremental search refresh preserves the observed-source and
+history policy of the current registry snapshot. It may refresh registry
+documents when that declared snapshot is stale, but it must not silently
+downgrade an authoritative snapshot to incremental-history semantics merely
+because one session's search documents were replaced. An operator's explicit
+registry-sync mode remains stronger than this preservation rule.

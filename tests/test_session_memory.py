@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import importlib.util
 import contextlib
 import fcntl
@@ -1117,6 +1118,147 @@ def test_agent_event_taxonomy_task_episodes_and_search_routes(tmp_path: Path, mo
     )
     assert windows_without_explain["window_count"] == 1
     assert "explain" not in windows_without_explain["results"][0]
+
+
+def test_search_event_inside_task_interval_keeps_episode_join_when_not_a_curated_ref(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = (
+        tmp_path
+        / "rollout-2026-07-11T00-00-00-episode-interval-search.jsonl"
+    )
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-07-11T00:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "episode-interval-search",
+                    "cwd": str(workspace),
+                },
+            },
+            {
+                "timestamp": "2026-07-11T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Review the live skill dispatch receipt.",
+                        }
+                    ],
+                },
+            },
+            {
+                "timestamp": "2026-07-11T00:00:02Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": "call-receipt",
+                    "arguments": json.dumps(
+                        {"cmd": "show reviewed receipt"}
+                    ),
+                },
+            },
+            {
+                "timestamp": "2026-07-11T00:00:03Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call-receipt",
+                    "output": (
+                        "direct_procedure_gap\n"
+                        + ("large reviewed receipt row\n" * 300)
+                    ),
+                },
+            },
+            {
+                "timestamp": "2026-07-11T00:00:04Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "Receipt review complete.",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "episode-interval-search",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    session_dir = next(
+        path
+        for path in (aoa_root / "sessions").iterdir()
+        if path.is_dir()
+    )
+    session_index = module.read_json(
+        session_dir / "session.index.json",
+        {},
+    )
+    episode = session_index["task_episodes"][0]
+    assert episode["event_range"]["from_line"] == 2
+    assert episode["event_range"]["to_line"] == 5
+    assert all(
+        str(ref.get("raw_ref") or "") != "raw:line:4"
+        for bucket in (
+            "reasoning_refs",
+            "plan_refs",
+            "progress_refs",
+            "answer_refs",
+            "action_refs",
+            "tool_refs",
+            "verification_refs",
+            "error_refs",
+            "closeout_refs",
+            "blocker_refs",
+            "transition_refs",
+        )
+        for ref in episode.get(bucket, [])
+        if isinstance(ref, dict)
+    )
+
+    index_result = module.search_index_sessions(
+        aoa_root=aoa_root,
+        target="all",
+        rebuild=True,
+    )
+    assert index_result["ok"] is True
+    result = module.search_sessions(
+        aoa_root=aoa_root,
+        query="direct_procedure_gap",
+        session=session_dir.name,
+        task_episode_id=episode["episode_id"],
+        limit=5,
+        explain=True,
+    )
+    assert result["ok"] is True
+    assert result["result_count"] == 1
+    assert result["results"][0]["task_episode_id"] == (
+        episode["episode_id"]
+    )
+    assert result["results"][0]["raw_ref"] == "raw:line:4"
+    assert result["results"][0]["refs"]["raw"] == "raw:line:4"
 
 
 def test_task_episode_semantics_admits_compact_success_observation_but_not_source_dump() -> None:
@@ -22886,6 +23028,103 @@ def test_entity_registry_autodiscovers_skills_mcp_and_links_search_graph(tmp_pat
     assert budgeted_noop_refresh["diagnostics"] == []
 
 
+def test_entity_registry_search_sync_does_not_skip_requested_source_or_history_policy(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    monkeypatch.setattr(
+        module,
+        "entity_registry_runtime_source_entries",
+        lambda _aoa_root: [],
+    )
+
+    initial = module.refresh_entity_registry_search_documents_only(
+        aoa_root=aoa_root,
+        observed_source="none",
+        history_policy="authoritative-rebuild",
+    )
+    assert initial["ok"] is True
+    assert initial["skipped"] is False
+    initial_registry = module.read_json(
+        aoa_root / module.ENTITY_REGISTRY_PATH,
+        {},
+    )
+    assert initial_registry["observed_source"] == "none"
+    assert initial_registry["history_policy"] == (
+        module.ENTITY_REGISTRY_HISTORY_POLICY_AUTHORITATIVE_REBUILD
+    )
+
+    conn = sqlite3.connect(str(module.search_db_path(aoa_root)))
+    document = conn.execute(
+        """
+        INSERT INTO documents(
+            id, doc_type, session_label, title, body, payload_json
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "historical-skill-evidence",
+            "event",
+            "historical-session",
+            "historical skill evidence",
+            "historical skill evidence",
+            "{}",
+        ),
+    )
+    route = conn.execute(
+        """
+        INSERT INTO route_terms(layer, key, route_signal)
+        VALUES ('skill', 'historical_skill', 'skill:historical_skill')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO document_routes(doc_rowid, route_id)
+        VALUES (?, ?)
+        """,
+        (document.lastrowid, route.lastrowid),
+    )
+    conn.commit()
+    conn.close()
+
+    changed = module.refresh_entity_registry_search_documents_only(
+        aoa_root=aoa_root,
+        observed_source="route-terms",
+        history_policy="authoritative-rebuild",
+    )
+    assert changed["ok"] is True
+    assert changed["skipped"] is False
+    changed_registry = module.read_json(
+        aoa_root / module.ENTITY_REGISTRY_PATH,
+        {},
+    )
+    assert changed_registry["observed_source"] == "route-terms"
+    assert changed_registry["observed_route_source"] == (
+        "archived_route_terms"
+    )
+    assert any(
+        entry.get("entity_id") == "skill:historical_skill"
+        for entry in changed_registry["entries"]
+    )
+
+    policy_changed = (
+        module.refresh_entity_registry_search_documents_only(
+            aoa_root=aoa_root,
+            observed_source="route-terms",
+            history_policy="incremental",
+        )
+    )
+    assert policy_changed["ok"] is True
+    assert policy_changed["skipped"] is False
+    policy_changed_registry = module.read_json(
+        aoa_root / module.ENTITY_REGISTRY_PATH,
+        {},
+    )
+    assert policy_changed_registry["history_policy"] == (
+        module.ENTITY_REGISTRY_HISTORY_POLICY_INCREMENTAL
+    )
+
+
 def test_entity_registry_source_mcp_tool_keys_are_service_namespaced(tmp_path: Path) -> None:
     entries: list[dict[str, Any]] = []
     for service_name in ("alpha-mcp", "beta-mcp"):
@@ -23872,6 +24111,90 @@ def test_entity_registry_lookup_falls_back_to_observed_route_terms(tmp_path: Pat
     assert any(candidate["route_signal"] == "route_next_action:repair" for candidate in next_action_candidates)
 
 
+def test_entity_registry_explicit_route_terms_fallback_is_not_top_k_truncated(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    conn = module.init_search_db(
+        module.search_db_path(aoa_root),
+        rebuild=True,
+    )
+    for ordinal in range(401):
+        key = f"historical_validator_{ordinal:04d}"
+        route_signal = f"validator:{key}"
+        conn.execute(
+            "INSERT INTO route_terms(layer, key, route_signal) "
+            "VALUES (?, ?, ?)",
+            ("validator", key, route_signal),
+        )
+        route_id = int(
+            conn.execute(
+                "SELECT id FROM route_terms "
+                "WHERE route_signal = ?",
+                (route_signal,),
+            ).fetchone()[0]
+        )
+        document = conn.execute(
+            """
+            INSERT INTO documents(
+              id, doc_type, session_id, session_label,
+              session_date, event_id, event_type, session_act,
+              usage_role, route_signals, raw_ref,
+              manifest_path, payload_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                f"event:historical-validator:{ordinal:06d}",
+                "event",
+                "historical-validator-session",
+                "historical-validator-session",
+                "2026-06-26",
+                f"{ordinal:06d}",
+                "COMMAND",
+                "tool_call",
+                "usage",
+                f"|{route_signal}|",
+                f"raw:line:{ordinal + 1}",
+                "session.manifest.json",
+                "{}",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO document_routes(doc_rowid, route_id) "
+            "VALUES (?, ?)",
+            (document.lastrowid, route_id),
+        )
+    conn.commit()
+    conn.close()
+
+    complete = module.entity_registry_entries_from_route_terms(
+        aoa_root
+    )
+    bounded = module.entity_registry_entries_from_route_terms(
+        aoa_root,
+        limit_per_layer=400,
+    )
+    complete_validators = [
+        entry
+        for entry in complete
+        if entry["kind"] == "validator"
+    ]
+    bounded_validators = [
+        entry
+        for entry in bounded
+        if entry["kind"] == "validator"
+    ]
+
+    assert len(complete_validators) == 401
+    assert len(bounded_validators) == 400
+    assert any(
+        entry["canonical_key"]
+        == "historical_validator_0400"
+        for entry in complete_validators
+    )
+
+
 def test_entity_registry_uses_rollup_observed_source_and_retains_previous_observed(
     tmp_path: Path,
     monkeypatch: Any,
@@ -23947,7 +24270,7 @@ def test_entity_registry_uses_rollup_observed_source_and_retains_previous_observ
             1,
         ),
     )
-    conn.execute(
+    conn.executemany(
         """
         INSERT INTO route_rollups(
             shard, layer, key, route_signal, posting_count, session_count,
@@ -23955,19 +24278,44 @@ def test_entity_registry_uses_rollup_observed_source_and_retains_previous_observ
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (
-            "month/2026-06",
-            "script",
-            "fast_rollup_script",
-            "script:fast_rollup_script",
-            3,
-            1,
-            "2026-06-26",
-            "2026-06-26",
-            json.dumps(["raw:line:1"]),
-            json.dumps(["000__initial-to-latest.md#event-000001"]),
-            json.dumps(["rollup-session"]),
-        ),
+        [
+            (
+                "month/2026-06",
+                "script",
+                "fast_rollup_script",
+                "script:fast_rollup_script",
+                3,
+                1,
+                "2026-06-26",
+                "2026-06-26",
+                json.dumps(["raw:line:1"]),
+                json.dumps(
+                    [
+                        "000__initial-to-latest.md"
+                        "#event-000001"
+                    ]
+                ),
+                json.dumps(["rollup-session"]),
+            ),
+            (
+                "month/2026-06",
+                "validator",
+                "replacement_rollup_validator",
+                "validator:replacement_rollup_validator",
+                8,
+                1,
+                "2026-06-26",
+                "2026-06-26",
+                json.dumps(["raw:line:2"]),
+                json.dumps(
+                    [
+                        "000__initial-to-latest.md"
+                        "#event-000002"
+                    ]
+                ),
+                json.dumps(["rollup-session"]),
+            ),
+        ],
     )
     conn.commit()
     conn.close()
@@ -23987,9 +24335,15 @@ def test_entity_registry_uses_rollup_observed_source_and_retains_previous_observ
 
     assert payload["observed_route_source"] == "operational_route_rollup"
     assert entries[("script", "fast_rollup_script")]["source_surface"] == "operational_route_rollup"
+    assert entries[
+        ("validator", "replacement_rollup_validator")
+    ]["source_surface"] == "operational_route_rollup"
     retained = entries[("validator", "legacy_full_route_validator")]
     assert retained["source_surface"] == "archived_route_terms"
     assert retained["retained_from_snapshot"]["reason"] == "fast_observed_route_uses_operational_rollup"
+    assert retained["retained_from_snapshot"][
+        "retention_basis"
+    ] == "stable_exact_identity_not_kind_cardinality"
     assert "observed_entity_retained_from_previous_snapshot" in retained["freshness"]["diagnostics"]
 
     rebuilt = module.build_entity_registry(
@@ -38917,6 +39271,148 @@ def test_graph_atomic_rebuild_preserves_published_store_when_dependency_changes(
         in result["diagnostics"]
     )
     assert after_digest == before_digest
+
+
+def test_graph_rebuild_reconciles_registry_only_drift_before_commit(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    module.build_entity_registry(
+        aoa_root=aoa_root,
+        write=True,
+        include_runtime=True,
+        observed_source="none",
+        limit=1_000_000,
+    )
+    initial_dependency = (
+        module.graph_entity_registry_dependency_snapshot(
+            aoa_root,
+            ensure_current=True,
+            allow_ephemeral=False,
+        )
+    )
+    route_node_id = module.graph_route_node_id(
+        "skill",
+        "registry-late-arrival",
+    )
+    event_id = "event:registry-late-arrival:000:000001"
+    contribution = {
+        "source": {
+            "source_key": "segment:registry-late-arrival:000",
+            "source_type": "segment",
+            "session_id": "registry-late-arrival",
+            "session_label": (
+                "2026-07-19__001__registry-late-arrival"
+            ),
+            "segment_id": "000",
+            "source_path": str(
+                tmp_path / "registry-late-arrival.json"
+            ),
+            "source_paths": [
+                str(tmp_path / "registry-late-arrival.json")
+            ],
+            "source_sha": "registry-late-arrival-sha",
+            "source_mtime": 1.0,
+            "graph_schema_version": module.GRAPH_SCHEMA_VERSION,
+            "graph_store_schema_version": (
+                module.GRAPH_STORE_SCHEMA_VERSION
+            ),
+            "graph_event_route_signal_edge_policy": (
+                module.GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY
+            ),
+            "route_signal_classifier_version": (
+                module.ROUTE_SIGNAL_CLASSIFIER_VERSION
+            ),
+        },
+        "nodes": [
+            {"id": event_id, "type": "event"},
+            {
+                "id": route_node_id,
+                "type": "skill",
+                "route_layer": "skill",
+                "route_key": "registry-late-arrival",
+                "route_signal": "skill:registry-late-arrival",
+            },
+        ],
+        "edges": [
+            {
+                "source": event_id,
+                "target": route_node_id,
+                "type": "mentions_route_signal",
+                "route_signal": "skill:registry-late-arrival",
+            }
+        ],
+    }
+
+    def drifting_contributions() -> Any:
+        yield contribution
+        time.sleep(0.02)
+        skill_path = (
+            aoa_root
+            / "skills"
+            / "registry-late-arrival"
+            / "SKILL.md"
+        )
+        skill_path.parent.mkdir(parents=True)
+        skill_path.write_text(
+            "---\n"
+            "name: registry-late-arrival\n"
+            "description: Appears while the graph rebuild is active.\n"
+            "---\n",
+            encoding="utf-8",
+        )
+
+    store = module.GraphSqliteStore(
+        aoa_root,
+        reset=True,
+        entity_registry_dependency=initial_dependency,
+    )
+    try:
+        rebuilt = store.rebuild(drifting_contributions())
+        final_dependency = (
+            module.graph_entity_registry_dependency_snapshot(
+                aoa_root,
+                ensure_current=False,
+                allow_ephemeral=False,
+            )
+        )
+        registry_node_count = store.conn.execute(
+            "SELECT COUNT(*) FROM node_contribs "
+            "WHERE node_type = 'entity_registry'"
+        ).fetchone()[0]
+        registry_route_edge_count = store.conn.execute(
+            "SELECT COUNT(*) FROM edge_contribs "
+            "WHERE edge_type = 'registry_entity_has_route_signal'"
+        ).fetchone()[0]
+        stored_dependency_ids = {
+            str(row[0] or "")
+            for row in store.conn.execute(
+                "SELECT DISTINCT entity_registry_dependency_id "
+                "FROM graph_sources"
+            )
+        }
+    finally:
+        store.close()
+
+    reconciliation = rebuilt["entity_registry_reconciliation"]
+    attempt = reconciliation["attempts"][-1]
+    assert reconciliation["status"] == "reconciled"
+    assert reconciliation["reconciled"] is True
+    assert (
+        initial_dependency["dependency_id"]
+        != final_dependency["dependency_id"]
+    )
+    assert final_dependency["status"] == "current"
+    assert registry_node_count == 1
+    assert registry_route_edge_count == 1
+    assert stored_dependency_ids == {
+        final_dependency["dependency_id"]
+    }
+    assert attempt["proof_compatible"] is True
+    assert (
+        attempt["non_registry_content_digest_before"]["sha256"]
+        == attempt["non_registry_content_digest_after"]["sha256"]
+    )
 
 
 def test_graph_progress_broken_pipe_does_not_abort_semantic_publish(
@@ -65229,7 +65725,7 @@ def test_generation_identity_is_canonical_deterministic_and_dependency_bound(
     )
 
 
-def test_generation_identity_uses_process_loaded_producer_snapshot(
+def test_generation_identity_uses_loaded_projection_producer_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     loaded_sha256 = (
@@ -65259,7 +65755,16 @@ def test_generation_identity_uses_process_loaded_producer_snapshot(
     assert before_common == after_common
     assert before_registry == after_registry
     assert after_common["producer_sha256"] == loaded_sha256
-    assert after_registry["producer_sha256"] == loaded_sha256
+    assert after_registry["producer_sha256"] == (
+        module.SESSION_MEMORY_LOADED_PROJECTION_PRODUCER_CONTRACTS[
+            "entity_registry"
+        ]["sha256"]
+    )
+    assert after_registry["producer_sha256"] != loaded_sha256
+    assert after_registry["producer_identity_mode"] == (
+        module.PROJECTION_PRODUCER_IDENTITY_MODE
+    )
+    assert after_registry["producer_contract_status"] == "current"
     assert after_common["producer_identity_mode"] == (
         "process_loaded_source_snapshot_v1"
     )
@@ -65532,7 +66037,7 @@ def test_evaluation_generation_pin_invalidates_semantic_artifact_drift(
     assert before["semantic_fingerprint"] != after["semantic_fingerprint"]
 
 
-def test_evaluation_generation_pin_refuses_incompatible_producer_generation(
+def test_evaluation_generation_pin_refuses_incompatible_projection_producer_generation(
     tmp_path: Path,
     monkeypatch: Any,
 ) -> None:
@@ -65586,11 +66091,17 @@ def test_evaluation_generation_pin_refuses_incompatible_producer_generation(
         sessions=[session_id],
     )
     assert current["ok"] is True
-    common = module.session_memory_generation_common()
+    loaded_contracts = copy.deepcopy(
+        module.SESSION_MEMORY_LOADED_PROJECTION_PRODUCER_CONTRACTS
+    )
+    loaded_contracts["portable_lexical_search"] = {
+        **loaded_contracts["portable_lexical_search"],
+        "sha256": "f" * 64,
+    }
     monkeypatch.setattr(
         module,
-        "session_memory_generation_common",
-        lambda: {**common, "producer_sha256": "f" * 64},
+        "SESSION_MEMORY_LOADED_PROJECTION_PRODUCER_CONTRACTS",
+        loaded_contracts,
     )
 
     incompatible = module.evaluation_generation_snapshot(
@@ -84635,3 +85146,558 @@ def test_portable_public_safety_audit_reports_classes_not_values(
     rendered = json.dumps(payload, ensure_ascii=False)
     assert secret_value not in rendered
     assert "private-operator" not in rendered
+
+
+def test_projection_producer_contract_is_bounded_and_change_sensitive() -> None:
+    source = SCRIPT.read_bytes()
+    graph_before = (
+        module.projection_producer_contract_from_source_bytes(
+            source,
+            "session_graph",
+        )
+    )
+    unrelated = source + b"\n# query-only test sentinel\n"
+    graph_after_unrelated = (
+        module.projection_producer_contract_from_source_bytes(
+            unrelated,
+            "session_graph",
+        )
+    )
+    start = source.index(b"\ndef graph_route_node_type(") + 1
+    end = source.index(
+        b"\nGRAPH_PROJECTION_SEMANTIC_DIGEST_VERSION =",
+        start,
+    )
+    graph_chunk = source[start:end]
+    needle = b'return "skill"'
+    assert needle in graph_chunk
+    changed_chunk = graph_chunk.replace(
+        needle,
+        b'return "skill_changed_for_test"',
+        1,
+    )
+    changed = source[:start] + changed_chunk + source[end:]
+    graph_after_materializer_change = (
+        module.projection_producer_contract_from_source_bytes(
+            changed,
+            "session_graph",
+        )
+    )
+
+    assert graph_before["status"] == "current"
+    assert graph_after_unrelated["status"] == "current"
+    assert graph_after_materializer_change["status"] == "current"
+    assert graph_before["sha256"] == graph_after_unrelated["sha256"]
+    assert (
+        graph_before["sha256"]
+        != graph_after_materializer_change["sha256"]
+    )
+
+
+def test_graph_legacy_generation_transition_requires_exact_source(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    identities = (
+        module.session_memory_expected_generation_identities(
+            aoa_root
+        )
+    )
+    previous_source = tmp_path / "aoa_session_memory.py"
+    source_bytes = SCRIPT.read_bytes()
+    previous_source.write_bytes(source_bytes)
+    previous_sha256 = hashlib.sha256(source_bytes).hexdigest()
+    legacy_task_episode = (
+        module.legacy_whole_source_generation_identity(
+            identities["task_episode_source"],
+            producer_sha256=previous_sha256,
+        )
+    )
+    legacy_entity_registry = (
+        module.legacy_whole_source_generation_identity(
+            identities["entity_registry"],
+            producer_sha256=previous_sha256,
+        )
+    )
+    stored_graph = module.legacy_whole_source_generation_identity(
+        identities["graph"],
+        producer_sha256=previous_sha256,
+        dependency_generations={
+            "task_episode_source": legacy_task_episode[
+                "generation_id"
+            ],
+            "entity_registry": legacy_entity_registry[
+                "generation_id"
+            ],
+        },
+    )
+
+    ready = module.graph_declared_generation_transition(
+        aoa_root=aoa_root,
+        stored_identity=stored_graph,
+        previous_producer_source=previous_source,
+    )
+    missing = module.graph_declared_generation_transition(
+        aoa_root=aoa_root,
+        stored_identity=stored_graph,
+        previous_producer_source=None,
+    )
+    previous_source.write_bytes(source_bytes + b"\n# drift\n")
+    wrong = module.graph_declared_generation_transition(
+        aoa_root=aoa_root,
+        stored_identity=stored_graph,
+        previous_producer_source=previous_source,
+    )
+
+    assert ready["status"] == "ready"
+    assert ready["compatible"] is True
+    assert ready["contracts"]["session_graph"]["equal"] is True
+    assert ready["contracts"]["task_episode_source"]["equal"] is True
+    assert missing["compatible"] is False
+    assert missing["requires_previous_producer_source"] is True
+    assert wrong["compatible"] is False
+    assert wrong["diagnostics"] == [
+        "graph_generation_transition_previous_source_sha_mismatch"
+    ]
+
+
+def test_graph_content_digest_excludes_only_generation_bindings(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "graph.sqlite3"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT)"
+    )
+    conn.execute(
+        """
+        CREATE TABLE graph_sources(
+          source_key TEXT PRIMARY KEY,
+          generation_id TEXT,
+          generation_identity_json TEXT,
+          entity_registry_dependency_id TEXT,
+          entity_registry_dependency_json TEXT,
+          semantic_value TEXT
+        )
+        """
+    )
+    conn.execute(
+        "CREATE TABLE node_contribs("
+        "source_key TEXT, node_id TEXT, payload_json TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE edge_contribs("
+        "source_key TEXT, edge_id TEXT, payload_json TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE nodes("
+        "id TEXT PRIMARY KEY, payload_json TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE edges("
+        "id TEXT PRIMARY KEY, payload_json TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE graph_type_counts("
+        "kind TEXT, type TEXT, count INTEGER)"
+    )
+    conn.executemany(
+        "INSERT INTO metadata(key, value) VALUES (?, ?)",
+        [
+            ("graph_generation_id", "old-generation"),
+            ("entity_registry_dependency_id", "old-dependency"),
+            ("semantic_policy", "typed-v1"),
+        ],
+    )
+    conn.execute(
+        """
+        INSERT INTO graph_sources VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "session:one",
+            "old-generation",
+            '{"generation_id":"old-generation"}',
+            "old-dependency",
+            '{"dependency_id":"old-dependency"}',
+            "preserved-content",
+        ),
+    )
+    conn.execute(
+        "INSERT INTO nodes VALUES (?, ?)",
+        ("node:one", '{"id":"node:one"}'),
+    )
+    conn.commit()
+    before = module.graph_projection_content_digest(conn)
+
+    conn.execute(
+        "UPDATE graph_sources SET generation_id = ?, "
+        "generation_identity_json = ?, "
+        "entity_registry_dependency_id = ?, "
+        "entity_registry_dependency_json = ?",
+        (
+            "new-generation",
+            '{"generation_id":"new-generation"}',
+            "new-dependency",
+            '{"dependency_id":"new-dependency"}',
+        ),
+    )
+    conn.execute(
+        "UPDATE metadata SET value = ? "
+        "WHERE key = 'graph_generation_id'",
+        ("new-generation",),
+    )
+    conn.execute(
+        "UPDATE metadata SET value = ? "
+        "WHERE key = 'entity_registry_dependency_id'",
+        ("new-dependency",),
+    )
+    after_binding = module.graph_projection_content_digest(conn)
+    conn.execute(
+        "UPDATE graph_sources SET semantic_value = ?",
+        ("changed-content",),
+    )
+    after_content = module.graph_projection_content_digest(conn)
+    conn.close()
+
+    assert before["sha256"] == after_binding["sha256"]
+    assert before["sha256"] != after_content["sha256"]
+
+
+def test_graph_registry_materialization_refresh_is_bounded_and_exact(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    old_entry = module.entity_registry_make_entry(
+        kind="tool",
+        key="alpha",
+        aliases=["alpha"],
+        source_refs=[
+            {
+                "source_type": "fixture",
+                "path": "old",
+                "status": "active",
+            }
+        ],
+        source_surface="old_fixture",
+        owner="fixture",
+        status="active",
+    )
+    current_entry = module.entity_registry_make_entry(
+        kind="tool",
+        key="alpha",
+        aliases=["alpha"],
+        source_refs=[
+            {
+                "source_type": "fixture",
+                "path": "current",
+                "status": "active",
+            }
+        ],
+        source_surface="current_fixture",
+        owner="fixture",
+        status="active",
+    )
+    old_dependency = {
+        "status": "current",
+        "dependency_id": "old-dependency",
+        "entries": [old_entry],
+        "index": {("tool", "alpha"): old_entry},
+    }
+    current_dependency = {
+        "status": "current",
+        "dependency_id": "current-dependency",
+        "entries": [current_entry],
+        "index": {
+            ("tool", "alpha"): current_entry,
+        },
+    }
+    evidence_refs = [
+        {
+            "session_id": "fixture-session",
+            "refs": {"raw": "raw:line:3"},
+        }
+    ]
+    route_node = {
+        "id": "tool:alpha",
+        "type": "tool",
+        "label": "alpha",
+        "route_layer": "tool",
+        "route_key": "alpha",
+        "route_signal": "tool:alpha",
+        "session_id": "fixture-session",
+        "evidence_refs": evidence_refs,
+    }
+    old_registry_node = module.graph_entity_registry_node(
+        old_entry,
+        aoa_root=aoa_root,
+        evidence_refs=evidence_refs,
+    )
+    owner_edge = {
+        "source": "event:fixture",
+        "target": old_registry_node["id"],
+        "type": "event_mentions_registered_entity",
+        "session_id": "fixture-session",
+        "route_signal": "tool:alpha",
+        "evidence_refs": evidence_refs,
+    }
+    registry_edge = {
+        "source": old_registry_node["id"],
+        "target": route_node["id"],
+        "type": "registry_entity_has_route_signal",
+        "session_id": "fixture-session",
+        "route_signal": "tool:alpha",
+        "evidence_refs": evidence_refs,
+    }
+    contribution = {
+        "source": {
+            "source_key": "session:fixture-session",
+            "source_type": "session",
+            "session_id": "fixture-session",
+            "session_label": "fixture-session",
+            "segment_id": "",
+            "source_path": "fixture",
+            "source_paths": ["fixture"],
+            "source_sha": "fixture-source-sha",
+            "source_mtime": 1.0,
+            "graph_schema_version": module.GRAPH_SCHEMA_VERSION,
+            "graph_store_schema_version": (
+                module.GRAPH_STORE_SCHEMA_VERSION
+            ),
+            "graph_event_route_signal_edge_policy": (
+                module.GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY
+            ),
+            "route_signal_classifier_version": (
+                module.ROUTE_SIGNAL_CLASSIFIER_VERSION
+            ),
+            "status": "current",
+            "diagnostics": [],
+        },
+        "nodes": [
+            {
+                "id": "event:fixture",
+                "type": "event",
+                "session_id": "fixture-session",
+                "evidence_refs": evidence_refs,
+            },
+            route_node,
+            old_registry_node,
+        ],
+        "edges": [owner_edge, registry_edge],
+    }
+    store = module.GraphSqliteStore(
+        aoa_root,
+        reset=True,
+        entity_registry_dependency=old_dependency,
+    )
+    for ordinal in range(
+        module.GRAPH_MAINTENANCE_FRESH_REPRESENTATIVE_ROW_LIMIT
+        + 1
+    ):
+        repeated = json.loads(json.dumps(contribution))
+        repeated["source"]["source_key"] = (
+            f"session:fixture-session-{ordinal}"
+        )
+        store._insert_source_row(repeated)
+        store._insert_contrib_rows(repeated)
+    for node in contribution["nodes"]:
+        store._add_aggregate_node(node)
+    for edge in contribution["edges"]:
+        store._add_aggregate_edge(edge)
+    store.refresh_type_counts(commit=False)
+    store.conn.commit()
+    before = module.graph_non_registry_content_digest(store.conn)
+
+    refreshed = module.graph_registry_materialization_refresh(
+        aoa_root=aoa_root,
+        conn=store.conn,
+        dependency=current_dependency,
+    )
+    after = module.graph_non_registry_content_digest(store.conn)
+    registry_nodes = store.conn.execute(
+        "SELECT node_id, payload_json FROM node_contribs "
+        "WHERE node_type = 'entity_registry'"
+    ).fetchall()
+    incident_edges = store.conn.execute(
+        "SELECT edge_type, source_node, target_node "
+        "FROM edge_contribs "
+        "WHERE source_node LIKE 'entity_registry:%' "
+        "OR target_node LIKE 'entity_registry:%' "
+        "ORDER BY edge_type"
+    ).fetchall()
+    aggregate_registry_row = store.conn.execute(
+        "SELECT payload_json FROM nodes "
+        "WHERE id = ?",
+        (f"entity_registry:{current_entry['entity_id']}",),
+    ).fetchone()
+    store.close()
+
+    current_registry_node_id = (
+        f"entity_registry:{current_entry['entity_id']}"
+    )
+    assert refreshed["ok"] is True
+    assert before["sha256"] == after["sha256"]
+    assert {
+        row["node_id"] for row in registry_nodes
+    } == {current_registry_node_id}
+    assert len(registry_nodes) > (
+        module.GRAPH_MAINTENANCE_FRESH_REPRESENTATIVE_ROW_LIMIT
+    )
+    registry_payload = json.loads(registry_nodes[0]["payload_json"])
+    assert registry_payload["canonical_key"] == "alpha"
+    assert registry_payload["source_surface"] == "current_fixture"
+    assert aggregate_registry_row is not None
+    aggregate_registry_payload = json.loads(
+        aggregate_registry_row["payload_json"]
+    )
+    assert (
+        aggregate_registry_payload["source_surface"]
+        == "current_fixture"
+    )
+    assert refreshed["counts"][
+        "registry_aggregate_rewrite_count"
+    ] == 1
+    assert {
+        (
+            row["edge_type"],
+            row["source_node"],
+            row["target_node"],
+        )
+        for row in incident_edges
+    } == {
+        (
+            "event_mentions_registered_entity",
+            "event:fixture",
+            current_registry_node_id,
+        ),
+        (
+            "registry_entity_has_route_signal",
+            current_registry_node_id,
+            "tool:alpha",
+        ),
+    }
+
+
+def test_entity_registry_semantic_digest_ignores_writer_source_state(
+    tmp_path: Path,
+) -> None:
+    base = {
+        "schema_version": module.ENTITY_REGISTRY_SCHEMA_VERSION,
+        "artifact_type": "entity_registry_snapshot",
+        "generation_identity": (
+            module.entity_registry_generation_identity()
+        ),
+        "entries": [
+            module.entity_registry_make_entry(
+                kind="tool",
+                key="stable",
+                aliases=["stable"],
+                source_refs=[
+                    {
+                        "source_type": "fixture",
+                        "path": "stable",
+                        "status": "active",
+                    }
+                ],
+                source_surface="fixture",
+                owner="fixture",
+                status="active",
+            )
+        ],
+    }
+    first = module.entity_registry_semantic_digest(
+        {
+            **base,
+            "producer_source_state": {
+                "loaded_sha256": "first",
+                "current_sha256": "first",
+                "stable": True,
+            },
+        },
+        aoa_root=tmp_path,
+    )
+    second = module.entity_registry_semantic_digest(
+        {
+            **base,
+            "producer_source_state": {
+                "loaded_sha256": "second",
+                "current_sha256": "second",
+                "stable": True,
+            },
+        },
+        aoa_root=tmp_path,
+    )
+
+    assert first["sha256"] == second["sha256"]
+    assert "producer_source_state" in first["excluded_keys"]
+
+    cli_ref_first = {
+        **base,
+        "entries": [
+            {
+                **base["entries"][0],
+                "source_refs": [
+                    {
+                        "source_type": (
+                            "aoa_session_memory_cli_subcommands"
+                        ),
+                        "path": "aoa_session_memory.py",
+                        "status": "active",
+                        "identity_sha256": "stable-parser-contract",
+                        "sha256": "whole-file-first",
+                        "sha256_mode": "full_file_v1",
+                    }
+                ],
+            }
+        ],
+    }
+    cli_ref_second = {
+        **cli_ref_first,
+        "entries": [
+            {
+                **cli_ref_first["entries"][0],
+                "source_refs": [
+                    {
+                        **cli_ref_first["entries"][0][
+                            "source_refs"
+                        ][0],
+                        "sha256": "whole-file-second",
+                    }
+                ],
+            }
+        ],
+    }
+    assert module.entity_registry_semantic_digest(
+        cli_ref_first,
+        aoa_root=tmp_path,
+    )["sha256"] == module.entity_registry_semantic_digest(
+        cli_ref_second,
+        aoa_root=tmp_path,
+    )["sha256"]
+
+
+def test_entity_registry_semantic_digest_canonicalizes_logical_root(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir()
+    relative_root = Path(os.path.relpath(aoa_root, Path.cwd()))
+    payload = {
+        "schema_version": module.ENTITY_REGISTRY_SCHEMA_VERSION,
+        "artifact_type": "entity_registry_snapshot",
+        "aoa_root": str(aoa_root),
+        "registry_path": str(
+            aoa_root / module.ENTITY_REGISTRY_PATH
+        ),
+        "entries": [],
+    }
+
+    absolute = module.entity_registry_semantic_digest(
+        payload,
+        aoa_root=aoa_root,
+    )
+    relative = module.entity_registry_semantic_digest(
+        payload,
+        aoa_root=relative_root,
+    )
+
+    assert absolute["sha256"] == relative["sha256"]
