@@ -1552,7 +1552,7 @@ GRAPH_NEIGHBORHOOD = {
         {"id": "route:mcp:mcp:aoa_session_memory_mcp", "type": "mcp", "label": "mcp:aoa_session_memory_mcp"},
         {"id": "event:session-1:000:000001", "type": "event", "title": "debug mcp"},
     ],
-    "edges": [{"source": "event:session-1:000:000001", "target": "route:mcp:mcp:aoa_session_memory_mcp", "type": "mentions_route_signal"}],
+    "edges": [{"source": "event:session-1:000:000001", "target": "route:mcp:mcp:aoa_session_memory_mcp", "type": "event_has_route_signal"}],
     "evidence_refs": [
         {
             "session_id": "session-1",
@@ -7497,11 +7497,11 @@ def test_graph_neighborhood_uses_sqlite_fast_path_for_exact_route_node(tmp_path:
         edge_payloads = [
             (
                 "edge:1",
-                "mentions_route_signal",
+                "event_has_route_signal",
                 event_node["id"],
                 route_node["id"],
                 {
-                    "type": "mentions_route_signal",
+                    "type": "event_has_route_signal",
                     "event_id": "000001",
                     "segment_id": "000",
                     "session_id": "session-1",
@@ -7526,27 +7526,27 @@ def test_graph_neighborhood_uses_sqlite_fast_path_for_exact_route_node(tmp_path:
             ),
             (
                 "edge:3",
-                "mentions_route_signal",
+                "event_has_route_signal",
                 "event:session-1:000:000002",
                 route_node["id"],
-                {"type": "mentions_route_signal", "event_id": "000002"},
+                {"type": "event_has_route_signal", "event_id": "000002"},
                 1,
             ),
             (
                 "edge:alias",
-                "mentions_route_signal",
+                "event_has_route_signal",
                 event_node["id"],
                 alias_route_node["id"],
-                {"type": "mentions_route_signal", "event_id": "000001"},
+                {"type": "event_has_route_signal", "event_id": "000001"},
                 4,
             ),
             (
                 "edge:target",
-                "mentions_route_signal",
+                "event_has_route_signal",
                 event_node["id"],
                 target_route_node["id"],
                 {
-                    "type": "mentions_route_signal",
+                    "type": "event_has_route_signal",
                     "event_id": "000001",
                     "segment_id": "000",
                     "session_id": "session-1",
@@ -7590,7 +7590,7 @@ def test_graph_neighborhood_uses_sqlite_fast_path_for_exact_route_node(tmp_path:
             (
                 "event:session-1:000:000001",
                 "edge:1",
-                "mentions_route_signal",
+                "event_has_route_signal",
                 event_node["id"],
                 route_node["id"],
                 json.dumps(edge_payloads[0][4]),
@@ -7774,8 +7774,8 @@ def test_graph_event_sqlite_route_orders_timeline_independently_of_edge_weight(t
         conn.executemany(
             "INSERT INTO edges (id, edge_type, source_node, target_node, payload_json, count) VALUES (?, ?, ?, ?, ?, ?)",
             [
-                ("edge:late", "mentions_route_signal", late_event_id, route_id, "{}", 20),
-                ("edge:early", "mentions_route_signal", early_event_id, route_id, "{}", 1),
+                ("edge:late", "event_has_route_signal", late_event_id, route_id, "{}", 20),
+                ("edge:early", "event_has_route_signal", early_event_id, route_id, "{}", 1),
             ],
         )
         conn.commit()
@@ -7972,7 +7972,7 @@ def test_graph_packets_are_compact_by_default_without_losing_refs(tmp_path: Path
                         {
                             "source": f"event:session-1:000:{idx % 60:06d}",
                             "target": "route:mcp:mcp:aoa_session_memory_mcp",
-                            "type": "mentions_route_signal",
+                            "type": "event_has_route_signal",
                             "content": long_text,
                         }
                         for idx in range(100)

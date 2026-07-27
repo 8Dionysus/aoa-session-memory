@@ -133,6 +133,7 @@
 | [AOA-SM-D-0005 Provenance-Preserving Fork Lineage Consolidation](../AOA-SM-D-0005-provenance-preserving-fork-lineage-consolidation.md) | 2026-07-15 | Accepted | `docs/decisions/AOA-SM-D-0005-provenance-preserving-fork-lineage-consolidation.md` |
 | [AOA-SM-D-0008 Scoped Graph Evidence Freshness](../AOA-SM-D-0008-scoped-graph-evidence-freshness.md) | 2026-07-16 | Accepted | `docs/decisions/AOA-SM-D-0008-scoped-graph-evidence-freshness.md` |
 | [AOA-SM-D-0009 Correlated Agent Activity Status Relation](../AOA-SM-D-0009-correlated-agent-activity-status-relation.md) | 2026-07-16 | Accepted | `docs/decisions/AOA-SM-D-0009-correlated-agent-activity-status-relation.md` |
+| [AOA-SM-D-0033 Neutral Derived Route-Signal Graph Relations](../AOA-SM-D-0033-neutral-derived-route-signal-graph-relations.md) | 2026-07-26 | Accepted | `docs/decisions/AOA-SM-D-0033-neutral-derived-route-signal-graph-relations.md` |
 
 ## evidence reading
 
@@ -213,6 +214,7 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0007 Typed Graph Bridge Admission](../AOA-SM-D-0007-typed-graph-bridge-admission.md) | 2026-07-16 | Accepted | `docs/decisions/AOA-SM-D-0007-typed-graph-bridge-admission.md` |
 | [AOA-SM-D-0009 Correlated Agent Activity Status Relation](../AOA-SM-D-0009-correlated-agent-activity-status-relation.md) | 2026-07-16 | Accepted | `docs/decisions/AOA-SM-D-0009-correlated-agent-activity-status-relation.md` |
+| [AOA-SM-D-0033 Neutral Derived Route-Signal Graph Relations](../AOA-SM-D-0033-neutral-derived-route-signal-graph-relations.md) | 2026-07-26 | Accepted | `docs/decisions/AOA-SM-D-0033-neutral-derived-route-signal-graph-relations.md` |
 
 ## hybrid retrieval
 
@@ -257,6 +259,7 @@
 | [AOA-SM-D-0025 Process-Loaded Producer Generation Identity](../AOA-SM-D-0025-process-loaded-producer-generation-identity.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0025-process-loaded-producer-generation-identity.md` |
 | [AOA-SM-D-0028 Authoritative Registry Rebuild Excludes Generated History](../AOA-SM-D-0028-authoritative-registry-rebuild-excludes-generated-history.md) | 2026-07-20 | Accepted | `docs/decisions/AOA-SM-D-0028-authoritative-registry-rebuild-excludes-generated-history.md` |
 | [AOA-SM-D-0030 Projection-Scoped Producer Generation Identity](../AOA-SM-D-0030-projection-scoped-producer-generation-identity.md) | 2026-07-26 | Accepted | `docs/decisions/AOA-SM-D-0030-projection-scoped-producer-generation-identity.md` |
+| [AOA-SM-D-0033 Neutral Derived Route-Signal Graph Relations](../AOA-SM-D-0033-neutral-derived-route-signal-graph-relations.md) | 2026-07-26 | Accepted | `docs/decisions/AOA-SM-D-0033-neutral-derived-route-signal-graph-relations.md` |
 
 ## optional host acceleration
 
@@ -366,6 +369,12 @@
 | [AOA-SM-D-0020 Preserved Capture and Last-Good Projection Publication](../AOA-SM-D-0020-preserved-capture-and-last-good-projection-publication.md) | 2026-07-18 | Accepted | `docs/decisions/AOA-SM-D-0020-preserved-capture-and-last-good-projection-publication.md` |
 | [AOA-SM-D-0026 Best-Effort Progress Transport](../AOA-SM-D-0026-best-effort-progress-transport.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0026-best-effort-progress-transport.md` |
 | [AOA-SM-D-0031 Proof-Gated Entity-Registry Graph Rebind](../AOA-SM-D-0031-proof-gated-entity-registry-graph-rebind.md) | 2026-07-26 | Accepted | `docs/decisions/AOA-SM-D-0031-proof-gated-entity-registry-graph-rebind.md` |
+
+## relation taxonomy
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0033 Neutral Derived Route-Signal Graph Relations](../AOA-SM-D-0033-neutral-derived-route-signal-graph-relations.md) | 2026-07-26 | Accepted | `docs/decisions/AOA-SM-D-0033-neutral-derived-route-signal-graph-relations.md` |
 
 ## reproducibility
 

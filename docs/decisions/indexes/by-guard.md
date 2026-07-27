@@ -220,6 +220,12 @@
 | [AOA-SM-D-0030 Projection-Scoped Producer Generation Identity](../AOA-SM-D-0030-projection-scoped-producer-generation-identity.md) | 2026-07-26 | Accepted | `docs/decisions/AOA-SM-D-0030-projection-scoped-producer-generation-identity.md` |
 | [AOA-SM-D-0031 Proof-Gated Entity-Registry Graph Rebind](../AOA-SM-D-0031-proof-gated-entity-registry-graph-rebind.md) | 2026-07-26 | Accepted | `docs/decisions/AOA-SM-D-0031-proof-gated-entity-registry-graph-rebind.md` |
 
+## derived-anchor admission
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0033 Neutral Derived Route-Signal Graph Relations](../AOA-SM-D-0033-neutral-derived-route-signal-graph-relations.md) | 2026-07-26 | Accepted | `docs/decisions/AOA-SM-D-0033-neutral-derived-route-signal-graph-relations.md` |
+
 ## deterministic rebuild
 
 | Decision | Date | Status | Path |
@@ -360,6 +366,7 @@
 | [AOA-SM-D-0020 Preserved Capture and Last-Good Projection Publication](../AOA-SM-D-0020-preserved-capture-and-last-good-projection-publication.md) | 2026-07-18 | Accepted | `docs/decisions/AOA-SM-D-0020-preserved-capture-and-last-good-projection-publication.md` |
 | [AOA-SM-D-0024 Semantic Generation Pins for Evaluation Admission](../AOA-SM-D-0024-semantic-generation-pins-for-evaluation-admission.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0024-semantic-generation-pins-for-evaluation-admission.md` |
 | [AOA-SM-D-0025 Process-Loaded Producer Generation Identity](../AOA-SM-D-0025-process-loaded-producer-generation-identity.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0025-process-loaded-producer-generation-identity.md` |
+| [AOA-SM-D-0033 Neutral Derived Route-Signal Graph Relations](../AOA-SM-D-0033-neutral-derived-route-signal-graph-relations.md) | 2026-07-26 | Accepted | `docs/decisions/AOA-SM-D-0033-neutral-derived-route-signal-graph-relations.md` |
 
 ## generation identity
 
@@ -426,6 +433,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0030 Projection-Scoped Producer Generation Identity](../AOA-SM-D-0030-projection-scoped-producer-generation-identity.md) | 2026-07-26 | Accepted | `docs/decisions/AOA-SM-D-0030-projection-scoped-producer-generation-identity.md` |
+
+## literal-mention separation
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0033 Neutral Derived Route-Signal Graph Relations](../AOA-SM-D-0033-neutral-derived-route-signal-graph-relations.md) | 2026-07-26 | Accepted | `docs/decisions/AOA-SM-D-0033-neutral-derived-route-signal-graph-relations.md` |
 
 ## local work attribution
 
@@ -812,3 +825,9 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0027 Evidence-Specific Sparse Anchors in Hybrid Fusion](../AOA-SM-D-0027-evidence-specific-sparse-anchors-in-hybrid-fusion.md) | 2026-07-20 | Accepted | `docs/decisions/AOA-SM-D-0027-evidence-specific-sparse-anchors-in-hybrid-fusion.md` |
+
+## usage-state separation
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0033 Neutral Derived Route-Signal Graph Relations](../AOA-SM-D-0033-neutral-derived-route-signal-graph-relations.md) | 2026-07-26 | Accepted | `docs/decisions/AOA-SM-D-0033-neutral-derived-route-signal-graph-relations.md` |

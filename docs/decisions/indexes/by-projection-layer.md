@@ -154,6 +154,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0025 Process-Loaded Producer Generation Identity](../AOA-SM-D-0025-process-loaded-producer-generation-identity.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0025-process-loaded-producer-generation-identity.md` |
 
+## event route signals
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0033 Neutral Derived Route-Signal Graph Relations](../AOA-SM-D-0033-neutral-derived-route-signal-graph-relations.md) | 2026-07-26 | Accepted | `docs/decisions/AOA-SM-D-0033-neutral-derived-route-signal-graph-relations.md` |
+
 ## evidence packets
 
 | Decision | Date | Status | Path |
@@ -262,6 +268,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0031 Proof-Gated Entity-Registry Graph Rebind](../AOA-SM-D-0031-proof-gated-entity-registry-graph-rebind.md) | 2026-07-26 | Accepted | `docs/decisions/AOA-SM-D-0031-proof-gated-entity-registry-graph-rebind.md` |
+
+## graph quality
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0033 Neutral Derived Route-Signal Graph Relations](../AOA-SM-D-0033-neutral-derived-route-signal-graph-relations.md) | 2026-07-26 | Accepted | `docs/decisions/AOA-SM-D-0033-neutral-derived-route-signal-graph-relations.md` |
 
 ## graph query packets
 
@@ -401,6 +413,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0020 Preserved Capture and Last-Good Projection Publication](../AOA-SM-D-0020-preserved-capture-and-last-good-projection-publication.md) | 2026-07-18 | Accepted | `docs/decisions/AOA-SM-D-0020-preserved-capture-and-last-good-projection-publication.md` |
+
+## registered-entity signals
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0033 Neutral Derived Route-Signal Graph Relations](../AOA-SM-D-0033-neutral-derived-route-signal-graph-relations.md) | 2026-07-26 | Accepted | `docs/decisions/AOA-SM-D-0033-neutral-derived-route-signal-graph-relations.md` |
 
 ## resource-block fallback
 
@@ -566,6 +584,7 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0009 Correlated Agent Activity Status Relation](../AOA-SM-D-0009-correlated-agent-activity-status-relation.md) | 2026-07-16 | Accepted | `docs/decisions/AOA-SM-D-0009-correlated-agent-activity-status-relation.md` |
+| [AOA-SM-D-0033 Neutral Derived Route-Signal Graph Relations](../AOA-SM-D-0033-neutral-derived-route-signal-graph-relations.md) | 2026-07-26 | Accepted | `docs/decisions/AOA-SM-D-0033-neutral-derived-route-signal-graph-relations.md` |
 
 ## typed graph bridge
 

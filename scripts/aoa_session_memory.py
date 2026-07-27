@@ -723,7 +723,7 @@ SEARCH_AGENT_EVENT_ELIGIBLE_EVENT_TYPES = (
 )
 SEARCH_OPERATIONAL_EVENT_ROUTE_ROLLUP_TOP_LIMIT = 12
 SEARCH_OPERATIONAL_ROUTE_ROLLUP_DB_NAME = "operational-route-rollup.sqlite3"
-SEARCH_OPERATIONAL_ROUTE_ROLLUP_SCHEMA_VERSION = 1
+SEARCH_OPERATIONAL_ROUTE_ROLLUP_SCHEMA_VERSION = 2
 SEARCH_OPERATIONAL_ROUTE_ROLLUP_DEFAULT_REF_SAMPLE_LIMIT = 3
 SEARCH_OPERATIONAL_ROUTE_ROLLUP_AGENT_ROUTE_TOP_KEYS = 3
 SEARCH_OPERATIONAL_DIRECT_EVENT_ROLLUP_DB_NAME = "operational-direct-event-rollup.sqlite3"
@@ -865,10 +865,8 @@ SEARCH_OPERATIONAL_DIRECT_EVENT_ROUTE_LAYERS = tuple(
         for layer in lane_layers
     )
 )
-SEARCH_OPERATIONAL_ROUTE_ROLLUP_PROMOTED_ROUTE_LAYERS = (
-    "goal",
-    "agent_event",
-    "decision_thread",
+SEARCH_OPERATIONAL_ROUTE_ROLLUP_MATERIALIZED_ROUTE_LAYERS = (
+    SEARCH_OPERATIONAL_DIRECT_EVENT_ROUTE_LAYERS
 )
 SEARCH_OPERATIONAL_EVENT_DIRECT_USAGE_ROLES = ("usage", "result", "outcome", "entrypoint")
 SEARCH_OPERATIONAL_EVENT_CONTEXT_ROLE = "context"
@@ -978,9 +976,12 @@ GRAPH_STORE_AGGREGATE_PAYLOAD_MODE = "compact_refs"
 GRAPH_STORE_CONTRIB_PAYLOAD_MODE = "compact_column_evidence_refs_v3"
 GRAPH_RAW_REF_MATERIALIZATION_POLICY = "event_evidence_refs_only_v1"
 GRAPH_MATERIALIZE_RAW_REF_NODES = False
-GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY = "anchor_event_edges_bounded_segment_summary_no_sequence_high_fanout_omit_v4"
+GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY = (
+    "neutral_event_signal_edges_bounded_segment_summary_"
+    "no_sequence_high_fanout_omit_v5"
+)
 GRAPH_EVENT_RELATIONSHIP_EDGE_POLICY = "typed_directional_evidence_correlation_gate_skip_linear_sequence_v3"
-GRAPH_RELATION_CONTRACT_VERSION = 3
+GRAPH_RELATION_CONTRACT_VERSION = 4
 GRAPH_EVENT_RELATIONSHIP_EDGE_OMIT_TYPES = frozenset({"next_event", "previous_event"})
 GRAPH_EVENT_ROUTE_SIGNAL_EDGE_LIMIT = 8
 GRAPH_EVENT_REGISTERED_ENTITY_EDGE_LIMIT = 8
@@ -1007,7 +1008,7 @@ EPISODE_POSTINGS_COOCCURRENCE_SUPPRESSED_LAYERS = frozenset({"entity", "namespac
 EPISODE_POSTINGS_COOCCURRENCE_SUPPRESSED_KEYS = frozenset(
     {"mcp_tool_call", "tool_call", "function_call", "namespace_tool", "namespace_mcp"}
 )
-GRAPH_ENTITY_USAGE_REPLACEMENT_EDGE_TYPE = "event_mentions_registered_entity"
+GRAPH_ENTITY_USAGE_REPLACEMENT_EDGE_TYPE = "event_has_registered_entity_signal"
 GRAPH_ENTITY_USAGE_REPLACEMENT_AGGREGATE_EDGE_TYPE = "session_has_registered_entity"
 GRAPH_ENTITY_USAGE_REPLACEMENT_TARGET_PROJECTION = "entity_usage_rollup_by_anchor_session_segment"
 GRAPH_ENTITY_USAGE_REPLACEMENT_DEFAULT_PROBES = (
@@ -1035,7 +1036,7 @@ GRAPH_HIGH_FANOUT_DEFAULT_OMITTED_EDGE_TYPES = frozenset({"has_event"})
 GRAPH_HIGH_FANOUT_PRUNE_EDGE_TYPES = frozenset(
     {
         GRAPH_ENTITY_USAGE_REPLACEMENT_EDGE_TYPE,
-        "mentions_route_signal",
+        "event_has_route_signal",
     }
 )
 GRAPH_HIGH_FANOUT_CARDINALITY_PROOF_GATE = "before_after_cardinality_comparison"
@@ -1094,7 +1095,7 @@ GRAPH_HIGH_FANOUT_CARDINALITY_TARGETS = (
     },
     {
         "target_projection": GRAPH_ROUTE_SIGNAL_REPLACEMENT_TARGET_PROJECTION,
-        "before_edge_types": ("mentions_route_signal",),
+        "before_edge_types": ("event_has_route_signal",),
         "after_count_source": "episode_direct_postings_plus_operational_route_rollup",
         "after_count_labels": (
             "episode_entity_postings_direct_relations",
@@ -9779,10 +9780,19 @@ def graph_entity_registry_dependency_snapshot(
         )
         if current or not ensure_current or attempt > 0:
             break
+        refresh_observed_source = str(
+            payload.get("observed_source") or "auto"
+        )
+        refresh_history_policy = str(
+            payload.get("history_policy")
+            or ENTITY_REGISTRY_HISTORY_POLICY_INCREMENTAL
+        )
         build_entity_registry(
             aoa_root=aoa_root,
             write=True,
             include_runtime=True,
+            observed_source=refresh_observed_source,
+            history_policy=refresh_history_policy,
             limit=1_000_000,
         )
         ENTITY_REGISTRY_INDEX_CACHE.clear()
@@ -76742,7 +76752,41 @@ def episode_selective_local_rerank(
     margin = top_score - second_score
     decisive = top_score >= EPISODE_RERANK_PROMOTION_MIN_SCORE and margin >= EPISODE_RERANK_PROMOTION_MIN_MARGIN
     winner_index = rerank_order[0]
-    if decisive and winner_index != 0:
+    original_top_explain = (
+        annotated_candidates[0].get("explain")
+        if annotated_candidates
+        and isinstance(annotated_candidates[0].get("explain"), dict)
+        else {}
+    )
+    original_top_fusion = (
+        original_top_explain.get("fusion")
+        if isinstance(original_top_explain.get("fusion"), dict)
+        else {}
+    )
+    typed_sparse_anchor_reasons = [
+        str(item)
+        for item in (
+            original_top_fusion.get("sparse_anchor_reasons")
+            if isinstance(
+                original_top_fusion.get("sparse_anchor_reasons"),
+                list,
+            )
+            else []
+        )
+        if item
+    ]
+    typed_sparse_anchor_protected = bool(
+        original_top_fusion.get("sparse_anchor")
+        and typed_sparse_anchor_reasons
+    )
+    if (
+        decisive
+        and winner_index != 0
+        and typed_sparse_anchor_protected
+    ):
+        final_candidates = annotated_candidates
+        status = "decisive_winner_blocked_by_typed_sparse_anchor"
+    elif decisive and winner_index != 0:
         final_candidates = [annotated_candidates[winner_index]] + [
             item for index, item in enumerate(annotated_candidates) if index != winner_index
         ]
@@ -76771,6 +76815,24 @@ def episode_selective_local_rerank(
         "margin": round(margin, 7),
         "promotion_min_score": EPISODE_RERANK_PROMOTION_MIN_SCORE,
         "promotion_min_margin": EPISODE_RERANK_PROMOTION_MIN_MARGIN,
+        "typed_sparse_anchor_protection": {
+            "active": typed_sparse_anchor_protected,
+            "doc_id": (
+                str(annotated_candidates[0].get("doc_id") or "")
+                if annotated_candidates
+                else ""
+            ),
+            "reasons": typed_sparse_anchor_reasons,
+            "blocked_promotion": bool(
+                status
+                == "decisive_winner_blocked_by_typed_sparse_anchor"
+            ),
+            "policy": (
+                "a decisive typed or ordered sparse evidence anchor remains "
+                "ahead of model-only reranker relevance; claim admission "
+                "still requires source evidence"
+            ),
+        },
         "model": payload.get("model"),
         "meta": {
             key: meta.get(key)
@@ -82711,6 +82773,7 @@ def episode_semantic_search(
                     "evidence_text_max_chars", "context_max_chars",
                     "lineage_consolidation_before_rerank", "top_score",
                     "second_score", "margin", "promotion_min_score", "promotion_min_margin",
+                    "typed_sparse_anchor_protection",
                     "model", "meta", "elapsed_ms", "truth_level", "diagnostics",
                     "trigger", "auto_reasons", "observed_signals",
                     "policy_version", "escalation", "provider_readiness",
@@ -105185,6 +105248,21 @@ def literal_query_plan(
             cost="low",
             authority="generated_session_refs",
         )
+    elif session_target and effective_agent_event:
+        add_route(
+            "agent_event_route",
+            "query asks for a typed assistant event inside an exact session target; preserve the typed route even when the bounded archive cannot resolve that session, so execution can return explicit unresolved scope before raw-text fallback",
+            literal_query_agent_event_command_line(
+                aoa_root=aoa_root,
+                agent_event=effective_agent_event,
+                session=session_target,
+                task_episode_id=task_episode_id,
+                max_shards=max_shards,
+                query_timeout_ms=query_timeout_ms,
+            ),
+            cost="low",
+            authority="generated_agent_event_refs_or_explicit_unresolved_scope",
+        )
 
     if broad_entity_class:
         class_layer = str(broad_entity_class.get("layer") or "")
@@ -107673,7 +107751,15 @@ def graph_route_signals_from_event(event: dict[str, Any]) -> list[dict[str, str]
         layer = route_key_slug(signal.get("layer"), fallback="")
         key = route_key_slug(signal.get("key"), fallback="")
         if layer and key:
-            selected.append({"layer": layer, "key": key, "route_signal": route_signal_token(layer, key)})
+            selected.append(
+                {
+                    "layer": layer,
+                    "key": key,
+                    "route_signal": route_signal_token(layer, key),
+                    "source": str(signal.get("source") or ""),
+                    "confidence": str(signal.get("confidence") or ""),
+                }
+            )
     return selected
 
 
@@ -107906,8 +107992,8 @@ GRAPH_RELATION_CONTRACTS: dict[str, dict[str, Any]] = {
         "domain": ("segment",),
         "range": ("route",),
     },
-    "mentions_route_signal": {
-        "family": "mention",
+    "event_has_route_signal": {
+        "family": "derived_anchor",
         "domain": ("event",),
         "range": ("route",),
     },
@@ -107921,8 +108007,8 @@ GRAPH_RELATION_CONTRACTS: dict[str, dict[str, Any]] = {
         "domain": ("*",),
         "range": ("route",),
     },
-    "event_mentions_registered_entity": {
-        "family": "mention",
+    "event_has_registered_entity_signal": {
+        "family": "derived_anchor",
         "domain": ("event",),
         "range": ("entity_registry",),
     },
@@ -109825,7 +109911,7 @@ def graph_contributions_for_record(
                     require_event_materialized=True,
                     limit=GRAPH_EVENT_ROUTE_SIGNAL_EDGE_LIMIT,
                 )
-                if graph_should_materialize_high_fanout_event_edge("mentions_route_signal")
+                if graph_should_materialize_high_fanout_event_edge("event_has_route_signal")
                 else []
             )
             event_registered_entity_edges = (
@@ -109986,11 +110072,20 @@ def graph_contributions_for_record(
                         {
                             "source": event_node_id,
                             "target": route_node_id,
-                            "type": "mentions_route_signal",
+                            "type": "event_has_route_signal",
                             "session_id": session_id,
                             "segment_id": segment_id,
                             "event_id": event_id,
                             "route_signal": route_signal_value,
+                            "signal_source": signal.get("source"),
+                            "signal_confidence": signal.get(
+                                "confidence"
+                            ),
+                            "semantic_boundary": (
+                                "derived route-signal navigation; this edge "
+                                "does not by itself prove literal mention, "
+                                "invocation, completion, or consequence"
+                            ),
                             "materialization_policy": GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
                             "evidence_refs": [{"session_id": session_id, "segment_id": segment_id, "event_id": event_id, "refs": event_refs}],
                         }
@@ -110004,8 +110099,23 @@ def graph_contributions_for_record(
                         layer=layer,
                         key=key,
                         evidence_refs=[{"session_id": session_id, "segment_id": segment_id, "event_id": event_id, "refs": event_refs}],
-                        edge_type="event_mentions_registered_entity",
-                        extra={"segment_id": segment_id, "event_id": event_id},
+                        edge_type="event_has_registered_entity_signal",
+                        extra={
+                            "segment_id": segment_id,
+                            "event_id": event_id,
+                            "signal_source": signal.get(
+                                "source"
+                            ),
+                            "signal_confidence": signal.get(
+                                "confidence"
+                            ),
+                            "semantic_boundary": (
+                                "registered entity navigation derived from "
+                                "an event route signal; this edge does not "
+                                "by itself prove literal mention, usage, "
+                                "completion, or consequence"
+                            ),
+                        },
                     )
             for rel_type, relation, target_event in event_relationship_edges:
                 target_event_node_id = f"event:{session_id}:{segment_id}:{relation.get('event_id')}"
@@ -115809,12 +115919,12 @@ def build_session_graph_legacy(
                                 ],
                             }
                         )
-                        if graph_should_materialize_high_fanout_event_edge("mentions_route_signal"):
+                        if graph_should_materialize_high_fanout_event_edge("event_has_route_signal"):
                             add_edge(
                                 {
                                     "source": event_node_id,
                                     "target": route_node_id,
-                                    "type": "mentions_route_signal",
+                                    "type": "event_has_route_signal",
                                     "session_id": session_id,
                                     "segment_id": segment_id,
                                     "event_id": event_id,
@@ -123780,7 +123890,7 @@ def graph_high_fanout_edge_policy_row(
         "replacement_required_before_prune": True,
         "authority_boundary": "graph edges are generated topology; raw/segment refs and owner source surfaces remain stronger",
     }
-    if edge_type == "mentions_route_signal":
+    if edge_type == "event_has_route_signal":
         return {
             **base,
             "class": "event_route_signal_fanout",
@@ -123791,15 +123901,21 @@ def graph_high_fanout_edge_policy_row(
             "next_route": "Use graph-cooccurrence for dense operational anchors; rebuild stale graph sources only if this policy is missing from generated sources.",
             "example_command": f"python3 {aoa_root / 'scripts' / 'aoa_session_memory.py'} graph-cooccurrence <anchor> --aoa-root {aoa_root} --kind <kind> --limit 30",
         }
-    if edge_type == "event_mentions_registered_entity":
+    if edge_type == "event_has_registered_entity_signal":
         return {
             **base,
             "class": "event_registered_entity_fanout",
             "current_policy": GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
-            "mitigation_status": "bounded_event_entity_edges_preserve_usage_refs",
+            "mitigation_status": (
+                "bounded_neutral_event_entity_signal_edges_preserve_refs"
+            ),
             "replacement_layers": ["session_has_registered_entity", "usage-chain"],
             "compact_query_route": "usage-chain",
-            "next_route": "Keep event-level refs for entity usage; reduce only after a usage/rollup replacement preserves consequence and raw/segment refs.",
+            "next_route": (
+                "Keep event-level signal refs as navigation only; reduce only "
+                "after a reviewed usage/rollup replacement preserves "
+                "consequence and raw/segment refs."
+            ),
             "example_command": f"python3 {aoa_root / 'scripts' / 'aoa_session_memory.py'} usage-chain <anchor> --aoa-root {aoa_root} --kind <kind>",
         }
     if edge_type in {"segment_has_route_signal", "session_has_route_signal", "session_has_registered_entity"}:
@@ -125043,7 +125159,7 @@ def graph_high_fanout_replacement_plan_for_edge(
         if layer
     ] if isinstance(edge_policy.get("replacement_layers"), list) else []
     common = list(GRAPH_HIGH_FANOUT_REPLACEMENT_COMMON_PROOF_GATES)
-    if edge_type == "event_mentions_registered_entity":
+    if edge_type == "event_has_registered_entity_signal":
         proof_state = (proof_states or {}).get(GRAPH_ENTITY_USAGE_REPLACEMENT_TARGET_PROJECTION)
         if not isinstance(proof_state, dict):
             proof_state = {}
@@ -125084,7 +125200,7 @@ def graph_high_fanout_replacement_plan_for_edge(
             "promotion_rule": "promote only after usage/consequence packets preserve raw/segment refs and route freshness on reviewed live cases",
             "can_prune_now": False,
         }
-    if edge_type == "mentions_route_signal":
+    if edge_type == "event_has_route_signal":
         proof_state = (proof_states or {}).get(GRAPH_ROUTE_SIGNAL_REPLACEMENT_TARGET_PROJECTION)
         if not isinstance(proof_state, dict):
             proof_state = {}
@@ -126725,9 +126841,9 @@ def graph_store_resolve_anchor(
 def graph_store_neighbor_edge_priority(edge_type: str) -> int:
     return {
         "registry_entity_has_route_signal": 0,
-        "mentions_route_signal": 1,
+        "event_has_route_signal": 1,
         "segment_has_route_signal": 2,
-        "event_mentions_registered_entity": 3,
+        "event_has_registered_entity_signal": 3,
         "session_has_registered_entity": 4,
         "has_event": 5,
         "answered_by": 5,
@@ -126763,9 +126879,9 @@ def graph_store_neighbor_edge_rows(
                 ORDER BY
                   CASE edge_type
                     WHEN 'registry_entity_has_route_signal' THEN 0
-                    WHEN 'mentions_route_signal' THEN 1
+                    WHEN 'event_has_route_signal' THEN 1
                     WHEN 'segment_has_route_signal' THEN 2
-                    WHEN 'event_mentions_registered_entity' THEN 3
+                    WHEN 'event_has_registered_entity_signal' THEN 3
                     WHEN 'session_has_registered_entity' THEN 4
                     WHEN 'has_event' THEN 5
                     WHEN 'answered_by' THEN 5
@@ -126908,7 +127024,7 @@ def graph_from_store_timeline_events(
     if state.get("status") != "current":
         return None
     paths = graph_paths(aoa_root)
-    edge_types = ("mentions_route_signal", "event_mentions_registered_entity", "goal_lifecycle_has_event")
+    edge_types = ("event_has_route_signal", "event_has_registered_entity_signal", "goal_lifecycle_has_event")
     route_structural_edge_types = ("goal_lifecycle_has_route_signal",)
     placeholders = ",".join("?" for _item in edge_types)
     route_structural_placeholders = ",".join("?" for _item in route_structural_edge_types)
@@ -127612,7 +127728,7 @@ def graph_route_signals_from_pipe(value: Any) -> list[dict[str, str]]:
 
 def graph_search_hit_route_relation(doc_type: str) -> str:
     return {
-        "event": "mentions_route_signal",
+        "event": "event_has_route_signal",
         "task_episode": "task_episode_has_route_signal",
         "entity_registry": "registry_entity_has_route_signal",
         "segment": "segment_has_route_signal",
@@ -128566,15 +128682,44 @@ def graph_source_verified_correlation_timeline(
 
     event_limit = max(1, min(int_value(limit, 40), 200))
     candidate_limit = max(20, min(200, event_limit * 8))
-    trace = trace_route(
+    exact_seed = search_sessions(
         aoa_root=aoa_root,
-        anchor=structured_identifier,
-        kind=kind,
-        session=session,
+        query=structured_identifier,
         limit=candidate_limit,
-        per_route_limit=max(20, min(candidate_limit, 50)),
+        provider="portable_sqlite",
+        session=session,
         doc_type="event",
         explain=True,
+        semantic_preview=False,
+        hydrate_body=False,
+        raw_ref_preview=False,
+        literal_postings_only=True,
+        include_archived_raw_fallback=False,
+    )
+    exact_hits = (
+        exact_seed.get("results", [])
+        if isinstance(exact_seed.get("results"), list)
+        else []
+    )
+    trace = (
+        {
+            "ok": exact_seed.get("ok"),
+            "result_count": len(exact_hits),
+            "results": exact_hits,
+            "diagnostics": exact_seed.get("diagnostics", []),
+            "selected_seed_route": "exact_literal_postings",
+        }
+        if exact_hits
+        else trace_route(
+            aoa_root=aoa_root,
+            anchor=structured_identifier,
+            kind=kind,
+            session=session,
+            limit=candidate_limit,
+            per_route_limit=max(20, min(candidate_limit, 50)),
+            doc_type="event",
+            explain=True,
+        )
     )
     hits = (
         trace.get("results", [])
@@ -128977,6 +129122,10 @@ def graph_source_verified_correlation_timeline(
             ),
             "trace_result_count": trace.get("result_count"),
             "trace_ok": trace.get("ok"),
+            "selected_seed_route": trace.get(
+                "selected_seed_route",
+                "bounded_trace_route_fallback",
+            ),
             "needs_maintenance": bool(
                 stale_source_observation or not nodes
             ),
@@ -130190,8 +130339,8 @@ def graph_bridge_compact_edge(edge: dict[str, Any]) -> dict[str, Any]:
 GRAPH_BRIDGE_DISCOVERY_ONLY_EDGE_TYPES = frozenset(
     {
         "cooccurs_with",
-        "event_mentions_registered_entity",
-        "mentions_route_signal",
+        "event_has_registered_entity_signal",
+        "event_has_route_signal",
         "segment_has_route_signal",
         "session_has_registered_entity",
         "session_has_route_signal",
@@ -130942,7 +131091,7 @@ def graph_cooccurrence_from_packet(
     event_to_routes: dict[str, set[str]] = defaultdict(set)
     route_to_events: dict[str, set[str]] = defaultdict(set)
     for edge in graph.get("edges", []) if isinstance(graph.get("edges"), list) else []:
-        if not isinstance(edge, dict) or edge.get("type") != "mentions_route_signal":
+        if not isinstance(edge, dict) or edge.get("type") != "event_has_route_signal":
             continue
         source = str(edge.get("source") or "")
         target = str(edge.get("target") or "")
@@ -131990,7 +132139,7 @@ def graph_cooccurrence_from_store_aggregate(
             "one_short_route": True,
             "bounded_store_query": True,
             "aggregate_route_signal_query": True,
-            "uses_event_mentions_route_signal_edges": False,
+            "uses_event_has_route_signal_edges": False,
             "uses_session_has_route_signal_edges": False,
             "context_selection_policy": GRAPH_COOCCURRENCE_CONTEXT_SELECTION_POLICY,
             "cooccurrence_ranking_policy": GRAPH_COOCCURRENCE_RANKING_POLICY,
@@ -132083,7 +132232,7 @@ def graph_cooccurrence_from_store(
                     SELECT source_node, target_node
                     FROM edges INDEXED BY {index_name}
                     WHERE {column} = ?
-                      AND edge_type = 'mentions_route_signal'
+                      AND edge_type = 'event_has_route_signal'
                     LIMIT ?
                     """,
                     (node_id, remaining),
@@ -132114,7 +132263,7 @@ def graph_cooccurrence_from_store(
                 SELECT id, source_node, target_node, count
                 FROM edges INDEXED BY idx_edges_source
                 WHERE source_node IN ({placeholders})
-                  AND edge_type = 'mentions_route_signal'
+                  AND edge_type = 'event_has_route_signal'
                 LIMIT ?
                 """,
                 (*chunk, remaining_edges),
@@ -132300,6 +132449,113 @@ def refs_from_search_hits(hits: list[dict[str, Any]], *, limit: int = 60) -> lis
     return graph_unique_records(refs, limit=limit)
 
 
+def graph_lexical_seed(
+    *,
+    aoa_root: Path,
+    query: str,
+    kind: str,
+    limit: int,
+    neighborhood: dict[str, Any] | None = None,
+    include_semantic_context: bool = False,
+    rerank_local: bool = False,
+) -> dict[str, Any]:
+    """Choose the cheapest specific text lane needed to seed graph retrieval.
+
+    Exact structured identifiers use the exact-output posting projection.
+    A resolved typed graph anchor already supplies evidence-bearing seeds, so
+    repeating a payload-wide FTS scan adds cost and semantic noise without
+    increasing the bounded graph scope. Natural-language and unresolved
+    anchors retain the lexical fallback.
+    """
+    text = str(query or "").strip()
+    normalized_kind = normalize_trace_route_kind(kind)
+    route_kind = (
+        normalized_kind
+        if normalized_kind in TRACE_ROUTE_KINDS
+        else "auto"
+    )
+    structured_identifier = literal_query_identifier_anchor(text)
+    if (
+        structured_identifier
+        and LITERAL_QUERY_STRUCTURED_IDENTIFIER_RE.fullmatch(
+            structured_identifier
+        )
+        is not None
+    ):
+        payload = search_sessions(
+            aoa_root=aoa_root,
+            query=structured_identifier,
+            limit=limit,
+            doc_type="event",
+            explain=True,
+            semantic_preview=False,
+            hydrate_body=False,
+            raw_ref_preview=False,
+            literal_postings_only=True,
+            include_archived_raw_fallback=False,
+        )
+        payload["graph_seed_route"] = "exact_literal_postings"
+        return payload
+
+    graph_packet = neighborhood if isinstance(neighborhood, dict) else {}
+    graph_refs = (
+        graph_packet.get("evidence_refs", [])
+        if isinstance(graph_packet.get("evidence_refs"), list)
+        else []
+    )
+    resolved = (
+        graph_packet.get("resolved")
+        if isinstance(graph_packet.get("resolved"), dict)
+        else {}
+    )
+    if (
+        route_kind != "auto"
+        and graph_refs
+        and isinstance(resolved.get("start_node_ids"), list)
+        and resolved.get("start_node_ids")
+    ):
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "artifact_type": "search_results",
+            "search_schema_version": SEARCH_SCHEMA_VERSION,
+            "generated_at": utc_now(),
+            "ok": True,
+            "mutates": False,
+            "truth_status": (
+                "typed_graph_seed_satisfied_no_payload_wide_text_scan"
+            ),
+            "query": text,
+            "normalized_query": "",
+            "result_count": 0,
+            "results": [],
+            "graph_seed_route": "typed_graph_anchor",
+            "route_selection": {
+                "first_route": "typed_graph_anchor",
+                "selected_route": "typed_graph_anchor",
+                "fallback_reason": "",
+                "semantic_or_lexical_expansion_used": False,
+            },
+            "cost_profile": {
+                "uses_fts": False,
+                "bounded": True,
+            },
+            "diagnostics": [
+                "graph_lexical_seed_skipped_specific_graph_anchor"
+            ],
+        }
+
+    payload = search_sessions(
+        aoa_root=aoa_root,
+        query=text,
+        limit=limit,
+        include_semantic_context=include_semantic_context,
+        rerank_local=rerank_local,
+        explain=True,
+    )
+    payload["graph_seed_route"] = "portable_lexical_search"
+    return payload
+
+
 def graph_rag_packet(
     *,
     aoa_root: Path,
@@ -132339,15 +132595,16 @@ def graph_rag_packet(
     anchor_text = str(anchor or text)
     normalized_kind = normalize_trace_route_kind(kind)
     route_kind = normalized_kind if normalized_kind in TRACE_ROUTE_KINDS else "auto"
-    lexical = search_sessions(
+    neighborhood = graph_neighborhood(aoa_root=aoa_root, anchor=anchor_text, kind=route_kind, depth=2, limit=max(limit * 8, 40))
+    lexical = graph_lexical_seed(
         aoa_root=aoa_root,
         query=text,
+        kind=route_kind,
         limit=limit,
+        neighborhood=neighborhood,
         include_semantic_context=include_semantic_context,
         rerank_local=rerank_local,
-        explain=True,
     )
-    neighborhood = graph_neighborhood(aoa_root=aoa_root, anchor=anchor_text, kind=route_kind, depth=2, limit=max(limit * 8, 40))
     cooccurrence = graph_cooccurrence_from_packet(
         aoa_root=aoa_root,
         packet=neighborhood,
@@ -132378,7 +132635,10 @@ def graph_rag_packet(
         **trace_kind_payload_fields(kind, route_kind),
         "mode": mode,
         "retrieval_modes": {
-            "lexical": "portable_sqlite_fts",
+            "lexical": lexical.get(
+                "graph_seed_route",
+                "portable_lexical_search",
+            ),
             "vector": "optional_semantic_overlay" if include_semantic_context else "not_requested",
             "rerank": "optional_local_rerank" if rerank_local else "not_requested",
             "graph": "route_signal_sidecar_or_ephemeral_graph",
@@ -134563,7 +134823,12 @@ def graph_answer_rules(
     }
 
 
-def graph_ref_raw_preview(ref: Any, *, max_chars: int = 360) -> dict[str, Any]:
+def graph_ref_raw_preview(
+    ref: Any,
+    *,
+    aoa_root: Path,
+    max_chars: int = 360,
+) -> dict[str, Any]:
     values = graph_ref_values(ref)
     raw_ref = values.get("raw", "")
     manifest_ref = values.get("session", "")
@@ -134572,6 +134837,8 @@ def graph_ref_raw_preview(ref: Any, *, max_chars: int = 360) -> dict[str, Any]:
     if not manifest_ref:
         return {"status": "missing_session_manifest_ref", "line": line_from_raw_ref(raw_ref), "text": ""}
     manifest_path = Path(manifest_ref)
+    if not manifest_path.is_absolute():
+        manifest_path = aoa_root / manifest_path
     manifest = read_json(manifest_path, {})
     if not isinstance(manifest, dict) or not manifest:
         return {"status": "session_manifest_unavailable", "line": line_from_raw_ref(raw_ref), "text": ""}
@@ -134593,18 +134860,35 @@ def graph_ref_raw_preview(ref: Any, *, max_chars: int = 360) -> dict[str, Any]:
     return preview
 
 
-def graph_quality_sample_ref(ref: Any) -> dict[str, Any]:
+def graph_quality_sample_ref(
+    ref: Any,
+    *,
+    aoa_root: Path,
+) -> dict[str, Any]:
     values = graph_ref_values(ref)
     return {
         "ref": ref,
         "has_raw_ref": bool(values.get("raw")),
         "has_segment_ref": bool(values.get("segment")),
         "has_session_ref": bool(values.get("session")),
-        "raw_preview": graph_ref_raw_preview(ref) if values.get("raw") else {"status": "missing_raw_ref", "line": None, "text": ""},
+        "raw_preview": (
+            graph_ref_raw_preview(ref, aoa_root=aoa_root)
+            if values.get("raw")
+            else {
+                "status": "missing_raw_ref",
+                "line": None,
+                "text": "",
+            }
+        ),
     }
 
 
-def graph_quality_sample_refs(evidence_refs: list[Any], *, limit: int) -> list[dict[str, Any]]:
+def graph_quality_sample_refs(
+    evidence_refs: list[Any],
+    *,
+    aoa_root: Path,
+    limit: int,
+) -> list[dict[str, Any]]:
     def rank(ref: Any) -> tuple[int, int, int]:
         values = graph_ref_values(ref)
         return (
@@ -134616,7 +134900,7 @@ def graph_quality_sample_refs(evidence_refs: list[Any], *, limit: int) -> list[d
     ordered = sorted(evidence_refs, key=rank)
     bounded_limit = max(1, limit)
     selected = [
-        graph_quality_sample_ref(ref)
+        graph_quality_sample_ref(ref, aoa_root=aoa_root)
         for ref in ordered[:bounded_limit]
     ]
 
@@ -134644,7 +134928,7 @@ def graph_quality_sample_refs(evidence_refs: list[Any], *, limit: int) -> list[d
     # retain that stable order but replace the final sample with the first
     # source-readable semantic ref so a manual quality audit is reviewable.
     for ref in ordered[bounded_limit:]:
-        sample = graph_quality_sample_ref(ref)
+        sample = graph_quality_sample_ref(ref, aoa_root=aoa_root)
         if not has_readable_semantic_preview(sample):
             continue
         if selected:
@@ -134679,6 +134963,7 @@ def graph_quality_route_nodes(nodes: list[dict[str, Any]], *, limit: int = 12) -
 
 GRAPH_QUALITY_INFORMATIONAL_DIAGNOSTICS = frozenset(
     {
+        "graph_lexical_seed_skipped_specific_graph_anchor",
         "graph_store_unindexed_payload_scan_skipped",
         "structured_correlation_source_admission_applied",
         "graph_store_exact_miss_used_bounded_retrieval_seed",
@@ -134702,7 +134987,7 @@ def graph_quality_diagnostic_finding(
             code.startswith(prefix)
             for prefix in GRAPH_QUALITY_INFORMATIONAL_DIAGNOSTIC_PREFIXES
         )
-        or code.startswith("answer_rule_gate:needs_review")
+        or code.startswith("answer_rule_gate:")
     ):
         return {
             "code": code,
@@ -134747,7 +135032,13 @@ def graph_quality_audit(
             depth=2,
             limit=max(limit * 6, 30),
         )
-        lexical = search_sessions(aoa_root=aoa_root, query=anchor, limit=limit, doc_type="event", explain=True)
+        lexical = graph_lexical_seed(
+            aoa_root=aoa_root,
+            query=anchor,
+            kind=kind,
+            limit=limit,
+            neighborhood=neighborhood,
+        )
         graphrag = (
             graph_rag_packet(
                 aoa_root=aoa_root,
@@ -134887,7 +135178,11 @@ def graph_quality_audit(
                 "evidence": {
                     "evidence_ref_count": len(evidence_refs),
                     **ref_counts,
-                    "sample_refs": graph_quality_sample_refs(evidence_refs, limit=sample_ref_limit),
+                    "sample_refs": graph_quality_sample_refs(
+                        evidence_refs,
+                        aoa_root=aoa_root,
+                        limit=sample_ref_limit,
+                    ),
                 },
                 "freshness": freshness,
                 "answer_rules": answer_rules,
@@ -143428,7 +143723,12 @@ def search_operational_route_rollup_shard_rows(
         conn = connect_existing_search_db(db_path, timeout=min(1.0, max(0.1, float(per_shard_timeout_seconds))))
         conn.set_progress_handler(lambda: 1 if time.monotonic() >= deadline else 0, SEARCH_FTS_QUERY_PROGRESS_OPCODES)
         protected_placeholders = ", ".join("?" for _ in SEARCH_OPERATIONAL_EVENT_PROTECTED_CONTEXT_EVENT_TYPES)
-        promoted_layer_placeholders = ", ".join("?" for _ in SEARCH_OPERATIONAL_ROUTE_ROLLUP_PROMOTED_ROUTE_LAYERS)
+        materialized_layer_placeholders = ", ".join(
+            "?"
+            for _ in (
+                SEARCH_OPERATIONAL_ROUTE_ROLLUP_MATERIALIZED_ROUTE_LAYERS
+            )
+        )
         direct_role_placeholders = ", ".join("?" for _ in SEARCH_OPERATIONAL_EVENT_DIRECT_USAGE_ROLES)
         candidate_where = f"""
             documents.doc_type = 'event'
@@ -143440,7 +143740,7 @@ def search_operational_route_rollup_shard_rows(
         candidate_params: list[Any] = [
             SEARCH_OPERATIONAL_EVENT_CONTEXT_ROLE,
             *SEARCH_OPERATIONAL_EVENT_PROTECTED_CONTEXT_EVENT_TYPES,
-            *SEARCH_OPERATIONAL_ROUTE_ROLLUP_PROMOTED_ROUTE_LAYERS,
+            *SEARCH_OPERATIONAL_ROUTE_ROLLUP_MATERIALIZED_ROUTE_LAYERS,
             *SEARCH_OPERATIONAL_EVENT_DIRECT_USAGE_ROLES,
             *SEARCH_OPERATIONAL_EVENT_PROTECTED_CONTEXT_EVENT_TYPES,
         ]
@@ -143483,7 +143783,7 @@ def search_operational_route_rollup_shard_rows(
             FROM route_terms
             JOIN document_routes ON document_routes.route_id = route_terms.id
             JOIN documents ON documents.rowid = document_routes.doc_rowid
-            WHERE route_terms.layer IN ({promoted_layer_placeholders})
+            WHERE route_terms.layer IN ({materialized_layer_placeholders})
               AND documents.doc_type = 'event'
               AND (
                 COALESCE(documents.usage_role, '') IN ({direct_role_placeholders})
@@ -149834,6 +150134,11 @@ def maintenance_status_markdown(payload: dict[str, Any]) -> str:
     search = payload.get("search") if isinstance(payload.get("search"), dict) else {}
     graph = payload.get("graph") if isinstance(payload.get("graph"), dict) else {}
     entity_registry = payload.get("entity_registry") if isinstance(payload.get("entity_registry"), dict) else {}
+    automatic_retry = (
+        payload.get("automatic_retry")
+        if isinstance(payload.get("automatic_retry"), dict)
+        else {}
+    )
     episode_posting_cardinality = (
         payload.get("episode_posting_cardinality")
         if isinstance(payload.get("episode_posting_cardinality"), dict)
@@ -155248,6 +155553,32 @@ def entity_usage_action_diverse_selection(
         ),
         None,
     )
+    if replace_index is None:
+        selected_usage_count = sum(
+            str(event.get("role") or "") == "usage"
+            for _hit, event, _index in selected
+        )
+        if selected_usage_count > 1:
+            replace_index = next(
+                (
+                    index
+                    for index in range(len(selected) - 1, -1, -1)
+                    if str(selected[index][1].get("role") or "") == "usage"
+                    and set(
+                        entity_usage_event_action_semantics(selected[index][1])
+                    ).issubset(
+                        {
+                            action
+                            for other_index, (_hit, event, _pair_index) in enumerate(
+                                selected
+                            )
+                            if other_index != index
+                            for action in entity_usage_event_action_semantics(event)
+                        }
+                    )
+                ),
+                None,
+            )
     if replace_index is None:
         return selected, quality
 
@@ -162468,6 +162799,7 @@ def entity_usage_scenario_candidate_score(candidate: dict[str, Any]) -> int:
     outcome_count = int_value(candidate.get("outcome_event_count"))
     event_count = int_value(candidate.get("event_document_count"))
     document_count = int_value(candidate.get("document_count"))
+    session_count = int_value(candidate.get("rollup_session_count"))
     registry_bonus = max(0, 3 - int_value(candidate.get("registry_tier"), 3)) * 2000
     return (
         registry_bonus
@@ -162475,6 +162807,7 @@ def entity_usage_scenario_candidate_score(candidate: dict[str, Any]) -> int:
         min(usage_count, 50) * 1000
         + min(outcome_count, 50) * 250
         + min(result_count, 50) * 150
+        + min(session_count, 50) * 25
         + min(event_count, 100) * 10
         + min(document_count, 100)
     )
@@ -162688,8 +163021,15 @@ def entity_usage_scenario_candidates(
             resolved_route_id = int_value(probed.get("route_id"), route_id)
             seen_route_ids.add(resolved_route_id)
             explicit_probe_route_ids.add(resolved_route_id)
+        layer_probe_width = (
+            4
+            if requested <= len(layer_order)
+            and not normalized_probes
+            else 1
+        )
         for layer in layer_order:
             items = by_layer.get(layer) or []
+            layer_candidates: list[dict[str, Any]] = []
             for candidate in items:
                 route_id = int_value(candidate.get("route_id"))
                 if route_id in seen_route_ids:
@@ -162697,9 +163037,24 @@ def entity_usage_scenario_candidates(
                 probed = probe_candidate(candidate)
                 if not probed:
                     continue
-                selected.append(probed)
-                seen_route_ids.add(int_value(probed.get("route_id"), route_id))
-                break
+                layer_candidates.append(probed)
+                if len(layer_candidates) >= layer_probe_width:
+                    break
+            if layer_candidates:
+                selected.append(
+                    max(
+                        layer_candidates,
+                        key=lambda item: (
+                            int_value(item.get("scenario_score")),
+                            int_value(item.get("rollup_session_count")),
+                            int_value(item.get("usage_event_count")),
+                            str(item.get("route_signal") or ""),
+                        ),
+                    )
+                )
+                seen_route_ids.add(
+                    int_value(selected[-1].get("route_id"))
+                )
             if len(selected) >= requested:
                 break
         if len(selected) < requested:
@@ -162726,6 +163081,10 @@ def entity_usage_scenario_candidates(
         if conn is not None:
             conn.close()
     diagnostics.append("candidate_selection_strategy:bounded_counted_route_probe_v2")
+    diagnostics.append(
+        "candidate_layer_trial_width:"
+        f"{layer_probe_width}"
+    )
     diagnostics.append(f"candidate_probe_count:{probe_count}")
     if probe_count >= probe_budget and len(selected) < requested:
         diagnostics.append(f"candidate_probe_budget_exhausted:{probe_budget}")
@@ -168282,6 +168641,7 @@ def skipped_performance_step(step_id: str, *, description: str, reason: str, mut
 
 PERFORMANCE_BASELINE_WARNING_DIAGNOSTIC_PREFIXES = (
     "answer_rule_gate:",
+    "graph_lexical_seed_skipped_specific_graph_anchor",
     "search_shard_fanout_using_structured_nonmaterialized_shards:",
 )
 
@@ -181067,7 +181427,7 @@ def build_parser() -> argparse.ArgumentParser:
     graph_entity_usage_replacement_proof_parser = sub.add_parser(
         "graph-entity-usage-replacement-proof",
         aliases=["graph-high-fanout-replacement-proof", "graph-registered-entity-replacement-proof"],
-        help="Prove one anchor sample for replacing event_mentions_registered_entity edges with compact entity usage routes without mutating graph rows.",
+        help="Prove one anchor sample for replacing event_has_registered_entity_signal edges with compact entity usage routes without mutating graph rows.",
     )
     graph_entity_usage_replacement_proof_parser.add_argument("anchor", help="Entity anchor to prove through usage-chain and graph edge samples.")
     graph_entity_usage_replacement_proof_parser.add_argument("--workspace-root")

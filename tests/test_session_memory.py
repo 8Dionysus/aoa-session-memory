@@ -534,7 +534,7 @@ def test_graph_aggregate_payload_compaction_sample_detects_legacy_payload(tmp_pa
     }
     legacy_edge = {
         "id": "edge:fixture",
-        "type": "mentions_route_signal",
+        "type": "event_has_route_signal",
         "source": "event:fixture",
         "target": "route:skill:aoa-decision",
         "route_signals": [f"skill:aoa-decision:{index}" for index in range(40)],
@@ -546,7 +546,7 @@ def test_graph_aggregate_payload_compaction_sample_detects_legacy_payload(tmp_pa
     )
     conn.execute(
         "INSERT INTO edges(id, edge_type, source_node, target_node, payload_json, count) VALUES (?, ?, ?, ?, ?, ?)",
-        ("edge:fixture", "mentions_route_signal", "event:fixture", "route:skill:aoa-decision", module.graph_json(legacy_edge), 1),
+        ("edge:fixture", "event_has_route_signal", "event:fixture", "route:skill:aoa-decision", module.graph_json(legacy_edge), 1),
     )
     conn.commit()
     conn.close()
@@ -5672,12 +5672,15 @@ def test_graph_timeline_recovers_exact_segment_peer_from_stale_search_seed(
         for relation in timeline["edges"]
     } == {"answered_by", "responds_to"}
     assert timeline["freshness"]["status"] == "stale_readable"
+    assert timeline["freshness"]["selected_seed_route"] == (
+        "exact_literal_postings"
+    )
     assert timeline["quality"][
         "structured_correlation_segment_peer_admitted_count"
-    ] == 1
+    ] == 0
     assert timeline["quality"][
         "structured_correlation_segment_peer_candidate_count"
-    ] == 2
+    ] == 1
     assert timeline["quality"][
         "structured_correlation_segment_peer_unverifiable_count"
     ] == 0
@@ -8990,7 +8993,11 @@ def test_episode_selective_rerank_is_bounded_and_only_promotes_decisive_winner(
             for document in payload["documents"]
         )
         calls["count"] += 1
-        scores = [0.20, 0.95, 0.10] if calls["count"] == 1 else [0.91, 0.95, 0.90]
+        scores = (
+            [0.20, 0.95, 0.10]
+            if calls["count"] in {1, 3}
+            else [0.91, 0.95, 0.90]
+        )
         ranked = sorted(range(3), key=lambda index: -scores[index])
         return {
             "ok": True,
@@ -9026,6 +9033,40 @@ def test_episode_selective_rerank_is_bounded_and_only_promotes_decisive_winner(
     )
     assert ambiguous["status"] == "ambiguous_preserved_fusion_order"
     assert ambiguous["results"][0]["task_episode_id"] == "task-0001"
+
+    protected_results = copy.deepcopy(results)
+    protected_results[0]["explain"] = {
+        "fusion": {
+            "sparse_anchor": True,
+            "sparse_anchor_reasons": [
+                "decisive_typed_sparse_evidence",
+            ],
+        },
+    }
+    protected = module.episode_selective_local_rerank(
+        aoa_root=aoa_root,
+        query="where does local fork work begin",
+        results=protected_results,
+        candidate_limit=24,
+    )
+    assert (
+        protected["status"]
+        == "decisive_winner_blocked_by_typed_sparse_anchor"
+    )
+    assert protected["results"][0]["task_episode_id"] == "task-0001"
+    assert protected["typed_sparse_anchor_protection"] == {
+        "active": True,
+        "doc_id": (
+            "episode_semantic:rerank-session:task-0001"
+        ),
+        "reasons": ["decisive_typed_sparse_evidence"],
+        "blocked_promotion": True,
+        "policy": (
+            "a decisive typed or ordered sparse evidence anchor remains "
+            "ahead of model-only reranker relevance; claim admission "
+            "still requires source evidence"
+        ),
+    }
 
 
 def test_episode_auto_rerank_trigger_does_not_confuse_kakoi_with_kak() -> None:
@@ -21520,7 +21561,7 @@ def test_graph_neighborhood_explains_exact_store_miss_and_bounded_retrieval_seed
                     "id": "edge:bounded-seed",
                     "source": event_id,
                     "target": route_id,
-                    "type": "mentions_route_signal",
+                    "type": "event_has_route_signal",
                     "evidence_refs": [evidence],
                 }
             ],
@@ -21560,7 +21601,7 @@ def test_graph_neighborhood_explains_exact_store_miss_and_bounded_retrieval_seed
     assert admission["admitted"] is False
     assert admission["answer_admissible"] is False
     assert admission["navigation_admissible"] is True
-    assert admission["relation_family_counts"] == {"mention": 1}
+    assert admission["relation_family_counts"] == {"derived_anchor": 1}
     assert (
         admission["claim_shape_gates"]["usage_or_consequence"][
             "mention_is_usage"
@@ -21935,7 +21976,7 @@ def test_auto_graph_seed_keeps_partial_route_candidate_unadmitted(
                     "id": "edge:partial-auto-seed",
                     "source": event_id,
                     "target": route_id,
-                    "type": "mentions_route_signal",
+                    "type": "event_has_route_signal",
                     "evidence_refs": [{"refs": refs}],
                 }
             ],
@@ -22308,6 +22349,9 @@ def test_graph_quality_treats_successful_message_mirror_dedup_as_informational()
     unknown = module.graph_quality_diagnostic_finding(
         "unexpected_graph_projection_failure"
     )
+    stale_gate = module.graph_quality_diagnostic_finding(
+        "answer_rule_gate:stale"
+    )
 
     assert finding == {
         "code": (
@@ -22317,7 +22361,74 @@ def test_graph_quality_treats_successful_message_mirror_dedup_as_informational()
         "severity": "informational",
         "category": "expected_bounded_route_posture",
     }
+    assert stale_gate == {
+        "code": "answer_rule_gate:stale",
+        "severity": "informational",
+        "category": "protective_answer_gate",
+    }
     assert unknown["severity"] == "critical"
+
+
+def test_graph_lexical_seed_uses_exact_postings_for_structured_identifier(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def fake_search_sessions(**kwargs: Any) -> dict[str, Any]:
+        calls.append(kwargs)
+        return {
+            "ok": True,
+            "result_count": 1,
+            "results": [{"doc_id": "event:s:001:000010"}],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr(module, "search_sessions", fake_search_sessions)
+    payload = module.graph_lexical_seed(
+        aoa_root=tmp_path / ".aoa",
+        query="call_7H5Kj9hF1qXr",
+        kind="auto",
+        limit=4,
+    )
+
+    assert payload["graph_seed_route"] == "exact_literal_postings"
+    assert len(calls) == 1
+    assert calls[0]["literal_postings_only"] is True
+    assert calls[0]["include_archived_raw_fallback"] is False
+    assert calls[0]["doc_type"] == "event"
+
+
+def test_graph_lexical_seed_skips_fts_for_resolved_typed_graph_anchor(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    def fail_search_sessions(**_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("resolved typed graph anchor must not invoke FTS")
+
+    monkeypatch.setattr(module, "search_sessions", fail_search_sessions)
+    payload = module.graph_lexical_seed(
+        aoa_root=tmp_path / ".aoa",
+        query="aoa-session-memory-evidence-route",
+        kind="skill",
+        limit=4,
+        neighborhood={
+            "resolved": {
+                "start_node_ids": [
+                    "route:skill:skill:aoa_session_memory_evidence_route"
+                ]
+            },
+            "evidence_refs": [{"refs": {"raw": "raw:line:10"}}],
+        },
+    )
+
+    assert payload["ok"] is True
+    assert payload["graph_seed_route"] == "typed_graph_anchor"
+    assert payload["cost_profile"]["uses_fts"] is False
+    assert payload["results"] == []
+    assert module.graph_quality_diagnostic_finding(
+        "graph_lexical_seed_skipped_specific_graph_anchor"
+    )["severity"] == "informational"
 
 
 def test_graph_store_typed_path_exact_key_wins_alias_and_fuzzy_collisions(tmp_path: Path) -> None:
@@ -22872,7 +22983,7 @@ def test_entity_registry_autodiscovers_skills_mcp_and_links_search_graph(tmp_pat
     ] is True
     assert registry_nodes[0]["identity_candidate_ids"]
     assert "session_has_registered_entity" in edge_types
-    assert "event_mentions_registered_entity" in edge_types
+    assert "event_has_registered_entity_signal" in edge_types
     neighborhood = module.graph_neighborhood(aoa_root=aoa_root, anchor="aoa-live-skill", kind="skill", depth=1, limit=20)
     assert neighborhood["ok"] is True
     assert any(node.get("type") == "entity_registry" for node in neighborhood["nodes"])
@@ -23748,6 +23859,62 @@ def test_entity_registry_runtime_fingerprint_distinguishes_mtime_rewrite_from_ow
     assert (
         "entity_registry_owner_sources_newer"
         in changed_dependency["reasons"]
+    )
+
+
+def test_graph_dependency_auto_refresh_preserves_authoritative_registry_policy(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    codex_home = tmp_path / "codex-home"
+    services_root = tmp_path / "empty-services"
+    codex_home.mkdir()
+    services_root.mkdir()
+    config_path = codex_home / "config.toml"
+    config_path.write_text(
+        "[mcp_servers.semantic_probe]\n"
+        'command = "before-command"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setenv(
+        "AOA_ENTITY_REGISTRY_MCP_SERVICES_ROOTS",
+        str(services_root),
+    )
+
+    initial = module.build_entity_registry(
+        aoa_root=aoa_root,
+        write=True,
+        include_runtime=True,
+        observed_source="none",
+        history_policy="authoritative-rebuild",
+        limit=1_000_000,
+    )
+    newer_mtime = float(initial["generated_at_epoch"]) + 10.0
+    config_path.write_text(
+        "[mcp_servers.semantic_probe]\n"
+        'command = "after-command"\n',
+        encoding="utf-8",
+    )
+    os.utime(config_path, (newer_mtime, newer_mtime))
+
+    refreshed = module.graph_entity_registry_dependency_snapshot(
+        aoa_root,
+        ensure_current=True,
+        allow_ephemeral=False,
+    )
+    persisted = module.read_json(
+        aoa_root / module.ENTITY_REGISTRY_PATH,
+        {},
+    )
+
+    assert refreshed["status"] == "current"
+    assert refreshed["refreshed"] is True
+    assert persisted["observed_source"] == "none"
+    assert (
+        persisted["history_policy"]
+        == module.ENTITY_REGISTRY_HISTORY_POLICY_AUTHORITATIVE_REBUILD
     )
 
 
@@ -30095,6 +30262,38 @@ def test_entity_usage_action_diverse_selection_preserves_usage_and_surfaces_read
     assert all_usage_quality["applied"] is False
     assert all_usage_quality["read_sample_present"] is False
 
+    repeated_usage_then_read = [
+        pair("1", "usage", event_type="COMMAND"),
+        pair("2", "usage", event_type="COMMAND"),
+        pair("3", "usage", event_type="COMMAND"),
+        pair("4", "usage", event_type="COMMAND"),
+        pair(
+            "5",
+            "context",
+            event_type="FILE_READ",
+            action="read",
+            session_act="file_inspection",
+            execution_entity_usage_admission="structured_inspection_read_proven",
+            execution_read_result_refs={"raw": "raw:line:571"},
+        ),
+    ]
+    repeated_selected, repeated_quality = module.entity_usage_action_diverse_selection(
+        repeated_usage_then_read,
+        normalized_kind="validator",
+        limit=4,
+    )
+    assert [
+        event["event_id"] for _hit, event, _index in repeated_selected
+    ] == ["1", "2", "3", "5"]
+    assert repeated_quality["applied"] is True
+    assert repeated_quality["read_sample_present"] is True
+    assert repeated_quality["selected_event_id"] == "5"
+    assert repeated_quality["replaced_event_id"] == "4"
+    assert sum(
+        event["role"] == "usage"
+        for _hit, event, _index in repeated_selected
+    ) == 3
+
 
 def test_live_scenario_usage_chain_audit_tracks_action_semantics(tmp_path: Path, monkeypatch: Any) -> None:
     def fake_entity_usage_chain(**kwargs: Any) -> dict[str, Any]:
@@ -30855,6 +31054,81 @@ def test_entity_usage_scenario_candidates_use_operational_rollup_pool(tmp_path: 
     assert {candidate["candidate_source"] for candidate in candidates} == {"operational_route_rollup"}
     assert all(candidate["route_id"] > 0 for candidate in candidates)
     assert any(item == "candidate_selection_source:operational_route_rollup" for item in diagnostics)
+
+
+def test_entity_usage_scenario_candidates_trial_bounded_layer_pool_for_coverage(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir()
+    conn = module.init_search_db(module.search_db_path(aoa_root), rebuild=True)
+    for index, route_signal in enumerate(
+        ("mcp:narrow_mcp", "mcp:broad_mcp"),
+        start=1,
+    ):
+        layer, key = route_signal.split(":", 1)
+        conn.execute(
+            "INSERT INTO route_terms(layer, key, route_signal) VALUES (?, ?, ?)",
+            (layer, key, route_signal),
+        )
+        route_id = conn.execute(
+            "SELECT id FROM route_terms WHERE route_signal = ?",
+            (route_signal,),
+        ).fetchone()[0]
+        cursor = conn.execute(
+            """
+            INSERT INTO documents(
+              id, doc_type, session_id, session_label, session_date, event_id,
+              event_type, session_act, usage_role, route_signals, raw_ref,
+              manifest_path, payload_json
+            )
+            VALUES (?, 'event', 'scenario-session', 'scenario-session',
+                    '2026-06-21', ?, 'COMMAND', 'memory_read', 'usage', ?,
+                    'raw:line:1', 'session.manifest.json', '{}')
+            """,
+            (
+                f"mcp-doc-{index}",
+                f"mcp-doc-{index}",
+                f"|{route_signal}|",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO document_routes(doc_rowid, route_id) VALUES (?, ?)",
+            (cursor.lastrowid, route_id),
+        )
+    conn.commit()
+    conn.close()
+
+    rollup = module.init_search_operational_route_rollup_db(
+        module.search_operational_route_rollup_db_path(aoa_root)
+    )
+    rollup.execute(
+        """
+        INSERT INTO route_rollups(
+          shard, layer, key, route_signal, posting_count, session_count,
+          first_session_date, last_session_date
+        )
+        VALUES
+          ('month/2026-06', 'mcp', 'narrow_mcp', 'mcp:narrow_mcp',
+           1, 1, '2026-06-21', '2026-06-21'),
+          ('month/2026-06', 'mcp', 'broad_mcp', 'mcp:broad_mcp',
+           1, 5, '2026-06-01', '2026-06-21')
+        """
+    )
+    rollup.commit()
+    rollup.close()
+
+    candidates, diagnostics = module.entity_usage_scenario_candidates(
+        aoa_root=aoa_root,
+        layers=["mcp"],
+        sample_size=1,
+        seed="scenario-layer-trials",
+    )
+
+    assert [candidate["route_signal"] for candidate in candidates] == [
+        "mcp:broad_mcp"
+    ]
+    assert "candidate_layer_trial_width:4" in diagnostics
 
 
 def test_entity_usage_scenario_audit_is_layer_aware_for_hook_and_agent_events(tmp_path: Path, monkeypatch: Any) -> None:
@@ -36005,6 +36279,14 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(
         query=f"найди ответы агента по сессии {archived_session_label}",
         doc_type="event",
     )
+    unresolved_session_answer_literal_plan = module.literal_query_plan(
+        aoa_root=aoa_root,
+        query=(
+            "найди ответы агента по сессии "
+            "2026-07-07__003__ноут-показывал-13-заряда-затем-резко"
+        ),
+        doc_type="event",
+    )
     path_phrase_literal_plan = module.literal_query_plan(
         aoa_root=aoa_root,
         query="как агент использовал validate_session_memory_mcp.py и что потом сломалось",
@@ -36398,6 +36680,24 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(
     assert session_answer_literal_plan["cost_profile"]["monolith_fallback_first"] is False
     assert session_answer_literal_plan["ordered_routes"][1]["route_id"] == "session_rehydrate"
     assert session_answer_literal_plan["literal_route_strategy"]["class_contract"]["cheapest_first_routes"][0] == "agent_event_route"
+    assert (
+        unresolved_session_answer_literal_plan["query_shape"]["session_target"]
+        == "2026-07-07__003__ноут-показывал-13-заряда-затем-резко"
+    )
+    assert (
+        unresolved_session_answer_literal_plan["primary_route"]["route_id"]
+        == "agent_event_route"
+    )
+    assert (
+        unresolved_session_answer_literal_plan["cost_profile"]["uses_fts_first"]
+        is False
+    )
+    assert (
+        unresolved_session_answer_literal_plan["cost_profile"][
+            "monolith_fallback_first"
+        ]
+        is False
+    )
     assert path_phrase_literal_plan["query_shape"]["primary"] == "path"
     assert path_phrase_literal_plan["query_shape"]["path_anchor"] == "validate_session_memory_mcp.py"
     assert path_phrase_literal_plan["route_anchor"] == "validate_session_memory_mcp.py"
@@ -36693,7 +36993,7 @@ def test_graph_bridge_does_not_accept_fuzzy_path_as_explicit_typed_target(
             },
             {
                 "id": "edge:fuzzy-path-event",
-                "type": "mentions_route_signal",
+                "type": "event_has_route_signal",
                 "source": target_candidate_event_id,
                 "target": fuzzy_target_node_id,
             },
@@ -36986,7 +37286,7 @@ def test_graph_bridge_defers_side_timeline_hydration_when_neighborhood_has_refs(
             "node_count": 2,
             "edge_count": 1,
             "nodes": [{"id": f"route:{kind}:{anchor}", "type": kind, "label": anchor}, event_node],
-            "edges": [{"id": f"edge:{session_id}", "type": "mentions_route_signal", "source": f"route:{kind}:{anchor}", "target": event_node["id"]}],
+            "edges": [{"id": f"edge:{session_id}", "type": "event_has_route_signal", "source": f"route:{kind}:{anchor}", "target": event_node["id"]}],
             "evidence_refs": [evidence_ref],
             "resolved": {
                 "anchor": anchor,
@@ -38234,10 +38534,10 @@ def test_graph_cooccurrence_uses_direct_store_for_dense_route_anchor(tmp_path: P
 
     def mention_edge(event_id: str, route_id: str, raw_ref: str) -> dict[str, Any]:
         return {
-            "id": module.graph_edge_id(event_id, route_id, "mentions_route_signal"),
+            "id": module.graph_edge_id(event_id, route_id, "event_has_route_signal"),
             "source": event_id,
             "target": route_id,
-            "type": "mentions_route_signal",
+            "type": "event_has_route_signal",
             "evidence_refs": [
                 {
                     "session_id": "session-cooccurrence",
@@ -38435,7 +38735,7 @@ def test_graph_cooccurrence_prefers_aggregate_store_with_raw_ref_hydration(tmp_p
 
     payload = module.graph_cooccurrence(aoa_root=aoa_root, anchor="exec_command", kind="tool", limit=5)
 
-    assert "mentions_route_signal" not in edge_types
+    assert "event_has_route_signal" not in edge_types
     assert payload["ok"] is True
     assert payload["source"] == "sqlite_graph_store_aggregate_cooccurrence"
     assert payload["cooccurrence_basis"] == "aggregate_segment_route_signal_edges_session_diversified"
@@ -38447,7 +38747,7 @@ def test_graph_cooccurrence_prefers_aggregate_store_with_raw_ref_hydration(tmp_p
     assert payload["quality"]["uses_session_has_route_signal_edges"] is False
     assert payload["anchor_event_count_basis"] == "aggregate_route_contexts"
     assert payload["quality"]["aggregate_route_signal_query"] is True
-    assert payload["quality"]["uses_event_mentions_route_signal_edges"] is False
+    assert payload["quality"]["uses_event_has_route_signal_edges"] is False
     assert payload["quality"]["raw_ref_count"] >= 1
     assert payload["quality"]["segment_ref_count"] >= 1
     assert any(str(ref["refs"].get("raw", "")).startswith("raw:line:") for ref in payload["evidence_refs"])
@@ -38591,7 +38891,7 @@ def test_graph_cooccurrence_packet_diagnoses_truncated_empty_routes() -> None:
             "edges": [
                 {
                     "id": "edge:1",
-                    "type": "mentions_route_signal",
+                    "type": "event_has_route_signal",
                     "source": event_node["id"],
                     "target": anchor_node,
                 }
@@ -38797,7 +39097,7 @@ def test_graph_cardinality_projection_refreshes_and_tracks_incremental_changes(t
 
     store = module.GraphSqliteStore(aoa_root, reset=True)
     try:
-        rebuild = store.rebuild([contribution("source-one", "event", "mentions_route_signal")])
+        rebuild = store.rebuild([contribution("source-one", "event", "event_has_route_signal")])
         assert rebuild["type_counts_projection"]["status"] == "current"
     finally:
         store.close()
@@ -38805,7 +39105,7 @@ def test_graph_cardinality_projection_refreshes_and_tracks_incremental_changes(t
     initial = module.graph_cardinality(aoa_root=aoa_root)
     assert initial["ok"] is True
     assert initial["projection"]["counts"]["node"]["event"] == 1
-    assert initial["projection"]["counts"]["edge"]["mentions_route_signal"] == 1
+    assert initial["projection"]["counts"]["edge"]["event_has_route_signal"] == 1
 
     store = module.GraphSqliteStore(aoa_root)
     try:
@@ -38818,7 +39118,7 @@ def test_graph_cardinality_projection_refreshes_and_tracks_incremental_changes(t
     assert updated["ok"] is True
     assert "event" not in updated["projection"]["counts"]["node"]
     assert updated["projection"]["counts"]["node"]["task_episode"] == 1
-    assert "mentions_route_signal" not in updated["projection"]["counts"]["edge"]
+    assert "event_has_route_signal" not in updated["projection"]["counts"]["edge"]
     assert updated["projection"]["counts"]["edge"]["has_event"] == 1
 
 
@@ -38891,7 +39191,7 @@ def test_graph_state_read_does_not_upgrade_legacy_generation_metadata(
                 "id": "edge:legacy-generation",
                 "source": "event:legacy-generation:000:000001",
                 "target": "route:tool:legacy-generation",
-                "type": "mentions_route_signal",
+                "type": "event_has_route_signal",
             }
         ],
     }
@@ -38962,7 +39262,7 @@ def test_graph_incompatible_generation_is_not_a_query_candidate(
                 "id": "edge:incompatible-generation",
                 "source": event_id,
                 "target": "route:tool:incompatible-generation",
-                "type": "mentions_route_signal",
+                "type": "event_has_route_signal",
             }
         ],
     }
@@ -39035,7 +39335,7 @@ def test_graph_pins_entity_registry_dependency_per_store_and_source(
                 "id": "edge:registry-pinned",
                 "source": "event:registry-pinned:000:000001",
                 "target": "route:tool:registry-pinned",
-                "type": "mentions_route_signal",
+                "type": "event_has_route_signal",
             }
         ],
     }
@@ -39087,7 +39387,7 @@ def test_graph_rejects_stale_entity_registry_dependency_and_preserves_rows(
                 "id": "edge:registry-stale",
                 "source": event_id,
                 "target": "route:tool:registry-stale",
-                "type": "mentions_route_signal",
+                "type": "event_has_route_signal",
             }
         ],
     }
@@ -39194,7 +39494,7 @@ def test_graph_atomic_rebuild_preserves_published_store_when_dependency_changes(
                     "id": f"edge:{source_name}",
                     "source": event_id,
                     "target": f"route:tool:{source_name}",
-                    "type": "mentions_route_signal",
+                    "type": "event_has_route_signal",
                 }
             ],
         }
@@ -39338,7 +39638,7 @@ def test_graph_rebuild_reconciles_registry_only_drift_before_commit(
             {
                 "source": event_id,
                 "target": route_node_id,
-                "type": "mentions_route_signal",
+                "type": "event_has_route_signal",
                 "route_signal": "skill:registry-late-arrival",
             }
         ],
@@ -39465,7 +39765,7 @@ def test_graph_progress_broken_pipe_does_not_abort_semantic_publish(
                 "id": f"edge:{source_name}",
                 "source": event_id,
                 "target": f"route:tool:{source_name}",
-                "type": "mentions_route_signal",
+                "type": "event_has_route_signal",
             }
         ],
     }
@@ -39564,7 +39864,7 @@ def test_graph_atomic_rebuild_preserves_store_when_producer_changes(
                     "id": f"edge:{source_name}",
                     "source": event_id,
                     "target": f"route:tool:{source_name}",
-                    "type": "mentions_route_signal",
+                    "type": "event_has_route_signal",
                 }
             ],
         }
@@ -39921,7 +40221,7 @@ def test_graph_sidecar_stage_is_not_published_before_store_commit(
                     "id": f"edge:sidecar-stage:{event_number}",
                     "source": event_id,
                     "target": "route:tool:sidecar-stage",
-                    "type": "mentions_route_signal",
+                    "type": "event_has_route_signal",
                 }
             ],
         }
@@ -40028,7 +40328,7 @@ def test_graph_sidecar_manifest_rejects_tampered_snapshot(
                     "event:sidecar-tamper:000:000001"
                 ),
                 "target": "route:tool:sidecar-tamper",
-                "type": "mentions_route_signal",
+                "type": "event_has_route_signal",
             }
         ],
     }
@@ -40115,7 +40415,7 @@ def test_graph_scoped_generation_can_be_current_while_global_is_stale(
                     "id": f"edge:{source_name}",
                     "source": event_id,
                     "target": f"route:tool:{source_name}",
-                    "type": "mentions_route_signal",
+                    "type": "event_has_route_signal",
                 }
             ],
         }
@@ -40240,7 +40540,7 @@ def test_graph_scoped_freshness_keeps_contribution_lookup_truncation_unverified(
                             f"route:tool:{session_id}"
                         ),
                         "type": (
-                            "mentions_route_signal"
+                            "event_has_route_signal"
                         ),
                     }
                 ],
@@ -40341,7 +40641,7 @@ def test_graph_double_rebuild_is_semantically_deterministic(
                 "id": "edge:deterministic-graph",
                 "source": "event:deterministic-graph:000:000001",
                 "target": "route:tool:deterministic-graph",
-                "type": "mentions_route_signal",
+                "type": "event_has_route_signal",
                 "evidence_refs": ["raw:deterministic-graph:1"],
             }
         ],
@@ -40377,7 +40677,7 @@ def test_graph_raw_ref_prune_removes_generated_materialization_only(tmp_path: Pa
     raw_node_id = module.graph_raw_ref_node_id(session_id, refs["raw"])
     route_node_id = module.graph_route_node_id("skill", "aoa-decision")
     has_raw_ref_edge_id = module.graph_edge_id(event_node_id, raw_node_id, "has_raw_ref")
-    route_edge_id = module.graph_edge_id(event_node_id, route_node_id, "mentions_route_signal")
+    route_edge_id = module.graph_edge_id(event_node_id, route_node_id, "event_has_route_signal")
     contribution = {
         "source": {
             "source_key": "segment:session-raw-ref-prune:000",
@@ -40428,7 +40728,7 @@ def test_graph_raw_ref_prune_removes_generated_materialization_only(tmp_path: Pa
                 "id": route_edge_id,
                 "source": event_node_id,
                 "target": route_node_id,
-                "type": "mentions_route_signal",
+                "type": "event_has_route_signal",
                 "evidence_refs": [{"session_id": session_id, "refs": refs}],
             },
         ],
@@ -40959,10 +41259,10 @@ def test_graph_store_replace_sources_uses_append_only_for_new_sources(tmp_path: 
             ],
             "edges": [
                 {
-                    "id": module.graph_edge_id(event_node_id, shared_node_id, "event_mentions_registered_entity"),
+                    "id": module.graph_edge_id(event_node_id, shared_node_id, "event_has_registered_entity_signal"),
                     "source": event_node_id,
                     "target": shared_node_id,
-                    "type": "event_mentions_registered_entity",
+                    "type": "event_has_registered_entity_signal",
                     "count": 1,
                 }
             ],
@@ -41004,7 +41304,7 @@ def test_graph_store_replace_sources_uses_metadata_only_when_payloads_match(tmp_
     edge_id = module.graph_edge_id(
         event_node_id,
         entity_node_id,
-        "mentions_route_signal",
+        "event_has_route_signal",
     )
 
     def contribution(
@@ -41050,7 +41350,7 @@ def test_graph_store_replace_sources_uses_metadata_only_when_payloads_match(tmp_
                     "id": edge_id,
                     "source": event_node_id,
                     "target": entity_node_id,
-                    "type": "mentions_route_signal",
+                    "type": "event_has_route_signal",
                     "count": 1,
                 }
             ],
@@ -41142,10 +41442,10 @@ def test_graph_store_replace_sources_uses_metadata_only_when_payloads_match(tmp_
     assert repaired_event_payload_row is not None
     assert json.loads(str(repaired_event_payload_row[0]))["label"] == "original event"
     assert repaired_edge_row is not None
-    assert repaired_edge_row[0] == "mentions_route_signal"
+    assert repaired_edge_row[0] == "event_has_route_signal"
     assert repaired_edge_row[1] == event_node_id
     assert repaired_edge_row[2] == entity_node_id
-    assert json.loads(str(repaired_edge_row[3]))["type"] == "mentions_route_signal"
+    assert json.loads(str(repaired_edge_row[3]))["type"] == "event_has_route_signal"
     assert changed_payload["metadata_only_source_count"] == 0
     assert changed_payload["refreshed_node_count"] >= 1
     assert "elapsed_ms" in changed_payload["node_refresh"]
@@ -41315,7 +41615,7 @@ def test_graph_route_signal_materialization_keeps_wide_facets_at_segment_level(t
     skill_route_node_id = module.graph_route_node_id("skill", "aoa_decision")
     scope_route_node_id = module.graph_route_node_id("scope_contract", "wide_summary_probe")
     first_event_node_id = f"event:{session_id}:{segment_id}:{events[0]['event_id']}"
-    mention_edges = [edge for edge in edges if edge["type"] == "mentions_route_signal"]
+    mention_edges = [edge for edge in edges if edge["type"] == "event_has_route_signal"]
     assert any(edge["source"] == first_event_node_id and edge["target"] == skill_route_node_id for edge in mention_edges)
     assert not any(edge["target"] == scope_route_node_id for edge in mention_edges)
     summary_edges = [edge for edge in edges if edge["type"] == "segment_has_route_signal"]
@@ -41381,7 +41681,7 @@ def test_graph_route_signal_materialization_caps_high_fanout_edges(tmp_path: Pat
     segment_node_id = f"segment:{session_id}:{segment_id}"
     edges = segment_contribution["edges"]
     nodes = {node["id"]: node for node in segment_contribution["nodes"]}
-    mention_edges = [edge for edge in edges if edge["type"] == "mentions_route_signal"]
+    mention_edges = [edge for edge in edges if edge["type"] == "event_has_route_signal"]
     summary_edges = [edge for edge in edges if edge["type"] == "segment_has_route_signal"]
 
     assert len(mention_edges) == module.GRAPH_EVENT_ROUTE_SIGNAL_EDGE_LIMIT
@@ -41624,7 +41924,7 @@ def test_graph_projection_links_only_same_correlation_agent_activity_status(tmp_
     assert status_node["refs"]["raw"] == status_event["raw_ref"]
 
 
-def test_graph_relation_contract_keeps_mentions_out_of_usage_and_consequence() -> None:
+def test_graph_relation_contract_keeps_route_signals_out_of_usage_and_consequence() -> None:
     edge = module.graph_relation_contract_payload(
         {
             "source": "event:session:000:000001",
@@ -41632,7 +41932,7 @@ def test_graph_relation_contract_keeps_mentions_out_of_usage_and_consequence() -
                 "tool",
                 "exec_command",
             ),
-            "type": "mentions_route_signal",
+            "type": "event_has_route_signal",
             "evidence_refs": [
                 {
                     "session_id": "session",
@@ -41646,10 +41946,32 @@ def test_graph_relation_contract_keeps_mentions_out_of_usage_and_consequence() -
     assert edge["direction"] == "source_to_target"
     assert edge["domain_range_status"] == "valid"
     assert edge["relation_state"] == "observed_projection"
-    assert edge["relation_family"] == "mention"
-    assert edge["semantic_boundary"] == "mention_only_never_usage_or_consequence"
+    assert edge["relation_family"] == "derived_anchor"
+    assert edge["semantic_boundary"] == (
+        "derived_navigation_never_usage_ownership_or_causality"
+    )
     assert edge["navigation_admissible"] is True
     assert edge["answer_admissible"] is False
+
+    registered_signal = module.graph_relation_contract_payload(
+        {
+            "source": "event:session:000:000001",
+            "target": "entity_registry:goal:goal_completed",
+            "type": "event_has_registered_entity_signal",
+            "signal_source": "goal_tool",
+            "evidence_refs": [
+                {
+                    "session_id": "session",
+                    "refs": {"raw": "raw:line:1"},
+                }
+            ],
+        }
+    )
+    assert registered_signal["relation_family"] == "derived_anchor"
+    assert registered_signal["semantic_boundary"] == (
+        "derived_navigation_never_usage_ownership_or_causality"
+    )
+    assert registered_signal["answer_admissible"] is False
 
 
 def test_graph_relation_contract_rejects_known_wrong_domain_and_range() -> None:
@@ -41659,7 +41981,7 @@ def test_graph_relation_contract_rejects_known_wrong_domain_and_range() -> None:
             "tool",
             "exec_command",
         ),
-        "type": "mentions_route_signal",
+        "type": "event_has_route_signal",
         "evidence_refs": [
             {
                 "session_id": "wrong-domain",
@@ -45945,10 +46267,10 @@ def test_graph_hot_state_detects_ledger_store_source_count_mismatch(tmp_path: Pa
         ],
         "edges": [
             {
-                "id": "event:partial-store:000:000001->route:skill:aoa_decision:mentions_route_signal",
+                "id": "event:partial-store:000:000001->route:skill:aoa_decision:event_has_route_signal",
                 "source": "event:partial-store:000:000001",
                 "target": "route:skill:aoa_decision",
-                "type": "mentions_route_signal",
+                "type": "event_has_route_signal",
             }
         ],
     }
@@ -46036,10 +46358,10 @@ def test_graph_hot_state_uses_latest_graph_maintenance_remaining_count(tmp_path:
         ],
         "edges": [
             {
-                "id": "event:remaining-report:000:000001->route:skill:aoa_decision:mentions_route_signal",
+                "id": "event:remaining-report:000:000001->route:skill:aoa_decision:event_has_route_signal",
                 "source": "event:remaining-report:000:000001",
                 "target": "route:skill:aoa_decision",
-                "type": "mentions_route_signal",
+                "type": "event_has_route_signal",
             }
         ],
     }
@@ -46110,10 +46432,10 @@ def test_graph_hot_state_keeps_recent_no_progress_report_for_heavy_tail_route(tm
         ],
         "edges": [
             {
-                "id": "event:recent-no-progress:000:000001->route:skill:aoa_decision:mentions_route_signal",
+                "id": "event:recent-no-progress:000:000001->route:skill:aoa_decision:event_has_route_signal",
                 "source": "event:recent-no-progress:000:000001",
                 "target": "route:skill:aoa_decision",
-                "type": "mentions_route_signal",
+                "type": "event_has_route_signal",
             }
         ],
     }
@@ -46254,10 +46576,10 @@ def test_graph_hot_state_ignores_scoped_latest_graph_maintenance_remaining_count
         ],
         "edges": [
             {
-                "id": "event:scoped-report:000:000001->route:skill:aoa_decision:mentions_route_signal",
+                "id": "event:scoped-report:000:000001->route:skill:aoa_decision:event_has_route_signal",
                 "source": "event:scoped-report:000:000001",
                 "target": "route:skill:aoa_decision",
-                "type": "mentions_route_signal",
+                "type": "event_has_route_signal",
             }
         ],
     }
@@ -49703,6 +50025,27 @@ def test_compact_maintenance_status_keeps_graph_live_tail_bounded() -> None:
     assert compact["graph"]["latest_maintenance"]["remaining_count"] == 7
     assert compact["live_tail"]["sampled_graph_source_count"] == 7
     assert compact["live_tail"]["samples"][0]["source_key"] == "segment:live:000"
+
+
+def test_maintenance_status_markdown_renders_automatic_retry_summary() -> None:
+    rendered = module.maintenance_status_markdown(
+        {
+            "generated_at": "2026-07-26T00:00:00Z",
+            "ok": True,
+            "automatic_retry": {
+                "status": "scheduled",
+                "queued_count": 2,
+                "due_count": 1,
+                "in_flight_count": 0,
+                "next_attempt_at": "2026-07-26T00:01:00Z",
+            },
+        }
+    )
+
+    assert (
+        "- automatic_retry: `scheduled` queued=`2` due=`1` "
+        "in_flight=`0` next=`2026-07-26T00:01:00Z`"
+    ) in rendered
 
 
 def test_maintenance_status_waits_for_recent_graph_live_tail_before_catchup(tmp_path: Path, monkeypatch: Any) -> None:
@@ -58273,6 +58616,13 @@ def test_search_operational_route_rollup_materializes_ref_samples(tmp_path: Path
         route_layer="goal",
         event_type="TOOL_OUTPUT",
     )
+    insert_event(
+        "direct-tool-doc",
+        usage_role="usage",
+        route_signal=module.route_signal_token("tool", "exec_command"),
+        route_layer="tool",
+        event_type="TOOL_CALL",
+    )
     conn.commit()
     conn.close()
 
@@ -58295,7 +58645,7 @@ def test_search_operational_route_rollup_materializes_ref_samples(tmp_path: Path
                     "shard_db_path": str(shard_db),
                     "materialized": True,
                     "status": "current",
-                    "document_count": 6,
+                    "document_count": 7,
                     "total_with_wal_bytes": shard_db.stat().st_size,
                     "total_with_wal_human": module.human_size(shard_db.stat().st_size),
                 }
@@ -58330,7 +58680,7 @@ def test_search_operational_route_rollup_materializes_ref_samples(tmp_path: Path
     assert applied["status"] == "current"
     assert applied["written"] is True
     assert applied["totals"]["route_rollup_row_count"] == 4
-    assert applied["totals"]["candidate_route_posting_count"] == 4
+    assert applied["totals"]["candidate_route_posting_count"] == 5
     assert Path(applied["report_json"]).exists()
     assert Path(applied["report_markdown"]).exists()
     assert not Path(str(target_db) + "-wal").exists()
@@ -58345,8 +58695,9 @@ def test_search_operational_route_rollup_materializes_ref_samples(tmp_path: Path
     rollup_conn.close()
 
     assert row is not None
-    assert row["posting_count"] == 1
+    assert row["posting_count"] == 2
     assert "raw:line:candidate-with-route" in json.loads(row["raw_refs_json"])
+    assert "raw:line:direct-tool-doc" in json.loads(row["raw_refs_json"])
     assert "segments/000__initial-to-latest.md" in json.loads(row["segment_refs_json"])
     assert "rollup-session" in json.loads(row["session_ids_json"])
     assert decision_row is not None
@@ -59693,11 +60044,11 @@ def test_graph_pressure_summary_routes_cardinality_before_physical_compaction(tm
             "status": "current",
             "counts": {
                 "node": {"event": 1_500_000, "entity": 50_000},
-                "edge": {"mentions_route_signal": 13_000_000, "has_event": 1_500_000},
+                "edge": {"event_has_route_signal": 13_000_000, "has_event": 1_500_000},
             },
             "top": {
                 "node": [{"type": "event", "count": 1_500_000}],
-                "edge": [{"type": "mentions_route_signal", "count": 13_000_000}],
+                "edge": [{"type": "event_has_route_signal", "count": 13_000_000}],
             },
             "diagnostics": [],
         },
@@ -59732,7 +60083,7 @@ def test_graph_pressure_summary_routes_cardinality_before_physical_compaction(tm
     assert summary["status"] == "large_cardinality_dominates"
     assert summary["node_count"] == 1_550_000
     assert summary["edge_count"] == 14_500_000
-    assert summary["top_edge_types"][0]["type"] == "mentions_route_signal"
+    assert summary["top_edge_types"][0]["type"] == "event_has_route_signal"
     assert summary["physical_compaction"]["status"] == "blocked_low_disk_headroom"
     assert summary["physical_compaction"]["reclaim_ratio"] < 0.1
     assert "cardinality reduction" in summary["next_route"]
@@ -59751,15 +60102,15 @@ def test_graph_pressure_summary_surfaces_cardinality_before_size_warning(tmp_pat
             "counts": {
                 "node": {"event": 2_000_000, "path": 220_000},
                 "edge": {
-                    "event_mentions_registered_entity": 3_700_000,
-                    "mentions_route_signal": 3_000_000,
+                    "event_has_registered_entity_signal": 3_700_000,
+                    "event_has_route_signal": 3_000_000,
                     "has_event": 2_100_000,
                     "session_has_route_signal": 1_400_000,
                 },
             },
             "top": {
                 "node": [{"type": "event", "count": 2_000_000}],
-                "edge": [{"type": "event_mentions_registered_entity", "count": 3_700_000}],
+                "edge": [{"type": "event_has_registered_entity_signal", "count": 3_700_000}],
             },
             "diagnostics": [],
         },
@@ -59797,8 +60148,8 @@ def test_graph_pressure_summary_surfaces_cardinality_before_size_warning(tmp_pat
     assert summary["physical_compaction"]["conservative_reclaimable_bytes"] == 0
     assert summary["high_fanout_policy"]["status"] == "large_cardinality_dominates"
     assert summary["high_fanout_policy"]["dominant_edge_types"][:2] == [
-        "event_mentions_registered_entity",
-        "mentions_route_signal",
+        "event_has_registered_entity_signal",
+        "event_has_route_signal",
     ]
     assert summary["high_fanout_policy"]["replacement_readiness"]["status"] == "not_ready_for_prune"
     assert summary["high_fanout_policy"]["replacement_readiness"]["candidate_count"] == 3
@@ -59819,15 +60170,15 @@ def test_graph_high_fanout_policy_keeps_replacement_boundary(tmp_path: Path, mon
             "counts": {
                 "node": {"event": 2_000_000, "entity": 220_000},
                 "edge": {
-                    "event_mentions_registered_entity": 3_700_000,
-                    "mentions_route_signal": 3_000_000,
+                    "event_has_registered_entity_signal": 3_700_000,
+                    "event_has_route_signal": 3_000_000,
                     "has_event": 2_100_000,
                     "session_has_route_signal": 1_400_000,
                 },
             },
             "top": {
                 "node": [{"type": "event", "count": 2_000_000}],
-                "edge": [{"type": "event_mentions_registered_entity", "count": 3_700_000}],
+                "edge": [{"type": "event_has_registered_entity_signal", "count": 3_700_000}],
             },
             "diagnostics": [],
         },
@@ -59840,15 +60191,15 @@ def test_graph_high_fanout_policy_keeps_replacement_boundary(tmp_path: Path, mon
     assert payload["mutates"] is False
     assert payload["status"] == "large_cardinality_dominates"
     assert payload["edge_count"] == 10_200_000
-    assert payload["dominant_edge_types"][:2] == ["event_mentions_registered_entity", "mentions_route_signal"]
-    assert payload["edge_policies"][0]["edge_type"] == "event_mentions_registered_entity"
+    assert payload["dominant_edge_types"][:2] == ["event_has_registered_entity_signal", "event_has_route_signal"]
+    assert payload["edge_policies"][0]["edge_type"] == "event_has_registered_entity_signal"
     assert payload["edge_policies"][0]["can_prune_now"] is False
     assert payload["edge_policies"][0]["replacement_required_before_prune"] is True
     assert payload["edge_policies"][0]["compact_query_route"] == "usage-chain"
     assert payload["edge_policies"][0]["replacement_plan"]["status"] == "replacement_projection_required"
     assert payload["edge_policies"][0]["replacement_plan"]["target_projection"] == "entity_usage_rollup_by_anchor_session_segment"
     assert "raw_or_segment_refs_preserved" in payload["edge_policies"][0]["replacement_plan"]["missing_proof_gates"]
-    assert payload["edge_policies"][1]["edge_type"] == "mentions_route_signal"
+    assert payload["edge_policies"][1]["edge_type"] == "event_has_route_signal"
     assert payload["edge_policies"][1]["current_policy"] == module.GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY
     assert "segment_has_route_signal" in payload["edge_policies"][1]["replacement_layers"]
     assert payload["edge_policies"][1]["replacement_plan"]["status"] == "compact_layers_exist_replacement_projection_unproven"
@@ -59856,8 +60207,8 @@ def test_graph_high_fanout_policy_keeps_replacement_boundary(tmp_path: Path, mon
     assert payload["high_fanout_nodes"][0]["node_type"] == "event"
     assert payload["replacement_readiness"]["status"] == "not_ready_for_prune"
     assert payload["replacement_readiness"]["candidate_edge_types"] == [
-        "event_mentions_registered_entity",
-        "mentions_route_signal",
+        "event_has_registered_entity_signal",
+        "event_has_route_signal",
         "has_event",
     ]
     assert payload["replacement_readiness"]["proof_gap_count"] >= 6
@@ -59987,8 +60338,8 @@ def test_graph_high_fanout_policy_reads_entity_replacement_corpus_evidence(
             "counts": {
                 "node": {"event": 2_000_000},
                 "edge": {
-                    "event_mentions_registered_entity": 3_700_000,
-                    "mentions_route_signal": 3_000_000,
+                    "event_has_registered_entity_signal": 3_700_000,
+                    "event_has_route_signal": 3_000_000,
                     "has_event": 2_100_000,
                     "session_has_route_signal": 1_400_000,
                 },
@@ -60001,7 +60352,7 @@ def test_graph_high_fanout_policy_reads_entity_replacement_corpus_evidence(
     payload = module.graph_high_fanout_policy(aoa_root=aoa_root, limit=4)
 
     entity_plan = payload["edge_policies"][0]["replacement_plan"]
-    assert entity_plan["edge_type"] == "event_mentions_registered_entity"
+    assert entity_plan["edge_type"] == "event_has_registered_entity_signal"
     assert entity_plan["missing_proof_gates"] == ["before_after_cardinality_comparison"]
     assert "entity_usage_rollup_samples_match_event_refs" in entity_plan["proven_proof_gates"]
     assert "usage_chain_preserves_consequence_links" in entity_plan["proven_proof_gates"]
@@ -60133,8 +60484,8 @@ def test_graph_high_fanout_policy_reads_route_signal_replacement_corpus_evidence
             "counts": {
                 "node": {"event": 2_000_000},
                 "edge": {
-                    "event_mentions_registered_entity": 3_700_000,
-                    "mentions_route_signal": 3_000_000,
+                    "event_has_registered_entity_signal": 3_700_000,
+                    "event_has_route_signal": 3_000_000,
                     "has_event": 2_100_000,
                     "session_has_route_signal": 1_400_000,
                 },
@@ -60149,7 +60500,7 @@ def test_graph_high_fanout_policy_reads_route_signal_replacement_corpus_evidence
     route_plan = next(
         row["replacement_plan"]
         for row in payload["edge_policies"]
-        if row["edge_type"] == "mentions_route_signal"
+        if row["edge_type"] == "event_has_route_signal"
     )
     assert route_plan["status"] == "compact_layers_exist_replacement_quality_proven_cardinality_unproven"
     assert route_plan["missing_proof_gates"] == ["before_after_cardinality_comparison"]
@@ -60300,8 +60651,8 @@ def test_graph_high_fanout_policy_reads_structural_event_chain_corpus_evidence(
             "counts": {
                 "node": {"event": 2_000_000},
                 "edge": {
-                    "event_mentions_registered_entity": 3_700_000,
-                    "mentions_route_signal": 3_000_000,
+                    "event_has_registered_entity_signal": 3_700_000,
+                    "event_has_route_signal": 3_000_000,
                     "has_event": 2_100_000,
                     "session_has_route_signal": 1_400_000,
                 },
@@ -60353,9 +60704,9 @@ def test_graph_high_fanout_cardinality_comparison_proves_configured_targets(
         "counts": {
             "node": {"event": 700},
             "edge": {
-                "event_mentions_registered_entity": 1000,
+                "event_has_registered_entity_signal": 1000,
                 "session_has_registered_entity": 50,
-                "mentions_route_signal": 800,
+                "event_has_route_signal": 800,
                 "segment_has_route_signal": 500,
                 "session_has_route_signal": 350,
                 "has_event": 700,
@@ -60437,9 +60788,9 @@ def test_graph_high_fanout_cardinality_uses_explicit_counterfactual_for_default_
         "counts": {
             "node": {"event": 700},
             "edge": {
-                "event_mentions_registered_entity": 1000,
+                "event_has_registered_entity_signal": 1000,
                 "session_has_registered_entity": 50,
-                "mentions_route_signal": 800,
+                "event_has_route_signal": 800,
                 "answered_by": 100,
                 "responds_to": 100,
                 "has_task_episode": 5,
@@ -60515,9 +60866,9 @@ def test_graph_high_fanout_cardinality_blocks_partial_episode_replacement(
         "counts": {
             "node": {"event": 700},
             "edge": {
-                "event_mentions_registered_entity": 1000,
+                "event_has_registered_entity_signal": 1000,
                 "session_has_registered_entity": 50,
-                "mentions_route_signal": 800,
+                "event_has_route_signal": 800,
                 "segment_has_route_signal": 500,
                 "session_has_route_signal": 350,
                 "has_event": 700,
@@ -60584,9 +60935,9 @@ def test_graph_high_fanout_policy_closes_cardinality_gate_but_not_prune_apply(
         "counts": {
             "node": {"event": 2_000_000},
             "edge": {
-                "event_mentions_registered_entity": 3_700_000,
+                "event_has_registered_entity_signal": 3_700_000,
                 "session_has_registered_entity": 58_000,
-                "mentions_route_signal": 3_000_000,
+                "event_has_route_signal": 3_000_000,
                 "segment_has_route_signal": 340_000,
                 "session_has_route_signal": 810_000,
                 "has_event": 2_100_000,
@@ -60666,7 +61017,7 @@ def test_graph_high_fanout_policy_closes_cardinality_gate_but_not_prune_apply(
         for action in payload["next_actions"]
         if isinstance(action, dict)
     }
-    for edge_type in ("event_mentions_registered_entity", "mentions_route_signal", "has_event"):
+    for edge_type in ("event_has_registered_entity_signal", "event_has_route_signal", "has_event"):
         plan = next(row["replacement_plan"] for row in payload["edge_policies"] if row["edge_type"] == edge_type)
         assert plan["missing_proof_gates"] == []
         assert "before_after_cardinality_comparison" in plan["proven_proof_gates"]
@@ -85435,7 +85786,7 @@ def test_graph_registry_materialization_refresh_is_bounded_and_exact(
     owner_edge = {
         "source": "event:fixture",
         "target": old_registry_node["id"],
-        "type": "event_mentions_registered_entity",
+        "type": "event_has_registered_entity_signal",
         "session_id": "fixture-session",
         "route_signal": "tool:alpha",
         "evidence_refs": evidence_refs,
@@ -85565,7 +85916,7 @@ def test_graph_registry_materialization_refresh_is_bounded_and_exact(
         for row in incident_edges
     } == {
         (
-            "event_mentions_registered_entity",
+            "event_has_registered_entity_signal",
             "event:fixture",
             current_registry_node_id,
         ),

@@ -9267,7 +9267,7 @@ class AoASessionMemoryMCPState:
                         ORDER BY count DESC, id
                         LIMIT ?
                         """,
-                        ["mentions_route_signal", *node_ids, budget + 1],
+                        ["event_has_route_signal", *node_ids, budget + 1],
                     ).fetchall()
                     if len(fetched) > budget:
                         truncated = True

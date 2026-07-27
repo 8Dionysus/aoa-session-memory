@@ -689,9 +689,11 @@ def test_os_profile_receipt_maps_capability_install_and_prompt_identity(
         skills=skills,
         dest_root=tmp_path / "installed",
     )
-    assert plan["schema_version"] == "aoa_os_skill_install_plan_v2"
+    assert plan["schema_version"] == "aoa_os_skill_install_plan_v3"
     assert all(item["source_fingerprint"] for item in plan["skills"])
     assert all(item["capability_graph_hash"] for item in plan["skills"])
+    assert all(item["management"] == "managed-copy" for item in plan["skills"])
+    assert all(item["owner_operation"] is None for item in plan["skills"])
 
 
 def test_reviewed_skill_receipt_proves_invocation_but_not_benefit(
