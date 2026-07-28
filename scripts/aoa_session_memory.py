@@ -2739,6 +2739,44 @@ def copytree_ignore(_directory: str, names: list[str]) -> set[str]:
     return ignored
 
 
+def restore_runtime_generated_maps(
+    *,
+    previous_maps_root: Path,
+    target_maps_root: Path,
+) -> list[str]:
+    """Overlay runtime-generated map projections after an authored upgrade."""
+    restored: list[str] = []
+
+    def restore_path(relative: Path) -> None:
+        source = previous_maps_root / relative
+        target = target_maps_root / relative
+        if not source.exists():
+            return
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if source.is_dir():
+            shutil.copytree(source, target, dirs_exist_ok=True)
+        else:
+            shutil.copy2(source, target)
+        restored.append(relative.as_posix())
+
+    for name in (
+        "INDEX.md",
+        "index.json",
+        ATLAS_PROJECTION_STATE_JSON,
+        ENTITY_REGISTRY_PATH.name,
+        ENTITY_REGISTRY_MARKDOWN.name,
+    ):
+        restore_path(Path(name))
+    if previous_maps_root.exists():
+        for child in sorted(previous_maps_root.iterdir()):
+            if not child.is_dir() or not child.name.startswith("by-"):
+                continue
+            restore_path(Path(child.name) / "INDEX.md")
+            restore_path(Path(child.name) / "index.json")
+            restore_path(Path(child.name) / "entries")
+    return restored
+
+
 PORTABLE_PUBLIC_SAFETY_HOME_PATH_RE = re.compile(
     r"(?<![A-Za-z0-9])/(?:home|Users)/(?P<account>[A-Za-z0-9._-]+)/"
 )
@@ -3064,6 +3102,7 @@ def copy_portable_bundle(
     include_tests: bool = True,
     overwrite: bool = False,
     audit_public_safety: bool = True,
+    preserve_runtime_generated: bool = False,
 ) -> dict[str, Any]:
     source_aoa_root = source_aoa_root.resolve()
     target_aoa_root = target_aoa_root.resolve()
@@ -3081,6 +3120,7 @@ def copy_portable_bundle(
 
     target_aoa_root.mkdir(parents=True, exist_ok=True)
     copied: list[str] = []
+    restored_runtime_generated: list[str] = []
     for rel_name in PORTABLE_BUNDLE_ITEMS:
         if rel_name == "tests" and not include_tests:
             continue
@@ -3090,6 +3130,36 @@ def copy_portable_bundle(
             continue
         if source_path.is_dir():
             if target_path.exists() and overwrite:
+                if (
+                    preserve_runtime_generated
+                    and rel_name == "maps"
+                ):
+                    previous_maps_root = target_path.with_name(
+                        f".{target_path.name}.runtime-preserve."
+                        f"{os.getpid()}.{time.time_ns()}.tmp"
+                    )
+                    target_path.rename(previous_maps_root)
+                    try:
+                        shutil.copytree(
+                            source_path,
+                            target_path,
+                            ignore=copytree_ignore,
+                        )
+                        restored_runtime_generated.extend(
+                            restore_runtime_generated_maps(
+                                previous_maps_root=previous_maps_root,
+                                target_maps_root=target_path,
+                            )
+                        )
+                    except Exception:
+                        if target_path.exists():
+                            shutil.rmtree(target_path)
+                        previous_maps_root.rename(target_path)
+                        raise
+                    else:
+                        shutil.rmtree(previous_maps_root)
+                    copied.append(rel_name)
+                    continue
                 shutil.rmtree(target_path)
             if not target_path.exists():
                 shutil.copytree(source_path, target_path, ignore=copytree_ignore)
@@ -3157,6 +3227,8 @@ def copy_portable_bundle(
         "include_sessions": include_sessions,
         "include_tests": include_tests,
         "copied": copied,
+        "preserve_runtime_generated": preserve_runtime_generated,
+        "restored_runtime_generated": restored_runtime_generated,
         "public_safety": public_safety,
     }
 
@@ -3192,6 +3264,7 @@ def install_portable_bundle(
         include_tests=include_tests,
         overwrite=overwrite,
         audit_public_safety=False,
+        preserve_runtime_generated=True,
     )
     hook_config = build_user_hooks_config(workspace_root, aoa_root)
     write_json(aoa_root / "hooks" / "codex-hooks.user.example.json", hook_config)

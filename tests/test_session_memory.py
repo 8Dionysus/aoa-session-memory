@@ -80976,6 +80976,98 @@ def test_install_portable_bundle_preserves_existing_sessions(tmp_path: Path) -> 
     assert registry["sessions"][0]["session_id"] == "existing-session"
 
 
+def test_install_portable_bundle_preserves_generated_maps_on_upgrade(
+    tmp_path: Path,
+) -> None:
+    source_aoa = SCRIPT.parents[1]
+    workspace = tmp_path / "ExistingWorkspace"
+    aoa_root = workspace / ".aoa"
+    module.install_portable_bundle(
+        source_aoa_root=source_aoa,
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        overwrite=True,
+    )
+    generated_payloads = {
+        Path("maps/INDEX.md"): "# Generated atlas\n",
+        Path("maps/index.json"): '{"generated": true}\n',
+        Path("maps") / module.ATLAS_PROJECTION_STATE_JSON: (
+            '{"projection": "kept"}\n'
+        ),
+        module.ENTITY_REGISTRY_PATH: '{"entities": ["kept"]}\n',
+        module.ENTITY_REGISTRY_MARKDOWN: "# Generated registry\n",
+        Path("maps/by-tool/INDEX.md"): "# Generated tool map\n",
+        Path("maps/by-tool/index.json"): '{"tool": true}\n',
+        Path("maps/by-tool/entries/runtime.json"): '{"runtime": true}\n',
+    }
+    for relative, text in generated_payloads.items():
+        path = aoa_root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    obsolete_authored = aoa_root / "maps" / "obsolete-authored.md"
+    obsolete_authored.write_text("remove on upgrade\n", encoding="utf-8")
+
+    payload = module.install_portable_bundle(
+        source_aoa_root=source_aoa,
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        overwrite=True,
+    )
+
+    assert payload["copy"]["preserve_runtime_generated"] is True
+    assert "entity-registry.json" in payload["copy"][
+        "restored_runtime_generated"
+    ]
+    assert "by-tool/entries" in payload["copy"][
+        "restored_runtime_generated"
+    ]
+    for relative, text in generated_payloads.items():
+        assert (aoa_root / relative).read_text(encoding="utf-8") == text
+    assert not obsolete_authored.exists()
+    assert (aoa_root / "maps" / "START.md").exists()
+
+
+def test_install_portable_bundle_restores_map_tree_when_overlay_fails(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    source_aoa = SCRIPT.parents[1]
+    workspace = tmp_path / "ExistingWorkspace"
+    aoa_root = workspace / ".aoa"
+    module.install_portable_bundle(
+        source_aoa_root=source_aoa,
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        overwrite=True,
+    )
+    generated = aoa_root / module.ENTITY_REGISTRY_PATH
+    generated.write_text('{"entities": ["last-good"]}\n', encoding="utf-8")
+    previous_start = (aoa_root / "maps" / "START.md").read_text(
+        encoding="utf-8"
+    )
+
+    def fail_overlay(**_kwargs: Any) -> list[str]:
+        raise RuntimeError("synthetic overlay failure")
+
+    monkeypatch.setattr(module, "restore_runtime_generated_maps", fail_overlay)
+
+    with pytest.raises(RuntimeError, match="synthetic overlay failure"):
+        module.install_portable_bundle(
+            source_aoa_root=source_aoa,
+            workspace_root=workspace,
+            aoa_root=aoa_root,
+            overwrite=True,
+        )
+
+    assert generated.read_text(encoding="utf-8") == (
+        '{"entities": ["last-good"]}\n'
+    )
+    assert (aoa_root / "maps" / "START.md").read_text(
+        encoding="utf-8"
+    ) == previous_start
+    assert not list(aoa_root.glob(".maps.runtime-preserve.*.tmp"))
+
+
 def test_install_user_skill_symlinks_router_and_is_idempotent(tmp_path: Path) -> None:
     source_aoa = SCRIPT.parents[1]
     skills_dir = tmp_path / "skills"

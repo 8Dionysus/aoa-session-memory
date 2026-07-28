@@ -48,6 +48,13 @@ registry/index views from those archives. Forced export may replace portable
 files while preserving repository-owned `.git`, `.github`, and `kag` surfaces.
 It must not silently delete runtime evidence.
 
+Runtime install upgrades replace authored map templates but transactionally
+overlay the existing generated atlas indexes, entry files, projection state,
+and entity registry afterward. A failed overlay restores the previous map
+tree. Generated projections remain non-authoritative and may still be marked
+dirty by the new producer generation; preservation prevents an upgrade from
+turning ordinary incremental catch-up into accidental bootstrap loss.
+
 ## Hook rendering
 
 The committed hook file is a placeholder example. Installation renders a
