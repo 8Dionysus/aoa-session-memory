@@ -292,6 +292,7 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0032 Task-Episode Interval Membership for Search Events](../AOA-SM-D-0032-task-episode-interval-membership-for-search-events.md) | 2026-07-26 | Accepted | `docs/decisions/AOA-SM-D-0032-task-episode-interval-membership-for-search-events.md` |
+| [AOA-SM-D-0036 Explicit Context Additions Continue Open Task Episodes](../AOA-SM-D-0036-explicit-context-additions-continue-open-task-episodes.md) | 2026-07-28 | Accepted | `docs/decisions/AOA-SM-D-0036-explicit-context-additions-continue-open-task-episodes.md` |
 
 ## evidence sufficiency
 
@@ -335,6 +336,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0010 Natural-Language Intent Before Literal Length](../AOA-SM-D-0010-natural-language-intent-before-literal-length.md) | 2026-07-16 | Accepted | `docs/decisions/AOA-SM-D-0010-natural-language-intent-before-literal-length.md` |
 
+## explicit operator signal
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0036 Explicit Context Additions Continue Open Task Episodes](../AOA-SM-D-0036-explicit-context-additions-continue-open-task-episodes.md) | 2026-07-28 | Accepted | `docs/decisions/AOA-SM-D-0036-explicit-context-additions-continue-open-task-episodes.md` |
+
 ## filter-before-bound
 
 | Decision | Date | Status | Path |
@@ -346,6 +353,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0009 Correlated Agent Activity Status Relation](../AOA-SM-D-0009-correlated-agent-activity-status-relation.md) | 2026-07-16 | Accepted | `docs/decisions/AOA-SM-D-0009-correlated-agent-activity-status-relation.md` |
+
+## fork isolation
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0036 Explicit Context Additions Continue Open Task Episodes](../AOA-SM-D-0036-explicit-context-additions-continue-open-task-episodes.md) | 2026-07-28 | Accepted | `docs/decisions/AOA-SM-D-0036-explicit-context-additions-continue-open-task-episodes.md` |
 
 ## freshness invalidation
 
@@ -386,6 +399,7 @@
 | [AOA-SM-D-0024 Semantic Generation Pins for Evaluation Admission](../AOA-SM-D-0024-semantic-generation-pins-for-evaluation-admission.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0024-semantic-generation-pins-for-evaluation-admission.md` |
 | [AOA-SM-D-0025 Process-Loaded Producer Generation Identity](../AOA-SM-D-0025-process-loaded-producer-generation-identity.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0025-process-loaded-producer-generation-identity.md` |
 | [AOA-SM-D-0033 Neutral Derived Route-Signal Graph Relations](../AOA-SM-D-0033-neutral-derived-route-signal-graph-relations.md) | 2026-07-26 | Accepted | `docs/decisions/AOA-SM-D-0033-neutral-derived-route-signal-graph-relations.md` |
+| [AOA-SM-D-0036 Explicit Context Additions Continue Open Task Episodes](../AOA-SM-D-0036-explicit-context-additions-continue-open-task-episodes.md) | 2026-07-28 | Accepted | `docs/decisions/AOA-SM-D-0036-explicit-context-additions-continue-open-task-episodes.md` |
 
 ## generation freshness
 
@@ -732,6 +746,7 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0032 Task-Episode Interval Membership for Search Events](../AOA-SM-D-0032-task-episode-interval-membership-for-search-events.md) | 2026-07-26 | Accepted | `docs/decisions/AOA-SM-D-0032-task-episode-interval-membership-for-search-events.md` |
+| [AOA-SM-D-0036 Explicit Context Additions Continue Open Task Episodes](../AOA-SM-D-0036-explicit-context-additions-continue-open-task-episodes.md) | 2026-07-28 | Accepted | `docs/decisions/AOA-SM-D-0036-explicit-context-additions-continue-open-task-episodes.md` |
 
 ## semantic completion
 

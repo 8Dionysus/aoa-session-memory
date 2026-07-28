@@ -1888,6 +1888,452 @@ def test_task_episode_failure_observation_and_resume_stay_with_open_lifecycle() 
     )
 
 
+def test_task_episode_real_context_addition_bridges_runtime_turn_boundary() -> None:
+    rows = [
+        {
+            "timestamp": "2026-06-13T17:26:26Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": (
+                            "Тут как-будто нужен aoa-eval-skill с подскиллами, "
+                            "чтобы проверять доступные evals и применять их."
+                        ),
+                    }
+                ],
+            },
+        },
+        {
+            "timestamp": "2026-06-13T17:27:30Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": (
+                            "После MCP/local ports следующий орган — "
+                            "aoa-eval skill family."
+                        ),
+                    }
+                ],
+            },
+        },
+        {
+            "timestamp": "2026-06-13T17:27:33Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "task_complete",
+                "turn_id": "turn-plan",
+            },
+        },
+        {
+            "timestamp": "2026-06-13T17:29:55Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "task_started",
+                "turn_id": "turn-context-addition",
+            },
+        },
+        {
+            "timestamp": "2026-06-13T17:29:55.100Z",
+            "type": "turn_context",
+            "payload": {
+                "turn_id": "turn-context-addition",
+            },
+        },
+        {
+            "timestamp": "2026-06-13T17:29:56Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": (
+                            "Да, всё именно так. Но ещё бы лучше на каждый "
+                            "перечисленный тобою пункт изучил бы инфу в вебе "
+                            "и всех репо, перед тем как пойти в сессии."
+                        ),
+                    }
+                ],
+            },
+        },
+    ]
+    events = [
+        module.classify_raw_event(
+            json.dumps(row, ensure_ascii=False),
+            row,
+            line_no,
+        )
+        for line_no, row in enumerate(rows, start=1)
+    ]
+
+    episodes = module.generated_task_episodes_for_events(events, [])
+
+    assert len(episodes) == 1
+    assert events[5].facets["conversation_act"]["kind"] == (
+        "operator_context_addition"
+    )
+    episode = episodes[0]
+    assert [item["raw_ref"] for item in episode["intent_refs"]] == [
+        "raw:line:1",
+        "raw:line:6",
+    ]
+    assert len(episode["semantic_continuations"]) == 1
+    continuation = episode["semantic_continuations"][0]
+    assert continuation["event_id"] == "000006"
+    assert continuation["raw_ref"] == "raw:line:6"
+    assert continuation["conversation_act"] == "operator_context_addition"
+    assert continuation["relation"] == "context_addition"
+    assert continuation["admission_basis"] == (
+        "typed_operator_conversation_act"
+    )
+    assert (
+        "runtime_turn_boundary_bridged_by_typed_continuation"
+        in episode["ambiguity_flags"]
+    )
+    assert any(
+        ref["raw_ref"] == "raw:line:4"
+        and ref.get("runtime_boundary_role")
+        == "bridged_runtime_task_started"
+        for ref in episode["transition_refs"]
+    )
+    assert any(
+        item["refs"]["raw"] == "raw:line:6"
+        and item["semantic_continuation_relation"] == "context_addition"
+        for item in episode["representations"]["intents"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("И ещё учти ограничение по времени.", True),
+        ("Дополнение: не изменяй канонический репозиторий.", True),
+        ("Also keep in mind the repository is frozen.", True),
+        ("Теперь новая задача: подготовь отчёт по календарю.", False),
+        ("И ещё одна новая задача: подготовь отчёт по календарю.", False),
+        ("Перейдём к другой задаче.", False),
+    ],
+)
+def test_operator_context_addition_signal_is_bounded(
+    text: str,
+    expected: bool,
+) -> None:
+    assert module.operator_context_addition_signal(text) is expected
+
+
+def test_task_episode_standalone_context_addition_starts_one_lifecycle() -> None:
+    rows = [
+        {
+            "timestamp": "2026-07-18T00:00:02Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "И ещё учти ограничение по времени.",
+                    }
+                ],
+            },
+        },
+    ]
+    events = [
+        module.classify_raw_event(
+            json.dumps(row, ensure_ascii=False),
+            row,
+            line_no,
+        )
+        for line_no, row in enumerate(rows, start=1)
+    ]
+
+    episodes = module.generated_task_episodes_for_events(events, [])
+
+    assert len(episodes) == 1
+    assert episodes[0]["event_range"]["from_line"] == 1
+    assert episodes[0]["transition"]["reason"] == "operator_context_addition"
+    assert episodes[0]["semantic_continuations"] == []
+
+
+def test_task_episode_unrelated_prompt_adopts_empty_runtime_turn_boundary() -> None:
+    rows = [
+        {
+            "timestamp": "2026-07-18T00:00:00Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "Проверь индексы aoa-session-memory",
+                    }
+                ],
+            },
+        },
+        {
+            "timestamp": "2026-07-18T00:00:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "Индексы проверены.",
+                    }
+                ],
+            },
+        },
+        {
+            "timestamp": "2026-07-18T00:00:02Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "task_complete",
+                "turn_id": "turn-indexes",
+            },
+        },
+        {
+            "timestamp": "2026-07-18T00:01:00Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "task_started",
+                "turn_id": "turn-calendar",
+            },
+        },
+        {
+            "timestamp": "2026-07-18T00:01:00.100Z",
+            "type": "turn_context",
+            "payload": {
+                "turn_id": "turn-calendar",
+            },
+        },
+        {
+            "timestamp": "2026-07-18T00:01:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "Подготовь отдельный отчёт по календарю",
+                    }
+                ],
+            },
+        },
+    ]
+    events = [
+        module.classify_raw_event(
+            json.dumps(row, ensure_ascii=False),
+            row,
+            line_no,
+        )
+        for line_no, row in enumerate(rows, start=1)
+    ]
+
+    episodes = module.generated_task_episodes_for_events(events, [])
+
+    assert len(episodes) == 2
+    assert episodes[0]["event_range"]["to_line"] == 3
+    second = episodes[1]
+    assert second["event_range"]["from_line"] == 4
+    assert second["intent_refs"][0]["raw_ref"] == "raw:line:6"
+    assert second["transition"]["previous_episode_id"] == "task-0001"
+    assert second["transition"]["first_semantic_intent_ref"] == (
+        "raw:line:6"
+    )
+    assert second["transition"]["user_conversation_act"] == (
+        "operator_instruction"
+    )
+    assert second["semantic_continuations"] == []
+
+
+def test_task_episode_generic_exact_prompt_does_not_bridge_runtime_turn() -> None:
+    rows = [
+        {
+            "timestamp": "2026-06-18T23:51:04Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "Давай",
+                    }
+                ],
+            },
+        },
+        {
+            "timestamp": "2026-06-18T23:57:47Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "Практический smoke завершён.",
+                    }
+                ],
+            },
+        },
+        {
+            "timestamp": "2026-06-18T23:57:50Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "task_complete",
+                "turn_id": "turn-smoke",
+            },
+        },
+        {
+            "timestamp": "2026-06-18T23:58:24Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "task_started",
+                "turn_id": "turn-next",
+            },
+        },
+        {
+            "timestamp": "2026-06-18T23:58:26Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "Давай",
+                    }
+                ],
+            },
+        },
+    ]
+    events = [
+        module.classify_raw_event(
+            json.dumps(row, ensure_ascii=False),
+            row,
+            line_no,
+        )
+        for line_no, row in enumerate(rows, start=1)
+    ]
+
+    episodes = module.generated_task_episodes_for_events(events, [])
+
+    assert len(episodes) == 2
+    assert episodes[0]["intent_refs"][0]["raw_ref"] == "raw:line:1"
+    assert episodes[1]["intent_refs"][0]["raw_ref"] == "raw:line:5"
+    assert episodes[1]["transition"]["first_semantic_intent_ref"] == (
+        "raw:line:5"
+    )
+    assert episodes[1]["semantic_continuations"] == []
+    assert not any(
+        "runtime_turn_boundary_bridged_by_typed_continuation"
+        in episode["ambiguity_flags"]
+        for episode in episodes
+    )
+
+
+def test_task_episode_context_addition_does_not_bridge_evidence_bearing_runtime_episode() -> None:
+    rows = [
+        {
+            "timestamp": "2026-07-18T00:00:00Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "Проверь индексы aoa-session-memory",
+                    }
+                ],
+            },
+        },
+        {
+            "timestamp": "2026-07-18T00:00:01Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "task_complete",
+                "turn_id": "turn-indexes",
+            },
+        },
+        {
+            "timestamp": "2026-07-18T00:01:00Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "task_started",
+                "turn_id": "turn-intervening",
+            },
+        },
+        {
+            "timestamp": "2026-07-18T00:01:00.500Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "Выполняю отдельное восстановление runtime.",
+                    }
+                ],
+            },
+        },
+        {
+            "timestamp": "2026-07-18T00:01:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "И ещё учти ограничение по времени.",
+                    }
+                ],
+            },
+        },
+    ]
+    events = [
+        module.classify_raw_event(
+            json.dumps(row, ensure_ascii=False),
+            row,
+            line_no,
+        )
+        for line_no, row in enumerate(rows, start=1)
+    ]
+
+    episodes = module.generated_task_episodes_for_events(events, [])
+
+    assert len(episodes) == 2
+    assert episodes[0]["intent_refs"][0]["raw_ref"] == "raw:line:1"
+    assert any(
+        ref["raw_ref"] == "raw:line:4"
+        for ref in episodes[1]["answer_refs"]
+    )
+    assert any(
+        continuation["raw_ref"] == "raw:line:5"
+        and continuation["relation"] == "context_addition"
+        for continuation in episodes[1]["semantic_continuations"]
+    )
+    assert not any(
+        "runtime_turn_boundary_bridged_by_typed_continuation"
+        in episode["ambiguity_flags"]
+        for episode in episodes
+    )
+
+
 def test_task_episode_unrelated_open_task_prompt_remains_a_new_episode() -> None:
     rows = [
         {

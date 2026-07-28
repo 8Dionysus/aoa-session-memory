@@ -180,6 +180,7 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0032 Task-Episode Interval Membership for Search Events](../AOA-SM-D-0032-task-episode-interval-membership-for-search-events.md) | 2026-07-26 | Accepted | `docs/decisions/AOA-SM-D-0032-task-episode-interval-membership-for-search-events.md` |
+| [AOA-SM-D-0036 Explicit Context Additions Continue Open Task Episodes](../AOA-SM-D-0036-explicit-context-additions-continue-open-task-episodes.md) | 2026-07-28 | Accepted | `docs/decisions/AOA-SM-D-0036-explicit-context-additions-continue-open-task-episodes.md` |
 
 ## evidence previews
 
@@ -522,6 +523,12 @@
 | [AOA-SM-D-0025 Process-Loaded Producer Generation Identity](../AOA-SM-D-0025-process-loaded-producer-generation-identity.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0025-process-loaded-producer-generation-identity.md` |
 | [AOA-SM-D-0030 Projection-Scoped Producer Generation Identity](../AOA-SM-D-0030-projection-scoped-producer-generation-identity.md) | 2026-07-26 | Accepted | `docs/decisions/AOA-SM-D-0030-projection-scoped-producer-generation-identity.md` |
 
+## segment indexes
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0036 Explicit Context Additions Continue Open Task Episodes](../AOA-SM-D-0036-explicit-context-additions-continue-open-task-episodes.md) | 2026-07-28 | Accepted | `docs/decisions/AOA-SM-D-0036-explicit-context-additions-continue-open-task-episodes.md` |
+
 ## segment projection
 
 | Decision | Date | Status | Path |
@@ -547,6 +554,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0021 Raw-Preserving Derived-Text Privacy Boundary](../AOA-SM-D-0021-raw-preserving-derived-text-privacy-boundary.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0021-raw-preserving-derived-text-privacy-boundary.md` |
+
+## semantic representations
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0036 Explicit Context Additions Continue Open Task Episodes](../AOA-SM-D-0036-explicit-context-additions-continue-open-task-episodes.md) | 2026-07-28 | Accepted | `docs/decisions/AOA-SM-D-0036-explicit-context-additions-continue-open-task-episodes.md` |
 
 ## semantic tree
 
@@ -611,6 +624,7 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0030 Projection-Scoped Producer Generation Identity](../AOA-SM-D-0030-projection-scoped-producer-generation-identity.md) | 2026-07-26 | Accepted | `docs/decisions/AOA-SM-D-0030-projection-scoped-producer-generation-identity.md` |
 | [AOA-SM-D-0032 Task-Episode Interval Membership for Search Events](../AOA-SM-D-0032-task-episode-interval-membership-for-search-events.md) | 2026-07-26 | Accepted | `docs/decisions/AOA-SM-D-0032-task-episode-interval-membership-for-search-events.md` |
+| [AOA-SM-D-0036 Explicit Context Additions Continue Open Task Episodes](../AOA-SM-D-0036-explicit-context-additions-continue-open-task-episodes.md) | 2026-07-28 | Accepted | `docs/decisions/AOA-SM-D-0036-explicit-context-additions-continue-open-task-episodes.md` |
 
 ## task-local DAG
 

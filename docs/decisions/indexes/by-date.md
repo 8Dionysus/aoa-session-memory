@@ -4,6 +4,7 @@
 
 | Date | Decision | Status | Path |
 | --- | --- | --- | --- |
+| 2026-07-28 | [AOA-SM-D-0036 Explicit Context Additions Continue Open Task Episodes](../AOA-SM-D-0036-explicit-context-additions-continue-open-task-episodes.md) | Accepted | `docs/decisions/AOA-SM-D-0036-explicit-context-additions-continue-open-task-episodes.md` |
 | 2026-07-28 | [AOA-SM-D-0035 Transactional Preservation of Runtime-Generated Maps Across Upgrades](../AOA-SM-D-0035-transactional-preservation-of-runtime-generated-maps-across-upgrades.md) | Accepted | `docs/decisions/AOA-SM-D-0035-transactional-preservation-of-runtime-generated-maps-across-upgrades.md` |
 | 2026-07-28 | [AOA-SM-D-0034 Bounded Dirty-First Automatic Index Discovery](../AOA-SM-D-0034-bounded-dirty-first-automatic-index-discovery.md) | Accepted | `docs/decisions/AOA-SM-D-0034-bounded-dirty-first-automatic-index-discovery.md` |
 | 2026-07-26 | [AOA-SM-D-0033 Neutral Derived Route-Signal Graph Relations](../AOA-SM-D-0033-neutral-derived-route-signal-graph-relations.md) | Accepted | `docs/decisions/AOA-SM-D-0033-neutral-derived-route-signal-graph-relations.md` |

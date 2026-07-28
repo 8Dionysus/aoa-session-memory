@@ -409,7 +409,7 @@ RAW_BLOCK_INDEX_JSON = "blocks.index.json"
 RAW_COMPACTION_EVENTS_JSONL = "compaction-events.jsonl"
 RAW_BLOCK_STORAGE_MODE_PLAIN = "plain_raw_jsonl_v1"
 RAW_BLOCK_STORAGE_MODE_GZIP = "compressed_gzip_v1"
-CONVERSATION_ACT_SCHEMA_VERSION = 3
+CONVERSATION_ACT_SCHEMA_VERSION = 4
 SESSION_ACT_SCHEMA_VERSION = 3
 AGENT_EVENT_SCHEMA_VERSION = 3
 TASK_EPISODE_SCHEMA_VERSION = 11
@@ -420,7 +420,7 @@ FIRST_PASS_DISTILLATION_SCHEMA_VERSION = 2
 FIRST_PASS_DISTILLATION_POLICY_VERSION = 1
 TASK_EPISODE_REF_LIMIT_PER_BUCKET = 80
 TASK_EPISODE_REPRESENTATION_VERSION = 9
-TASK_EPISODE_BOUNDARY_POLICY_VERSION = 5
+TASK_EPISODE_BOUNDARY_POLICY_VERSION = 6
 TASK_EPISODE_IDENTITY_VERSION = 1
 TASK_EPISODE_EVIDENCE_INTEGRITY_VERSION = 1
 TASK_EPISODE_COMPATIBLE_SCHEMA_MIN = 2
@@ -12488,6 +12488,51 @@ def operator_resume_request_signal(text: str) -> bool:
     )
 
 
+def operator_context_addition_signal(text: str) -> bool:
+    """Recognize an explicit additive constraint without guessing task similarity."""
+    compact = re.sub(r"\s+", " ", str(text or "")).strip().casefold()
+    if not compact or len(compact) > 2000 or "?" in compact:
+        return False
+    if re.search(
+        r"(?:"
+        r"\b(?:нов\w*|друг\w*|отдельн\w*)\s+"
+        r"(?:задач\w*|тем\w*|работ\w*)\b|"
+        r"\bперейд\w*\s+к\s+(?:друг\w*|нов\w*)\b|"
+        r"^\s*теперь\b"
+        r")",
+        compact,
+        flags=re.IGNORECASE,
+    ):
+        return False
+    russian_confirmation = (
+        r"(?:да\b[^?!]{0,80}?[.!]\s*)?"
+    )
+    russian_marker = (
+        r"(?:"
+        r"(?:но\s+)?ещ[её]\s+(?:бы\s+)?"
+        r"(?:лучше|важно|нужно|учт\w*|добав\w*)|"
+        r"(?:и|а)\s+ещ[её]\b|"
+        r"дополн(?:ение|ительно)\b|"
+        r"кроме\s+того\b|"
+        r"также\s+(?:учт\w*|важно|нужно)\b"
+        r")"
+    )
+    english_marker = (
+        r"(?:"
+        r"also\s+keep\s+in\s+mind\b|"
+        r"in\s+addition\b|"
+        r"one\s+more\s+(?:constraint|detail|requirement)\b"
+        r")"
+    )
+    return bool(
+        re.match(
+            rf"^(?:{russian_confirmation}{russian_marker}|{english_marker})",
+            compact,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
 def classify_operator_prompt_act(text: str) -> tuple[str, str, str]:
     if operator_failure_observation_signal(text):
         return (
@@ -12501,6 +12546,12 @@ def classify_operator_prompt_act(text: str) -> tuple[str, str, str]:
         return "operator_correction", "correct_agent", "correction_signal"
     if text_has_any(text, ["коммить", "пуш", "мердж", "commit", "push", "merge"]):
         return "operator_delivery_request", "publish_changes", "delivery_signal"
+    if operator_context_addition_signal(text):
+        return (
+            "operator_context_addition",
+            "extend_active_work_context",
+            "context_addition_signal",
+        )
     if text_has_any(text, ["идея", "концепт", "мысл", "задум", "философ"]):
         return "operator_concept", "shape_concept", "concept_signal"
     if "?" in text or text_has_any(text, ["почему", "зачем", "как ", "что ", "какие ", "верно", "правильно"]):
@@ -17221,6 +17272,26 @@ def normalized_task_episode_intent_text(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "").casefold()).strip()
 
 
+def task_episode_replayed_intent_is_specific(value: Any) -> bool:
+    normalized = normalized_task_episode_intent_text(value)
+    if not normalized or len(normalized) < 12:
+        return False
+    if re.fullmatch(
+        r"(?:"
+        r"да|давай|ок|окей|хорошо|сделай|делай|"
+        r"продолжай|продолжаем|"
+        r"yes|ok|okay|do it|go ahead|continue|resume"
+        r")",
+        normalized,
+        flags=re.IGNORECASE,
+    ):
+        return False
+    tokens = re.findall(r"\w+", normalized, flags=re.UNICODE)
+    return len(tokens) >= 3 or bool(
+        re.search(r"(?:[/\\]|--|\.[a-z0-9]{1,8}\b|`)", normalized)
+    )
+
+
 def task_episode_observed_intent_texts(episode: dict[str, Any]) -> set[str]:
     texts: set[str] = set()
     candidates = (
@@ -17252,13 +17323,11 @@ def task_episode_observed_intent_texts(episode: dict[str, Any]) -> set[str]:
     return texts
 
 
-def task_episode_user_continuation_relation(
+def task_episode_user_continuation_candidate_relation(
     episode: dict[str, Any],
     event: RawEvent,
 ) -> str:
-    """Return a semantic continuation only when the open lifecycle proves one."""
-    if str(episode.get("status") or "") != "open":
-        return ""
+    """Return the typed relation without deciding whether a boundary may bridge."""
     conversation_act = (
         event.facets.get("conversation_act")
         if isinstance(event.facets.get("conversation_act"), dict)
@@ -17266,13 +17335,58 @@ def task_episode_user_continuation_relation(
     )
     conversation_kind = str(conversation_act.get("kind") or "")
     normalized = normalized_task_episode_intent_text(event_semantic_text(event))
-    if normalized and normalized in task_episode_observed_intent_texts(episode):
+    if (
+        normalized
+        and normalized in task_episode_observed_intent_texts(episode)
+        and task_episode_replayed_intent_is_specific(normalized)
+    ):
         return "replayed_intent"
     return {
         "operator_correction": "correction",
+        "operator_context_addition": "context_addition",
         "operator_failure_observation": "failure_observation",
         "operator_resume_request": "resume",
     }.get(conversation_kind, "")
+
+
+def task_episode_user_continuation_relation(
+    episode: dict[str, Any],
+    event: RawEvent,
+) -> str:
+    """Return a semantic continuation only when the open lifecycle proves one."""
+    if str(episode.get("status") or "") != "open":
+        return ""
+    return task_episode_user_continuation_candidate_relation(
+        episode,
+        event,
+    )
+
+
+def task_episode_is_empty_runtime_turn_boundary(
+    episode: dict[str, Any],
+) -> bool:
+    transition = (
+        episode.get("transition")
+        if isinstance(episode.get("transition"), dict)
+        else {}
+    )
+    if (
+        str(episode.get("status") or "") != "open"
+        or str(transition.get("boundary_kind") or "")
+        != "runtime_task_started_boundary"
+        or episode.get("intent_refs")
+        or episode.get("semantic_continuations")
+        or task_episode_agent_response_ref_count(episode) > 0
+    ):
+        return False
+    evidence_buckets = (
+        "action_refs",
+        "tool_refs",
+        "error_refs",
+        "verification_refs",
+        "correlation_chain",
+    )
+    return not any(episode.get(bucket) for bucket in evidence_buckets)
 
 
 def append_task_episode_semantic_continuation(
@@ -17424,6 +17538,198 @@ class TaskEpisodeBuilder:
         self.query_relevant_representation_candidate_count = 0
         self.runtime_goal_continuation_boundary_count = 0
 
+    def bridge_runtime_turn_boundary_for_user(
+        self,
+        event: RawEvent,
+    ) -> str:
+        if (
+            self.current is None
+            or len(self.episodes) < 2
+            or self.episodes[-1] is not self.current
+            or not task_episode_is_empty_runtime_turn_boundary(
+                self.current
+            )
+        ):
+            return ""
+        previous = self.episodes[-2]
+        previous_flags = (
+            previous.get("ambiguity_flags")
+            if isinstance(previous.get("ambiguity_flags"), list)
+            else []
+        )
+        if (
+            str(previous.get("status") or "")
+            not in {"closed", "blocked", "handoff"}
+            or "runtime_task_complete_observed"
+            not in previous_flags
+        ):
+            return ""
+        relation = task_episode_user_continuation_candidate_relation(
+            previous,
+            event,
+        )
+        if not relation:
+            return ""
+
+        boundary_ref = (
+            dict(self.current.get("start_user_ref"))
+            if isinstance(self.current.get("start_user_ref"), dict)
+            else {}
+        )
+        if not boundary_ref.get("raw_ref"):
+            return ""
+        boundary_ref["runtime_boundary_role"] = (
+            "bridged_runtime_task_started"
+        )
+        transition_refs = previous.setdefault(
+            "transition_refs",
+            [],
+        )
+        if isinstance(transition_refs, list):
+            displaced = bounded_head_tail_append(
+                transition_refs,
+                boundary_ref,
+                limit=TASK_EPISODE_REF_LIMIT_PER_BUCKET,
+            )
+            if displaced:
+                omitted = previous.setdefault(
+                    "omitted_ref_counts",
+                    {},
+                )
+                if isinstance(omitted, dict):
+                    omitted["transition_refs"] = int_value(
+                        omitted.get("transition_refs"),
+                        0,
+                    ) + 1
+
+        prior_status = str(previous.get("status") or "")
+        bridge = {
+            "relation": relation,
+            "admission_basis": (
+                "typed_operator_conversation_act_across_empty_runtime_turn"
+            ),
+            "runtime_task_started_ref": boundary_ref.get(
+                "raw_ref"
+            ),
+            "previous_terminal_status": prior_status,
+        }
+        bridges = previous.setdefault(
+            "transport_boundary_continuations",
+            [],
+        )
+        if isinstance(bridges, list):
+            bounded_head_tail_append(
+                bridges,
+                bridge,
+                limit=TASK_EPISODE_REF_LIMIT_PER_BUCKET,
+            )
+        previous["status"] = "open"
+        if (
+            isinstance(previous_flags, list)
+            and (
+                "runtime_turn_boundary_bridged_by_typed_continuation"
+                not in previous_flags
+            )
+        ):
+            previous_flags.append(
+                "runtime_turn_boundary_bridged_by_typed_continuation"
+            )
+        if (
+            previous.get("closeout_refs")
+            and isinstance(previous_flags, list)
+            and (
+                "prior_closeout_followed_by_operator_continuation"
+                not in previous_flags
+            )
+        ):
+            previous_flags.append(
+                "prior_closeout_followed_by_operator_continuation"
+            )
+
+        self.episodes.pop()
+        self.current = previous
+        append_task_episode_semantic_continuation(
+            previous,
+            event,
+            self.segments,
+            relation=relation,
+        )
+        return relation
+
+    def adopt_empty_runtime_turn_boundary_for_user(
+        self,
+        event: RawEvent,
+    ) -> bool:
+        if (
+            self.current is None
+            or not task_episode_is_empty_runtime_turn_boundary(
+                self.current
+            )
+        ):
+            return False
+        update_task_episode_range(self.current, event)
+        append_task_episode_ref(
+            self.current,
+            "intent_refs",
+            event,
+            self.segments,
+        )
+        representation = task_episode_representation_entry(
+            event,
+            self.segments,
+        )
+        if representation is not None:
+            candidates = self.current.setdefault(
+                "_representation_candidates",
+                [],
+            )
+            if isinstance(candidates, list):
+                candidates.append(representation)
+        conversation_act = (
+            event.facets.get("conversation_act")
+            if isinstance(
+                event.facets.get("conversation_act"),
+                dict,
+            )
+            else {}
+        )
+        transition = (
+            self.current.get("transition")
+            if isinstance(self.current.get("transition"), dict)
+            else {}
+        )
+        transition.update(
+            {
+                "first_semantic_intent_ref": (
+                    f"raw:line:{event.line_no}"
+                ),
+                "semantic_intent_reason": (
+                    str(conversation_act.get("kind") or "")
+                    or "user_prompt"
+                ),
+                "user_conversation_act": str(
+                    conversation_act.get("kind") or ""
+                ),
+            }
+        )
+        self.current["transition"] = transition
+        self.current["confidence"] = "high"
+        flags = self.current.setdefault(
+            "ambiguity_flags",
+            [],
+        )
+        if (
+            isinstance(flags, list)
+            and (
+                "runtime_boundary_adopted_by_first_semantic_intent"
+                not in flags
+            )
+        ):
+            flags.append(
+                "runtime_boundary_adopted_by_first_semantic_intent"
+            )
+        return True
+
     def observe(self, event: RawEvent) -> None:
         conversation_act = event.facets.get("conversation_act") if isinstance(event.facets.get("conversation_act"), dict) else {}
         conversation_kind = str(conversation_act.get("kind") or "")
@@ -17523,6 +17829,20 @@ class TaskEpisodeBuilder:
         )
         fallback_user_message = event.event_type == "USER_INTENT" and event.source_type == "event_msg"
         if canonical_user_message or (fallback_user_message and self.current is None):
+            if (
+                canonical_user_message
+                and self.bridge_runtime_turn_boundary_for_user(
+                    event
+                )
+            ):
+                return
+            if (
+                canonical_user_message
+                and self.adopt_empty_runtime_turn_boundary_for_user(
+                    event
+                )
+            ):
+                return
             continuation_relation = (
                 task_episode_user_continuation_relation(self.current, event)
                 if canonical_user_message and self.current is not None

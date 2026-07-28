@@ -65,6 +65,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0019 Portable Export Excludes Atomic-Publish Scratch Files](../AOA-SM-D-0019-portable-export-excludes-atomic-publish-scratch-files.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0019-portable-export-excludes-atomic-publish-scratch-files.md` |
 
+## conversation acts
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0036 Explicit Context Additions Continue Open Task Episodes](../AOA-SM-D-0036-explicit-context-additions-continue-open-task-episodes.md) | 2026-07-28 | Accepted | `docs/decisions/AOA-SM-D-0036-explicit-context-additions-continue-open-task-episodes.md` |
+
 ## decision record
 
 | Decision | Date | Status | Path |
@@ -103,6 +109,7 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0005 Provenance-Preserving Fork Lineage Consolidation](../AOA-SM-D-0005-provenance-preserving-fork-lineage-consolidation.md) | 2026-07-15 | Accepted | `docs/decisions/AOA-SM-D-0005-provenance-preserving-fork-lineage-consolidation.md` |
 | [AOA-SM-D-0032 Task-Episode Interval Membership for Search Events](../AOA-SM-D-0032-task-episode-interval-membership-for-search-events.md) | 2026-07-26 | Accepted | `docs/decisions/AOA-SM-D-0032-task-episode-interval-membership-for-search-events.md` |
+| [AOA-SM-D-0036 Explicit Context Additions Continue Open Task Episodes](../AOA-SM-D-0036-explicit-context-additions-continue-open-task-episodes.md) | 2026-07-28 | Accepted | `docs/decisions/AOA-SM-D-0036-explicit-context-additions-continue-open-task-episodes.md` |
 
 ## evaluation
 
@@ -127,6 +134,7 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0032 Task-Episode Interval Membership for Search Events](../AOA-SM-D-0032-task-episode-interval-membership-for-search-events.md) | 2026-07-26 | Accepted | `docs/decisions/AOA-SM-D-0032-task-episode-interval-membership-for-search-events.md` |
+| [AOA-SM-D-0036 Explicit Context Additions Continue Open Task Episodes](../AOA-SM-D-0036-explicit-context-additions-continue-open-task-episodes.md) | 2026-07-28 | Accepted | `docs/decisions/AOA-SM-D-0036-explicit-context-additions-continue-open-task-episodes.md` |
 
 ## evidence provenance
 
@@ -333,6 +341,12 @@
 | [AOA-SM-D-0024 Semantic Generation Pins for Evaluation Admission](../AOA-SM-D-0024-semantic-generation-pins-for-evaluation-admission.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0024-semantic-generation-pins-for-evaluation-admission.md` |
 | [AOA-SM-D-0025 Process-Loaded Producer Generation Identity](../AOA-SM-D-0025-process-loaded-producer-generation-identity.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0025-process-loaded-producer-generation-identity.md` |
 | [AOA-SM-D-0026 Best-Effort Progress Transport](../AOA-SM-D-0026-best-effort-progress-transport.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0026-best-effort-progress-transport.md` |
+
+## projection generation
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0036 Explicit Context Additions Continue Open Task Episodes](../AOA-SM-D-0036-explicit-context-additions-continue-open-task-episodes.md) | 2026-07-28 | Accepted | `docs/decisions/AOA-SM-D-0036-explicit-context-additions-continue-open-task-episodes.md` |
 
 ## public-safe copy boundary
 
