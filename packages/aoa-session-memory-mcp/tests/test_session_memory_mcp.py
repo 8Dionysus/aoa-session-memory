@@ -2866,7 +2866,7 @@ def test_trace_kind_aliases_bridge_entity_registry_and_usage_routes(tmp_path: Pa
     assert neighborhood["kind"] == "mcp"
     assert neighborhood["requested_kind"] == "mcp_service"
     assert neighborhood["mcp_access"]["selected_route_signal"] == "mcp:aoa_session_memory_mcp"
-    assert timeline["kind"] == "tool"
+    assert timeline["kind"] == "mcp_tool"
     assert timeline["requested_kind"] == "mcp_tool"
     assert quality["artifact_type"] == "session_memory_graph_quality_audit"
 
@@ -2875,7 +2875,7 @@ def test_trace_kind_aliases_bridge_entity_registry_and_usage_routes(tmp_path: Pa
     audit_args = next(args for command, args in calls if command == "entity-usage-audit")
     assert trace_args[trace_args.index("--kind") + 1] == "mcp"
     assert audit_args[audit_args.index("--kind") + 1] == "mcp"
-    assert "--kind tool" in timeline["next_expansion_command"]
+    assert "--kind mcp_tool" in timeline["next_expansion_command"]
     assert "session_memory_mcp:mcp:aoa-session-memory-mcp" in quality["next_expansion_command"]
     assert not any(command in {"graph-timeline", "graph-quality-audit"} for command, _args in calls)
 
@@ -5822,6 +5822,29 @@ def test_entity_usage_chain_routes_to_allowlisted_archive_command(tmp_path: Path
     assert args[args.index("--document-limit") + 1] == "9"
     assert args[args.index("--session") + 1] == "session-1"
     assert runner.timeouts[-1] == ("usage-chain", 90.0)
+
+
+def test_entity_usage_chain_preserves_mcp_tool_identity_for_archive_admission(
+    tmp_path: Path,
+) -> None:
+    runner = FakeRunner()
+    state = state_with_fixture(tmp_path, runner)
+
+    chain = state.session_entity_usage_chain(
+        "aoa_session_route_rollup_query",
+        kind="mcp_tool",
+        limit=5,
+        per_route_limit=7,
+        session="session-1",
+    )
+
+    assert chain["artifact_type"] == "session_memory_entity_usage_chain"
+    assert chain["requested_kind"] == "mcp_tool"
+    usage_calls = [call for call in runner.calls if call[0] == "usage-chain"]
+    assert len(usage_calls) == 1
+    args = usage_calls[0][1]
+    assert args[args.index("--kind") + 1] == "mcp_tool"
+    assert "--kind mcp_tool" in chain["mcp_access"]["full_evidence_route"]
 
 
 def test_entity_usage_chain_compact_preserves_evidence_first_admission_contract(

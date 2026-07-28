@@ -297,6 +297,7 @@ ALLOWED_TRACE_KINDS = {
     "hook",
     "receipt",
     "mcp",
+    "mcp_tool",
     "owner_route",
     "path",
     "api",
@@ -320,8 +321,7 @@ ALLOWED_TRACE_KINDS = {
 TRACE_KIND_ALIASES = {
     "mcp_service": "mcp",
     "mcp_services": "mcp",
-    "mcp_tool": "tool",
-    "mcp_tools": "tool",
+    "mcp_tools": "mcp_tool",
     "failure_mode": "error",
     "hook_health": "receipt",
     "route": "owner_route",
@@ -699,7 +699,8 @@ def _coerce_trace_kind(kind: str | None, *, error_label: str = "trace kind") -> 
 def _annotate_trace_kind_payload(payload: dict[str, Any], *, requested_kind: str | None, normalized_kind: str) -> dict[str, Any]:
     requested = _requested_trace_kind_key(requested_kind)
     payload.setdefault("kind", normalized_kind)
-    if requested != normalized_kind:
+    observed = _requested_trace_kind_key(str(payload.get("kind") or normalized_kind))
+    if requested != observed:
         payload.setdefault("requested_kind", requested)
     return payload
 
@@ -6607,19 +6608,29 @@ class AoASessionMemoryMCPState:
         anchor_text = str(anchor or "").strip()
         normalized_anchor = _route_key(anchor_text)
         normalized_kind = _normalize_trace_kind(kind or "auto")
+        route_layer_kind = (
+            "tool" if normalized_kind == "mcp_tool" else normalized_kind
+        )
         candidates: list[str] = []
         if ":" in anchor_text:
             candidates.append(anchor_text)
             prefix, _, value = anchor_text.partition(":")
             normalized_value = _route_key(value)
             normalized_prefix_kind = _normalize_trace_kind(prefix)
+            normalized_prefix_layer = (
+                "tool"
+                if normalized_prefix_kind == "mcp_tool"
+                else normalized_prefix_kind
+            )
             if prefix and normalized_value:
-                candidates.append(f"{_route_key(prefix)}:{normalized_value}")
-            if normalized_prefix_kind and normalized_prefix_kind != "auto" and normalized_value:
-                candidates.append(f"{normalized_prefix_kind}:{normalized_value}")
-        if normalized_kind and normalized_kind != "auto" and normalized_anchor:
-            candidates.append(f"{normalized_kind}:{normalized_anchor}")
-            candidates.append(f"{normalized_kind}:{anchor_text}")
+                candidates.append(
+                    f"{'tool' if _route_key(prefix) == 'mcp_tool' else _route_key(prefix)}:{normalized_value}"
+                )
+            if normalized_prefix_layer and normalized_prefix_layer != "auto" and normalized_value:
+                candidates.append(f"{normalized_prefix_layer}:{normalized_value}")
+        if route_layer_kind and route_layer_kind != "auto" and normalized_anchor:
+            candidates.append(f"{route_layer_kind}:{normalized_anchor}")
+            candidates.append(f"{route_layer_kind}:{anchor_text}")
         elif normalized_anchor:
             for layer in (
                 "tool",
@@ -8736,6 +8747,11 @@ class AoASessionMemoryMCPState:
         kinds = [explicit_route[0]] if explicit_route else [kind]
         if kind == "auto":
             kinds.extend(["mcp", "skill", "tool", "hook", "api", "script", "validator", "test", "eval", "graph", "memory", "goal", "git"])
+        elif kind == "mcp_tool":
+            # MCP tools are typed entities whose physical route layer is
+            # still `tool`; keep both exact candidates without weakening the
+            # requested identity used by source-side usage admission.
+            kinds.append("tool")
         elif kind not in kinds:
             kinds.append(kind)
         candidates = [f"route:{explicit_route[0]}:{explicit_route[2]}"] if explicit_route else []
