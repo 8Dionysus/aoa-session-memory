@@ -1,0 +1,17 @@
+{
+  "allowed_bytes": 23301530,
+  "allowed_tracked_bytes": 23413040,
+  "approved_by": "repository-owner",
+  "base_ref": "ee3910abd0d9607d94628aa56e85c376b57b23ac",
+  "changed_generated_bytes": 23301530,
+  "changed_generated_files": 346,
+  "decision_ref": "aoa-kag:docs/decisions/AOA-KAG-D-0017-portable-content-addressed-repository-family.md",
+  "default_limit_bytes": 1048576,
+  "head_family_digest": "a61d02947b51bbfa7f6e2e0643b27ae5c359e07fb6ff87f056ad64da2533eae3",
+  "reason": "AOA-SM-D-0034 and AOA-SM-D-0035 add owner-approved bounded discovery and transactional generated-map upgrade contracts; admit only the resulting digest-bound source-linked family without changing standing budgets or source authority.",
+  "repo": "aoa-session-memory",
+  "schema_version": "aoa-repo-local-kag-budget-receipt-v1",
+  "scope": "generated_delta_and_tracked_size",
+  "tracked_bytes": 23413040,
+  "tracked_bytes_max": 13631488
+}
