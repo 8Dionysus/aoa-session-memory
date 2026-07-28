@@ -351,6 +351,20 @@ to one batch-sized reserve and counting entries already queued. Reports retain
 the original scope, added targets, queue top-up, remaining work, and freshness;
 the demand signal never makes a projection current by itself.
 
+Automatic index discovery is also bounded before any per-session manifest,
+segment index, or projection fingerprint is opened. Each profile selects a
+fixed dirty-first window from persisted search freshness state, reserves part
+of that window for a round-robin registry cursor, and rotates the dirty tail
+independently so one repeatedly blocked source cannot starve the rest of the
+backlog. The cursor packet under `diagnostics/` is generated scheduling state,
+not projection truth. A bounded pass always reports
+`global_scope_complete=false`; only persisted projection states and owner
+freshness checks decide whether selected work is current. Explicit manual
+maintenance without a discovery limit retains the strict whole-scope scan for
+audits, migrations, and rebuild decisions. Thus recurring cost is bounded by
+the profile window while repeated successful runs still converge across a
+growing archive.
+
 Resource-blocked all-session graph fallback also maintains a separate bounded
 background candidate reserve. Existing entries count toward the reserve, and
 only the missing count is admitted from the generated ledger before ordinary

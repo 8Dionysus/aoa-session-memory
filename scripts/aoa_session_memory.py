@@ -1243,6 +1243,10 @@ SEARCH_REPAIR_COST_WARM_DOCUMENT_COUNT = 15_000
 SEARCH_REPAIR_COST_HEAVY_DOCUMENT_COUNT = 100_000
 SEARCH_REPAIR_COST_WARM_SOURCE_PATH_COUNT = 96
 SEARCH_REPAIR_COST_HEAVY_SOURCE_PATH_COUNT = 384
+INDEX_MAINTENANCE_DISCOVERY_STATE_SCHEMA_VERSION = 1
+INDEX_MAINTENANCE_DISCOVERY_STATE_JSON = "index-maintenance-discovery-state.json"
+INDEX_MAINTENANCE_DISCOVERY_CURSOR_RESERVE_DIVISOR = 4
+INDEX_MAINTENANCE_DISCOVERY_CURSOR_RESERVE_MAX = 1
 CLASSIFIER_TEXT_HEAD_CHARS = 12000
 CLASSIFIER_TEXT_TAIL_CHARS = 6000
 CLASSIFIER_TEXT_MAX_CHARS = CLASSIFIER_TEXT_HEAD_CHARS + CLASSIFIER_TEXT_TAIL_CHARS + 128
@@ -1254,6 +1258,7 @@ AUTO_MAINTENANCE_PROFILES = {
     "hot": {
         "since_days": 2,
         "limit": None,
+        "discovery_limit": 8,
         "repair_limit": None,
         "search_repair_limit": 4,
         "search_shard_repair_limit": 4,
@@ -1286,6 +1291,7 @@ AUTO_MAINTENANCE_PROFILES = {
     "backlog": {
         "since_days": 30,
         "limit": None,
+        "discovery_limit": 16,
         "repair_limit": None,
         "search_repair_limit": None,
         "search_shard_repair_limit": None,
@@ -1323,6 +1329,7 @@ AUTO_MAINTENANCE_PROFILES = {
     "catchup": {
         "since_days": None,
         "limit": None,
+        "discovery_limit": 16,
         "repair_limit": 25,
         "search_repair_limit": 25,
         "search_shard_repair_limit": 24,
@@ -1360,6 +1367,7 @@ AUTO_MAINTENANCE_PROFILES = {
     "deep": {
         "since_days": None,
         "limit": None,
+        "discovery_limit": 32,
         "repair_limit": None,
         "search_repair_limit": None,
         "search_shard_repair_limit": None,
@@ -36208,6 +36216,292 @@ def prioritize_session_records(
     return selected
 
 
+def index_maintenance_discovery_state_path(aoa_root: Path) -> Path:
+    return aoa_root / DIAGNOSTICS_ROOT / INDEX_MAINTENANCE_DISCOVERY_STATE_JSON
+
+
+def read_index_maintenance_discovery_state(aoa_root: Path) -> dict[str, Any]:
+    path = index_maintenance_discovery_state_path(aoa_root)
+    state = read_json(path, {})
+    if (
+        not isinstance(state, dict)
+        or state.get("artifact_type") != "index_maintenance_discovery_state"
+        or int_value(state.get("schema_version"))
+        != INDEX_MAINTENANCE_DISCOVERY_STATE_SCHEMA_VERSION
+    ):
+        return {
+            "schema_version": INDEX_MAINTENANCE_DISCOVERY_STATE_SCHEMA_VERSION,
+            "artifact_type": "index_maintenance_discovery_state",
+            "cursors": {},
+        }
+    cursors = state.get("cursors")
+    if not isinstance(cursors, dict):
+        state["cursors"] = {}
+    return state
+
+
+def session_records_by_id_fast(
+    records: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Resolve registry-backed records without opening every session manifest."""
+    return {
+        str(record.get("session_id")): record
+        for record in records
+        if str(record.get("session_id") or "")
+    }
+
+
+def session_record_declared_raw_bytes(record: dict[str, Any]) -> int:
+    raw = record.get("raw") if isinstance(record.get("raw"), dict) else {}
+    capture = (
+        record.get("capture")
+        if isinstance(record.get("capture"), dict)
+        else {}
+    )
+    return max(
+        0,
+        int_value(raw.get("bytes")),
+        int_value(capture.get("raw_bytes")),
+    )
+
+
+def bounded_index_maintenance_discovery_records(
+    *,
+    aoa_root: Path,
+    records: list[dict[str, Any]],
+    discovery_limit: int,
+    priority_session_ids: list[str] | None = None,
+    dirty_session_ids: list[str] | None = None,
+    cursor_key: str = "default",
+    advance_cursor: bool = False,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Select a fixed-cost dirty-first window plus round-robin discovery.
+
+    Registry metadata may grow, but session manifests, segment indexes, and
+    projection fingerprints are opened only for the returned bounded window.
+    """
+    effective_limit = max(1, int_value(discovery_limit, 1))
+    ordered_records = sort_session_records_chronologically(
+        unique_session_records(records)
+    )
+    by_id = session_records_by_id_fast(ordered_records)
+    state = read_index_maintenance_discovery_state(aoa_root)
+    cursors = (
+        dict(state.get("cursors"))
+        if isinstance(state.get("cursors"), dict)
+        else {}
+    )
+    previous_cursor = str(cursors.get(cursor_key) or "")
+    dirty_cursor_key = f"{cursor_key}:dirty"
+    previous_dirty_cursor = str(cursors.get(dirty_cursor_key) or "")
+    ordered_keys = [session_record_key(record) for record in ordered_records]
+    cursor_start = 0
+    if previous_cursor:
+        try:
+            cursor_start = (ordered_keys.index(previous_cursor) + 1) % max(
+                1, len(ordered_keys)
+            )
+        except ValueError:
+            cursor_start = 0
+    priority_ids = list(
+        dict.fromkeys(
+            str(item) for item in (priority_session_ids or []) if str(item)
+        )
+    )
+    dirty_ids = list(
+        dict.fromkeys(
+            str(item) for item in (dirty_session_ids or []) if str(item)
+        )
+    )
+    cursor_reserve = (
+        0
+        if effective_limit == 1 and dirty_ids
+        else min(
+            effective_limit,
+            INDEX_MAINTENANCE_DISCOVERY_CURSOR_RESERVE_MAX,
+            max(
+                1,
+                effective_limit
+                // INDEX_MAINTENANCE_DISCOVERY_CURSOR_RESERVE_DIVISOR,
+            ),
+        )
+    )
+    priority_budget = max(0, effective_limit - cursor_reserve)
+    dirty_cursor_start = 0
+    if previous_dirty_cursor:
+        try:
+            dirty_cursor_start = (
+                dirty_ids.index(previous_dirty_cursor) + 1
+            ) % max(1, len(dirty_ids))
+        except ValueError:
+            dirty_cursor_start = 0
+    rotated_dirty_ids = (
+        dirty_ids[dirty_cursor_start:] + dirty_ids[:dirty_cursor_start]
+        if dirty_ids
+        else []
+    )
+    selected: list[dict[str, Any]] = []
+    selected_keys: set[str] = set()
+
+    def add_record(record: dict[str, Any] | None) -> None:
+        if record is None or len(selected) >= effective_limit:
+            return
+        key = session_record_key(record)
+        if not key or key in selected_keys:
+            return
+        selected.append(record)
+        selected_keys.add(key)
+
+    priority_slot_limit = min(
+        priority_budget,
+        (
+            max(1, priority_budget // 4)
+            if dirty_ids and priority_budget > 0
+            else priority_budget
+        ),
+    )
+    for session_id in priority_ids:
+        if len(selected) >= priority_slot_limit:
+            break
+        add_record(by_id.get(session_id))
+
+    dirty_slot_budget = max(0, priority_budget - len(selected))
+    dirty_candidates = [
+        (session_id, by_id[session_id])
+        for session_id in rotated_dirty_ids
+        if session_id in by_id
+        and session_record_key(by_id[session_id]) not in selected_keys
+    ]
+    cost_ordered_dirty_candidates = sorted(
+        dirty_candidates,
+        key=lambda item: session_record_declared_raw_bytes(item[1]),
+    )
+    selected_dirty_candidates = cost_ordered_dirty_candidates[
+        :dirty_slot_budget
+    ]
+    dirty_fairness_session_id = ""
+    if (
+        dirty_slot_budget > 1
+        and len(dirty_candidates) > dirty_slot_budget
+    ):
+        fairness_candidate = dirty_candidates[0]
+        if fairness_candidate not in selected_dirty_candidates:
+            selected_dirty_candidates[-1] = fairness_candidate
+        dirty_fairness_session_id = fairness_candidate[0]
+    elif selected_dirty_candidates:
+        dirty_fairness_session_id = selected_dirty_candidates[-1][0]
+    selected_dirty_ids: list[str] = []
+    for session_id, record in selected_dirty_candidates:
+        before_count = len(selected)
+        add_record(record)
+        if len(selected) > before_count:
+            selected_dirty_ids.append(session_id)
+
+    cursor_records: list[dict[str, Any]] = []
+    if ordered_records:
+        for offset in range(min(cursor_reserve, len(ordered_records))):
+            cursor_records.append(
+                ordered_records[(cursor_start + offset) % len(ordered_records)]
+            )
+        for record in cursor_records:
+            add_record(record)
+
+    if len(selected) < effective_limit:
+        for session_id, record in cost_ordered_dirty_candidates:
+            before_count = len(selected)
+            add_record(record)
+            if (
+                len(selected) > before_count
+                and session_id not in selected_dirty_ids
+            ):
+                selected_dirty_ids.append(session_id)
+            if len(selected) >= effective_limit:
+                break
+    if len(selected) < effective_limit:
+        for record in ordered_records:
+            add_record(record)
+            if len(selected) >= effective_limit:
+                break
+
+    next_cursor = (
+        session_record_key(cursor_records[-1])
+        if cursor_records
+        else previous_cursor
+    )
+    next_dirty_cursor = (
+        dirty_fairness_session_id
+        if dirty_fairness_session_id
+        else selected_dirty_ids[-1]
+        if selected_dirty_ids
+        else previous_dirty_cursor
+    )
+    wrapped = bool(
+        cursor_records
+        and ordered_records
+        and cursor_start + len(cursor_records) >= len(ordered_records)
+    )
+    if advance_cursor and next_cursor:
+        cursors[cursor_key] = next_cursor
+        if next_dirty_cursor:
+            cursors[dirty_cursor_key] = next_dirty_cursor
+        write_json(
+            index_maintenance_discovery_state_path(aoa_root),
+            {
+                "schema_version": INDEX_MAINTENANCE_DISCOVERY_STATE_SCHEMA_VERSION,
+                "artifact_type": "index_maintenance_discovery_state",
+                "generated_at": utc_now(),
+                "cursors": cursors,
+                "last_selection": {
+                    "cursor_key": cursor_key,
+                    "cursor_before": previous_cursor,
+                    "cursor_after": next_cursor,
+                    "dirty_cursor_before": previous_dirty_cursor,
+                    "dirty_cursor_after": next_dirty_cursor,
+                    "wrapped": wrapped,
+                    "source_record_count": len(ordered_records),
+                    "selected_session_ids": [
+                        str(record.get("session_id") or "")
+                        for record in selected
+                    ],
+                },
+                "truth_status": (
+                    "generated_scheduler_cursor_not_projection_freshness"
+                ),
+            },
+        )
+    return selected, {
+        "mode": "bounded_dirty_first_round_robin_v1",
+        "global_scope_complete": False,
+        "source_record_count": len(ordered_records),
+        "discovery_limit": effective_limit,
+        "priority_session_count": len(priority_ids),
+        "priority_slot_limit": priority_slot_limit,
+        "dirty_session_count": len(dirty_ids),
+        "dirty_fairness_session_id": dirty_fairness_session_id,
+        "selected_declared_raw_bytes": sum(
+            session_record_declared_raw_bytes(record)
+            for record in selected
+        ),
+        "cursor_key": cursor_key,
+        "cursor_before": previous_cursor,
+        "cursor_after": next_cursor,
+        "dirty_cursor_before": previous_dirty_cursor,
+        "dirty_cursor_after": next_dirty_cursor,
+        "cursor_reserve": cursor_reserve,
+        "cursor_wrapped": wrapped,
+        "selected_count": len(selected),
+        "selected_session_ids": [
+            str(record.get("session_id") or "") for record in selected
+        ],
+        "state_path": str(index_maintenance_discovery_state_path(aoa_root)),
+        "cursor_advanced": bool(advance_cursor and next_cursor),
+        "authority_boundary": (
+            "The cursor bounds discovery only; persisted projection state and "
+            "owner freshness checks remain authoritative for dirty work."
+        ),
+    }
+
+
 def extend_session_records_with_priority(
     selected_records: list[dict[str, Any]],
     available_records: list[dict[str, Any]],
@@ -36516,6 +36810,7 @@ def maintain_indexes(
     since: str | None = None,
     until: str | None = None,
     limit: int | None = None,
+    discovery_limit: int | None = None,
     repair_limit: int | None = None,
     search_repair_limit: int | None = None,
     search_shard_repair_limit: int | None = None,
@@ -36616,6 +36911,47 @@ def maintain_indexes(
             )
         )
         records = prioritize_session_records(records, query_priority_session_ids)
+        if (
+            selected_records is None
+            and target == "all"
+            and discovery_limit is not None
+            and int_value(discovery_limit) > 0
+        ):
+            dirty_id_state = search_freshness_actionable_dirty_session_ids(
+                aoa_root
+            )
+            records, bounded_scope = (
+                bounded_index_maintenance_discovery_records(
+                    aoa_root=aoa_root,
+                    records=records,
+                    discovery_limit=int_value(discovery_limit),
+                    priority_session_ids=query_priority_session_ids,
+                    dirty_session_ids=(
+                        dirty_id_state.get("session_ids", [])
+                        if dirty_id_state.get("ok")
+                        and isinstance(
+                            dirty_id_state.get("session_ids"), list
+                        )
+                        else []
+                    ),
+                    cursor_key=(
+                        f"index-maintenance:{since or '*'}:{until or '*'}"
+                    ),
+                    advance_cursor=apply,
+                )
+            )
+            selection_scope = {
+                **(
+                    selection_scope
+                    if isinstance(selection_scope, dict)
+                    else {}
+                ),
+                **bounded_scope,
+                "search_dirty_state_ok": bool(dirty_id_state.get("ok")),
+                "search_dirty_state_diagnostics": dirty_id_state.get(
+                    "diagnostics", []
+                ),
+            }
     except ValueError as exc:
         return {
             "schema_version": SCHEMA_VERSION,
@@ -36806,7 +37142,20 @@ def maintain_indexes(
                         planning_budget_exhausted = True
                         if "index_maintenance_planning_budget_exhausted" not in diagnostics:
                             diagnostics.append("index_maintenance_planning_budget_exhausted")
-    stable_selected_records_global = graph_selection_is_global(target=target, since=since, until=until, limit=limit)
+    bounded_discovery = bool(
+        isinstance(selection_scope, dict)
+        and selection_scope.get("global_scope_complete") is False
+    )
+    stable_selected_records_global = bool(
+        selected_records is None
+        and not bounded_discovery
+        and graph_selection_is_global(
+            target=target,
+            since=since,
+            until=until,
+            limit=limit,
+        )
+    )
     if planning_budget_exhausted and repair_graph:
         graph_state = {
             "status": "deferred_budget_exhausted",
@@ -36995,7 +37344,41 @@ def maintain_indexes(
         else episode_semantic_state.get("dirty_sessions", [])
     )
     search_dirty_records = [] if search_rebuild_required else records_matching_projection_states(records, search_dirty_selector if isinstance(search_dirty_selector, list) else [])
-    atlas_dirty_records = [] if atlas_rebuild_required else records_matching_projection_states(records, atlas_dirty_selector if isinstance(atlas_dirty_selector, list) else [])
+    if atlas_rebuild_required and bounded_discovery:
+        atlas_rebuild_required = False
+        atlas_dirty_records = list(records)
+        atlas_state = {
+            **atlas_state,
+            "bounded_bootstrap": True,
+            "global_scope_complete": False,
+            "reasons": list(
+                dict.fromkeys(
+                    [
+                        *(
+                            atlas_state.get("reasons", [])
+                            if isinstance(
+                                atlas_state.get("reasons"), list
+                            )
+                            else []
+                        ),
+                        "bounded_incremental_bootstrap",
+                    ]
+                )
+            ),
+        }
+    else:
+        atlas_dirty_records = (
+            []
+            if atlas_rebuild_required
+            else records_matching_projection_states(
+                records,
+                (
+                    atlas_dirty_selector
+                    if isinstance(atlas_dirty_selector, list)
+                    else []
+                ),
+            )
+        )
     episode_semantic_dirty_records = records_matching_projection_states(
         records,
         episode_semantic_dirty_selector if isinstance(episode_semantic_dirty_selector, list) else [],
@@ -38829,6 +39212,14 @@ def maintain_indexes(
             "budget_remaining": final_snapshot_budget_remaining,
             "min_seconds": MAINTENANCE_FINAL_FRESHNESS_SNAPSHOT_MIN_SECONDS,
         }
+    elif not apply:
+        final_snapshot_captured = True
+        post_maintenance_states["final_freshness_snapshot"] = {
+            "status": "reused_plan_snapshot_no_mutations",
+            "truth_status": (
+                "initial_and_final_state_identical_because_apply_is_false"
+            ),
+        }
     else:
         try:
             final_records = current_selected_records()
@@ -39025,6 +39416,7 @@ def maintain_indexes(
         "since": since,
         "until": until,
         "limit": limit,
+        "discovery_limit": discovery_limit,
         "selection_source": "provided_records" if selected_records is not None else "target_filters",
         "selection_scope": selection_scope or {},
         "query_demand_observation_requested": bool(observe_query_demand),
@@ -39233,6 +39625,8 @@ def index_maintenance_markdown(payload: dict[str, Any]) -> str:
         f"- write_queue: `{payload.get('write_queue')}`",
         f"- write_ledger: `{payload.get('write_ledger')}`",
         f"- target: `{payload.get('target')}`",
+        f"- discovery_limit: `{payload.get('discovery_limit')}`",
+        f"- selection_scope: `{json.dumps(payload.get('selection_scope', {}), ensure_ascii=False)}`",
         f"- reason: `{payload.get('reason')}`",
         f"- query_demand_observation_requested: `{payload.get('query_demand_observation_requested')}`",
         f"- query_demand_count: `{payload.get('query_demand_count')}`",
@@ -39707,6 +40101,8 @@ def auto_maintenance_markdown(payload: dict[str, Any]) -> str:
         f"- since: `{payload.get('since')}`",
         f"- until: `{payload.get('until')}`",
         f"- limit: `{payload.get('limit')}`",
+        f"- discovery_limit: `{payload.get('discovery_limit')}`",
+        f"- selection_scope: `{json.dumps(payload.get('selection_scope', {}), ensure_ascii=False)}`",
         f"- repair_limit: `{payload.get('repair_limit')}`",
         f"- search_repair_limit: `{payload.get('search_repair_limit')}`",
         f"- search_shard_repair_limit: `{payload.get('search_shard_repair_limit')}`",
@@ -43924,6 +44320,20 @@ def auto_maintenance_resource_launch(
             "--observe-query-demand",
             "--repair-limit",
             str(max(1, int_value(index_drip_repair_limit, 12))),
+            "--discovery-limit",
+            str(
+                max(
+                    8,
+                    min(
+                        32,
+                        max(
+                            1,
+                            int_value(index_drip_repair_limit, 12),
+                        )
+                        * 2,
+                    ),
+                )
+            ),
             "--skip-token-accounting",
             "--skip-graph-repair",
             "--budget-seconds",
@@ -44042,6 +44452,17 @@ def auto_maintenance_resource_launch(
             "resource_estimate_confidence": fallback_effective_estimate_confidence,
             "resource_demand_floor_resolution": fallback_resource_demand_floor_resolution,
             "repair_limit": max(1, int_value(index_drip_repair_limit, 12)),
+            "discovery_limit": max(
+                8,
+                min(
+                    32,
+                    max(
+                        1,
+                        int_value(index_drip_repair_limit, 12),
+                    )
+                    * 2,
+                ),
+            ),
             "search_shard_repair_limit": effective_search_shard_repair_limit,
             "budget_seconds": max(1.0, float(index_drip_budget_seconds)),
             "returncode": fallback_returncode,
@@ -46849,6 +47270,7 @@ def auto_maintenance(
     since_days: int | None = None,
     until: str | None = None,
     limit: int | None = None,
+    discovery_limit: int | None = None,
     repair_limit: int | None = None,
     search_shard_repair_limit: int | None = None,
     dense_repair_limit: int | None = None,
@@ -46876,6 +47298,18 @@ def auto_maintenance(
     effective_since_days = since_days if since_days is not None else (int_value(profile_since_days) if profile_since_days is not None else None)
     effective_since = since if since is not None else since_date_from_args(None, effective_since_days)
     effective_limit = limit if limit is not None else settings.get("limit")
+    profile_discovery_limit = settings.get("discovery_limit")
+    selected_discovery_limit = (
+        discovery_limit
+        if discovery_limit is not None
+        else profile_discovery_limit
+    )
+    effective_discovery_limit = (
+        int_value(selected_discovery_limit)
+        if selected_discovery_limit is not None
+        and int_value(selected_discovery_limit) > 0
+        else None
+    )
     profile_repair_limit = settings.get("repair_limit")
     effective_repair_limit = repair_limit if repair_limit is not None else (int_value(profile_repair_limit) if profile_repair_limit is not None else None)
     effective_repair_limit = None if effective_repair_limit is None or int_value(effective_repair_limit) <= 0 else int_value(effective_repair_limit)
@@ -47242,6 +47676,62 @@ def auto_maintenance(
                 "query_demand_added_session_ids": query_demand_added_session_ids,
                 "selected_count": len(selected_records_override),
             }
+        if target == "all" and effective_discovery_limit is not None:
+            discovery_source_records = (
+                list(selected_records_override)
+                if selected_records_override is not None
+                else chronological_session_records(
+                    aoa_root,
+                    since=effective_since,
+                    until=until,
+                    limit=effective_limit,
+                )
+            )
+            dirty_id_state = search_freshness_actionable_dirty_session_ids(
+                aoa_root
+            )
+            selected_records_override, bounded_scope = (
+                bounded_index_maintenance_discovery_records(
+                    aoa_root=aoa_root,
+                    records=discovery_source_records,
+                    discovery_limit=effective_discovery_limit,
+                    priority_session_ids=query_priority_session_ids,
+                    dirty_session_ids=(
+                        dirty_id_state.get("session_ids", [])
+                        if dirty_id_state.get("ok")
+                        and isinstance(
+                            dirty_id_state.get("session_ids"), list
+                        )
+                        else []
+                    ),
+                    cursor_key=(
+                        f"auto-maintenance:{profile}:"
+                        f"{effective_since or '*'}:{until or '*'}"
+                    ),
+                    advance_cursor=apply,
+                )
+            )
+            upstream_selection_scope = dict(selection_scope)
+            upstream_selection_mode = str(
+                upstream_selection_scope.get("mode")
+                or "target_filters"
+            )
+            selection_scope = {
+                **upstream_selection_scope,
+                **bounded_scope,
+                "mode": (
+                    str(bounded_scope.get("mode") or "")
+                    if upstream_selection_mode == "target_filters"
+                    else upstream_selection_mode
+                ),
+                "discovery_mode": bounded_scope.get("mode"),
+                "upstream_selection_scope": upstream_selection_scope,
+                "profile": profile,
+                "search_dirty_state_ok": bool(dirty_id_state.get("ok")),
+                "search_dirty_state_diagnostics": dirty_id_state.get(
+                    "diagnostics", []
+                ),
+            }
         def run_auto_freshness_probe() -> dict[str, Any]:
             if allow_deferred_graph:
                 return route_cache_freshness_gates(
@@ -47262,6 +47752,8 @@ def auto_maintenance(
                 limit=effective_limit,
                 ref_sample_limit=effective_ref_sample_limit,
                 write_report=write_report,
+                selected_records=selected_records_override,
+                selection_scope=selection_scope,
             )
 
         freshness_before_probe_started = time.monotonic()
@@ -48105,6 +48597,7 @@ def auto_maintenance(
             since=effective_since,
             until=until,
             limit=effective_limit,
+            discovery_limit=effective_discovery_limit,
             repair_limit=effective_repair_limit,
             search_repair_limit=effective_search_repair_limit,
             search_shard_repair_limit=effective_search_shard_repair_limit,
@@ -48336,6 +48829,7 @@ def auto_maintenance(
             "since": effective_since,
             "until": until,
             "limit": effective_limit,
+            "discovery_limit": effective_discovery_limit,
             "selection_scope": selection_scope,
             "query_demand": query_demand,
             "repair_limit": effective_repair_limit,
@@ -136105,11 +136599,24 @@ def graph_freshness_gates(
     stable_quiet_seconds: float | None = None,
     now_ts: float | None = None,
     write_report: bool = False,
+    selected_records: list[dict[str, Any]] | None = None,
+    selection_scope: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     now = utc_now()
     diagnostics: list[str] = []
     try:
-        records = [resolve_session_record(aoa_root, target)] if target != "all" else chronological_session_records(aoa_root, since=since, until=until, limit=limit)
+        records = (
+            list(selected_records)
+            if selected_records is not None
+            else [resolve_session_record(aoa_root, target)]
+            if target != "all"
+            else chronological_session_records(
+                aoa_root,
+                since=since,
+                until=until,
+                limit=limit,
+            )
+        )
     except ValueError as exc:
         return {
             "schema_version": SCHEMA_VERSION,
@@ -136144,7 +136651,15 @@ def graph_freshness_gates(
     search_gate_projection_fingerprints = search_projection_fingerprints_for_records(gate_records) if stable_mode else None
     search_state = sqlite_search_index_state(aoa_root, latest_source_mtime, gate_records, projection_fingerprints=search_gate_projection_fingerprints)
     atlas_state = atlas_index_state(aoa_root, latest_source_mtime, gate_records, projection_fingerprints=gate_projection_fingerprints)
-    global_selection = graph_selection_is_global(target=target, since=since, until=until, limit=limit)
+    global_selection = bool(
+        selected_records is None
+        and graph_selection_is_global(
+            target=target,
+            since=since,
+            until=until,
+            limit=limit,
+        )
+    )
     graph_selection_global = global_selection and not deferred_live_sessions
     store_state = graph_store_state(
         aoa_root=aoa_root,
@@ -136152,8 +136667,16 @@ def graph_freshness_gates(
         since=since,
         until=until,
         limit=limit,
-        selected_records=gate_records if stable_mode else None,
-        selected_records_global=graph_selection_global if stable_mode else None,
+        selected_records=(
+            gate_records
+            if stable_mode or selected_records is not None
+            else None
+        ),
+        selected_records_global=(
+            graph_selection_global
+            if stable_mode or selected_records is not None
+            else None
+        ),
     )
     graph_state = graph_sidecar_state(
         aoa_root,
@@ -136233,8 +136756,21 @@ def graph_freshness_gates(
         "generated_at": now,
         "ok": not diagnostics and all(bool(gate.get("ok")) for gate in gates),
         "mutates": False,
-        "truth_status": "stable_quiescent_subset_gate_deferred_live_sessions_are_not_checked" if stable_mode else "strict_full_selection_freshness_gate",
+        "truth_status": (
+            "stable_quiescent_subset_gate_deferred_live_sessions_are_not_checked"
+            if stable_mode
+            else "bounded_selected_records_freshness_gate_not_global"
+            if selected_records is not None
+            else "strict_full_selection_freshness_gate"
+        ),
         "target": target,
+        "selection_source": (
+            "provided_records"
+            if selected_records is not None
+            else "target_filters"
+        ),
+        "selection_scope": selection_scope or {},
+        "global_scope_complete": graph_selection_global,
         "selected_count": len(records),
         "checked_count": len(gate_records),
         "deferred_live_session_count": len(deferred_live_sessions),
@@ -170259,6 +170795,7 @@ def command_index_maintenance(args: argparse.Namespace) -> int:
             since=since,
             until=args.until,
             limit=args.limit,
+            discovery_limit=getattr(args, "discovery_limit", None),
             repair_limit=getattr(args, "repair_limit", None),
             search_shard_repair_limit=getattr(
                 args, "search_shard_repair_limit", None
@@ -170322,6 +170859,7 @@ def command_auto_maintenance(args: argparse.Namespace) -> int:
         since_days=None if args.since is not None else args.since_days,
         until=args.until,
         limit=args.limit,
+        discovery_limit=getattr(args, "discovery_limit", None),
         repair_limit=getattr(args, "repair_limit", None),
         search_shard_repair_limit=getattr(
             args, "search_shard_repair_limit", None
@@ -179990,6 +180528,11 @@ def build_parser() -> argparse.ArgumentParser:
     index_maintenance.add_argument("--until", help="Select sessions with archive dates on or before YYYY-MM-DD when session=all.")
     index_maintenance.add_argument("--limit", type=int, help="Limit selected sessions after chronological ordering when session=all.")
     index_maintenance.add_argument(
+        "--discovery-limit",
+        type=int,
+        help="Bound session-level freshness discovery to a dirty-first persistent-cursor window; automatic profiles set this by default.",
+    )
+    index_maintenance.add_argument(
         "--observe-query-demand",
         action="store_true",
         help="Observe bounded recent structured session-memory queries and prioritize their target sessions. Automatic workers/fallbacks use this explicitly; ordinary manual maintenance does not.",
@@ -180085,6 +180628,11 @@ def build_parser() -> argparse.ArgumentParser:
     auto_maintenance_parser.add_argument("--since-days", type=int, help="Rolling window when --since is not provided and session=all; defaults to profile.")
     auto_maintenance_parser.add_argument("--until", help="Select sessions with archive dates on or before YYYY-MM-DD when session=all.")
     auto_maintenance_parser.add_argument("--limit", type=int, help="Limit selected sessions after chronological ordering when session=all.")
+    auto_maintenance_parser.add_argument(
+        "--discovery-limit",
+        type=int,
+        help="Override the profile's fixed dirty-first discovery window; <=0 disables bounded discovery for an explicit manual run.",
+    )
     auto_maintenance_parser.add_argument("--repair-limit", type=int, help="Override the profile dirty session repair batch size after full freshness detection.")
     auto_maintenance_parser.add_argument(
         "--search-shard-repair-limit",

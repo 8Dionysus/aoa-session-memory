@@ -49756,6 +49756,17 @@ def test_auto_maintenance_profile_runs_session_memory_route_without_mcp_mutation
     assert calls["maintenance"]["repair_graph"] is True
     assert calls["maintenance"]["reason"] == "auto_maintenance:backlog:timer"
     assert len(calls["freshness"]) == 2
+    assert all(call["selected_records"] == [] for call in calls["freshness"])
+    assert all(
+        call["selection_scope"]["mode"]
+        == "bounded_dirty_first_round_robin_v1"
+        for call in calls["freshness"]
+    )
+    assert (
+        calls["maintenance"]["discovery_limit"]
+        == module.AUTO_MAINTENANCE_PROFILES["backlog"]["discovery_limit"]
+    )
+    assert calls["maintenance"]["selected_records"] == []
     assert payload["resource_launcher"][:3] == ["abyss-machine", "resource", "launch"]
     assert "aoa_session_memory MCP remains read-only" in payload["mcp_boundary"]
     assert Path(payload["report_json"]).exists()
@@ -52366,6 +52377,7 @@ def test_catchup_auto_maintenance_resource_uses_explicit_index_drip_fallback(
     assert "index-maintenance" in calls[1]
     assert "graph-maintenance" not in calls[1]
     assert "--observe-query-demand" in calls[1]
+    assert calls[1][calls[1].index("--discovery-limit") + 1] == "24"
     assert "--skip-token-accounting" in calls[1]
     assert "--skip-graph-repair" in calls[1]
     assert "--repair-limit" in calls[1]
@@ -52374,6 +52386,113 @@ def test_catchup_auto_maintenance_resource_uses_explicit_index_drip_fallback(
     assert "index_drip_fallback_completed" in payload["diagnostics"]
     assert Path(payload["report_json"]).exists()
     assert Path(payload["report_markdown"]).exists()
+
+
+def test_bounded_index_maintenance_discovery_is_dirty_first_and_fair(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    records = [
+        {
+            "session_id": f"session-{index:03d}",
+            "session_label": f"2026-07-01__{index:03d}__session",
+        }
+        for index in range(100)
+    ]
+    dirty_ids = [f"session-{index:03d}" for index in range(80, 100)]
+    state_path = module.index_maintenance_discovery_state_path(aoa_root)
+
+    planned, planned_scope = (
+        module.bounded_index_maintenance_discovery_records(
+            aoa_root=aoa_root,
+            records=records,
+            discovery_limit=8,
+            priority_session_ids=["session-099"],
+            dirty_session_ids=dirty_ids,
+            cursor_key="catchup",
+            advance_cursor=False,
+        )
+    )
+
+    assert len(planned) == 8
+    assert planned[0]["session_id"] == "session-099"
+    assert {
+        record["session_id"] for record in planned
+    }.issuperset(
+        {
+            "session-080",
+            "session-081",
+            "session-082",
+            "session-083",
+            "session-084",
+        }
+    )
+    assert planned_scope["cursor_reserve"] == 1
+    assert planned_scope["global_scope_complete"] is False
+    assert not state_path.exists()
+
+    first, first_scope = (
+        module.bounded_index_maintenance_discovery_records(
+            aoa_root=aoa_root,
+            records=records,
+            discovery_limit=8,
+            priority_session_ids=["session-099"],
+            dirty_session_ids=dirty_ids,
+            cursor_key="catchup",
+            advance_cursor=True,
+        )
+    )
+    assert [record["session_id"] for record in first] == [
+        record["session_id"] for record in planned
+    ]
+    assert first_scope["cursor_advanced"] is True
+    assert first_scope["dirty_cursor_after"] == "session-080"
+    assert state_path.exists()
+
+    second, second_scope = (
+        module.bounded_index_maintenance_discovery_records(
+            aoa_root=aoa_root,
+            records=records,
+            discovery_limit=8,
+            priority_session_ids=["session-099"],
+            dirty_session_ids=dirty_ids,
+            cursor_key="catchup",
+            advance_cursor=True,
+        )
+    )
+    second_ids = [record["session_id"] for record in second]
+    assert len(second_ids) == 8
+    assert second_ids[0] == "session-099"
+    assert "session-085" in second_ids
+    assert "session-080" not in second_ids
+    assert second_scope["cursor_before"] == first_scope["cursor_after"]
+    assert second_scope["dirty_cursor_before"] == "session-080"
+    assert second_scope["dirty_cursor_after"] == "session-081"
+
+
+def test_automatic_maintenance_profiles_bound_discovery() -> None:
+    assert {
+        profile: settings["discovery_limit"]
+        for profile, settings in module.AUTO_MAINTENANCE_PROFILES.items()
+    } == {
+        "hot": 8,
+        "backlog": 16,
+        "catchup": 16,
+        "deep": 32,
+    }
+
+
+def test_maintenance_parsers_accept_discovery_limit() -> None:
+    parser = module.build_parser()
+    index_args = parser.parse_args(
+        ["index-maintenance", "all", "--discovery-limit", "17"]
+    )
+    auto_args = parser.parse_args(
+        ["auto-maintenance", "catchup", "all", "--discovery-limit", "19"]
+    )
+
+    assert index_args.discovery_limit == 17
+    assert auto_args.discovery_limit == 19
 
 
 def test_catchup_index_drip_reports_bounded_progress_without_false_failure(
