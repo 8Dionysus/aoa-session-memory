@@ -340,6 +340,7 @@ def build_server(
         consequence_window: int = 6,
         document_limit: int = 24,
         session: str = "",
+        correlation_id: str = "",
         full: bool = False,
     ) -> dict[str, Any]:
         """Return compact usage-to-consequence chains for an operational entity without graph or raw-preview expansion."""
@@ -351,6 +352,7 @@ def build_server(
             consequence_window=consequence_window,
             document_limit=document_limit,
             session=session,
+            correlation_id=correlation_id,
             full=full,
         )
 

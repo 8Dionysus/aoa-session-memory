@@ -170,15 +170,15 @@
     {
       "mode": "0644",
       "path": "src/aoa_session_memory_mcp/core.py",
-      "sha256": "0e2e463cf2763e4226eab5b18d1ce88c24285778f7293106426d94092b562720",
-      "size": 476529,
+      "sha256": "45e48cc7b5a9e01cb640c7cf397c5cd02f16c9f07949fb6e86238149ef9c5ce3",
+      "size": 479804,
       "source": "owner:src/aoa_session_memory_mcp/core.py"
     },
     {
       "mode": "0644",
       "path": "src/aoa_session_memory_mcp/server.py",
-      "sha256": "67bd895d5f5490dd537b8f341f479bfd859372c563e107ffef44800f5da5b745",
-      "size": 34101,
+      "sha256": "ce2dbcd0636fcf743c4e08922bb49b1ecb434321c82ae550064a94c7c154b5d4",
+      "size": 34178,
       "source": "owner:src/aoa_session_memory_mcp/server.py"
     },
     {
@@ -198,8 +198,8 @@
     {
       "mode": "0644",
       "path": "tests/test_session_memory_mcp.py",
-      "sha256": "4d0d098cce64132ae17d793b2f7c0b5d70339f8f06d0b9fc0c95bf80657418b7",
-      "size": 374739,
+      "sha256": "9d0862b3e915fa871d90a8bc09c68d7a1a0dab610766ccb6368ab61c53ba61c9",
+      "size": 381160,
       "source": "owner:tests/test_session_memory_mcp.py"
     }
   ],
@@ -1099,6 +1099,11 @@
               "default": 6,
               "title": "Consequence Window",
               "type": "integer"
+            },
+            "correlation_id": {
+              "default": "",
+              "title": "Correlation Id",
+              "type": "string"
             },
             "document_limit": {
               "default": 24,
@@ -2648,8 +2653,8 @@
   "schema": "aoa_session_memory_mcp_package_manifest_v1",
   "schema_version": 1,
   "upstream": {
-    "commit": "d19cc41df695a4defa143c90f7ee9d86a14917f7",
-    "commit_epoch": 1785293204,
+    "commit": "feaf01e72e11d15204c85d911a34fd60850d2758",
+    "commit_epoch": 1785303584,
     "repository": "https://github.com/8Dionysus/abyss-stack",
     "source_path": "mcp/services/aoa-session-memory-mcp"
   }

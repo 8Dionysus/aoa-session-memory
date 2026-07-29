@@ -30625,6 +30625,236 @@ def test_entity_usage_lifecycle_requires_correlation_owned_terminal_evidence() -
     assert lifecycle["answer_admission"]["umbrella_used_claim_admitted"] is False
 
 
+def test_hook_command_admission_requires_exact_session_memory_subcommand() -> None:
+    """Regression derived from UAP-HOOK-FAILED-001 raw refs 2944/2948."""
+    exact = (
+        "python3 /workspace/AbyssOS/.aoa/scripts/aoa_session_memory.py "
+        "codex-hooks-status --workspace-root /workspace/AbyssOS"
+    )
+    assert module.entity_usage_hook_command_proves_invocation(
+        exact,
+        anchor="codex-hooks-status",
+    )
+    assert not module.entity_usage_hook_command_proves_invocation(
+        "python3 scripts/aoa_session_memory.py doctor "
+        "--note codex-hooks-status",
+        anchor="codex-hooks-status",
+    )
+    assert not module.entity_usage_hook_command_proves_invocation(
+        "apply_patch docs/codex-hooks-status.md",
+        anchor="codex-hooks-status",
+    )
+
+
+def test_exact_source_hit_infers_task_episode_and_bounds_scan_generation() -> None:
+    scan = {
+        "session_id": "session-1",
+        "session_label": "session-label",
+        "session_manifest": "/archive/session.manifest.json",
+        "_session_dir": Path("/archive/session-label"),
+        "_record": {"date": "2026-07-29"},
+        "_task_episode_ranges": [
+            ("task-0043", 13796, 13853),
+        ],
+        "generation_identities": {
+            "expected": {"segment_index": {"generation_id": "gen-1"}},
+            "observed": {
+                "session_index": {"generation_id": "session-gen"},
+                "segment_indexes": {
+                    "065": {"generation_id": "gen-1"},
+                    "066": {"generation_id": "gen-1"},
+                },
+            },
+            "compatible": True,
+        },
+        "status": "complete",
+        "source_fingerprint": "raw-sha",
+    }
+    entry = {
+        "event": {
+            "event_id": "013803",
+            "type": "FILE_READ",
+            "raw_ref": "raw:line:13803",
+            "correlation_id": "call-skill-read",
+            "facets": {},
+        },
+        "segment": {
+            "segment_id": "066",
+            "markdown": "segments/066.md",
+        },
+        "segment_index": {"segment_id": "066"},
+        "index_path": Path("/archive/session-label/segments/066.index.json"),
+        "raw_block_ref": "raw/blocks/066.raw.jsonl",
+    }
+
+    hit = module.session_query_source_hit(
+        scan,
+        entry,
+        source="session_scoped_query_time_exact_correlation_probe",
+    )
+    summary = module.session_query_source_scan_summary(scan)
+
+    assert hit["task_episode_id"] == "task-0043"
+    assert hit["task_episode_ref"] == (
+        "task_episode:session-1:task-0043"
+    )
+    assert hit["refs"]["task_episode"] == (
+        "task_episode:session-1:task-0043"
+    )
+    assert summary["generation_identities"]["observed"] == {
+        "session_index": {"generation_id": "session-gen"},
+        "segment_index_generation_ids": ["gen-1"],
+        "segment_index_count": 2,
+    }
+    assert "segment_indexes" not in summary[
+        "generation_identities"
+    ]["observed"]
+
+
+def test_usage_chain_exact_correlation_selects_failed_hook_cli_instance(
+    tmp_path: Path,
+) -> None:
+    """Real-transcript invariant derived from the sealed failed-hook specimen."""
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-exact-hook-correlation.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-07-29T00:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "exact-hook-correlation",
+                    "cwd": str(workspace),
+                },
+            },
+            {
+                "timestamp": "2026-07-29T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": "call-hook-status-failed",
+                    "arguments": json.dumps(
+                        {
+                            "cmd": (
+                                "python3 scripts/aoa_session_memory.py "
+                                "codex-hooks-status --json"
+                            )
+                        }
+                    ),
+                },
+            },
+            {
+                "timestamp": "2026-07-29T00:00:02Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call-hook-status-failed",
+                    "output": (
+                        "Process exited with code 2\n"
+                        "error: unrecognized arguments: --json\n"
+                    ),
+                },
+            },
+            {
+                "timestamp": "2026-07-29T00:00:03Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "name": "apply_patch",
+                    "call_id": "call-unrelated-hook-patch",
+                    "input": (
+                        "*** Begin Patch\n"
+                        "*** Update File: docs/hooks.md\n"
+                        "@@\n"
+                        "+codex-hooks-status is documented here\n"
+                        "*** End Patch\n"
+                    ),
+                },
+            },
+            {
+                "timestamp": "2026-07-29T00:00:04Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call-unrelated-hook-patch",
+                    "output": "Done!",
+                },
+            },
+        ],
+    )
+    receipt = module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "exact-hook-correlation",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    assert receipt["ok"] is True
+
+    chain = module.entity_usage_chain(
+        aoa_root=aoa_root,
+        anchor="codex-hooks-status",
+        kind="hook",
+        session="exact-hook-correlation",
+        correlation_id="call-hook-status-failed",
+        limit=8,
+        consequence_window=8,
+    )
+
+    assert chain["ok"] is True
+    assert chain["selection_scope"] == {
+        "mode": "exact_session_correlation",
+        "session": "exact-hook-correlation",
+        "correlation_id": "call-hook-status-failed",
+        "source_probe_status": "resolved",
+        "candidate_count_exhaustive": True,
+        "absence_claim_allowed": False,
+    }
+    assert chain["counts"]["chain_count"] == 1
+    usage = chain["usage_chain"]["chains"][0]["usage_event"]
+    assert usage["correlation_id"] == "call-hook-status-failed"
+    assert usage["hook_usage_admission"] == (
+        "structured_hook_command_invocation_proven"
+    )
+    assert usage["refs"]["raw"] == "raw:line:2"
+    result = chain["usage_chain"]["chains"][0][
+        "result_or_consequence_events"
+    ][0]
+    assert result["correlation_id"] == "call-hook-status-failed"
+    assert result["refs"]["raw"] == "raw:line:3"
+    states = chain["usage_lifecycle"]["states"]
+    assert states["invoked"]["present"] is True
+    assert states["failed"]["present"] is True
+    assert states["completed"]["present"] is False
+    assert states["verified"]["present"] is False
+    assert states["consequence-producing"]["present"] is False
+    assert all(
+        event.get("correlation_id") != "call-unrelated-hook-patch"
+        for event in [
+            chain_item["usage_event"]
+            for chain_item in chain["usage_chain"]["chains"]
+        ]
+    )
+
+    missing_session = module.entity_usage_chain(
+        aoa_root=aoa_root,
+        anchor="codex-hooks-status",
+        kind="hook",
+        correlation_id="call-hook-status-failed",
+    )
+    assert missing_session["ok"] is False
+    assert missing_session["diagnostics"] == [
+        "exact correlation selection requires an explicit session"
+    ]
+
+
 def test_entity_usage_lifecycle_does_not_promote_selection_to_load_or_invocation() -> None:
     selected_event = {
         "doc_id": "event:session:001:000020",

@@ -10005,6 +10005,12 @@ SESSION_QUERY_SOURCE_SCAN_MAX_EVENTS = 250_000
 MCP_TOOL_SESSION_IDENTITY_PROBE_SCHEMA_VERSION = (
     "mcp_tool_session_identity_probe_v1"
 )
+ENTITY_USAGE_EXACT_CORRELATION_PROBE_SCHEMA_VERSION = (
+    "entity_usage_exact_correlation_probe_v1"
+)
+ENTITY_USAGE_CORRELATION_ID_RE = re.compile(
+    r"^[A-Za-z0-9_.:-]{1,256}$"
+)
 
 
 def session_query_source_event_scan(
@@ -10069,6 +10075,27 @@ def session_query_source_event_scan(
     )
     session_index_path = session_dir / SESSION_INDEX_JSON
     session_index = read_json(session_index_path, {})
+    task_episode_ranges: list[tuple[str, int, int]] = []
+    for episode in (
+        session_index.get("task_episodes", [])
+        if isinstance(session_index, dict)
+        and isinstance(session_index.get("task_episodes"), list)
+        else []
+    ):
+        if not isinstance(episode, dict):
+            continue
+        event_range = (
+            episode.get("event_range")
+            if isinstance(episode.get("event_range"), dict)
+            else {}
+        )
+        episode_id = str(episode.get("episode_id") or "")
+        from_line = int_value(event_range.get("from_line"))
+        to_line = int_value(event_range.get("to_line"))
+        if episode_id and from_line > 0 and to_line >= from_line:
+            task_episode_ranges.append(
+                (episode_id, from_line, to_line)
+            )
     expected_publish_id, expected_raw_sha256 = (
         session_manifest_projection_expectations(manifest)
     )
@@ -10228,9 +10255,11 @@ def session_query_source_event_scan(
     packet["generation_identities"]["observed"][
         "segment_indexes"
     ] = observed_segment_generations
+    packet["task_episode_count"] = len(task_episode_ranges)
     packet["_record"] = record
     packet["_manifest"] = manifest
     packet["_session_dir"] = session_dir
+    packet["_task_episode_ranges"] = task_episode_ranges
     packet["_entries"] = entries
     complete = bool(
         segments
@@ -10253,6 +10282,59 @@ def session_query_source_event_scan(
         packet.get("diagnostics", [])
     )
     return packet
+
+
+def session_query_source_scan_summary(
+    scan: dict[str, Any],
+) -> dict[str, Any]:
+    """Return the bounded public scan proof without per-segment duplication."""
+    public = {
+        key: value
+        for key, value in scan.items()
+        if not str(key).startswith("_")
+        and key != "generation_identities"
+    }
+    generations = (
+        scan.get("generation_identities")
+        if isinstance(scan.get("generation_identities"), dict)
+        else {}
+    )
+    observed = (
+        generations.get("observed")
+        if isinstance(generations.get("observed"), dict)
+        else {}
+    )
+    segment_generations = (
+        observed.get("segment_indexes")
+        if isinstance(observed.get("segment_indexes"), dict)
+        else {}
+    )
+    segment_generation_ids = sorted(
+        {
+            str(identity.get("generation_id") or "")
+            for identity in segment_generations.values()
+            if isinstance(identity, dict)
+            and str(identity.get("generation_id") or "")
+        }
+    )
+    public["generation_identities"] = {
+        "expected": (
+            generations.get("expected", {})
+            if isinstance(generations.get("expected"), dict)
+            else {}
+        ),
+        "observed": {
+            "session_index": (
+                observed.get("session_index", {})
+                if isinstance(observed.get("session_index"), dict)
+                else {}
+            ),
+            "segment_index_generation_ids": segment_generation_ids,
+            "segment_index_count": len(segment_generations),
+        },
+        "compatible": generations.get("compatible"),
+    }
+    return public
 
 
 def session_query_source_hit(
@@ -10297,6 +10379,23 @@ def session_query_source_hit(
         segment.get("segment_id") or segment_index.get("segment_id") or ""
     )
     event_id = str(event.get("event_id") or "")
+    raw_ref = str(event.get("raw_ref") or "")
+    task_episode_id = str(event.get("task_episode_id") or "")
+    if not task_episode_id:
+        raw_line = line_from_raw_ref(raw_ref)
+        for episode_id, from_line, to_line in (
+            scan.get("_task_episode_ranges", [])
+            if isinstance(scan.get("_task_episode_ranges"), list)
+            else []
+        ):
+            if from_line <= raw_line <= to_line:
+                task_episode_id = episode_id
+                break
+    task_episode_ref = (
+        f"task_episode:{scan.get('session_id')}:{task_episode_id}"
+        if task_episode_id
+        else ""
+    )
     return {
         "doc_id": (
             f"event:{scan.get('session_id')}:{segment_id}:{event_id}"
@@ -10318,7 +10417,8 @@ def session_query_source_hit(
         "session_date": session_record_date(scan.get("_record") or {}),
         "segment_id": segment_id,
         "event_id": event_id,
-        "task_episode_id": event.get("task_episode_id"),
+        "task_episode_id": task_episode_id,
+        "task_episode_ref": task_episode_ref,
         "title": event.get("title"),
         "snippet": "",
         "route_signals": route_signals,
@@ -10330,8 +10430,9 @@ def session_query_source_hit(
                 event,
             ),
             "segment_index": str(index_path),
-            "raw": str(event.get("raw_ref") or ""),
+            "raw": raw_ref,
             "raw_block": str(entry.get("raw_block_ref") or ""),
+            "task_episode": task_episode_ref,
         },
         "freshness": {
             "status": "bounded_current",
@@ -10340,6 +10441,142 @@ def session_query_source_hit(
             "reasons": [],
         },
     }
+
+
+def entity_usage_exact_correlation_probe(
+    *,
+    aoa_root: Path,
+    session: str | None,
+    correlation_id: str | None,
+) -> dict[str, Any]:
+    """Resolve one archived invocation identity before entity admission.
+
+    A correlation id is meaningful only inside an explicit session. Segment
+    indexes provide bounded coordinates; downstream entity-specific admission
+    still opens the raw refs before promoting invocation or terminal states.
+    """
+    requested = str(correlation_id or "").strip()
+    packet: dict[str, Any] = {
+        "schema_version": (
+            ENTITY_USAGE_EXACT_CORRELATION_PROBE_SCHEMA_VERSION
+        ),
+        "applied": bool(requested),
+        "status": "not_requested",
+        "mutates": False,
+        "bounded": True,
+        "scope": "one_resolved_archived_session_and_correlation",
+        "session": str(session or ""),
+        "correlation_id": requested,
+        "event_count": 0,
+        "raw_ref_count": 0,
+        "segment_ref_count": 0,
+        "candidate_count_exhaustive": False,
+        "absence_claim_allowed": False,
+        "diagnostics": [],
+        "_hits": [],
+    }
+    if not requested:
+        return packet
+    if not session:
+        packet.update(
+            {
+                "status": "session_required",
+                "diagnostics": [
+                    "exact correlation selection requires an explicit session"
+                ],
+            }
+        )
+        return packet
+    if not ENTITY_USAGE_CORRELATION_ID_RE.fullmatch(requested):
+        packet.update(
+            {
+                "status": "invalid_correlation_id",
+                "diagnostics": [
+                    "correlation id must be 1-256 safe identifier characters"
+                ],
+            }
+        )
+        return packet
+    scan = session_query_source_event_scan(
+        aoa_root=aoa_root,
+        session=session,
+    )
+    entries = (
+        scan.get("_entries")
+        if isinstance(scan.get("_entries"), list)
+        else []
+    )
+    hits: list[dict[str, Any]] = []
+    for entry in entries:
+        event = (
+            entry.get("event")
+            if isinstance(entry.get("event"), dict)
+            else {}
+        )
+        if str(event.get("correlation_id") or "") != requested:
+            continue
+        hits.append(
+            session_query_source_hit(
+                scan,
+                entry,
+                source=(
+                    "session_scoped_query_time_exact_correlation_probe"
+                ),
+            )
+        )
+    scan_complete = str(scan.get("status") or "") == "complete"
+    raw_ref_count = sum(
+        bool(
+            str(
+                (
+                    hit.get("refs")
+                    if isinstance(hit.get("refs"), dict)
+                    else {}
+                ).get("raw")
+                or ""
+            )
+        )
+        for hit in hits
+    )
+    segment_ref_count = sum(
+        bool(
+            str(
+                (
+                    hit.get("refs")
+                    if isinstance(hit.get("refs"), dict)
+                    else {}
+                ).get("segment")
+                or ""
+            )
+        )
+        for hit in hits
+    )
+    packet.update(
+        {
+            "status": (
+                "resolved"
+                if hits and scan_complete
+                else "incomplete"
+                if not scan_complete
+                else "not_observed_in_bounded_session"
+            ),
+            "event_count": len(hits),
+            "raw_ref_count": raw_ref_count,
+            "segment_ref_count": segment_ref_count,
+            "candidate_count_exhaustive": scan_complete,
+            # Even a complete correlation scan proves only this instance. It
+            # must never be widened into an archive-wide non-use claim.
+            "absence_claim_allowed": False,
+            "source_scan": session_query_source_scan_summary(scan),
+            "diagnostics": unique_preserving_order(
+                scan.get("diagnostics", [])
+                if isinstance(scan.get("diagnostics"), list)
+                else []
+            ),
+            "_hits": hits,
+        }
+    )
+    return packet
 
 
 def mcp_tool_session_identity_probe(
@@ -10507,11 +10744,7 @@ def mcp_tool_session_identity_probe(
             "absence_claim_allowed": bool(
                 status == "unresolved" and scan_complete and not raw_failures
             ),
-            "source_scan": {
-                key: value
-                for key, value in scan.items()
-                if not str(key).startswith("_")
-            },
+            "source_scan": session_query_source_scan_summary(scan),
             "diagnostics": unique_preserving_order(
                 [
                     *(
@@ -153351,6 +153584,70 @@ def entity_usage_execution_command_candidates(payload: dict[str, Any]) -> list[s
     ]
 
 
+def entity_usage_hook_command_proves_invocation(
+    command: str,
+    *,
+    anchor: str,
+) -> bool:
+    """Admit an exact hook CLI operation, not hook vocabulary in a command.
+
+    Hook lifecycle receipts remain the authority for whether a runtime hook
+    fired. This route only proves that the requested hook-facing CLI operation
+    itself was invoked (for example ``codex-hooks-status``).
+    """
+    anchor_key = route_key_slug(anchor, fallback="", max_chars=120)
+    if not anchor_key:
+        return False
+    for tokens in session_memory_query_demand_shell_segments(command):
+        executable, arguments = entity_usage_shell_segment_executable(tokens)
+        if not executable:
+            continue
+        subcommand_arguments = list(arguments)
+        executable_key = entity_usage_execution_anchor_key(executable)
+        if executable in {
+            "python",
+            "python3",
+            "pypy",
+            "pypy3",
+        } or re.fullmatch(r"python3(?:\.\d+)+", executable):
+            target_kind, target = entity_usage_python_target(arguments)
+            if target_kind != "script":
+                continue
+            target_key = entity_usage_execution_anchor_key(
+                Path(str(target).replace("\\", "/")).name
+            )
+            if target_key != "aoa_session_memory_py":
+                continue
+            try:
+                target_index = arguments.index(target)
+            except ValueError:
+                continue
+            subcommand_arguments = arguments[target_index + 1 :]
+        elif executable_key not in {
+            "aoa_session_memory",
+            "aoa_session_memory_py",
+        }:
+            continue
+        subcommand = next(
+            (
+                str(argument)
+                for argument in subcommand_arguments
+                if str(argument) and not str(argument).startswith("-")
+            ),
+            "",
+        )
+        if (
+            route_key_slug(
+                subcommand,
+                fallback="",
+                max_chars=120,
+            )
+            == anchor_key
+        ):
+            return True
+    return False
+
+
 def entity_usage_execution_anchor_key(value: Any) -> str:
     return "_".join(re.findall(r"[a-z0-9]+", str(value or "").casefold()))
 
@@ -154673,11 +154970,7 @@ def skill_session_evidence_probe(
                 or result_failures
                 else "not_present"
             ),
-            "source_scan": {
-                key: value
-                for key, value in scan.items()
-                if not str(key).startswith("_")
-            },
+            "source_scan": session_query_source_scan_summary(scan),
             "diagnostics": unique_preserving_order(
                 [
                     *(
@@ -158189,12 +158482,14 @@ def entity_usage_audit(
     document_limit: int = 60,
     provider: str = "portable_sqlite",
     session: str | None = None,
+    correlation_id: str | None = None,
     before_event_id: str | None = None,
     write_report: bool = False,
 ) -> dict[str, Any]:
     now = utc_now()
     requested_kind = str(kind or "auto").strip().lower() or "auto"
     normalized_kind = normalize_trace_route_kind(kind)
+    normalized_correlation_id = str(correlation_id or "").strip()
     if normalized_kind not in TRACE_ROUTE_KINDS:
         return {
             "schema_version": SCHEMA_VERSION,
@@ -158206,6 +158501,40 @@ def entity_usage_audit(
             **trace_kind_payload_fields(kind, normalized_kind),
             "diagnostics": [f"unknown trace kind: {kind}"],
         }
+    if normalized_correlation_id and not session:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "artifact_type": "session_memory_entity_usage_audit",
+            "generated_at": now,
+            "ok": False,
+            "mutates": False,
+            "anchor": anchor,
+            **trace_kind_payload_fields(kind, normalized_kind),
+            "correlation_id": normalized_correlation_id,
+            "diagnostics": [
+                "exact correlation selection requires an explicit session"
+            ],
+        }
+    if (
+        normalized_correlation_id
+        and not ENTITY_USAGE_CORRELATION_ID_RE.fullmatch(
+            normalized_correlation_id
+        )
+    ):
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "artifact_type": "session_memory_entity_usage_audit",
+            "generated_at": now,
+            "ok": False,
+            "mutates": False,
+            "anchor": anchor,
+            **trace_kind_payload_fields(kind, normalized_kind),
+            "correlation_id": normalized_correlation_id,
+            "diagnostics": [
+                "invalid exact correlation identifier"
+            ],
+        }
+    exact_instance_mode = bool(normalized_correlation_id)
     limit = max(1, min(int_value(limit, 20), 200))
     per_route_limit = max(1, min(int_value(per_route_limit, 20), 100))
     # Global audits keep the advertised fetch limit as the hard upstream budget
@@ -158245,6 +158574,19 @@ def entity_usage_audit(
         for hit in skill_query_time_source_probe.pop("_hits", [])
         if isinstance(hit, dict)
     ] if normalized_kind == "skill" else []
+    if exact_instance_mode:
+        mcp_tool_query_time_source_hits = [
+            hit
+            for hit in mcp_tool_query_time_source_hits
+            if str(hit.get("correlation_id") or "")
+            == normalized_correlation_id
+        ]
+        skill_query_time_source_hits = [
+            hit
+            for hit in skill_query_time_source_hits
+            if str(hit.get("correlation_id") or "")
+            == normalized_correlation_id
+        ]
     candidates = (
         list(mcp_tool_resolution.get("route_candidates", []))
         if requested_kind == "mcp_tool"
@@ -158276,6 +158618,11 @@ def entity_usage_audit(
                 *exact_skill_candidates,
                 *exact_entity_dispatch_candidates,
             ]
+    if exact_instance_mode:
+        # Exact instance selection is source-coordinate first. Do not pay for
+        # or admit unrelated aggregate route candidates from the same session.
+        query_candidates = []
+        skill_dispatch_query_candidates = []
     merged: dict[str, dict[str, Any]] = {}
     for source_hit in mcp_tool_query_time_source_hits:
         merge_usage_hit(
@@ -158289,9 +158636,26 @@ def entity_usage_audit(
             source_hit,
             "session_scoped_query_time_raw_skill_probe",
         )
+    exact_correlation_probe = entity_usage_exact_correlation_probe(
+        aoa_root=aoa_root,
+        session=session,
+        correlation_id=normalized_correlation_id,
+    )
+    exact_correlation_hits = [
+        hit
+        for hit in exact_correlation_probe.pop("_hits", [])
+        if isinstance(hit, dict)
+    ]
+    for source_hit in exact_correlation_hits:
+        merge_usage_hit(
+            merged,
+            source_hit,
+            "session_scoped_query_time_exact_correlation_probe",
+        )
     route_result_summaries: list[dict[str, Any]] = []
     usage_role_fast_path_supported = bool(
         lookup_candidates
+        and not exact_instance_mode
         and normalized_kind in ENTITY_USAGE_DIRECT_TRACE_KINDS
         and search_usage_role_filter_supported(aoa_root, provider=provider)
     )
@@ -158312,6 +158676,16 @@ def entity_usage_audit(
     upstream_candidate_window_incomplete = False
     upstream_query_failure_count = 0
     upstream_query_failure_diagnostics: list[str] = []
+    if exact_instance_mode:
+        diagnostics.extend(
+            str(item)
+            for item in exact_correlation_probe.get("diagnostics", [])
+            if item
+        )
+        if not exact_correlation_probe.get(
+            "candidate_count_exhaustive"
+        ):
+            upstream_candidate_window_incomplete = True
     mcp_usage_admission_checked_doc_ids: set[str] = set()
     mcp_usage_admission_segment_cache: dict[str, list[dict[str, Any]]] = {}
     mcp_usage_invocation_admitted_count = 0
@@ -158337,7 +158711,13 @@ def entity_usage_audit(
     mcp_tool_invocation_unverifiable_count = 0
     hook_usage_admission_checked_doc_ids: set[str] = set()
     hook_usage_admission_segment_cache: dict[str, list[dict[str, Any]]] = {}
+    hook_usage_admission_manifest_cache: dict[str, dict[str, Any]] = {}
+    hook_usage_admission_raw_preview_cache: dict[
+        tuple[str, str, str, int],
+        dict[str, Any],
+    ] = {}
     hook_usage_invocation_admitted_count = 0
+    hook_usage_command_invocation_admitted_count = 0
     hook_usage_session_activity_rejected_count = 0
     hook_usage_invocation_unverifiable_count = 0
     execution_usage_admission_checked_doc_ids: set[str] = set()
@@ -158688,9 +159068,10 @@ def entity_usage_audit(
 
     def apply_hook_usage_invocation_admission() -> None:
         nonlocal hook_usage_invocation_admitted_count
+        nonlocal hook_usage_command_invocation_admitted_count
         nonlocal hook_usage_session_activity_rejected_count
         nonlocal hook_usage_invocation_unverifiable_count
-        if normalized_kind != "hook" or not requested_hook_route_keys:
+        if normalized_kind != "hook":
             return
         for hit in merged.values():
             doc_id = str(hit.get("doc_id") or "")
@@ -158728,14 +159109,48 @@ def entity_usage_audit(
             if invocation_proven:
                 hit["hook_usage_admission"] = "structured_hook_event_proven"
                 hook_usage_invocation_admitted_count += 1
+                hook_usage_admission_checked_doc_ids.add(doc_id)
+                continue
+            payload, payload_status = raw_payload_for_usage_segment_event(
+                source_event,
+                hit=hit,
+                distance=0,
+                manifest_cache=hook_usage_admission_manifest_cache,
+                raw_preview_cache=hook_usage_admission_raw_preview_cache,
+            )
+            commands = (
+                entity_usage_execution_command_candidates(payload)
+                if payload
+                else []
+            )
+            command_invocation_proven = any(
+                entity_usage_hook_command_proves_invocation(
+                    command,
+                    anchor=anchor,
+                )
+                for command in commands
+            )
+            if command_invocation_proven:
+                hit["hook_usage_admission"] = (
+                    "structured_hook_command_invocation_proven"
+                )
+                hook_usage_invocation_admitted_count += 1
+                hook_usage_command_invocation_admitted_count += 1
             else:
                 # Commands that inspect processes, mutate hook files, or quote
-                # lifecycle names are session activity around hooks.  They do
-                # not prove that this requested hook fired; the receipt route
-                # remains the invocation evidence authority.
+                # lifecycle names are session activity around hooks. They do
+                # not prove that this requested operation or hook fired; the
+                # exact command and receipt routes remain the authorities.
                 hit["entity_usage_role_override"] = "context"
-                hit["hook_usage_admission"] = "session_activity_not_hook_invocation"
-                hook_usage_session_activity_rejected_count += 1
+                hit["hook_usage_admission"] = (
+                    "session_activity_not_hook_invocation"
+                    if payload
+                    else f"hook_invocation_source_unverifiable:{payload_status}"
+                )
+                if payload:
+                    hook_usage_session_activity_rejected_count += 1
+                else:
+                    hook_usage_invocation_unverifiable_count += 1
             hook_usage_admission_checked_doc_ids.add(doc_id)
 
     def apply_execution_usage_invocation_admission() -> None:
@@ -159341,6 +159756,7 @@ def entity_usage_audit(
     route_usage_retry_fetch_limit = 0
     if (
         lookup_candidates
+        and not exact_instance_mode
         and route_hit_count > 0
         and route_usage_hit_count == 0
         and normalized_kind != "skill"
@@ -159407,9 +159823,15 @@ def entity_usage_audit(
             )
     text_search_skipped = False
     text_search_skip_reason = ""
-    skip_text_search = bool(diagnostics) and not lookup_candidates
+    skip_text_search = exact_instance_mode or (
+        bool(diagnostics) and not lookup_candidates
+    )
     if skip_text_search:
-        text_search_skip_reason = "identity_diagnostic_without_route_candidates"
+        text_search_skip_reason = (
+            "exact_correlation_source_probe_selected"
+            if exact_instance_mode
+            else "identity_diagnostic_without_route_candidates"
+        )
     route_evidence_satisfies_kind = route_usage_hit_count > 0 or (
         normalized_kind not in ENTITY_USAGE_DIRECT_TRACE_KINDS and route_evidence_hit_count > 0
     )
@@ -159428,7 +159850,7 @@ def entity_usage_audit(
         for state in SKILL_DISPATCH_CANDIDATE_STATES
     )
     skill_prompt_visibility = {}
-    if normalized_kind == "skill" and session:
+    if normalized_kind == "skill" and session and not exact_instance_mode:
         skill_prompt_visibility = skill_prompt_visibility_probe(
             aoa_root=aoa_root,
             anchor=anchor,
@@ -159446,7 +159868,7 @@ def entity_usage_audit(
                     prompt_visibility_hit,
                     "prompt_visibility_probe",
                 )
-    elif normalized_kind == "skill":
+    elif normalized_kind == "skill" and not exact_instance_mode:
         skill_prompt_visibility = skill_prompt_visibility_probe(
             aoa_root=aoa_root,
             anchor=anchor,
@@ -159880,6 +160302,12 @@ def entity_usage_audit(
             and not upstream_candidate_window_incomplete
         ),
         "candidate_count_basis": (
+            "exact_session_correlation_source_scan"
+            if exact_instance_mode
+            and exact_correlation_probe.get(
+                "candidate_count_exhaustive"
+            )
+            else
             "incomplete_upstream_query"
             if upstream_candidate_window_incomplete
             else "lower_bound_upstream_probe"
@@ -159898,6 +160326,12 @@ def entity_usage_audit(
         "omitted_usage_event_count": omitted_usage_event_count,
         "before_event_id": str(before_event_id or ""),
         "next_before_event_id": next_before_event_id,
+        "exact_instance_mode": exact_instance_mode,
+        "exact_correlation_id": normalized_correlation_id,
+        "exact_correlation_probe": exact_correlation_probe,
+        "exact_correlation_source_hit_count": len(
+            exact_correlation_hits
+        ),
         "text_result_count": text_result_count,
         "text_search_skipped": text_search_skipped,
         "text_search_skip_reason": text_search_skip_reason,
@@ -160008,6 +160442,9 @@ def entity_usage_audit(
         ),
         "hook_usage_invocation_admission_applied": normalized_kind == "hook",
         "hook_usage_invocation_admitted_count": hook_usage_invocation_admitted_count,
+        "hook_usage_command_invocation_admitted_count": (
+            hook_usage_command_invocation_admitted_count
+        ),
         "hook_usage_session_activity_rejected_count": hook_usage_session_activity_rejected_count,
         "hook_usage_invocation_unverifiable_count": hook_usage_invocation_unverifiable_count,
         "execution_usage_invocation_admission_applied": (
@@ -160069,6 +160506,7 @@ def entity_usage_audit(
             kind=normalized_kind,
             aoa_root=aoa_root,
             session=session,
+            correlation_id=normalized_correlation_id,
             before_event_id=next_before_event_id,
             limit=limit,
             per_route_limit=per_route_limit,
@@ -160102,6 +160540,29 @@ def entity_usage_audit(
         "inferred_kinds": infer_trace_route_kinds(anchor, normalized_kind),
         "aliases": trace_anchor_aliases(anchor),
         "session": session or "",
+        "correlation_id": normalized_correlation_id,
+        "selection_scope": (
+            {
+                "mode": "exact_session_correlation",
+                "session": session or "",
+                "correlation_id": normalized_correlation_id,
+                "source_probe_status": exact_correlation_probe.get(
+                    "status"
+                ),
+                "candidate_count_exhaustive": bool(
+                    exact_correlation_probe.get(
+                        "candidate_count_exhaustive"
+                    )
+                ),
+                "absence_claim_allowed": False,
+            }
+            if exact_instance_mode
+            else {
+                "mode": "bounded_entity_aggregate",
+                "session": session or "",
+                "absence_claim_allowed": False,
+            }
+        ),
         "route_candidates": lookup_candidates,
         "route_result_summaries": route_result_summaries,
         "event_count": len(events),
@@ -160414,6 +160875,16 @@ def entity_usage_event_action_semantics(event: dict[str, Any]) -> list[str]:
 
 def entity_usage_chain_event(event: dict[str, Any]) -> dict[str, Any]:
     refs = event.get("refs") if isinstance(event.get("refs"), dict) else {}
+    task_episode_id = str(event.get("task_episode_id") or "")
+    task_episode_ref = str(
+        event.get("task_episode_ref")
+        or refs.get("task_episode")
+        or (
+            f"task_episode:{event.get('session_id')}:{task_episode_id}"
+            if event.get("session_id") and task_episode_id
+            else ""
+        )
+    )
     route_signals, route_signal_count = compact_usage_route_signals(event.get("route_signals"), limit=8)
     matched_routes = event.get("matched_routes") if isinstance(event.get("matched_routes"), list) else []
     usage_actions = entity_usage_event_action_semantics(event)
@@ -160431,7 +160902,8 @@ def entity_usage_chain_event(event: dict[str, Any]) -> dict[str, Any]:
         "segment_id": event.get("segment_id"),
         "event_id": event.get("event_id"),
         "event_type": event.get("event_type"),
-        "task_episode_id": event.get("task_episode_id"),
+        "task_episode_id": task_episode_id,
+        "task_episode_ref": task_episode_ref,
         "correlation_id": event.get("correlation_id"),
         "source_correlation_id": event.get("source_correlation_id"),
         "rejected_correlation_id": event.get("rejected_correlation_id"),
@@ -160573,6 +161045,7 @@ def entity_usage_chain_event(event: dict[str, Any]) -> dict[str, Any]:
             "segment_index": refs.get("segment_index", ""),
             "raw": refs.get("raw", ""),
             "raw_block": refs.get("raw_block", ""),
+            "task_episode": task_episode_ref,
         },
         "freshness": {
             "status": freshness.get("status"),
@@ -160619,6 +161092,12 @@ def entity_usage_chain_refs(events: list[dict[str, Any]], document_refs: list[di
         add("segment_index", refs_payload.get("segment_index"), event)
         add("raw_line", refs_payload.get("raw"), event)
         add("raw_block", refs_payload.get("raw_block"), event)
+        add(
+            "task_episode",
+            refs_payload.get("task_episode")
+            or event.get("task_episode_ref"),
+            event,
+        )
         parent_refs = (
             event.get("execution_parent_refs")
             if isinstance(event.get("execution_parent_refs"), dict)
@@ -160771,6 +161250,7 @@ def entity_usage_chain_command(
     kind: str,
     aoa_root: Path,
     session: str | None = None,
+    correlation_id: str | None = None,
     before_event_id: str | None = None,
     limit: int | None = None,
     per_route_limit: int | None = None,
@@ -160788,6 +161268,8 @@ def entity_usage_chain_command(
     ]
     if session:
         command.extend(["--session", session])
+    if correlation_id:
+        command.extend(["--correlation-id", correlation_id])
     if before_event_id:
         command.extend(["--before-event-id", str(before_event_id)])
     if limit is not None:
@@ -160844,6 +161326,7 @@ def entity_usage_event_is_structured_invocation(
         "structured_invocation_proven",
         "structured_nested_invocation_proven",
         "structured_hook_event_proven",
+        "structured_hook_command_invocation_proven",
         "structured_command_invocation_proven",
         "structured_result_invocation_proven",
     }
@@ -161885,6 +162368,7 @@ def entity_usage_chain(
     document_limit: int = 24,
     provider: str = "portable_sqlite",
     session: str | None = None,
+    correlation_id: str | None = None,
     before_event_id: str | None = None,
     include_source_audit: bool = False,
     write_report: bool = False,
@@ -161922,6 +162406,7 @@ def entity_usage_chain(
         document_limit=document_limit,
         provider=provider,
         session=session,
+        correlation_id=correlation_id,
         before_event_id=before_event_id,
         write_report=False,
     )
@@ -162064,6 +162549,95 @@ def entity_usage_chain(
                 )
     evidence_refs = entity_usage_chain_refs(all_chain_events, document_refs, limit=max(12, document_limit or 12))
     first_ref = entity_usage_chain_first_ref(all_chain_events, evidence_refs)
+    source_episode_refs: list[dict[str, Any]] = []
+    seen_source_episodes: set[tuple[str, str]] = set()
+    for event in unique_entity_usage_events(all_chain_events):
+        if not isinstance(event, dict):
+            continue
+        session_id = str(event.get("session_id") or "")
+        task_episode_id = str(event.get("task_episode_id") or "")
+        if not session_id or not task_episode_id:
+            continue
+        episode_key = (session_id, task_episode_id)
+        if episode_key in seen_source_episodes:
+            continue
+        seen_source_episodes.add(episode_key)
+        refs = (
+            event.get("refs")
+            if isinstance(event.get("refs"), dict)
+            else {}
+        )
+        raw_ref = str(refs.get("raw") or "")
+        task_episode_command = shlex.join(
+            [
+                "python3",
+                "scripts/aoa_session_memory.py",
+                "task-episodes",
+                "all",
+                "--aoa-root",
+                str(aoa_root),
+                "--session",
+                session_id,
+                "--task-episode-id",
+                task_episode_id,
+                "--limit",
+                "1",
+            ]
+        )
+        task_answer_command = shlex.join(
+            [
+                "python3",
+                "scripts/aoa_session_memory.py",
+                "task-answer-chain",
+                "--aoa-root",
+                str(aoa_root),
+                "--session",
+                session_id,
+                "--task-episode-id",
+                task_episode_id,
+                "--allow-missing-reasoning",
+                "--allow-missing-answer",
+            ]
+        )
+        evidence_window_command = (
+            shlex.join(
+                [
+                    "python3",
+                    "scripts/aoa_session_memory.py",
+                    "evidence-window",
+                    "--aoa-root",
+                    str(aoa_root),
+                    session_id,
+                    raw_ref,
+                    "--before",
+                    "3",
+                    "--after",
+                    "12",
+                ]
+            )
+            if raw_ref
+            else ""
+        )
+        source_episode_refs.append(
+            {
+                "episode_ref": (
+                    str(refs.get("task_episode") or "")
+                    or f"task_episode:{session_id}:{task_episode_id}"
+                ),
+                "session_id": session_id,
+                "task_episode_id": task_episode_id,
+                "anchor_raw_ref": raw_ref,
+                "task_episode_command": task_episode_command,
+                "task_answer_chain_command": task_answer_command,
+                "evidence_window_command": evidence_window_command,
+                "authority": (
+                    "generated episode coordinate; raw and segment refs "
+                    "remain authoritative evidence"
+                ),
+            }
+        )
+        if len(source_episode_refs) >= 8:
+            break
     raw_or_segment_ref_present = any(
         item.get("kind") in {"raw_line", "raw_block", "segment_markdown", "segment_index"}
         for item in evidence_refs
@@ -162118,6 +162692,7 @@ def entity_usage_chain(
         kind=requested_kind,
         aoa_root=aoa_root,
         session=session,
+        correlation_id=correlation_id,
         before_event_id=before_event_id,
         limit=source_audit_expansion_limit,
         per_route_limit=max(per_route_limit, 12),
@@ -162130,6 +162705,7 @@ def entity_usage_chain(
             kind=requested_kind,
             aoa_root=aoa_root,
             session=session,
+            correlation_id=correlation_id,
             before_event_id=next_before_event_id,
             limit=limit,
             per_route_limit=per_route_limit,
@@ -162282,7 +162858,11 @@ def entity_usage_chain(
         aoa_root
     )
     query_source_probe: dict[str, Any] = {}
-    if normalized_kind == "skill" and isinstance(
+    if correlation_id and isinstance(
+        quality.get("exact_correlation_probe"), dict
+    ):
+        query_source_probe = quality["exact_correlation_probe"]
+    elif normalized_kind == "skill" and isinstance(
         quality.get("skill_query_time_source_probe"), dict
     ):
         query_source_probe = quality["skill_query_time_source_probe"]
@@ -162449,6 +163029,17 @@ def entity_usage_chain(
         "generation_identities": generation_identities,
         "anchor": anchor,
         **trace_kind_payload_fields(kind, normalized_kind),
+        "session": session or "",
+        "correlation_id": str(correlation_id or ""),
+        "selection_scope": (
+            audit.get("selection_scope")
+            if isinstance(audit.get("selection_scope"), dict)
+            else {
+                "mode": "bounded_entity_aggregate",
+                "session": session or "",
+                "absence_claim_allowed": False,
+            }
+        ),
         "normalized_entity": {
             "anchor": anchor,
             "route_key": (
@@ -162564,6 +163155,7 @@ def entity_usage_chain(
         "answer_admission": usage_lifecycle["answer_admission"],
         "document_refs": document_refs,
         "evidence_refs": evidence_refs,
+        "source_episode_refs": source_episode_refs,
         "first_ref": first_ref,
         "sessions": audit.get("sessions", []) if isinstance(audit.get("sessions"), list) else [],
         "skill_evidence": skill_evidence,
@@ -162714,6 +163306,22 @@ def entity_usage_chain(
             "queried_route_candidate_count": quality.get("queried_route_candidate_count"),
             "candidate_event_count": quality.get("candidate_event_count"),
             "candidate_usage_event_count": quality.get("candidate_usage_event_count"),
+            "exact_instance_mode": quality.get(
+                "exact_instance_mode"
+            ),
+            "exact_correlation_id": quality.get(
+                "exact_correlation_id"
+            ),
+            "exact_correlation_source_hit_count": quality.get(
+                "exact_correlation_source_hit_count"
+            ),
+            "exact_correlation_probe": (
+                quality.get("exact_correlation_probe", {})
+                if isinstance(
+                    quality.get("exact_correlation_probe"), dict
+                )
+                else {}
+            ),
             "text_search_skipped": quality.get("text_search_skipped"),
             "text_search_skip_reason": quality.get("text_search_skip_reason"),
             "text_result_count": quality.get("text_result_count"),
@@ -162824,6 +163432,9 @@ def entity_usage_chain(
             ),
             "hook_usage_invocation_admission_applied": quality.get("hook_usage_invocation_admission_applied"),
             "hook_usage_invocation_admitted_count": quality.get("hook_usage_invocation_admitted_count"),
+            "hook_usage_command_invocation_admitted_count": quality.get(
+                "hook_usage_command_invocation_admitted_count"
+            ),
             "hook_usage_session_activity_rejected_count": quality.get("hook_usage_session_activity_rejected_count"),
             "hook_usage_invocation_unverifiable_count": quality.get("hook_usage_invocation_unverifiable_count"),
             "execution_usage_invocation_admission_applied": quality.get("execution_usage_invocation_admission_applied"),
@@ -162923,6 +163534,50 @@ def entity_usage_chain(
         "diagnostics": diagnostics,
         "authority_boundary": "usage-chain routes session evidence only; owner source files, decisions, evals, skills, and reviewed memory remain stronger.",
     }
+    for episode in reversed(source_episode_refs[:3]):
+        payload["next_expansion"].insert(
+            0,
+            {
+                "id": (
+                    "source_episode:"
+                    f"{episode.get('session_id')}:"
+                    f"{episode.get('task_episode_id')}"
+                ),
+                "command": episode.get("task_answer_chain_command"),
+                "use_when": (
+                    "evaluate the surrounding work episode, including "
+                    "failures, recovery, verification, and answer evidence"
+                ),
+                "episode_ref": episode.get("episode_ref"),
+            },
+        )
+        if episode.get("evidence_window_command"):
+            payload["next_expansion"].insert(
+                1,
+                {
+                    "id": (
+                        "source_episode_evidence_window:"
+                        f"{episode.get('session_id')}:"
+                        f"{episode.get('task_episode_id')}"
+                    ),
+                    "command": episode.get(
+                        "evidence_window_command"
+                    ),
+                    "use_when": (
+                        "open bounded hash-verified raw context around "
+                        "the selected usage instance"
+                    ),
+                    "episode_ref": episode.get("episode_ref"),
+                },
+            )
+    if source_episode_refs:
+        payload["next_expansion_command"] = str(
+            source_episode_refs[0].get(
+                "task_answer_chain_command"
+            )
+            or payload.get("next_expansion_command")
+            or ""
+        )
     if usage_chain_next_page_command:
         payload["next_expansion"].insert(
             0,
@@ -170206,6 +170861,7 @@ def command_entity_usage_audit(args: argparse.Namespace) -> int:
         document_limit=args.document_limit,
         provider=args.provider,
         session=args.session_filter,
+        correlation_id=args.correlation_id,
         before_event_id=args.before_event_id,
         write_report=args.write_report,
     )
@@ -170234,6 +170890,7 @@ def command_entity_usage_chain(args: argparse.Namespace) -> int:
         document_limit=args.document_limit,
         provider=args.provider,
         session=args.session_filter,
+        correlation_id=args.correlation_id,
         before_event_id=args.before_event_id,
         include_source_audit=args.full,
         write_report=args.write_report,
@@ -182669,6 +183326,7 @@ def build_parser() -> argparse.ArgumentParser:
     entity_usage_parser.add_argument("--document-limit", type=int, default=60, help="Maximum evidence and mentioned document refs.")
     entity_usage_parser.add_argument("--provider", default="portable_sqlite", help="Search provider. portable_sqlite remains authoritative.")
     entity_usage_parser.add_argument("--session", dest="session_filter", help="Filter by session id, label, or title fragment.")
+    entity_usage_parser.add_argument("--correlation-id", help="Select one exact correlation inside the explicit session; never widens to an archive-wide absence claim.")
     entity_usage_parser.add_argument("--before-event-id", help="Continue a bounded session-local candidate window before this event id.")
     entity_usage_parser.add_argument("--write-report", action="store_true", help="Write JSON and Markdown entity usage audit reports under .aoa/diagnostics.")
     entity_usage_parser.add_argument("--full", action="store_true", help="Print complete event buckets.")
@@ -182689,6 +183347,7 @@ def build_parser() -> argparse.ArgumentParser:
     entity_usage_chain_parser.add_argument("--document-limit", type=int, default=24, help="Maximum evidence and mentioned document refs.")
     entity_usage_chain_parser.add_argument("--provider", default="portable_sqlite", help="Search provider. portable_sqlite remains authoritative.")
     entity_usage_chain_parser.add_argument("--session", dest="session_filter", help="Filter by session id, label, or title fragment.")
+    entity_usage_chain_parser.add_argument("--correlation-id", help="Select one exact correlation inside the explicit session so full and compact packets preserve the same invocation instance.")
     entity_usage_chain_parser.add_argument("--before-event-id", help="Continue a bounded session-local usage window before this event id.")
     entity_usage_chain_parser.add_argument("--write-report", action="store_true", help="Write JSON and Markdown entity usage chain reports under .aoa/diagnostics.")
     entity_usage_chain_parser.add_argument("--full", action="store_true", help="Include the source entity-usage-audit packet.")
