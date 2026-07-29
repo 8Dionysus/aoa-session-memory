@@ -71973,13 +71973,21 @@ def episode_compact_relation_entry(
     mutation_kind: str = "",
 ) -> dict[str, Any]:
     refs = entry.get("refs") if isinstance(entry.get("refs"), dict) else {}
+    admission_basis = str(entry.get("admission_basis") or "")
+    relation_text = str(entry.get("text") or "")
+    relation_text_limit = 260
+    if admission_basis == "structured_compact_success_observation":
+        bounded_observation = episode_causal_attribution_claim_text(entry)
+        if bounded_observation:
+            relation_text = bounded_observation
+            relation_text_limit = TASK_EPISODE_COMPACT_SUCCESS_OUTPUT_MAX_CHARS
     result = {
         "role": role,
         "line": int_value(entry.get("line") or line_from_raw_ref(refs.get("raw"))),
-        "text": short_text(str(entry.get("text") or ""), max_chars=260),
+        "text": short_text(relation_text, max_chars=relation_text_limit),
         "event_type": str(entry.get("event_type") or ""),
         "source_lane": str(entry.get("source_lane") or ""),
-        "admission_basis": str(entry.get("admission_basis") or ""),
+        "admission_basis": admission_basis,
         "correlation_id": str(entry.get("correlation_id") or ""),
         "matched_query_terms": sorted(set(matched_query_terms)),
         "refs": {

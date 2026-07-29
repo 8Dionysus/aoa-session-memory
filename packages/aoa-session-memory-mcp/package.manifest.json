@@ -72,8 +72,8 @@
     {
       "mode": "0644",
       "path": "README.md",
-      "sha256": "e7cd35448b10f2f195481c495aa4c39024d1e2ca24c6d3905186666a7bd849ba",
-      "size": 28231,
+      "sha256": "be5ec4b49d54f03a1ab05d01d6a5cd63f81f52501a79554f4e380fe0dc01550d",
+      "size": 29548,
       "source": "owner:README.md"
     },
     {
@@ -135,8 +135,8 @@
     {
       "mode": "0644",
       "path": "scripts/validate_session_memory_mcp.py",
-      "sha256": "c5f50b2ee66670ddc3c893c2ec4a754cc932c0994c06e6c0e9d6ed6d844b7808",
-      "size": 94801,
+      "sha256": "a1baf144d68d04ba497abbebdfe85f64cf0d3647d715bb889d1440077cedd978",
+      "size": 94835,
       "source": "owner:scripts/validate_session_memory_mcp.py"
     },
     {
@@ -156,8 +156,8 @@
     {
       "mode": "0644",
       "path": "src/aoa_session_memory_mcp/cli.py",
-      "sha256": "8caa25bbc1d8943618aeab96e282aa1dae1a314e58ef11d13120984dbf35d46f",
-      "size": 30055,
+      "sha256": "9bdc5b36caa1b565bfd87c8c3ca21f34e1227ce74077bd4980e416b2db84e66c",
+      "size": 31879,
       "source": "owner:src/aoa_session_memory_mcp/cli.py"
     },
     {
@@ -170,15 +170,15 @@
     {
       "mode": "0644",
       "path": "src/aoa_session_memory_mcp/core.py",
-      "sha256": "4d1fea2539388e92da10c6be41f0272a46d541adc74fac287133625b14517713",
-      "size": 446117,
+      "sha256": "0e2e463cf2763e4226eab5b18d1ce88c24285778f7293106426d94092b562720",
+      "size": 476529,
       "source": "owner:src/aoa_session_memory_mcp/core.py"
     },
     {
       "mode": "0644",
       "path": "src/aoa_session_memory_mcp/server.py",
-      "sha256": "76bc5362230074b7c3d07a4cb7db1c9139bf11352cc6aed2bf5e083671de3a08",
-      "size": 32908,
+      "sha256": "67bd895d5f5490dd537b8f341f479bfd859372c563e107ffef44800f5da5b745",
+      "size": 34101,
       "source": "owner:src/aoa_session_memory_mcp/server.py"
     },
     {
@@ -198,8 +198,8 @@
     {
       "mode": "0644",
       "path": "tests/test_session_memory_mcp.py",
-      "sha256": "f827ee7719b07be1e7eb1f22e1602543ee702638a23b61fd64503254b8922d8d",
-      "size": 358605,
+      "sha256": "4d0d098cce64132ae17d793b2f7c0b5d70339f8f06d0b9fc0c95bf80657418b7",
+      "size": 374739,
       "source": "owner:tests/test_session_memory_mcp.py"
     }
   ],
@@ -1284,6 +1284,109 @@
           "type": "object"
         },
         "name": "aoa_session_entity_usage_scenario_audit"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true,
+          "title": null
+        },
+        "description": "Execute producer-owned semantic episode retrieval with temporal, causal, quantitative, freshness, and answer-admission evidence preserved.",
+        "input_schema": {
+          "properties": {
+            "date_from": {
+              "default": "",
+              "title": "Date From",
+              "type": "string"
+            },
+            "date_to": {
+              "default": "",
+              "title": "Date To",
+              "type": "string"
+            },
+            "dense_candidate_limit": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Dense Candidate Limit"
+            },
+            "explain": {
+              "default": true,
+              "title": "Explain",
+              "type": "boolean"
+            },
+            "full": {
+              "default": false,
+              "title": "Full",
+              "type": "boolean"
+            },
+            "limit": {
+              "default": 10,
+              "title": "Limit",
+              "type": "integer"
+            },
+            "mode": {
+              "default": "auto",
+              "title": "Mode",
+              "type": "string"
+            },
+            "query": {
+              "title": "Query",
+              "type": "string"
+            },
+            "rerank_candidate_limit": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Rerank Candidate Limit"
+            },
+            "rerank_local": {
+              "default": false,
+              "title": "Rerank Local",
+              "type": "boolean"
+            },
+            "session": {
+              "default": "",
+              "title": "Session",
+              "type": "string"
+            },
+            "status": {
+              "default": "",
+              "title": "Status",
+              "type": "string"
+            },
+            "time_from": {
+              "default": "",
+              "title": "Time From",
+              "type": "string"
+            },
+            "time_to": {
+              "default": "",
+              "title": "Time To",
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "title": "aoa_session_episode_searchArguments",
+          "type": "object"
+        },
+        "name": "aoa_session_episode_search"
       },
       {
         "annotations": {
@@ -2545,8 +2648,8 @@
   "schema": "aoa_session_memory_mcp_package_manifest_v1",
   "schema_version": 1,
   "upstream": {
-    "commit": "f64626671cbece1b8a90e45433ab9f9b0450a88a",
-    "commit_epoch": 1785285846,
+    "commit": "d19cc41df695a4defa143c90f7ee9d86a14917f7",
+    "commit_epoch": 1785293204,
     "repository": "https://github.com/8Dionysus/abyss-stack",
     "source_path": "mcp/services/aoa-session-memory-mcp"
   }

@@ -152,6 +152,7 @@ ENTITY_USAGE_ACTION_LIMIT = 12
 ENTITY_USAGE_ACTION_SAMPLE_LIMIT = 3
 ENTITY_USAGE_LIFECYCLE_STATE_LIMIT = 16
 ENTITY_USAGE_LIFECYCLE_EVIDENCE_SAMPLE_LIMIT = 1
+ENTITY_USAGE_LIFECYCLE_REJECTED_CONTEXT_SAMPLE_LIMIT = 1
 EVIDENCE_ENVELOPE_REF_SAMPLE_LIMIT = 6
 EVIDENCE_ENVELOPE_GENERATION_LIMIT = 12
 ENTITY_USAGE_ACTION_SEMANTIC_PRIORITY = (
@@ -1509,7 +1510,11 @@ def _compact_usage_answer_admission(value: Any) -> dict[str, Any]:
     return _without_omitted_field_counts(compact)
 
 
-def _compact_usage_lifecycle(value: Any) -> dict[str, Any]:
+def _compact_usage_lifecycle(
+    value: Any,
+    *,
+    include_answer_admission: bool = True,
+) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
     compact = _compact_usage_mapping(
@@ -1562,21 +1567,43 @@ def _compact_usage_lifecycle(value: Any) -> dict[str, Any]:
             state_key = _bounded_string(state, 80)
             if not state_key or not isinstance(state_payload, dict):
                 continue
-            compact_state = _compact_usage_mapping(
-                state_payload,
-                allowed_keys=(
-                    "state",
-                    "status",
-                    "present",
-                    "candidate_present",
-                    "evidence_count",
-                    "strong_evidence_event_count",
+            evidence_count = state_payload.get("evidence_count")
+            strong_evidence_count = state_payload.get(
+                "strong_evidence_event_count"
+            )
+            evidence_bearing = bool(
+                state_payload.get("present") is True
+                or state_payload.get("candidate_present") is True
+                or (
+                    isinstance(evidence_count, (int, float))
+                    and not isinstance(evidence_count, bool)
+                    and evidence_count > 0
+                )
+                or (
+                    isinstance(strong_evidence_count, (int, float))
+                    and not isinstance(strong_evidence_count, bool)
+                    and strong_evidence_count > 0
+                )
+            )
+            state_keys = (
+                "status",
+                "present",
+                "candidate_present",
+                "evidence_count",
+                "strong_evidence_event_count",
+            )
+            if evidence_bearing:
+                state_keys = (
+                    *state_keys,
                     "basis",
                     "positive_instance_admitted",
                     "exhaustive_claim_admitted",
                     "negative_claim_admitted",
-                ),
-                text_limit=240,
+                )
+            compact_state = _compact_usage_mapping(
+                state_payload,
+                allowed_keys=state_keys,
+                text_limit=160,
             )
             evidence_sample = state_payload.get("evidence_sample")
             if isinstance(evidence_sample, list):
@@ -1619,7 +1646,9 @@ def _compact_usage_lifecycle(value: Any) -> dict[str, Any]:
         if isinstance(rejected, list):
             selected = [
                 _compact_usage_event(item)
-                for item in rejected[:ENTITY_USAGE_CHAIN_CONSEQUENCE_SAMPLE_LIMIT]
+                for item in rejected[
+                    :ENTITY_USAGE_LIFECYCLE_REJECTED_CONTEXT_SAMPLE_LIMIT
+                ]
             ]
             selected = [item for item in selected if item]
             if selected:
@@ -1642,9 +1671,12 @@ def _compact_usage_lifecycle(value: Any) -> dict[str, Any]:
     )
     if coverage:
         compact["coverage"] = _without_omitted_field_counts(coverage)
-    admission = _compact_usage_answer_admission(value.get("answer_admission"))
-    if admission:
-        compact["answer_admission"] = admission
+    if include_answer_admission:
+        admission = _compact_usage_answer_admission(
+            value.get("answer_admission")
+        )
+        if admission:
+            compact["answer_admission"] = admission
     return _without_omitted_field_counts(compact)
 
 
@@ -1697,7 +1729,12 @@ def _compact_generation_identity(value: Any) -> dict[str, Any]:
     return _without_omitted_field_counts(compact)
 
 
-def _compact_evidence_envelope(value: Any) -> dict[str, Any]:
+def _compact_evidence_envelope(
+    value: Any,
+    *,
+    generation_names: tuple[str, ...] | None = None,
+    include_answer_admission: bool = True,
+) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
     compact = _compact_usage_mapping(
@@ -1729,7 +1766,12 @@ def _compact_evidence_envelope(value: Any) -> dict[str, Any]:
             if not isinstance(group, dict):
                 continue
             compact_group: dict[str, Any] = {}
-            for name in sorted(group, key=str)[:EVIDENCE_ENVELOPE_GENERATION_LIMIT]:
+            ordered_names = (
+                [name for name in generation_names if name in group]
+                if generation_names is not None
+                else sorted(group, key=str)
+            )
+            for name in ordered_names[:EVIDENCE_ENVELOPE_GENERATION_LIMIT]:
                 name_key = _bounded_string(name, 120)
                 if not name_key:
                     continue
@@ -1845,13 +1887,556 @@ def _compact_evidence_envelope(value: Any) -> dict[str, Any]:
         omitted = max(0, len(refs) - len(selected_refs))
         if omitted:
             compact["omitted_evidence_ref_count"] = omitted
-    admission = _compact_usage_answer_admission(value.get("answer_admission"))
-    if admission:
-        compact["answer_admission"] = admission
+    if include_answer_admission:
+        admission = _compact_usage_answer_admission(
+            value.get("answer_admission")
+        )
+        if admission:
+            compact["answer_admission"] = admission
     uncertainty = _compact_usage_mapping(value.get("uncertainty"), text_limit=180)
     if uncertainty:
         compact["uncertainty"] = _without_omitted_field_counts(uncertainty)
     return _without_omitted_field_counts(compact)
+
+
+EPISODE_SEARCH_RESULT_LIMIT = 10
+EPISODE_SEARCH_COMPACT_RESULT_LIMIT = 1
+EPISODE_SEARCH_SUPPORT_LIMIT = 4
+EPISODE_SEARCH_NUMERIC_ROW_LIMIT = 12
+EPISODE_SEARCH_RELATION_CANDIDATE_LIMIT = 4
+EPISODE_SEARCH_GENERATION_NAMES = (
+    "episode_semantic",
+    "task_episode_source",
+    "exact_literal",
+    "lexical_search",
+    "episode_dense",
+    "search_catalog",
+)
+ENTITY_USAGE_CHAIN_GENERATION_NAMES = (
+    "entity_registry",
+    "exact_literal",
+    "lexical_search",
+    "segment_index",
+    "session_index",
+)
+
+
+def _compact_episode_search_refs(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    return _without_omitted_field_counts(
+        _compact_usage_mapping(
+            value,
+            allowed_keys=(
+                "raw",
+                "raw_ref",
+                "raw_block",
+                "segment",
+                "segment_ref",
+                "segment_index",
+                "session",
+                "session_ref",
+                "session_index",
+                "receipt",
+                "line",
+            ),
+            text_limit=320,
+        )
+    )
+
+
+def _compact_episode_search_evidence(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    compact = _compact_usage_mapping(
+        value,
+        allowed_keys=(
+            "role",
+            "line",
+            "text",
+            "source_lane",
+            "event_type",
+            "admission_basis",
+            "correlation_id",
+            "outcome",
+            "result_status",
+            "exit_code",
+            "matched_query_terms",
+            "reading_signals",
+        ),
+        text_limit=480,
+    )
+    refs = _compact_episode_search_refs(value.get("refs"))
+    if refs:
+        compact["refs"] = refs
+    return _without_omitted_field_counts(compact)
+
+
+def _compact_episode_search_relation_entry(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    compact = _compact_episode_search_evidence(value)
+    for key in (
+        "command",
+        "workdir",
+        "timestamp",
+        "matched_operation_identity_terms",
+        "operation_identity_coverage",
+    ):
+        scalar = _compact_usage_scalar(value.get(key), limit=640)
+        if scalar not in (None, "", [], {}):
+            compact[key] = scalar
+    return compact
+
+
+def _compact_episode_search_relation(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    compact = _compact_usage_mapping(
+        value,
+        allowed_keys=(
+            "active",
+            "accepted",
+            "admitted",
+            "status",
+            "kind",
+            "relation_basis",
+            "answer_scope",
+            "authority",
+            "policy",
+            "policy_version",
+            "ambiguous",
+            "ambiguous_within_episode",
+            "qualified_count",
+            "qualified_candidate_count",
+            "qualified_pair_count",
+            "qualified_chain_count",
+            "claim_support_count",
+            "correlation_id",
+            "operation",
+            "operation_kinds",
+            "direction",
+            "result_status",
+            "numeric_row_count",
+            "subject_coverage",
+            "context_coverage",
+            "baseline_coverage",
+            "target_coverage",
+            "minimum_anchor_coverage",
+            "matched_target_terms",
+            "matched_subject_terms",
+            "matched_context_terms",
+            "matched_baseline_terms",
+            "rejection_reasons",
+            "contract_status",
+            "truncated",
+        ),
+        text_limit=480,
+    )
+    for key in ("left", "right", "action", "result", "verification"):
+        entry = _compact_episode_search_relation_entry(value.get(key))
+        if entry:
+            compact[key] = entry
+    chain = value.get("chain")
+    if isinstance(chain, dict):
+        compact_chain = _compact_usage_mapping(
+            chain,
+            allowed_keys=(
+                "correlation_id",
+                "operation_kinds",
+                "operation_identity_terms",
+                "matched_operation_identity_terms",
+                "operation_identity_coverage",
+                "matched_target_terms",
+                "target_term_count",
+                "target_coverage",
+            ),
+            text_limit=480,
+        )
+        for key in ("action", "result", "verification"):
+            entry = _compact_episode_search_relation_entry(chain.get(key))
+            if entry:
+                compact_chain[key] = entry
+        if compact_chain:
+            compact["chain"] = _without_omitted_field_counts(compact_chain)
+    numeric_rows = value.get("numeric_rows")
+    if isinstance(numeric_rows, list):
+        selected_rows = [
+            _without_omitted_field_counts(
+                _compact_usage_mapping(
+                    row,
+                    allowed_keys=("count", "label"),
+                    text_limit=240,
+                )
+            )
+            for row in numeric_rows[:EPISODE_SEARCH_NUMERIC_ROW_LIMIT]
+            if isinstance(row, dict)
+        ]
+        compact["numeric_rows"] = selected_rows
+        compact["numeric_row_count"] = len(numeric_rows)
+        omitted = max(0, len(numeric_rows) - len(selected_rows))
+        if omitted:
+            compact["omitted_numeric_row_count"] = omitted
+    candidates = value.get("candidate_chains")
+    if isinstance(candidates, list):
+        selected_candidates = [
+            _compact_episode_search_relation(candidate)
+            for candidate in candidates[
+                :EPISODE_SEARCH_RELATION_CANDIDATE_LIMIT
+            ]
+            if isinstance(candidate, dict)
+        ]
+        compact["candidate_chains"] = selected_candidates
+        compact["candidate_chain_count"] = len(candidates)
+        omitted = max(0, len(candidates) - len(selected_candidates))
+        if omitted:
+            compact["omitted_candidate_chain_count"] = omitted
+    return _without_omitted_field_counts(compact)
+
+
+def _compact_episode_search_answer_admission(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    compact = _compact_usage_mapping(
+        value,
+        allowed_keys=(
+            "admitted",
+            "status",
+            "basis",
+            "claim_shape",
+            "policy",
+            "policy_version",
+            "evidence_read_admitted",
+            "retrieval_candidates_are_claims",
+            "insufficiency_reason",
+            "required_next_route",
+            "support_raw_refs",
+            "negative_claim_admitted",
+            "negative_claim_reason",
+            "current_state_claim_admitted",
+            "historical_projection_status",
+        ),
+        text_limit=640,
+    )
+    relation_gate = value.get("relation_gate")
+    if isinstance(relation_gate, dict):
+        compact_gate = _compact_usage_mapping(
+            relation_gate,
+            allowed_keys=(
+                "required",
+                "admitted",
+                "status",
+                "ambiguous",
+                "qualified_count",
+            ),
+            text_limit=320,
+        )
+        gates = relation_gate.get("gates")
+        if isinstance(gates, list):
+            compact_gate["gates"] = [
+                _compact_episode_search_relation(gate)
+                for gate in gates[:EPISODE_SEARCH_RELATION_CANDIDATE_LIMIT]
+                if isinstance(gate, dict)
+            ]
+            compact_gate["gate_count"] = len(gates)
+        compact["relation_gate"] = _without_omitted_field_counts(
+            compact_gate
+        )
+    for key in (
+        "evidence_ref_gate",
+        "explicit_time_evidence_gate",
+        "localized_exact_evidence_gate",
+        "required_next_route_packet",
+    ):
+        item = _compact_usage_mapping(value.get(key), text_limit=480)
+        if item:
+            compact[key] = _without_omitted_field_counts(item)
+    return _without_omitted_field_counts(compact)
+
+
+def _compact_episode_search_result(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    compact = _compact_usage_mapping(
+        value,
+        allowed_keys=(
+            "result_position",
+            "candidate_id",
+            "doc_id",
+            "session_id",
+            "session_label",
+            "session_title",
+            "session_date",
+            "task_episode_id",
+            "episode_status",
+            "event_range",
+            "time_span",
+            "confidence_band",
+            "match_channel",
+            "match_channels",
+            "sparse_rank",
+            "dense_rank",
+            "fusion_score",
+            "rerank_score",
+        ),
+        text_limit=320,
+    )
+    preview = _compact_usage_scalar(value.get("preview"), limit=360)
+    if preview not in (None, "", [], {}):
+        compact["preview"] = preview
+    query_coverage = _compact_usage_mapping(
+        value.get("query_coverage"),
+        allowed_keys=(
+            "status",
+            "coverage",
+            "coherent_coverage",
+            "matched_term_count",
+            "coherent_term_count",
+            "matched_query_terms",
+        ),
+        text_limit=160,
+    )
+    if query_coverage:
+        compact["query_coverage"] = _without_omitted_field_counts(
+            query_coverage
+        )
+    freshness = _compact_usage_mapping(
+        value.get("freshness"),
+        allowed_keys=(
+            "status",
+            "basis",
+            "source_fingerprint",
+            "processed_watermark",
+            "generation_id",
+        ),
+        text_limit=200,
+    )
+    if freshness:
+        compact["freshness"] = _without_omitted_field_counts(freshness)
+    reading_contract = _compact_usage_mapping(
+        value.get("reading_contract"),
+        allowed_keys=(
+            "status",
+            "authority",
+            "support_scope",
+            "accepted_claim_requires",
+        ),
+        text_limit=240,
+    )
+    if reading_contract:
+        compact["reading_contract"] = _without_omitted_field_counts(
+            reading_contract
+        )
+    refs = _compact_episode_search_refs(value.get("refs"))
+    if refs:
+        compact["refs"] = refs
+    support = value.get("supporting_evidence")
+    if isinstance(support, list):
+        selected_support = [
+            _compact_episode_search_evidence(item)
+            for item in support[:EPISODE_SEARCH_SUPPORT_LIMIT]
+            if isinstance(item, dict)
+        ]
+        compact["supporting_evidence"] = selected_support
+        compact["supporting_evidence_count"] = len(support)
+        omitted = max(0, len(support) - len(selected_support))
+        if omitted:
+            compact["omitted_supporting_evidence_count"] = omitted
+    for key in (
+        "temporal_span",
+        "quantitative_comparison",
+        "causal_attribution",
+        "operational_group",
+        "explicit_time_evidence",
+    ):
+        relation = _compact_episode_search_relation(value.get(key))
+        if relation:
+            compact[key] = relation
+    return _without_omitted_field_counts(compact)
+
+
+def _episode_search_result_has_admitted_relation(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    admitted_statuses = {
+        "qualified_ordered_spans_available",
+        "bounded_interval_contents_read",
+        "ordered_action_result_attribution_chain",
+        "qualified_quantitative_comparison_available",
+        "correlation_owned_ranked_count_available",
+    }
+    for key in (
+        "temporal_span",
+        "quantitative_comparison",
+        "causal_attribution",
+        "operational_group",
+        "explicit_time_evidence",
+    ):
+        relation = value.get(key)
+        if not isinstance(relation, dict):
+            continue
+        if relation.get("accepted") is True or relation.get("admitted") is True:
+            return True
+        if relation.get("status") in admitted_statuses:
+            return True
+    return False
+
+
+def _select_episode_search_results(
+    results: list[Any],
+    *,
+    answer_admitted: bool,
+) -> list[dict[str, Any]]:
+    typed_results = [item for item in results if isinstance(item, dict)]
+    if not typed_results:
+        return []
+    if answer_admitted:
+        admitted = [
+            item
+            for item in typed_results
+            if _episode_search_result_has_admitted_relation(item)
+        ]
+        if admitted:
+            return admitted[:EPISODE_SEARCH_COMPACT_RESULT_LIMIT]
+    return typed_results[:EPISODE_SEARCH_COMPACT_RESULT_LIMIT]
+
+
+def _compact_episode_search_payload(
+    payload: dict[str, Any],
+    *,
+    full_route: str,
+) -> dict[str, Any]:
+    compact: dict[str, Any] = {}
+    for key in (
+        "schema_version",
+        "artifact_type",
+        "search_schema_version",
+        "episode_semantic_projection_version",
+        "query_normalization_version",
+        "route_signal_classifier_version",
+        "task_episode_schema_version",
+        "generated_at",
+        "ok",
+        "query",
+        "query_intent",
+        "filters",
+        "candidate_limit",
+        "candidate_count",
+        "result_count",
+        "candidate_ids",
+        "coverage",
+        "diagnostics",
+        "next_route",
+        "next_command",
+        "maintenance_handoff",
+        "abstention",
+    ):
+        if payload.get(key) not in (None, "", [], {}):
+            compact[key] = payload.get(key)
+    admission = _compact_episode_search_answer_admission(
+        payload.get("answer_admission")
+    )
+    if admission:
+        compact["answer_admission"] = admission
+    results = payload.get("results")
+    if isinstance(results, list):
+        selected_source_results = _select_episode_search_results(
+            results,
+            answer_admitted=bool(
+                isinstance(payload.get("answer_admission"), dict)
+                and payload["answer_admission"].get("admitted") is True
+            ),
+        )
+        selected_results = [
+            _compact_episode_search_result(item)
+            for item in selected_source_results
+        ]
+        compact["results"] = selected_results
+        compact["result_count"] = int(
+            payload.get("result_count") or len(results)
+        )
+        compact["returned_result_count"] = len(selected_results)
+        omitted = max(0, len(results) - len(selected_results))
+        if omitted:
+            compact["omitted_result_count"] = omitted
+    retrieval = payload.get("retrieval")
+    if isinstance(retrieval, dict):
+        compact_retrieval = _compact_usage_mapping(
+            retrieval,
+            allowed_keys=(
+                "requested_mode",
+                "effective_mode",
+                "effective_mode_with_fallback",
+                "fusion",
+                "fusion_policy_version",
+            ),
+            text_limit=320,
+        )
+        for key in (
+            "temporal_relation_gate",
+            "quantitative_comparison_relation_gate",
+            "causal_claim_shape_gate",
+            "causal_attribution_scope",
+            "query_claim_shape_gate",
+        ):
+            relation = _compact_episode_search_relation(
+                retrieval.get(key)
+            )
+            if relation:
+                compact_retrieval[key] = relation
+        if compact_retrieval:
+            compact["retrieval"] = _without_omitted_field_counts(
+                compact_retrieval
+            )
+    envelope = _compact_evidence_envelope(
+        payload.get("evidence_envelope"),
+        generation_names=EPISODE_SEARCH_GENERATION_NAMES,
+        include_answer_admission=False,
+    )
+    if envelope:
+        compact["evidence_envelope"] = envelope
+    mcp_access = (
+        dict(payload.get("mcp_access"))
+        if isinstance(payload.get("mcp_access"), dict)
+        else {}
+    )
+    mcp_access.update(
+        {
+            "response_compacted": True,
+            "full_evidence_route": full_route,
+            "authority_boundary": (
+                "MCP compacts the producer-owned episode-search packet; "
+                "raw and segment refs remain authoritative."
+            ),
+        }
+    )
+    compact["mcp_access"] = mcp_access
+    compact["mcp_payload_policy"] = {
+        "response_compacted": True,
+        "answer_admission_preserved": bool(admission),
+        "evidence_envelope_preserved": bool(envelope),
+        "relation_evidence_preserved": any(
+            any(
+                key in result
+                for key in (
+                    "temporal_span",
+                    "quantitative_comparison",
+                    "causal_attribution",
+                    "operational_group",
+                )
+            )
+            for result in compact.get("results", [])
+            if isinstance(result, dict)
+        ),
+        "support_limit_per_result": EPISODE_SEARCH_SUPPORT_LIMIT,
+        "result_limit": EPISODE_SEARCH_COMPACT_RESULT_LIMIT,
+        "full_evidence_route": full_route,
+    }
+    compact["authority_boundary"] = (
+        "MCP returns compact producer-owned episode evidence and admission; "
+        "accepted claims still require the resolvable owner refs."
+    )
+    return compact
 
 
 def _compact_skill_evidence(evidence: Any) -> dict[str, Any]:
@@ -2644,6 +3229,164 @@ def _compact_usage_neighborhood(neighborhood: Any) -> dict[str, Any]:
     return {key: value for key, value in compact.items() if value not in (None, "", [], {})}
 
 
+def _compact_entity_usage_chain_counts(value: Any) -> dict[str, Any]:
+    return _without_omitted_field_counts(
+        _compact_usage_mapping(
+            value,
+            allowed_keys=(
+                "usage_event_count",
+                "selected_usage_event_count",
+                "omitted_usage_event_count",
+                "candidate_usage_event_count",
+                "chain_count",
+                "chain_with_result_or_consequence_count",
+                "result_event_count",
+                "outcome_event_count",
+                "consequence_event_count",
+                "context_event_count",
+                "false_correlation_event_count",
+                "false_correlation_edge_count",
+                "unique_false_correlation_event_count",
+                "accepted_event_association_count",
+                "unique_accepted_event_count",
+                "document_ref_count",
+                "evidence_ref_count",
+            ),
+            text_limit=120,
+        )
+    )
+
+
+def _compact_entity_usage_chain_quality(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    compact = _compact_usage_mapping(
+        value,
+        allowed_keys=(
+            "direct_usage_present",
+            "generic_direct_event_present",
+            "raw_or_segment_ref_present",
+            "result_or_consequence_present",
+            "attached_result_or_consequence_present",
+            "unattached_result_or_outcome_candidate_present",
+            "false_correlation_event_present",
+            "candidate_count_exhaustive",
+            "incomplete",
+            "truncated",
+            "skill_dispatch_candidate_present",
+            "skill_behavioral_candidate_present",
+            "skill_invocation_claim_allowed",
+            "skill_prompt_visibility_probe",
+            "mcp_tool_identity_status",
+            "mcp_tool_invocation_admitted_count",
+            "mcp_tool_invocation_unverifiable_count",
+            "mcp_usage_invocation_admitted_count",
+            "mcp_usage_invocation_unverifiable_count",
+            "tool_usage_invocation_admitted_count",
+            "tool_usage_invocation_unverifiable_count",
+            "execution_usage_invocation_admitted_count",
+            "execution_usage_invocation_unverifiable_count",
+            "hook_usage_invocation_admitted_count",
+            "hook_usage_invocation_unverifiable_count",
+            "skipped_graph_neighborhood",
+            "skipped_graph_rag_packet",
+            "skipped_raw_preview_neighborhood",
+            "text_search_skipped",
+            "text_search_skip_reason",
+            "source_route",
+            "compact_route",
+        ),
+        text_limit=200,
+    )
+    causal = _compact_usage_mapping(
+        value.get("causal_admission"),
+        allowed_keys=(
+            "structured_mcp_receipt_admitted_count",
+            "structured_mcp_receipt_identity_ambiguous_rejected_count",
+            "structured_result_status_admitted_count",
+            "structured_result_timeout_count",
+            "uncorrelated_outcome_rejected_count",
+            "uncorrelated_result_rejected_count",
+            "parallel_batch_outcome_rejected_count",
+            "parallel_batch_verification_rejected_count",
+        ),
+        text_limit=120,
+    )
+    if causal:
+        compact["causal_admission"] = _without_omitted_field_counts(causal)
+    compact = _without_omitted_field_counts(compact)
+    zero_meaningful = {
+        "candidate_count_exhaustive",
+        "raw_or_segment_ref_present",
+    }
+    return {
+        key: item
+        for key, item in compact.items()
+        if (
+            key in zero_meaningful
+            or item not in (False, 0, 0.0, "", [], {})
+        )
+    }
+
+
+def _compact_entity_usage_chain_truncation(value: Any) -> dict[str, Any]:
+    return _without_omitted_field_counts(
+        _compact_usage_mapping(
+            value,
+            allowed_keys=(
+                "status",
+                "reason",
+                "requested_limit",
+                "selected_event_count",
+                "selected_usage_event_count",
+                "omitted_event_count",
+                "omitted_usage_event_count",
+                "candidate_count_exhaustive",
+                "next_before_event_id",
+                "next_page_command",
+            ),
+            text_limit=240,
+        )
+    )
+
+
+def _compact_usage_chain_event(event: Any) -> dict[str, Any]:
+    if not isinstance(event, dict):
+        return {}
+    compact = _compact_usage_mapping(
+        event,
+        allowed_keys=(
+            "doc_id",
+            "source_doc_id",
+            "event_id",
+            "event_type",
+            "role",
+            "action",
+            "title",
+            "snippet",
+            "session_id",
+            "session_label",
+            "task_episode_id",
+            "correlation_id",
+            "source_correlation_id",
+            "rejected_correlation_id",
+            "status",
+            "outcome",
+            "skill_evidence_state",
+            "usage_actions",
+            "primary_usage_action",
+        ),
+        text_limit=320,
+    )
+    refs = _compact_usage_refs(event.get("refs"))
+    if refs:
+        compact["refs"] = refs
+    raw_preview = _compact_raw_preview(event.get("raw_preview"))
+    if raw_preview:
+        compact["raw_preview"] = raw_preview
+    return _without_omitted_field_counts(compact)
+
+
 def _compact_entity_usage_audit_payload(payload: dict[str, Any], *, full_route: str) -> dict[str, Any]:
     compact: dict[str, Any] = {}
     passthrough_keys = (
@@ -2743,12 +3486,9 @@ def _compact_entity_usage_chain_payload(payload: dict[str, Any], *, full_route: 
         "requested_kind",
         "session",
         "normalized_entity",
-        "counts",
-        "quality",
         "freshness",
         "incomplete",
         "truncated",
-        "truncation",
         "noise_flags",
         "next_expansion_command",
         "performance_contract",
@@ -2757,42 +3497,70 @@ def _compact_entity_usage_chain_payload(payload: dict[str, Any], *, full_route: 
     for key in passthrough_keys:
         if payload.get(key) not in (None, "", [], {}):
             compact[key] = payload.get(key)
+    counts = _compact_entity_usage_chain_counts(payload.get("counts"))
+    if counts:
+        compact["counts"] = counts
+    quality = _compact_entity_usage_chain_quality(payload.get("quality"))
+    if quality:
+        compact["quality"] = quality
+    truncation = _compact_entity_usage_chain_truncation(
+        payload.get("truncation")
+    )
+    if truncation:
+        compact["truncation"] = truncation
     first_ref = _compact_first_ref(payload.get("first_ref"))
     if first_ref:
         compact["first_ref"] = first_ref
     skill_evidence = _compact_skill_evidence(payload.get("skill_evidence"))
     if skill_evidence:
         compact["skill_evidence"] = skill_evidence
-    usage_lifecycle = _compact_usage_lifecycle(payload.get("usage_lifecycle"))
+    usage_lifecycle = _compact_usage_lifecycle(
+        payload.get("usage_lifecycle"),
+        include_answer_admission=False,
+    )
     if usage_lifecycle:
         compact["usage_lifecycle"] = usage_lifecycle
     answer_admission = _compact_usage_answer_admission(payload.get("answer_admission"))
     if answer_admission:
         compact["answer_admission"] = answer_admission
-    evidence_envelope = _compact_evidence_envelope(payload.get("evidence_envelope"))
+    evidence_envelope = _compact_evidence_envelope(
+        payload.get("evidence_envelope"),
+        generation_names=ENTITY_USAGE_CHAIN_GENERATION_NAMES,
+        include_answer_admission=False,
+    )
     if evidence_envelope:
         compact["evidence_envelope"] = evidence_envelope
+    evidence_first_packet = bool(
+        usage_lifecycle and answer_admission and evidence_envelope
+    )
+    if evidence_first_packet:
+        compact.pop("freshness", None)
     for key in ("usage_action_counts", "primary_usage_action_counts"):
         counts, omitted_count = _compact_usage_action_counts(payload.get(key))
         if counts:
             compact[key] = counts
         if omitted_count:
             compact[f"omitted_{key.removesuffix('_counts')}_count"] = omitted_count
-    (
-        usage_action_samples,
-        omitted_action_samples,
-        omitted_action_sample_buckets,
-    ) = _compact_usage_action_samples(payload.get("usage_action_samples"))
-    if usage_action_samples:
-        compact["usage_action_samples"] = usage_action_samples
-    if omitted_action_samples:
-        compact["omitted_usage_action_sample_counts"] = omitted_action_samples
-    if omitted_action_sample_buckets:
-        compact["omitted_usage_action_sample_bucket_count"] = omitted_action_sample_buckets
+    if not evidence_first_packet:
+        (
+            usage_action_samples,
+            omitted_action_samples,
+            omitted_action_sample_buckets,
+        ) = _compact_usage_action_samples(payload.get("usage_action_samples"))
+        if usage_action_samples:
+            compact["usage_action_samples"] = usage_action_samples
+        if omitted_action_samples:
+            compact["omitted_usage_action_sample_counts"] = (
+                omitted_action_samples
+            )
+        if omitted_action_sample_buckets:
+            compact["omitted_usage_action_sample_bucket_count"] = (
+                omitted_action_sample_buckets
+            )
     usage_chain = payload.get("usage_chain") if isinstance(payload.get("usage_chain"), dict) else {}
     compact_chain: dict[str, Any] = {}
     entrypoints = usage_chain.get("entrypoint_events")
-    if isinstance(entrypoints, list):
+    if isinstance(entrypoints, list) and not evidence_first_packet:
         selected = [_compact_usage_event(event) for event in entrypoints[:ENTITY_USAGE_CHAIN_SAMPLE_LIMIT]]
         compact_chain["entrypoint_events"] = [event for event in selected if event]
         compact_chain["entrypoint_event_count"] = len(entrypoints)
@@ -2800,7 +3568,25 @@ def _compact_entity_usage_chain_payload(payload: dict[str, Any], *, full_route: 
     chains = usage_chain.get("chains")
     if isinstance(chains, list):
         selected_chains: list[dict[str, Any]] = []
-        for chain in chains[:ENTITY_USAGE_CHAIN_SAMPLE_LIMIT]:
+        typed_chains = [
+            chain for chain in chains if isinstance(chain, dict)
+        ]
+        ordered_chains = (
+            sorted(
+                typed_chains,
+                key=lambda item: bool(
+                    item.get("has_result_or_consequence")
+                    or item.get("result_or_consequence_events")
+                ),
+                reverse=True,
+            )
+            if evidence_first_packet
+            else typed_chains
+        )
+        selected_chain_limit = (
+            1 if evidence_first_packet else ENTITY_USAGE_CHAIN_SAMPLE_LIMIT
+        )
+        for chain in ordered_chains[:selected_chain_limit]:
             if not isinstance(chain, dict):
                 continue
             compact_item: dict[str, Any] = {
@@ -2809,11 +3595,19 @@ def _compact_entity_usage_chain_payload(payload: dict[str, Any], *, full_route: 
                 if chain.get(key) not in (None, "", [], {})
             }
             if isinstance(chain.get("usage_event"), dict):
-                compact_item["usage_event"] = _compact_usage_event(chain["usage_event"])
+                compact_item["usage_event"] = (
+                    _compact_usage_chain_event(chain["usage_event"])
+                    if evidence_first_packet
+                    else _compact_usage_event(chain["usage_event"])
+                )
             result_events = chain.get("result_or_consequence_events")
             if isinstance(result_events, list):
                 selected_results = [
-                    _compact_usage_event(event)
+                    (
+                        _compact_usage_chain_event(event)
+                        if evidence_first_packet
+                        else _compact_usage_event(event)
+                    )
                     for event in result_events[:ENTITY_USAGE_CHAIN_CONSEQUENCE_SAMPLE_LIMIT]
                 ]
                 compact_item["result_or_consequence_events"] = [event for event in selected_results if event]
@@ -2833,7 +3627,21 @@ def _compact_entity_usage_chain_payload(payload: dict[str, Any], *, full_route: 
         "context_events",
     ):
         events = usage_chain.get(key)
-        if isinstance(events, list):
+        lifecycle_rejected_context = (
+            ((usage_lifecycle.get("correlation") or {}).get(
+                "rejected_context_sample"
+            ))
+            if isinstance(usage_lifecycle, dict)
+            else None
+        )
+        preserve_evidence_first_bucket = (
+            key == "false_correlation_events"
+            and evidence_first_packet
+            and not lifecycle_rejected_context
+        )
+        if isinstance(events, list) and (
+            not evidence_first_packet or preserve_evidence_first_bucket
+        ):
             selected = [_compact_usage_event(event) for event in events[:ENTITY_USAGE_CHAIN_CONSEQUENCE_SAMPLE_LIMIT]]
             compact_chain[key] = [event for event in selected if event]
             if key == "false_correlation_events":
@@ -2853,15 +3661,25 @@ def _compact_entity_usage_chain_payload(payload: dict[str, Any], *, full_route: 
         ("route_candidates", ENTITY_USAGE_DOCUMENT_REF_SAMPLE_LIMIT),
         ("sessions", ENTITY_USAGE_DOCUMENT_REF_SAMPLE_LIMIT),
     ):
+        if evidence_first_packet and key == "evidence_refs":
+            continue
         values = payload.get(key)
         if isinstance(values, list):
-            selected = [_compact_usage_mapping(item) for item in values[:limit]]
+            selected_limit = 1 if evidence_first_packet else limit
+            selected = [
+                _compact_usage_mapping(item)
+                for item in values[:selected_limit]
+            ]
             compact[key] = [_without_omitted_field_counts(item) for item in selected if item]
             compact[f"{key}_count"] = len(values)
             compact[f"omitted_{key}_count"] = max(0, len(values) - len(compact[key]))
     next_expansion = payload.get("next_expansion")
     if isinstance(next_expansion, list):
-        selected = [_compact_usage_mapping(item, text_limit=160) for item in next_expansion[:4]]
+        selected_limit = 1 if evidence_first_packet else 4
+        selected = [
+            _compact_usage_mapping(item, text_limit=160)
+            for item in next_expansion[:selected_limit]
+        ]
         compact["next_expansion"] = [_without_omitted_field_counts(item) for item in selected if item]
         compact["next_expansion_count"] = len(next_expansion)
     mcp_access = dict(payload.get("mcp_access")) if isinstance(payload.get("mcp_access"), dict) else {}
@@ -2888,6 +3706,7 @@ def _compact_entity_usage_chain_payload(payload: dict[str, Any], *, full_route: 
         "evidence_envelope_preserved": bool(evidence_envelope),
         "evidence_envelope_ref_sample_limit": EVIDENCE_ENVELOPE_REF_SAMPLE_LIMIT,
         "text_preview_chars": ENTITY_USAGE_TEXT_PREVIEW_CHARS,
+        "evidence_first_duplicate_samples_omitted": evidence_first_packet,
         "full_evidence_route": full_route,
     }
     compact["authority_boundary"] = "MCP returns compact usage-chain refs and samples; raw/segment evidence remains authoritative."
@@ -4099,6 +4918,7 @@ class AoASessionMemoryMCPState:
                 "aoa_session_memory_status",
                 "aoa_session_transport_preflight",
                 "aoa_session_search",
+                "aoa_session_episode_search",
                 "aoa_session_agent_responses",
                 "aoa_session_agent_closeouts",
                 "aoa_session_agent_progress_updates",
@@ -5086,6 +5906,114 @@ class AoASessionMemoryMCPState:
         )
         payload.setdefault("authority_boundary", self.authority_boundary())
         return payload
+
+    def session_episode_search(
+        self,
+        query: str,
+        session: str = "",
+        status: str = "",
+        date_from: str = "",
+        date_to: str = "",
+        time_from: str = "",
+        time_to: str = "",
+        mode: str = "auto",
+        limit: int = 10,
+        dense_candidate_limit: int | None = None,
+        rerank_local: bool = False,
+        rerank_candidate_limit: int | None = None,
+        explain: bool = True,
+        full: bool = False,
+    ) -> dict[str, Any]:
+        text = _ensure_short_text(query, "query")
+        selected_mode = str(mode or "auto").strip().casefold()
+        if selected_mode not in {"auto", "sparse", "dense", "hybrid"}:
+            raise ValueError(
+                "episode search mode must be auto, sparse, dense, or hybrid"
+            )
+        selected_status = str(status or "").strip().casefold()
+        if selected_status not in {
+            "",
+            "open",
+            "closed",
+            "blocked",
+            "handoff",
+            "interrupted",
+        }:
+            raise ValueError(
+                "episode status must be open, closed, blocked, handoff, or interrupted"
+            )
+        selected_limit = _coerce_limit(limit, 10, EPISODE_SEARCH_RESULT_LIMIT)
+        args = [
+            "--query",
+            text,
+            "--mode",
+            selected_mode,
+            "--limit",
+            str(selected_limit),
+        ]
+        for value, flag, label in (
+            (session, "--session", "session"),
+            (selected_status, "--status", "status"),
+            (date_from, "--date-from", "date_from"),
+            (date_to, "--date-to", "date_to"),
+            (time_from, "--time-from", "time_from"),
+            (time_to, "--time-to", "time_to"),
+        ):
+            if value:
+                args.extend([flag, _safe_selector(str(value), label)])
+        if dense_candidate_limit is not None:
+            args.extend(
+                [
+                    "--dense-candidate-limit",
+                    str(
+                        _coerce_bounded_int(
+                            dense_candidate_limit,
+                            64,
+                            1,
+                            300,
+                        )
+                    ),
+                ]
+            )
+        if rerank_local:
+            args.append("--rerank-local")
+        if rerank_candidate_limit is not None:
+            args.extend(
+                [
+                    "--rerank-candidate-limit",
+                    str(
+                        _coerce_bounded_int(
+                            rerank_candidate_limit,
+                            10,
+                            1,
+                            50,
+                        )
+                    ),
+                ]
+            )
+        if explain:
+            args.append("--explain")
+        full_route = self._archive_command_line("episode-search", args)
+        payload = self._archive_command(
+            "episode-search",
+            args,
+            allow_nonzero_json=True,
+            timeout_seconds=max(
+                self.timeout_seconds,
+                EVIDENCE_PACKET_TIMEOUT_SECONDS,
+            ),
+        )
+        payload.setdefault("authority_boundary", self.authority_boundary())
+        mcp_access = payload.get("mcp_access")
+        if isinstance(mcp_access, dict):
+            mcp_access["full_evidence_route"] = full_route
+            mcp_access["response_compacted"] = not full
+        if full:
+            return payload
+        return _compact_episode_search_payload(
+            payload,
+            full_route=full_route,
+        )
 
     def _agent_route_filter_search(
         self,

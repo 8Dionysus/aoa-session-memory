@@ -3151,6 +3151,364 @@ def test_memory_query_plan_transports_producer_claim_admission_without_reconstru
     assert not any(call[0] == "search" for call in runner.calls)
 
 
+def test_episode_search_preserves_producer_admission_relations_and_refs(
+    tmp_path: Path,
+) -> None:
+    class EpisodeSearchRunner(FakeRunner):
+        def __call__(
+            self,
+            argv: list[str],
+            timeout: float,
+        ) -> CommandOutput:
+            command = argv[2]
+            args = tuple(argv[3:])
+            if command != "episode-search":
+                return super().__call__(argv, timeout)
+            self.calls.append((command, args))
+            self.timeouts.append((command, timeout))
+            payload = {
+                "schema_version": 3,
+                "artifact_type": "episode_semantic_search_results",
+                "search_schema_version": 21,
+                "episode_semantic_projection_version": 14,
+                "route_signal_classifier_version": 41,
+                "task_episode_schema_version": 8,
+                "generated_at": "2026-07-29T00:00:00Z",
+                "ok": True,
+                "query": "Какие mechanics parts changed most since v0.2.3?",
+                "query_intent": {
+                    "primary": "quantitative_comparison",
+                    "claim_shape": {
+                        "kind": "quantitative_comparison",
+                        "retrieval_candidates_are_claims": False,
+                    },
+                },
+                "generation_identity": {
+                    "projection": "episode_semantic",
+                    "generation_id": "episode-generation",
+                    "projection_version": 14,
+                    "route_signal_classifier_version": 41,
+                },
+                "generation_identities": {
+                    "expected": {
+                        "episode_semantic": {
+                            "generation_id": "episode-generation",
+                        }
+                    },
+                    "compatible": True,
+                },
+                "filters": {"session": "session-1"},
+                "candidate_count": 1,
+                "result_count": 1,
+                "candidate_ids": ["episode:session-1:task-0001"],
+                "results": [
+                    {
+                        "candidate_id": "episode:session-1:task-0001",
+                        "doc_id": "episode:session-1:task-0001",
+                        "session_id": "session-1",
+                        "task_episode_id": "task-0001",
+                        "event_range": {"from_line": 100, "to_line": 140},
+                        "preview": "private episode body " * 200,
+                        "query_coverage": {
+                            "coverage": 1.0,
+                            "matched_term_count": 6,
+                        },
+                        "freshness": {
+                            "status": "cached_unverified",
+                            "live_source": {"status": "current"},
+                        },
+                        "refs": {
+                            "raw": "raw:line:116",
+                            "segment": "segments/001.md",
+                            "session": "sessions/session-1/session.manifest.json",
+                        },
+                        "supporting_evidence": [
+                            {
+                                "role": "actions",
+                                "line": 116,
+                                "text": "git diff --name-only v0.2.3..HEAD | uniq -c",
+                                "source_lane": "structured_tool_call",
+                                "event_type": "COMMAND",
+                                "admission_basis": "structured_quantitative_count_action",
+                                "correlation_id": "call-count",
+                                "refs": {
+                                    "raw": "raw:line:116",
+                                    "segment": "segments/001.md",
+                                },
+                            },
+                            {
+                                "role": "outcomes",
+                                "line": 122,
+                                "text": "183 recurrence\n158 agon\n" + ("private " * 200),
+                                "source_lane": "structured_tool_result",
+                                "event_type": "COMMAND_OUTPUT",
+                                "admission_basis": "correlation_owned_quantitative_numeric_result",
+                                "correlation_id": "call-count",
+                                "refs": {
+                                    "raw": "raw:line:122",
+                                    "segment": "segments/001.md",
+                                },
+                            },
+                        ],
+                        "quantitative_comparison": {
+                            "active": True,
+                            "accepted": True,
+                            "status": "correlation_owned_ranked_count_available",
+                            "correlation_id": "call-count",
+                            "qualified_chain_count": 1,
+                            "action": {
+                                "line": 116,
+                                "text": "git diff --name-only v0.2.3..HEAD | uniq -c",
+                                "correlation_id": "call-count",
+                                "refs": {"raw": "raw:line:116"},
+                            },
+                            "result": {
+                                "line": 122,
+                                "text": "183 recurrence\n158 agon",
+                                "correlation_id": "call-count",
+                                "refs": {"raw": "raw:line:122"},
+                            },
+                            "numeric_rows": [
+                                {"count": index, "label": f"part-{index}"}
+                                for index in range(20, 0, -1)
+                            ],
+                        },
+                    }
+                ],
+                "answer_admission": {
+                    "admitted": True,
+                    "status": "answer_evidence_admitted",
+                    "basis": "typed_quantitative_comparison_evidence",
+                    "retrieval_candidates_are_claims": False,
+                    "relation_gate": {
+                        "required": True,
+                        "admitted": True,
+                        "gates": [
+                            {
+                                "kind": "quantitative_comparison",
+                                "status": "qualified_quantitative_comparison_available",
+                                "admitted": True,
+                                "qualified_count": 1,
+                            }
+                        ],
+                    },
+                },
+                "retrieval": {
+                    "requested_mode": "auto",
+                    "effective_mode": "hybrid",
+                    "fusion": "reciprocal_rank_fusion",
+                    "quantitative_comparison_relation_gate": {
+                        "status": "qualified_quantitative_comparison_available",
+                        "qualified_count": 1,
+                        "ambiguous": False,
+                    },
+                },
+                "coverage": {
+                    "status": "current",
+                    "covered_session_count": 1,
+                    "indexed_session_count": 1,
+                },
+                "cost_profile": {"candidate_bound": 64},
+                "evidence_envelope": {
+                    "schema": "aoa_session_memory_evidence_packet_v1",
+                    "truth_status": "evidence_packet_not_owner_truth",
+                    "candidate_ids": ["episode:session-1:task-0001"],
+                    "evidence_refs": [
+                        {"raw": "raw:line:116"},
+                        {"raw": "raw:line:122"},
+                    ],
+                    "freshness": {
+                        "global": {"status": "current"},
+                        "scoped": {
+                            "status": "current",
+                            "does_not_upgrade_global_freshness": True,
+                        },
+                    },
+                    "answer_admission": {
+                        "admitted": True,
+                        "status": "answer_evidence_admitted",
+                    },
+                },
+                "diagnostics": [],
+            }
+            return CommandOutput(
+                argv,
+                0,
+                json.dumps(payload),
+                "",
+                1.0,
+            )
+
+    runner = EpisodeSearchRunner()
+    state = state_with_fixture(tmp_path, runner)
+
+    packet = state.session_episode_search(
+        query="Какие mechanics parts changed most since v0.2.3?",
+        session="session-1",
+        mode="hybrid",
+        limit=6,
+        dense_candidate_limit=40,
+        rerank_local=True,
+        rerank_candidate_limit=8,
+        explain=True,
+    )
+
+    assert packet["answer_admission"]["admitted"] is True
+    assert packet["answer_admission"]["basis"] == (
+        "typed_quantitative_comparison_evidence"
+    )
+    assert packet["answer_admission"]["relation_gate"]["gates"][0][
+        "status"
+    ] == "qualified_quantitative_comparison_available"
+    result = packet["results"][0]
+    assert result["candidate_id"] == "episode:session-1:task-0001"
+    assert {
+        item["refs"]["raw"]
+        for item in result["supporting_evidence"]
+    } == {"raw:line:116", "raw:line:122"}
+    relation = result["quantitative_comparison"]
+    assert relation["correlation_id"] == "call-count"
+    assert relation["action"]["refs"]["raw"] == "raw:line:116"
+    assert relation["result"]["refs"]["raw"] == "raw:line:122"
+    assert relation["numeric_row_count"] == 20
+    assert relation["omitted_numeric_row_count"] == 8
+    assert packet["evidence_envelope"]["evidence_ref_count"] == 2
+    assert packet["mcp_payload_policy"][
+        "answer_admission_preserved"
+    ] is True
+    assert packet["mcp_payload_policy"]["relation_evidence_preserved"] is True
+    assert packet["mcp_access"]["mutates"] is False
+    assert len(result["preview"]) <= 700
+    assert len(result["supporting_evidence"][1]["text"]) <= 700
+    assert ("private episode body " * 200) not in json.dumps(packet)
+    assert len(json.dumps(packet)) < 30_000
+    calls = [call for call in runner.calls if call[0] == "episode-search"]
+    assert len(calls) == 1
+    args = calls[0][1]
+    assert args[args.index("--session") + 1] == "session-1"
+    assert args[args.index("--mode") + 1] == "hybrid"
+    assert args[args.index("--dense-candidate-limit") + 1] == "40"
+    assert args[args.index("--rerank-candidate-limit") + 1] == "8"
+    assert "--rerank-local" in args
+    assert "--explain" in args
+
+
+def test_episode_search_compaction_selects_the_admitted_relation_candidate() -> None:
+    from aoa_session_memory_mcp import core as core_module
+
+    weak_result = {
+        "candidate_id": "episode:weak",
+        "preview": "weak navigation candidate " * 200,
+        "supporting_evidence": [
+            {
+                "text": "navigation only " * 200,
+                "refs": {"raw": "raw:line:10"},
+            }
+        ],
+        "causal_attribution": {
+            "active": True,
+            "status": "causal_candidate_unresolved",
+        },
+    }
+    admitted_result = {
+        "candidate_id": "episode:admitted",
+        "preview": "bounded admitted candidate",
+        "refs": {
+            "raw": "raw:line:20",
+            "segment": "segments/000.md",
+            "session": "sessions/example/session.manifest.json",
+        },
+        "supporting_evidence": [
+            {
+                "role": "actions",
+                "text": "run the bounded command",
+                "correlation_id": "call-20",
+                "refs": {"raw": "raw:line:20"},
+            },
+            {
+                "role": "outcomes",
+                "text": "14 passed in 0.09s",
+                "correlation_id": "call-20",
+                "refs": {"raw": "raw:line:21"},
+            },
+        ],
+        "causal_attribution": {
+            "active": True,
+            "accepted": True,
+            "status": "ordered_action_result_attribution_chain",
+            "correlation_id": "call-20",
+            "action": {
+                "text": "run the bounded command",
+                "refs": {"raw": "raw:line:20"},
+            },
+            "result": {
+                "text": "14 passed in 0.09s",
+                "refs": {"raw": "raw:line:21"},
+            },
+        },
+    }
+    payload = {
+        "schema_version": 3,
+        "artifact_type": "episode_semantic_search_results",
+        "ok": True,
+        "candidate_ids": [
+            "episode:weak",
+            "episode:admitted",
+            "episode:other",
+        ],
+        "candidate_count": 3,
+        "result_count": 3,
+        "results": [
+            weak_result,
+            admitted_result,
+            {**weak_result, "candidate_id": "episode:other"},
+        ],
+        "answer_admission": {
+            "admitted": True,
+            "status": "answer_evidence_admitted",
+            "basis": "correlation_owned_open_result_evidence",
+        },
+        "evidence_envelope": {
+            "schema": "aoa_session_memory_evidence_packet_v1",
+            "candidate_ids": [
+                "episode:weak",
+                "episode:admitted",
+                "episode:other",
+            ],
+            "evidence_refs": [
+                {"raw": "raw:line:20"},
+                {"raw": "raw:line:21"},
+            ],
+            "freshness": {
+                "global": {"status": "stale-readable"},
+                "scoped": {
+                    "status": "current",
+                    "does_not_upgrade_global_freshness": True,
+                },
+            },
+        },
+    }
+
+    compact = core_module._compact_episode_search_payload(
+        payload,
+        full_route="episode-search --full",
+    )
+
+    assert compact["candidate_ids"] == payload["candidate_ids"]
+    assert compact["result_count"] == 3
+    assert compact["returned_result_count"] == 1
+    assert compact["omitted_result_count"] == 2
+    assert compact["results"][0]["candidate_id"] == "episode:admitted"
+    assert compact["results"][0]["causal_attribution"]["status"] == (
+        "ordered_action_result_attribution_chain"
+    )
+    assert {
+        item["refs"]["raw"]
+        for item in compact["results"][0]["supporting_evidence"]
+    } == {"raw:line:20", "raw:line:21"}
+    assert len(json.dumps(compact)) < 30_000
+
+
 def test_retrieve_unsupported_recipe_returns_structured_diagnostic(tmp_path: Path) -> None:
     runner = FakeRunner()
     state = state_with_fixture(tmp_path, runner)
@@ -3923,6 +4281,7 @@ def test_validator_requires_literal_and_graph_mcp_tools() -> None:
 
     assert "aoa_session_literal_query_plan" in validator.REQUIRED_STDIO_SMOKE_TOOLS
     assert "aoa_session_memory_query_plan" in validator.REQUIRED_STDIO_SMOKE_TOOLS
+    assert "aoa_session_episode_search" in validator.REQUIRED_STDIO_SMOKE_TOOLS
     assert "aoa_session_entity_dossier" in validator.REQUIRED_STDIO_SMOKE_TOOLS
     assert "aoa_session_entity_usage_chain" in validator.REQUIRED_STDIO_SMOKE_TOOLS
     assert "aoa_session_route_rollup_query" in validator.REQUIRED_STDIO_SMOKE_TOOLS
@@ -5003,6 +5362,7 @@ def test_published_tool_schema_allows_route_only_search_and_usage_neighborhood(t
     assert query_schema["default"] == ""
     assert "aoa_session_literal_query_plan" in tools
     assert "aoa_session_memory_query_plan" in tools
+    assert "aoa_session_episode_search" in tools
     assert "aoa_session_agent_responses" in tools
     assert "aoa_session_agent_closeouts" in tools
     assert "aoa_session_agent_progress_updates" in tools
@@ -5047,6 +5407,7 @@ def test_published_tool_schema_allows_route_only_search_and_usage_neighborhood(t
     assert tools["aoa_session_entity_dossier"].inputSchema["properties"]["graph_edge_limit"]["default"] == 24
     literal_description = tools["aoa_session_literal_query_plan"].description or ""
     memory_plan_description = tools["aoa_session_memory_query_plan"].description or ""
+    episode_search_description = tools["aoa_session_episode_search"].description or ""
     dossier_description = tools["aoa_session_entity_dossier"].description or ""
     usage_chain_description = tools["aoa_session_entity_usage_chain"].description or ""
     live_scenario_description = tools["aoa_session_live_scenario_audit"].description or ""
@@ -5057,6 +5418,7 @@ def test_published_tool_schema_allows_route_only_search_and_usage_neighborhood(t
     bridge_description = tools["aoa_session_graph_bridge"].description or ""
     assert "literal skill/MCP/hook/tool/API/path/query" in literal_description
     assert "producer-owned bounded route, admission, freshness" in memory_plan_description
+    assert "producer-owned semantic episode retrieval" in episode_search_description
     assert "one compact registry, usage, consequence" in dossier_description
     assert "usage-to-consequence chains" in usage_chain_description
     assert "entity registry lookup status probes" in live_scenario_description
@@ -6108,11 +6470,22 @@ def test_entity_usage_chain_compact_preserves_evidence_first_admission_contract(
                         "route_id": "entity_usage_chain",
                         "reason": "state-specific usage and correlation evidence",
                     },
-                    "generation_identities": {
-                        "expected": {
-                            "episode_semantic": {
-                                "projection": "episode_semantic",
-                                "schema_version": 22,
+                        "generation_identities": {
+                            "expected": {
+                                "entity_registry": {
+                                    "projection": "entity_registry",
+                                    "schema_version": 4,
+                                    "generation_id": "entity-generation",
+                                    "producer_sha256": "entity-producer-digest",
+                                },
+                                "exact_literal": {
+                                    "projection": "exact_literal",
+                                    "schema_version": 3,
+                                    "generation_id": "exact-generation",
+                                },
+                                "episode_semantic": {
+                                    "projection": "episode_semantic",
+                                    "schema_version": 22,
                                 "projection_version": 14,
                                 "route_signal_classifier_version": 41,
                                 "generation_id": "episode-generation",
@@ -6127,14 +6500,14 @@ def test_entity_usage_chain_compact_preserves_evidence_first_admission_contract(
                                     "episode_semantic": "episode-generation"
                                 },
                             },
-                        },
-                        "observed": {
-                            "episode_semantic": {
-                                "projection": "episode_semantic",
-                                "schema_version": 22,
-                                "generation_id": "episode-generation",
-                            }
-                        },
+                            },
+                            "observed": {
+                                "entity_registry": {
+                                    "projection": "entity_registry",
+                                    "schema_version": 4,
+                                    "generation_id": "entity-generation",
+                                }
+                            },
                         "compatible": True,
                     },
                     "freshness": {
@@ -6232,25 +6605,32 @@ def test_entity_usage_chain_compact_preserves_evidence_first_admission_contract(
     assert chain["usage_lifecycle"]["states"]["loaded"]["candidate_present"] is True
     assert chain["usage_lifecycle"]["states"]["loaded"]["positive_instance_admitted"] is False
     assert chain["usage_lifecycle"]["states"]["invoked"]["present"] is False
+    assert (
+        "positive_instance_admitted"
+        not in chain["usage_lifecycle"]["states"]["invoked"]
+    )
     assert chain["usage_lifecycle"]["identity"]["collision_preserved"] is True
     correlation = chain["usage_lifecycle"]["correlation"]
     assert correlation["accepted_consequence_chain_count"] == 0
     assert correlation["rejected_context_count"] == 3
-    assert len(correlation["rejected_context_sample"]) == 2
-    assert correlation["omitted_rejected_context_sample_count"] == 1
+    assert len(correlation["rejected_context_sample"]) == 1
+    assert correlation["omitted_rejected_context_sample_count"] == 2
     assert chain["answer_admission"]["umbrella_used_claim_admitted"] is False
     assert chain["answer_admission"]["claim_admission_by_state"]["selected"]["positive_instance_admitted"] is True
     assert chain["answer_admission"]["claim_admission_by_state"]["loaded"]["positive_instance_admitted"] is False
     envelope = chain["evidence_envelope"]
-    assert envelope["generation_identities"]["expected"]["episode_semantic"] == {
-        "projection": "episode_semantic",
-        "generation_id": "episode-generation",
-        "schema_version": 22,
-        "projection_version": 14,
-        "route_signal_classifier_version": 41,
-        "producer_sha256": "producer-digest",
+    assert envelope["generation_identities"]["expected"]["entity_registry"] == {
+        "projection": "entity_registry",
+        "generation_id": "entity-generation",
+        "schema_version": 4,
+        "producer_sha256": "entity-producer-digest",
     }
-    assert envelope["generation_identities"]["expected"]["episode_dense"]["embedding_model"] == "test-embedding-model"
+    assert envelope["generation_identities"]["expected"]["exact_literal"][
+        "generation_id"
+    ] == "exact-generation"
+    assert "episode_semantic" not in envelope["generation_identities"]["expected"]
+    assert envelope["generation_identities"]["expected_count"] == 4
+    assert envelope["generation_identities"]["omitted_expected_count"] == 2
     assert envelope["freshness"]["global"]["status"] == "stale-readable"
     assert envelope["freshness"]["scoped"]["status"] == "current"
     assert envelope["freshness"]["scoped"]["does_not_upgrade_global_freshness"] is True
@@ -6279,7 +6659,15 @@ def test_entity_usage_chain_compact_preserves_evidence_first_admission_contract(
     assert chain["mcp_payload_policy"]["usage_lifecycle_preserved"] is True
     assert chain["mcp_payload_policy"]["answer_admission_preserved"] is True
     assert chain["mcp_payload_policy"]["evidence_envelope_preserved"] is True
-    assert len(json.dumps(chain)) < 20_000
+    assert (
+        chain["mcp_payload_policy"][
+            "evidence_first_duplicate_samples_omitted"
+        ]
+        is True
+    )
+    assert "answer_admission" not in chain["usage_lifecycle"]
+    assert "answer_admission" not in chain["evidence_envelope"]
+    assert len(json.dumps(chain)) < 15_000
 
 
 def test_entity_dossier_composes_first_route_packet(tmp_path: Path) -> None:

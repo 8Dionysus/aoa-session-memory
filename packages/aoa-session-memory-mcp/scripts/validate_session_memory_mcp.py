@@ -30,6 +30,7 @@ REQUIRED_STDIO_SMOKE_TOOLS = {
     "aoa_session_search",
     "aoa_session_literal_query_plan",
     "aoa_session_memory_query_plan",
+    "aoa_session_episode_search",
     "aoa_session_agent_responses",
     "aoa_session_agent_closeouts",
     "aoa_session_agent_progress_updates",

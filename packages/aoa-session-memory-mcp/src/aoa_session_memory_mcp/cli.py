@@ -54,6 +54,32 @@ def main() -> None:
     memory_plan.add_argument("--kind", default="auto")
     memory_plan.add_argument("--filter", action="append")
 
+    episode_search = sub.add_parser("episode-search")
+    episode_search.add_argument("query")
+    episode_search.add_argument("--session", default="")
+    episode_search.add_argument("--status", default="")
+    episode_search.add_argument("--date-from", default="")
+    episode_search.add_argument("--date-to", default="")
+    episode_search.add_argument("--time-from", default="")
+    episode_search.add_argument("--time-to", default="")
+    episode_search.add_argument("--mode", default="auto")
+    episode_search.add_argument("--limit", type=int, default=10)
+    episode_search.add_argument("--dense-candidate-limit", type=int)
+    episode_search.add_argument("--rerank-local", action="store_true")
+    episode_search.add_argument("--rerank-candidate-limit", type=int)
+    episode_search.set_defaults(explain=True)
+    episode_search.add_argument(
+        "--explain",
+        dest="explain",
+        action="store_true",
+    )
+    episode_search.add_argument(
+        "--no-explain",
+        dest="explain",
+        action="store_false",
+    )
+    episode_search.add_argument("--full", action="store_true")
+
     agent_responses = sub.add_parser("agent-responses")
     agent_responses.add_argument("query", nargs="?", default="")
     agent_responses.add_argument("--session", default="")
@@ -362,6 +388,25 @@ def main() -> None:
         _print(state.session_literal_query_plan(args.query, kind=args.kind, filters=_parse_filter(args.filter)))
     elif args.command == "memory-query-plan":
         _print(state.session_memory_query_plan(args.query, kind=args.kind, filters=_parse_filter(args.filter)))
+    elif args.command == "episode-search":
+        _print(
+            state.session_episode_search(
+                query=args.query,
+                session=args.session,
+                status=args.status,
+                date_from=args.date_from,
+                date_to=args.date_to,
+                time_from=args.time_from,
+                time_to=args.time_to,
+                mode=args.mode,
+                limit=args.limit,
+                dense_candidate_limit=args.dense_candidate_limit,
+                rerank_local=args.rerank_local,
+                rerank_candidate_limit=args.rerank_candidate_limit,
+                explain=args.explain,
+                full=args.full,
+            )
+        )
     elif args.command == "agent-responses":
         _print(
             state.session_agent_responses(

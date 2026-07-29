@@ -115,6 +115,41 @@ def build_server(
         return current_state().session_memory_query_plan(query=query, kind=kind, filters=filters)
 
     @read_only_tool
+    def aoa_session_episode_search(
+        query: str,
+        session: str = "",
+        status: str = "",
+        date_from: str = "",
+        date_to: str = "",
+        time_from: str = "",
+        time_to: str = "",
+        mode: str = "auto",
+        limit: int = 10,
+        dense_candidate_limit: int | None = None,
+        rerank_local: bool = False,
+        rerank_candidate_limit: int | None = None,
+        explain: bool = True,
+        full: bool = False,
+    ) -> dict[str, Any]:
+        """Execute producer-owned semantic episode retrieval with temporal, causal, quantitative, freshness, and answer-admission evidence preserved."""
+        return current_state().session_episode_search(
+            query=query,
+            session=session,
+            status=status,
+            date_from=date_from,
+            date_to=date_to,
+            time_from=time_from,
+            time_to=time_to,
+            mode=mode,
+            limit=limit,
+            dense_candidate_limit=dense_candidate_limit,
+            rerank_local=rerank_local,
+            rerank_candidate_limit=rerank_candidate_limit,
+            explain=explain,
+            full=full,
+        )
+
+    @read_only_tool
     def aoa_session_agent_responses(
         query: str = "",
         session: str = "",

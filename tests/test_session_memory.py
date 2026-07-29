@@ -10793,6 +10793,29 @@ def test_causal_attribution_requires_correlation_owned_target_bearing_result() -
     assert explicit["chain"]["operation_identity_coverage"] == 1.0
     assert explicit["qualified_chain_count"] == 1
 
+    bounded_result_preview = module.episode_compact_relation_entry(
+        entry(
+            "outcomes",
+            371,
+            ("linked action prefix " * 30)
+            + "compact successful output observation: "
+            + "[ok] topology\n.............. [100%]\n14 passed in 0.09s",
+            correlation_id="call_fk0puwMDNACW8PKHZGdgwg1m",
+            admission_basis="structured_compact_success_observation",
+            event_type="TOOL_OUTPUT",
+            source_lane="structured_tool_result",
+            outcome="succeeded",
+        ),
+        role="outcomes",
+        matched_query_terms=[],
+    )
+    assert "linked action prefix" not in bounded_result_preview["text"]
+    assert "14 passed in 0.09s" in bounded_result_preview["text"]
+    assert (
+        len(bounded_result_preview["text"])
+        <= module.TASK_EPISODE_COMPACT_SUCCESS_OUTPUT_MAX_CHARS
+    )
+
     explicit_foreign_only = module.episode_causal_attribution_alignment(
         {
             "representations": {
