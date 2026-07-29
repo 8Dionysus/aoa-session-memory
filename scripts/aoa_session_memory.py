@@ -1282,8 +1282,9 @@ AUTO_MAINTENANCE_PROFILES = {
         "deferred_graph_job_budget_seconds": 120,
         "resource_class": "medium",
         "resource_kind": "indexing",
-        "resource_demand_epoch": "v2",
+        "resource_demand_epoch": "v3",
         "budget_seconds": 600,
+        "hard_timeout_grace_seconds": 120,
         "timeout_sec": 900,
         "index_drip_on_block": False,
         "graph_drip_on_block": False,
@@ -1315,8 +1316,9 @@ AUTO_MAINTENANCE_PROFILES = {
         "deferred_graph_job_budget_seconds": 600,
         "resource_class": "medium",
         "resource_kind": "indexing",
-        "resource_demand_epoch": "v2",
+        "resource_demand_epoch": "v3",
         "budget_seconds": 900,
+        "hard_timeout_grace_seconds": 180,
         "timeout_sec": 3600,
         "index_drip_on_block": False,
         "graph_drip_on_block": True,
@@ -1354,8 +1356,9 @@ AUTO_MAINTENANCE_PROFILES = {
         "deferred_graph_job_budget_seconds": 600,
         "resource_class": "medium",
         "resource_kind": "indexing",
-        "resource_demand_epoch": "v2",
+        "resource_demand_epoch": "v3",
         "budget_seconds": 600,
+        "hard_timeout_grace_seconds": 180,
         "timeout_sec": 1800,
         "index_drip_on_block": False,
         "graph_drip_on_block": True,
@@ -1393,8 +1396,9 @@ AUTO_MAINTENANCE_PROFILES = {
         "deferred_graph_job_budget_seconds": 1800,
         "resource_class": "heavy",
         "resource_kind": "indexing",
-        "resource_demand_epoch": "v2",
+        "resource_demand_epoch": "v3",
         "budget_seconds": 1200,
+        "hard_timeout_grace_seconds": 300,
         "timeout_sec": 7200,
         "index_drip_on_block": False,
         "graph_drip_on_block": True,
@@ -38788,7 +38792,7 @@ def maintain_indexes(
                         rebuild=search_rebuild_required,
                         write_report=write_report,
                         selected_records=selected_search_records,
-                        budget_seconds=None if search_rebuild_required else budget_remaining(),
+                        budget_seconds=budget_remaining(),
                         progress_every=progress_every,
                     )
                     note_dense_upstream_changes(result)
@@ -38922,7 +38926,7 @@ def maintain_indexes(
                         clean=atlas_rebuild_required,
                         selected_records=selected_atlas_records,
                         write_report=write_report,
-                        budget_seconds=None if atlas_rebuild_required else budget_remaining(),
+                        budget_seconds=budget_remaining(),
                         progress_every=progress_every,
                     )
                     atlas_action["status"] = "applied" if result.get("ok") else ("deferred_budget_exhausted" if result.get("budget_exhausted") else "failed")
@@ -39188,7 +39192,7 @@ def maintain_indexes(
                         rebuild=refreshed_search_rebuild_required,
                         write_report=write_report,
                         selected_records=None if refreshed_search_rebuild_required else (refreshed_search_dirty_records or refreshed_records),
-                        budget_seconds=None if refreshed_search_rebuild_required else budget_remaining(),
+                        budget_seconds=budget_remaining(),
                         progress_every=progress_every,
                     )
                     note_dense_upstream_changes(result)
@@ -40221,6 +40225,45 @@ def auto_maintenance_profile(profile: str) -> dict[str, Any]:
     return dict(AUTO_MAINTENANCE_PROFILES.get(profile, AUTO_MAINTENANCE_PROFILES["hot"]))
 
 
+def auto_maintenance_runtime_envelope(
+    profile: str,
+    *,
+    budget_seconds: float | None = None,
+) -> dict[str, float]:
+    settings = auto_maintenance_profile(profile)
+    profile_budget_seconds = max(
+        0.0,
+        float(settings.get("budget_seconds") or 0.0),
+    )
+    effective_budget_seconds = (
+        float(budget_seconds)
+        if budget_seconds is not None and float(budget_seconds) > 0
+        else profile_budget_seconds
+    )
+    grace_seconds = max(
+        1.0,
+        float(settings.get("hard_timeout_grace_seconds") or 120.0),
+    )
+    configured_timeout_ceiling_seconds = max(
+        1.0,
+        float(
+            settings.get("timeout_sec")
+            or effective_budget_seconds + grace_seconds
+        ),
+    )
+    hard_timeout_seconds = min(
+        configured_timeout_ceiling_seconds,
+        max(1.0, math.ceil(effective_budget_seconds + grace_seconds)),
+    )
+    return {
+        "budget_seconds": effective_budget_seconds,
+        "hard_timeout_grace_seconds": grace_seconds,
+        "configured_timeout_ceiling_seconds": configured_timeout_ceiling_seconds,
+        "hard_timeout_seconds": hard_timeout_seconds,
+        "wrapper_timeout_seconds": hard_timeout_seconds + 120.0,
+    }
+
+
 def session_memory_resource_demand_key(*parts: str) -> str:
     normalized_parts = [safe_slug(str(part), fallback="route") for part in parts]
     demand_key = ":".join([SESSION_MEMORY_RESOURCE_DEMAND_KEY_PREFIX, *normalized_parts])
@@ -40350,8 +40393,10 @@ def auto_maintenance_resource_launcher(
     resource_memory_demand_mib: float | None = None,
     resource_estimate_source: str | None = None,
     resource_estimate_confidence: str | None = None,
+    hard_timeout_seconds: float | None = None,
 ) -> list[str]:
     settings = auto_maintenance_profile(profile)
+    runtime_envelope = auto_maintenance_runtime_envelope(profile)
     if child_command is None:
         child_args = [
             "python3",
@@ -40402,7 +40447,21 @@ def auto_maintenance_resource_launcher(
         command.extend(["--estimate-confidence", str(resource_estimate_confidence)])
     if resource_force:
         command.append("--force")
-    command.extend(["--timeout", str(settings["timeout_sec"]), "--success-on-block", "--json", "--", *child_args])
+    effective_hard_timeout_seconds = (
+        float(hard_timeout_seconds)
+        if hard_timeout_seconds is not None and float(hard_timeout_seconds) > 0
+        else float(runtime_envelope["hard_timeout_seconds"])
+    )
+    command.extend(
+        [
+            "--timeout",
+            f"{effective_hard_timeout_seconds:g}",
+            "--success-on-block",
+            "--json",
+            "--",
+            *child_args,
+        ]
+    )
     return command
 
 
@@ -42382,11 +42441,16 @@ def auto_maintenance_resource_markdown(payload: dict[str, Any]) -> str:
         f"- graph_drip_on_block_source: `{payload.get('graph_drip_on_block_source')}`",
         f"- resource_class: `{payload.get('resource_class')}`",
         f"- resource_kind: `{payload.get('resource_kind')}`",
+        f"- budget_seconds: `{payload.get('budget_seconds')}`",
         f"- timeout_sec: `{payload.get('timeout_sec')}`",
+        f"- hard_timeout_grace_seconds: `{payload.get('hard_timeout_grace_seconds')}`",
+        f"- configured_timeout_ceiling_sec: `{payload.get('configured_timeout_ceiling_sec')}`",
+        f"- wrapper_timeout_sec: `{payload.get('wrapper_timeout_sec')}`",
         f"- returncode: `{payload.get('returncode')}`",
         f"- resource_ok: `{payload.get('resource_ok')}`",
         f"- execution_ok: `{execution.get('ok')}`",
         f"- execution_returncode: `{execution.get('returncode')}`",
+        f"- execution_timeout_cleanup: `{bool(execution.get('timeout_cleanup'))}`",
         f"- child_result_verified: `{payload.get('child_result_verified')}`",
         f"- child_status: `{payload.get('child_status')}`",
         f"- child_ok: `{payload.get('child_ok')}`",
@@ -43616,6 +43680,7 @@ def auto_maintenance_resource_status_retryable(status: str) -> bool:
             "skipped_lock_held",
             "deferred_conflicting_lease",
             "resource_launcher_timeout",
+            "resource_hard_timeout",
             "resource_launcher_no_json",
             "resource_launcher_failed",
             "resource_failed",
@@ -44394,6 +44459,19 @@ def auto_maintenance_resource_launch(
     schedule_automatic_retry: bool = True,
 ) -> dict[str, Any]:
     settings = auto_maintenance_profile(profile)
+    runtime_envelope = auto_maintenance_runtime_envelope(
+        profile,
+        budget_seconds=budget_seconds,
+    )
+    effective_budget_seconds = float(runtime_envelope["budget_seconds"])
+    effective_budget_argument = (
+        budget_seconds
+        if budget_seconds is not None and float(budget_seconds) > 0
+        else effective_budget_seconds
+    )
+    effective_hard_timeout_seconds = float(
+        runtime_envelope["hard_timeout_seconds"]
+    )
     selected_search_shard_repair_limit = (
         search_shard_repair_limit
         if search_shard_repair_limit is not None
@@ -44476,7 +44554,7 @@ def auto_maintenance_resource_launch(
         repair_indexes=repair_indexes,
         repair_graph=repair_graph,
         lock_timeout_sec=lock_timeout_sec,
-        budget_seconds=budget_seconds,
+        budget_seconds=effective_budget_argument,
         progress_every=progress_every,
     )
     live_tail_fast_path = auto_maintenance_live_tail_resource_route(
@@ -44492,7 +44570,7 @@ def auto_maintenance_resource_launch(
         repair_indexes=repair_indexes,
         repair_graph=repair_graph,
         reason=reason,
-        budget_seconds=budget_seconds,
+        budget_seconds=effective_budget_argument,
     )
     live_tail_child_command = (
         live_tail_fast_path.get("child_command")
@@ -44540,6 +44618,7 @@ def auto_maintenance_resource_launch(
         resource_memory_demand_mib=effective_resource_memory_demand_mib,
         resource_estimate_source=effective_resource_estimate_source,
         resource_estimate_confidence=effective_resource_estimate_confidence,
+        hard_timeout_seconds=effective_hard_timeout_seconds,
     )
     started = time.monotonic()
     generated_at = utc_now()
@@ -44554,7 +44633,7 @@ def auto_maintenance_resource_launch(
             check=False,
             capture_output=True,
             text=True,
-            timeout=int_value(settings.get("timeout_sec"), 0) + 120,
+            timeout=float(runtime_envelope["wrapper_timeout_seconds"]),
         )
         returncode = completed.returncode
         stdout = completed.stdout or ""
@@ -44573,6 +44652,14 @@ def auto_maintenance_resource_launch(
     resource_ok = resource_payload.get("ok")
     execution_ok = execution.get("ok") if isinstance(execution, dict) else None
     execution_returncode = execution.get("returncode") if isinstance(execution, dict) else None
+    execution_timeout_cleanup = (
+        execution.get("timeout_cleanup")
+        if isinstance(execution.get("timeout_cleanup"), dict)
+        else {}
+    )
+    execution_hard_timed_out = bool(
+        execution_returncode == 124 or execution_timeout_cleanup
+    )
     child_payload = (
         child_json_payload_from_stdout_tail(str(execution.get("stdout_tail") or ""), aoa_root=aoa_root)
         if isinstance(execution, dict)
@@ -44610,6 +44697,9 @@ def auto_maintenance_resource_launch(
         diagnostics.extend(f"resource_denied:{item}" for item in denied_reasons)
     elif "resource_launcher_timeout" in diagnostics:
         status = "resource_launcher_timeout"
+    elif execution_hard_timed_out:
+        status = "resource_hard_timeout"
+        diagnostics.append("resource_hard_timeout")
     elif diagnostics:
         status = "resource_launcher_failed"
     elif child_status in {"skipped_lock_held", "deferred_conflicting_lease"}:
@@ -45202,7 +45292,15 @@ def auto_maintenance_resource_launch(
         "fallback_graph_drip": fallback_graph_drip,
         "resource_class": settings.get("resource_class"),
         "resource_kind": settings.get("resource_kind"),
-        "timeout_sec": settings.get("timeout_sec"),
+        "budget_seconds": effective_budget_seconds,
+        "timeout_sec": effective_hard_timeout_seconds,
+        "hard_timeout_grace_seconds": runtime_envelope.get(
+            "hard_timeout_grace_seconds"
+        ),
+        "configured_timeout_ceiling_sec": runtime_envelope.get(
+            "configured_timeout_ceiling_seconds"
+        ),
+        "wrapper_timeout_sec": runtime_envelope.get("wrapper_timeout_seconds"),
         "resource_force": resource_force,
         "resource_binary": resource_binary,
         "resource_memory_demand_floor_mib": resource_memory_demand_floor_mib,
@@ -45225,6 +45323,7 @@ def auto_maintenance_resource_launch(
             "stderr_tail": execution.get("stderr_tail") if isinstance(execution, dict) else None,
             "stdout_tail": execution.get("stdout_tail") if isinstance(execution, dict) else None,
             "systemd": execution.get("systemd") if isinstance(execution, dict) else None,
+            "timeout_cleanup": execution_timeout_cleanup or None,
         },
         "child_result_verified": child_result_verified,
         "child_status": child_status,

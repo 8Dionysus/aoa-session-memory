@@ -50151,6 +50151,85 @@ def test_search_index_partial_update_reports_budget_exhausted_on_sqlite_interrup
     assert result["remaining_sessions"][0]["active_phase"] == "delete_existing_documents"
 
 
+def test_index_maintenance_full_rebuild_receives_remaining_budget(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-07-29T00-00-00-budgeted-rebuild.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-07-29T00:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "budgeted-rebuild",
+                    "cwd": str(repo),
+                },
+            },
+            {
+                "timestamp": "2026-07-29T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Keep automatic full rebuilds bounded.",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "budgeted-rebuild",
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    search_calls: list[dict[str, Any]] = []
+
+    def fake_search_index_sessions(**kwargs: Any) -> dict[str, Any]:
+        search_calls.append(kwargs)
+        return {
+            "ok": False,
+            "selected_count": 1,
+            "processed_count": 0,
+            "remaining_count": 1,
+            "budget_exhausted": True,
+            "document_count": 0,
+            "removed_document_count": 0,
+            "diagnostics": ["search_index_budget_exhausted"],
+        }
+
+    monkeypatch.setattr(module, "search_index_sessions", fake_search_index_sessions)
+
+    module.maintain_indexes(
+        aoa_root=aoa_root,
+        target="all",
+        apply=True,
+        repair_token_accounting=False,
+        repair_graph=False,
+        budget_seconds=30,
+    )
+
+    rebuild_calls = [call for call in search_calls if call.get("rebuild") is True]
+    assert rebuild_calls
+    assert all(call.get("budget_seconds") is not None for call in rebuild_calls)
+    assert all(0 < float(call["budget_seconds"]) <= 30 for call in rebuild_calls)
+
+
 def test_auto_maintenance_profile_runs_session_memory_route_without_mcp_mutation(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
@@ -51536,7 +51615,7 @@ def test_auto_maintenance_resource_launch_scopes_hot_demand_identity(tmp_path: P
 
     assert command[command.index("--class") + 1] == "medium"
     assert command[command.index("--demand-key") + 1] == (
-        "aoa-session-memory:auto-maintenance:hot:auto-maintenance-v2"
+        "aoa-session-memory:auto-maintenance:hot:auto-maintenance-v3"
     )
     assert command[command.index("--demand-owner") + 1] == "aoa-session-memory"
     assert command[command.index("--memory-demand-mib") + 1] == "3400"
@@ -51569,7 +51648,7 @@ def test_auto_maintenance_resource_demand_epoch_tracks_each_bounded_profile_enve
             profile,
         ]
         assert module.auto_maintenance_resource_demand_key(profile, child_command) == (
-            f"aoa-session-memory:auto-maintenance:{profile}:auto-maintenance-v2"
+            f"aoa-session-memory:auto-maintenance:{profile}:auto-maintenance-v3"
         )
 
 
@@ -51635,6 +51714,106 @@ def test_projection_catchup_resource_launch_has_separate_demand_identity(tmp_pat
         "aoa-session-memory:projection-catchup:catchup"
     )
     assert command[command.index("--demand-owner") + 1] == "aoa-session-memory"
+
+
+def test_auto_maintenance_runtime_envelope_bounds_hard_timeout_to_budget_plus_grace() -> None:
+    assert module.auto_maintenance_runtime_envelope("hot") == {
+        "budget_seconds": 600.0,
+        "hard_timeout_grace_seconds": 120.0,
+        "configured_timeout_ceiling_seconds": 900.0,
+        "hard_timeout_seconds": 720,
+        "wrapper_timeout_seconds": 840.0,
+    }
+    assert module.auto_maintenance_runtime_envelope("backlog") == {
+        "budget_seconds": 900.0,
+        "hard_timeout_grace_seconds": 180.0,
+        "configured_timeout_ceiling_seconds": 3600.0,
+        "hard_timeout_seconds": 1080,
+        "wrapper_timeout_seconds": 1200.0,
+    }
+    assert module.auto_maintenance_runtime_envelope(
+        "backlog",
+        budget_seconds=30,
+    )["hard_timeout_seconds"] == 210
+    assert module.auto_maintenance_runtime_envelope(
+        "deep",
+        budget_seconds=10000,
+    )["hard_timeout_seconds"] == module.AUTO_MAINTENANCE_PROFILES["deep"]["timeout_sec"]
+
+
+def test_auto_maintenance_resource_launch_reports_host_hard_timeout_and_retries(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    calls: dict[str, Any] = {}
+
+    def fake_run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls["command"] = command
+        calls["timeout"] = kwargs.get("timeout")
+        stdout = json.dumps(
+            {
+                "schema": "abyss_machine_resource_launch_v1",
+                "generated_at": "2026-07-29T03:00:00Z",
+                "ok": False,
+                "blocked_reasons": [],
+                "denied_reasons": [],
+                "request": {
+                    "class": "medium",
+                    "kind": "indexing",
+                    "timeout_sec": 210,
+                },
+                "execution": {
+                    "ok": False,
+                    "returncode": 124,
+                    "stdout_tail": "",
+                    "stderr_tail": "timeout",
+                    "timeout_cleanup": {
+                        "unit": "bounded-maintenance.service",
+                        "kill": {"returncode": 0},
+                    },
+                },
+            }
+        )
+        return subprocess.CompletedProcess(command, 1, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    payload = module.auto_maintenance_resource_launch(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        profile="backlog",
+        target="all",
+        apply=True,
+        write_report=True,
+        reason="timer_backlog",
+        budget_seconds=30,
+        graph_drip_on_block=False,
+    )
+
+    command = calls["command"]
+    assert command[command.index("--timeout") + 1] == "210"
+    assert calls["timeout"] == 330.0
+    assert command[command.index("--budget-seconds") + 1] == "30"
+    assert payload["ok"] is False
+    assert payload["status"] == "resource_hard_timeout"
+    assert payload["budget_seconds"] == 30.0
+    assert payload["timeout_sec"] == 210.0
+    assert payload["hard_timeout_grace_seconds"] == 180.0
+    assert payload["configured_timeout_ceiling_sec"] == 3600.0
+    assert payload["execution"]["returncode"] == 124
+    assert payload["execution"]["timeout_cleanup"]["kill"]["returncode"] == 0
+    assert payload["automatic_retry"]["status"] == "scheduled"
+    assert payload["automatic_retry"]["retryable"] is True
+    assert payload["recommended_exit_code"] == 1
+    queue = module.auto_maintenance_retry_queue_status(aoa_root)
+    assert queue["items"]["backlog:all"]["last_status"] == "resource_hard_timeout"
+    assert "resource_hard_timeout" in payload["diagnostics"]
+    assert "execution_timeout_cleanup: `True`" in Path(
+        payload["report_markdown"]
+    ).read_text(encoding="utf-8")
 
 
 def test_auto_maintenance_resource_launch_uses_live_tail_fast_path_for_catchup(tmp_path: Path, monkeypatch: Any) -> None:
@@ -51714,7 +51893,7 @@ def test_auto_maintenance_resource_launch_uses_live_tail_fast_path_for_catchup(t
     assert calls["command"][:3] == ["abyss-machine", "resource", "launch"]
     assert "--force" in calls["command"]
     assert calls["command"][calls["command"].index("--demand-key") + 1] == (
-        "aoa-session-memory:auto-maintenance:catchup:index-maintenance-v2"
+        "aoa-session-memory:auto-maintenance:catchup:index-maintenance-v3"
     )
     assert calls["command"][calls["command"].index("--demand-owner") + 1] == "aoa-session-memory"
     assert child[:4] == ["python3", str(Path(module.__file__).resolve()), "index-maintenance", session_label]

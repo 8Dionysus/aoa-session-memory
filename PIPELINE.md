@@ -342,6 +342,16 @@ remain visible. Queue and status packets expose the policy version, order,
 deadlines, breaches, fairness reservation, and selected item. These scheduling
 signals do not make a projection current.
 
+The host launcher timeout is a hard runtime envelope, not an alternate work
+budget. For automatic profiles it is the smaller of the profile's absolute
+timeout ceiling and the effective cooperative budget plus a bounded grace
+period. Full search and atlas rebuild paths receive the same remaining
+cooperative budget as incremental work; rebuilds publish from temporary state
+only after completion. A host-enforced termination is reported as
+`resource_hard_timeout`, never as semantic completion, and remains eligible for
+the persistent retry route. The outer wrapper waits only a bounded cleanup
+margin beyond that hard envelope.
+
 Observed query demand is a bounded scheduling input, not evidence authority.
 An automatic scoped profile may prepend only the configured bounded set of
 demanded archive sessions that fell outside its normal date or count window.
