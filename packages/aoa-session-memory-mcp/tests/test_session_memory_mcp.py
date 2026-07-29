@@ -905,6 +905,56 @@ LITERAL_QUERY_PLAN = {
     "authority_boundary": "This planner chooses a cheap first route; raw transcript and segment indexes remain evidence authority.",
 }
 
+MEMORY_QUERY_PLAN = {
+    "schema_version": 1,
+    "artifact_type": "session_memory_query_plan",
+    "ok": True,
+    "mutates": False,
+    "truth_status": "query_plan_is_route_advice_not_evidence_truth",
+    "query": "Ghostty сейчас установлен и какая сейчас версия?",
+    "query_intent": {
+        "primary": "current_state",
+        "claim_shape": {
+            "kind": "current_state",
+            "negative_polarity_detected": False,
+            "retrieval_candidates_are_claims": False,
+        },
+    },
+    "primary_route": {
+        "route_id": "external_current_owner_handoff",
+        "authority": "external_current_owner_required_memory_navigation_only",
+        "readiness": "external_adapter_required",
+        "command": "",
+        "handoff": {
+            "kind": "current_owner_or_runtime_verification",
+            "memory_role": "historical_navigation_only",
+            "executable": False,
+            "mutates": False,
+        },
+    },
+    "answer_admission": {
+        "admitted": False,
+        "status": "requires_current_owner_evidence",
+        "claim_shape": "current_state",
+        "insufficiency_reason": "session memory cannot prove current external owner or runtime state",
+    },
+    "maintenance_handoff": {
+        "needed": False,
+        "mutates": False,
+        "command": "",
+    },
+    "evidence_envelope": {
+        "schema": "aoa_session_memory_evidence_packet_v1",
+        "truth_status": "navigation_and_admission_packet_not_source_truth",
+        "answer_admission": {
+            "admitted": False,
+            "status": "requires_current_owner_evidence",
+        },
+        "insufficiency_reason": "session memory cannot prove current external owner or runtime state",
+    },
+    "authority_boundary": "The router chooses navigation routes. Accepted claims still require resolvable evidence refs.",
+}
+
 
 def literal_query_plan_fixture(query: str) -> dict[str, Any]:
     payload = json.loads(json.dumps(LITERAL_QUERY_PLAN))
@@ -1904,6 +1954,9 @@ class FakeRunner:
         elif command == "literal-query-plan":
             query = args[args.index("--query") + 1] if "--query" in args else ""
             payload = literal_query_plan_fixture(query)
+        elif command == "memory-query-plan":
+            payload = json.loads(json.dumps(MEMORY_QUERY_PLAN))
+            payload["query"] = args[args.index("--query") + 1] if "--query" in args else ""
         elif command in {"agent-responses", "agent-closeouts", "agent-progress-updates"}:
             payload = AGENT_RESPONSES
         elif command in {"agent-reasoning-windows", "answer-neighborhood"}:
@@ -3054,6 +3107,50 @@ def test_literal_query_plan_routes_to_allowlisted_archive_command(tmp_path: Path
     assert not any(call[0] == "search" for call in runner.calls)
 
 
+def test_memory_query_plan_transports_producer_claim_admission_without_reconstruction(
+    tmp_path: Path,
+) -> None:
+    runner = FakeRunner()
+    state = state_with_fixture(tmp_path, runner)
+
+    plan = state.session_memory_query_plan(
+        "Ghostty сейчас установлен и какая сейчас версия?",
+        kind="mcp_service",
+        filters={
+            "session": "session-1",
+            "episode": "task-0001",
+            "time_from": "2026-05-26T10:00:00Z",
+            "time_to": "2026-05-26T11:00:00Z",
+            "max_shards": 3,
+            "query_timeout_ms": 500,
+            "unsupported": "must-not-reach-producer",
+        },
+    )
+
+    assert plan["artifact_type"] == "session_memory_query_plan"
+    assert plan["kind"] == "mcp"
+    assert plan["requested_kind"] == "mcp_service"
+    assert plan["query_intent"]["primary"] == "current_state"
+    assert plan["primary_route"]["route_id"] == "external_current_owner_handoff"
+    assert plan["answer_admission"]["admitted"] is False
+    assert plan["answer_admission"]["status"] == "requires_current_owner_evidence"
+    assert plan["maintenance_handoff"]["mutates"] is False
+    assert plan["evidence_envelope"]["schema"] == "aoa_session_memory_evidence_packet_v1"
+    assert "ignored unsupported filter 'unsupported'" in plan["diagnostics"]
+    plan_calls = [call for call in runner.calls if call[0] == "memory-query-plan"]
+    assert len(plan_calls) == 1
+    args = plan_calls[0][1]
+    assert args[args.index("--kind") + 1] == "mcp"
+    assert args[args.index("--session") + 1] == "session-1"
+    assert args[args.index("--task-episode-id") + 1] == "task-0001"
+    assert args[args.index("--time-from") + 1] == "2026-05-26T10:00:00Z"
+    assert args[args.index("--time-to") + 1] == "2026-05-26T11:00:00Z"
+    assert args[args.index("--max-shards") + 1] == "3"
+    assert args[args.index("--query-timeout-ms") + 1] == "500"
+    assert "unsupported" not in args
+    assert not any(call[0] == "search" for call in runner.calls)
+
+
 def test_retrieve_unsupported_recipe_returns_structured_diagnostic(tmp_path: Path) -> None:
     runner = FakeRunner()
     state = state_with_fixture(tmp_path, runner)
@@ -3720,6 +3817,14 @@ def test_stdio_route_count_summary_allows_empty_route_results() -> None:
         {"ok": True, "window_count": 0},
         {"ok": True, "entity_count": 1},
         {"primary_route": {"route_id": "entity_usage_chain"}, "cost_profile": {"structured_first": True}},
+        {
+            "query_intent": {"primary": "current_state"},
+            "primary_route": {"route_id": "external_current_owner_handoff"},
+            "answer_admission": {
+                "admitted": False,
+                "insufficiency_reason": "session memory cannot prove current external owner or runtime state",
+            },
+        },
         {"quality": {"usage_event_count": 2, "graph_node_count": 3, "raw_or_segment_ref_present": True}},
         {
             "counts": {"usage_event_count": 2, "chain_with_result_or_consequence_count": 2},
@@ -3774,6 +3879,12 @@ def test_stdio_route_count_summary_allows_empty_route_results() -> None:
     assert summary["answer_neighborhood_count"] == 0
     assert summary["literal_plan_primary_route"] == "entity_usage_chain"
     assert summary["literal_plan_structured_first"] is True
+    assert summary["memory_plan_primary_intent"] == "current_state"
+    assert summary["memory_plan_primary_route"] == "external_current_owner_handoff"
+    assert summary["memory_plan_answer_admitted"] is False
+    assert summary["memory_plan_insufficiency_reason"] == (
+        "session memory cannot prove current external owner or runtime state"
+    )
     assert summary["entity_dossier_usage_count"] == 2
     assert summary["entity_dossier_graph_node_count"] == 3
     assert summary["entity_dossier_raw_or_segment_ref_present"] is True
@@ -3811,6 +3922,7 @@ def test_validator_requires_literal_and_graph_mcp_tools() -> None:
     validator = load_validator_module()
 
     assert "aoa_session_literal_query_plan" in validator.REQUIRED_STDIO_SMOKE_TOOLS
+    assert "aoa_session_memory_query_plan" in validator.REQUIRED_STDIO_SMOKE_TOOLS
     assert "aoa_session_entity_dossier" in validator.REQUIRED_STDIO_SMOKE_TOOLS
     assert "aoa_session_entity_usage_chain" in validator.REQUIRED_STDIO_SMOKE_TOOLS
     assert "aoa_session_route_rollup_query" in validator.REQUIRED_STDIO_SMOKE_TOOLS
@@ -4890,6 +5002,7 @@ def test_published_tool_schema_allows_route_only_search_and_usage_neighborhood(t
     query_schema = tools["aoa_session_search"].inputSchema["properties"]["query"]
     assert query_schema["default"] == ""
     assert "aoa_session_literal_query_plan" in tools
+    assert "aoa_session_memory_query_plan" in tools
     assert "aoa_session_agent_responses" in tools
     assert "aoa_session_agent_closeouts" in tools
     assert "aoa_session_agent_progress_updates" in tools
@@ -4933,6 +5046,7 @@ def test_published_tool_schema_allows_route_only_search_and_usage_neighborhood(t
     assert tools["aoa_session_entity_dossier"].inputSchema["properties"]["usage_limit"]["default"] == 4
     assert tools["aoa_session_entity_dossier"].inputSchema["properties"]["graph_edge_limit"]["default"] == 24
     literal_description = tools["aoa_session_literal_query_plan"].description or ""
+    memory_plan_description = tools["aoa_session_memory_query_plan"].description or ""
     dossier_description = tools["aoa_session_entity_dossier"].description or ""
     usage_chain_description = tools["aoa_session_entity_usage_chain"].description or ""
     live_scenario_description = tools["aoa_session_live_scenario_audit"].description or ""
@@ -4942,6 +5056,7 @@ def test_published_tool_schema_allows_route_only_search_and_usage_neighborhood(t
     graph_description = tools["aoa_session_graph_neighborhood"].description or ""
     bridge_description = tools["aoa_session_graph_bridge"].description or ""
     assert "literal skill/MCP/hook/tool/API/path/query" in literal_description
+    assert "producer-owned bounded route, admission, freshness" in memory_plan_description
     assert "one compact registry, usage, consequence" in dossier_description
     assert "usage-to-consequence chains" in usage_chain_description
     assert "entity registry lookup status probes" in live_scenario_description

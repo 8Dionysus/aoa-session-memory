@@ -66426,6 +66426,10 @@ def test_memory_query_plan_current_state_requires_stronger_owner_runtime_evidenc
         aoa_root=aoa_root,
         query="Ghostty сейчас установлен и какая сейчас версия?",
     )
+    current_negative = module.memory_query_plan(
+        aoa_root=aoa_root,
+        query="Ghostty сейчас не установлен?",
+    )
     historical = module.memory_query_plan(
         aoa_root=aoa_root,
         query="Какая версия Ghostty была зафиксирована в той сессии?",
@@ -66453,6 +66457,23 @@ def test_memory_query_plan_current_state_requires_stronger_owner_runtime_evidenc
         "requires_current_owner_evidence"
     )
     assert current["answer_admission"]["required_next_route_packet"] == handoff
+    assert current_negative["query_intent"]["primary"] == "current_state"
+    assert current_negative["query_intent"]["claim_shape"]["kind"] == (
+        "current_state"
+    )
+    assert current_negative["query_intent"]["claim_shape"]["polarity"] == (
+        "negative"
+    )
+    assert current_negative["query_intent"]["claim_shape"][
+        "negative_polarity_detected"
+    ] is True
+    assert current_negative["primary_route"]["route_id"] == (
+        "external_current_owner_handoff"
+    )
+    assert current_negative["answer_admission"]["admitted"] is False
+    assert current_negative["answer_admission"]["status"] == (
+        "requires_current_owner_evidence"
+    )
     envelope = current["evidence_envelope"]
     assert envelope["schema"] == "aoa_session_memory_evidence_packet_v1"
     assert envelope["selected_route"]["route_id"] == (

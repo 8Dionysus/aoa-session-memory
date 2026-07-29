@@ -5003,6 +5003,90 @@ class AoASessionMemoryMCPState:
         payload.setdefault("authority_boundary", self.authority_boundary())
         return payload
 
+    def session_memory_query_plan(
+        self,
+        query: str = "",
+        kind: str = "auto",
+        filters: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        filters, diagnostics = _normalize_search_filters(filters or {})
+        text = str(query or "").strip()
+        if text:
+            text = _ensure_short_text(text, "query")
+        route_kind = _coerce_trace_kind(kind, error_label="memory query kind")
+        supported_filters = {
+            "session",
+            "doc_type",
+            "route_layer",
+            "route_signal",
+            "agent_event",
+            "usage_role",
+            "task_episode_id",
+            "episode",
+            "date_from",
+            "date_to",
+            "time_from",
+            "time_to",
+            "max_shards",
+            "query_timeout_ms",
+            REQUESTED_AGENT_EVENT_FILTER,
+        }
+        for key in sorted(set(filters) - supported_filters):
+            diagnostics.append(f"ignored unsupported filter {key!r}")
+        args = ["--query", text, "--kind", route_kind]
+        for key, flag in (
+            ("session", "--session"),
+            ("doc_type", "--doc-type"),
+            ("route_layer", "--route-layer"),
+            ("route_signal", "--route-signal"),
+            ("agent_event", "--agent-event"),
+            ("usage_role", "--usage-role"),
+            ("task_episode_id", "--task-episode-id"),
+            ("date_from", "--date-from"),
+            ("date_to", "--date-to"),
+            ("time_from", "--time-from"),
+            ("time_to", "--time-to"),
+        ):
+            value = filters.get(key)
+            if value in (None, ""):
+                continue
+            if key == "doc_type" and str(value) not in ALLOWED_SEARCH_DOC_TYPES:
+                diagnostics.append(f"ignored unsupported doc_type={value!r}")
+                continue
+            args.extend([flag, _safe_selector(str(value), key)])
+        episode = filters.get("episode")
+        if episode not in (None, "") and filters.get("task_episode_id") in (None, ""):
+            args.extend(["--task-episode-id", _safe_selector(str(episode), "episode")])
+        max_shards = _coerce_bounded_int(
+            filters.get("max_shards"),
+            DEFAULT_SEARCH_MAX_SHARDS,
+            1,
+            DEFAULT_SEARCH_MAX_SHARDS,
+        )
+        args.extend(["--max-shards", str(max_shards)])
+        query_timeout_ms = filters.get("query_timeout_ms")
+        if query_timeout_ms not in (None, ""):
+            args.extend(
+                [
+                    "--query-timeout-ms",
+                    str(_coerce_bounded_int(query_timeout_ms, 250, 0, 300_000)),
+                ]
+            )
+        payload = self._archive_command(
+            "memory-query-plan",
+            args,
+            timeout_seconds=max(self.timeout_seconds, SEARCH_TIMEOUT_SECONDS),
+        )
+        if diagnostics:
+            payload.setdefault("diagnostics", []).extend(diagnostics)
+        _annotate_trace_kind_payload(
+            payload,
+            requested_kind=kind,
+            normalized_kind=route_kind,
+        )
+        payload.setdefault("authority_boundary", self.authority_boundary())
+        return payload
+
     def _agent_route_filter_search(
         self,
         *,

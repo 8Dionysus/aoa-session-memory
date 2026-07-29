@@ -62,6 +62,7 @@ Tools:
   current proof.
 - `aoa_session_search(query="", filters, limit)`; route-only search is valid when filters such as `route_signal` and `doc_type` are supplied. `layer` is accepted as an input alias for `route_layer`, and explicit `use_shards`/`max_shards` filter controls are honored for bounded fan-out instead of being reported as unsupported filters. MCP returns compact hits, `mcp_route_plan`, and a provider freshness summary by default; follow `full_search_route` for the full archive CLI packet. `date_from`/`date_to` filter indexed search document/session dates; hook receipt timestamp checks should follow the returned `hook_receipts_route`.
 - `aoa_session_literal_query_plan(query="", kind="auto", filters)`; plans the cheapest reliable route before broad literal raw-text search. It prefers `entity_usage_chain` for typed operational anchors, entity registry/inventory for broad class queries such as skills/MCP/hooks/tools, rehydrate plus session-scoped search for exact session ids, structured filters for exact route reads, scoped full-text shards when available, and monolith fallback only as a bounded recall safety net. The packet exposes `classifications`, `cost_profile`, `fallback_plan`, and `next_expansion_command` so agents can see why the route was selected and where to expand next.
+- `aoa_session_memory_query_plan(query="", kind="auto", filters)`; transports the producer-owned claim-shape classifier and bounded retrieval plan for natural-language memory questions. The packet preserves the selected route, answer admission, generation and freshness state, insufficiency reason, and any non-executable owner or maintenance handoff without letting MCP reconstruct those meanings, admit a claim, or execute the handoff. Exact and typed questions retain the producer's literal subplan.
 - `aoa_session_agent_responses(query, session, agent_events, episode, closeout_final, verification_state, failure_state, limit)`
 - `aoa_session_agent_closeouts(query, session, episode, limit)`
 - `aoa_session_agent_progress_updates(query, session, episode, limit)`
@@ -295,6 +296,13 @@ audit route outside the MCP status path.
 When installed as a package, the direct server entry point is
 `aoa-session-memory-mcp-server`; `aoa-session-memory-mcp` remains the CLI entry
 point.
+
+For the same producer-owned common planner through the package CLI:
+
+```bash
+aoa-session-memory-mcp memory-query-plan \
+  "Ghostty сейчас установлен и какая сейчас версия?"
+```
 
 Both entrypoints accept `--workspace-root`, `--aoa-root`, and `--script-path`.
 Without explicit arguments or matching environment variables, discovery checks

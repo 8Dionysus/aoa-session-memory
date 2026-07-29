@@ -29,6 +29,7 @@ REQUIRED_STDIO_SMOKE_TOOLS = {
     "aoa_session_memory_status",
     "aoa_session_search",
     "aoa_session_literal_query_plan",
+    "aoa_session_memory_query_plan",
     "aoa_session_agent_responses",
     "aoa_session_agent_closeouts",
     "aoa_session_agent_progress_updates",
@@ -718,6 +719,7 @@ def _stdio_route_count_summary(
     neighborhood: dict,
     registry: dict,
     literal_plan: dict,
+    memory_plan: dict,
     entity_dossier: dict,
     usage_chain: dict,
     usage_alias: dict,
@@ -774,6 +776,18 @@ def _stdio_route_count_summary(
         else None,
         "literal_plan_structured_first": literal_plan.get("cost_profile", {}).get("structured_first")
         if isinstance(literal_plan.get("cost_profile"), dict)
+        else None,
+        "memory_plan_primary_intent": memory_plan.get("query_intent", {}).get("primary")
+        if isinstance(memory_plan.get("query_intent"), dict)
+        else None,
+        "memory_plan_primary_route": memory_plan.get("primary_route", {}).get("route_id")
+        if isinstance(memory_plan.get("primary_route"), dict)
+        else None,
+        "memory_plan_answer_admitted": memory_plan.get("answer_admission", {}).get("admitted")
+        if isinstance(memory_plan.get("answer_admission"), dict)
+        else None,
+        "memory_plan_insufficiency_reason": memory_plan.get("answer_admission", {}).get("insufficiency_reason")
+        if isinstance(memory_plan.get("answer_admission"), dict)
         else None,
         "entity_dossier_usage_count": entity_dossier.get("quality", {}).get("usage_event_count")
         if isinstance(entity_dossier.get("quality"), dict)
@@ -942,6 +956,14 @@ async def _stdio_tool_smoke(state: AoASessionMemoryMCPState, session: str) -> di
                 },
                 timeout_seconds=60,
             )
+            memory_plan = await call_json(
+                "aoa_session_memory_query_plan",
+                {
+                    "query": "Ghostty сейчас установлен и какая сейчас версия?",
+                    "filters": {"unsupported_validator_probe": "ignored"},
+                },
+                timeout_seconds=60,
+            )
             responses = await call_json("aoa_session_agent_responses", {"session": session, "limit": 2})
             closeouts = await call_json("aoa_session_agent_closeouts", {"session": session, "limit": 2})
             progress = await call_json("aoa_session_agent_progress_updates", {"session": session, "limit": 2})
@@ -1083,6 +1105,18 @@ async def _stdio_tool_smoke(state: AoASessionMemoryMCPState, session: str) -> di
         raise SystemExit(f"stdio MCP literal query kind alias contract failed: {literal_plan}")
     if literal_plan.get("primary_route", {}).get("route_id") != "entity_usage_chain":
         raise SystemExit(f"stdio MCP literal query plan did not choose entity usage chain first: {literal_plan}")
+    if (
+        memory_plan.get("artifact_type") != "session_memory_query_plan"
+        or memory_plan.get("query_intent", {}).get("primary") != "current_state"
+        or memory_plan.get("primary_route", {}).get("route_id") != "external_current_owner_handoff"
+        or memory_plan.get("answer_admission", {}).get("admitted") is not False
+        or memory_plan.get("answer_admission", {}).get("status") != "requires_current_owner_evidence"
+    ):
+        raise SystemExit(f"stdio MCP memory query plan current-state admission contract failed: {memory_plan}")
+    if memory_plan.get("maintenance_handoff", {}).get("mutates") is not False:
+        raise SystemExit(f"stdio MCP memory query plan exposed mutating maintenance: {memory_plan}")
+    if "ignored unsupported filter 'unsupported_validator_probe'" not in memory_plan.get("diagnostics", []):
+        raise SystemExit(f"stdio MCP memory query plan did not expose unsupported filter diagnostic: {memory_plan}")
     if usage_chain.get("artifact_type") != "session_memory_entity_usage_chain":
         raise SystemExit(f"stdio MCP usage-chain returned invalid payload: {usage_chain.get('diagnostics')}")
     if usage_chain.get("kind") != "mcp" or usage_chain.get("requested_kind") != "mcp_service":
@@ -1205,6 +1239,7 @@ async def _stdio_tool_smoke(state: AoASessionMemoryMCPState, session: str) -> di
         neighborhood,
         registry,
         literal_plan,
+        memory_plan,
         entity_dossier,
         usage_chain,
         usage_alias,
@@ -1306,6 +1341,29 @@ async def _configured_transport_smoke(state: AoASessionMemoryMCPState) -> dict:
                 or literal_plan_payload.get("primary_route", {}).get("route_id") != "entity_usage_chain"
             ):
                 raise SystemExit(f"configured Codex MCP literal query plan contract failed: {literal_plan_payload}")
+
+            memory_plan_result = await mcp_session.call_tool(
+                "aoa_session_memory_query_plan",
+                {
+                    "query": "Ghostty сейчас установлен и какая сейчас версия?",
+                    "filters": {"unsupported_validator_probe": "ignored"},
+                },
+                read_timeout_seconds=timedelta(seconds=60),
+            )
+            if memory_plan_result.isError or not memory_plan_result.content:
+                raise SystemExit(f"configured Codex MCP memory query plan call failed: {memory_plan_result.content}")
+            memory_plan_payload = json.loads(memory_plan_result.content[0].text)
+            if (
+                not isinstance(memory_plan_payload, dict)
+                or memory_plan_payload.get("artifact_type") != "session_memory_query_plan"
+                or memory_plan_payload.get("query_intent", {}).get("primary") != "current_state"
+                or memory_plan_payload.get("primary_route", {}).get("route_id") != "external_current_owner_handoff"
+                or memory_plan_payload.get("answer_admission", {}).get("admitted") is not False
+                or memory_plan_payload.get("answer_admission", {}).get("status") != "requires_current_owner_evidence"
+                or memory_plan_payload.get("maintenance_handoff", {}).get("mutates") is not False
+                or "ignored unsupported filter 'unsupported_validator_probe'" not in memory_plan_payload.get("diagnostics", [])
+            ):
+                raise SystemExit(f"configured Codex MCP memory query plan contract failed: {memory_plan_payload}")
 
             usage_chain_result = await mcp_session.call_tool(
                 "aoa_session_entity_usage_chain",
@@ -1446,6 +1504,15 @@ async def _configured_transport_smoke(state: AoASessionMemoryMCPState) -> dict:
         else None,
         "literal_plan_structured_first": literal_plan_payload.get("cost_profile", {}).get("structured_first")
         if isinstance(literal_plan_payload, dict) and isinstance(literal_plan_payload.get("cost_profile"), dict)
+        else None,
+        "memory_plan_primary_intent": memory_plan_payload.get("query_intent", {}).get("primary")
+        if isinstance(memory_plan_payload, dict) and isinstance(memory_plan_payload.get("query_intent"), dict)
+        else None,
+        "memory_plan_primary_route": memory_plan_payload.get("primary_route", {}).get("route_id")
+        if isinstance(memory_plan_payload, dict) and isinstance(memory_plan_payload.get("primary_route"), dict)
+        else None,
+        "memory_plan_answer_admitted": memory_plan_payload.get("answer_admission", {}).get("admitted")
+        if isinstance(memory_plan_payload, dict) and isinstance(memory_plan_payload.get("answer_admission"), dict)
         else None,
         "usage_chain_usage_count": usage_chain_counts.get("usage_event_count")
         if isinstance(usage_chain_counts, dict)
@@ -1655,6 +1722,10 @@ def main(argv: list[str] | None = None) -> None:
                 "stdio_answer_neighborhood_count": stdio_smoke["answer_neighborhood_count"],
                 "stdio_literal_plan_primary_route": stdio_smoke["literal_plan_primary_route"],
                 "stdio_literal_plan_structured_first": stdio_smoke["literal_plan_structured_first"],
+                "stdio_memory_plan_primary_intent": stdio_smoke["memory_plan_primary_intent"],
+                "stdio_memory_plan_primary_route": stdio_smoke["memory_plan_primary_route"],
+                "stdio_memory_plan_answer_admitted": stdio_smoke["memory_plan_answer_admitted"],
+                "stdio_memory_plan_insufficiency_reason": stdio_smoke["memory_plan_insufficiency_reason"],
                 "stdio_entity_dossier_usage_count": stdio_smoke["entity_dossier_usage_count"],
                 "stdio_entity_dossier_graph_node_count": stdio_smoke["entity_dossier_graph_node_count"],
                 "stdio_entity_dossier_raw_or_segment_ref_present": stdio_smoke["entity_dossier_raw_or_segment_ref_present"],

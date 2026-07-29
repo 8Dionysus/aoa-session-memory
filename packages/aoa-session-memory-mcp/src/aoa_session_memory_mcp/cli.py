@@ -49,6 +49,11 @@ def main() -> None:
     literal_plan.add_argument("--kind", default="auto")
     literal_plan.add_argument("--filter", action="append")
 
+    memory_plan = sub.add_parser("memory-query-plan")
+    memory_plan.add_argument("query", nargs="?", default="")
+    memory_plan.add_argument("--kind", default="auto")
+    memory_plan.add_argument("--filter", action="append")
+
     agent_responses = sub.add_parser("agent-responses")
     agent_responses.add_argument("query", nargs="?", default="")
     agent_responses.add_argument("--session", default="")
@@ -355,6 +360,8 @@ def main() -> None:
         _print(state.session_search(args.query, filters=_parse_filter(args.filter), limit=args.limit))
     elif args.command == "literal-query-plan":
         _print(state.session_literal_query_plan(args.query, kind=args.kind, filters=_parse_filter(args.filter)))
+    elif args.command == "memory-query-plan":
+        _print(state.session_memory_query_plan(args.query, kind=args.kind, filters=_parse_filter(args.filter)))
     elif args.command == "agent-responses":
         _print(
             state.session_agent_responses(

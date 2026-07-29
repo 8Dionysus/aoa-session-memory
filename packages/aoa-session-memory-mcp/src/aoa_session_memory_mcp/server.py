@@ -110,6 +110,11 @@ def build_server(
         return current_state().session_literal_query_plan(query=query, kind=kind, filters=filters)
 
     @read_only_tool
+    def aoa_session_memory_query_plan(query: str = "", kind: str = "auto", filters: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Classify a memory claim shape and return the producer-owned bounded route, admission, freshness, and owner-handoff packet."""
+        return current_state().session_memory_query_plan(query=query, kind=kind, filters=filters)
+
+    @read_only_tool
     def aoa_session_agent_responses(
         query: str = "",
         session: str = "",

@@ -33,6 +33,11 @@ the snapshot's internal source fingerprint, but it must not synthesize a
 candidate, choose between colliding definitions, promote an incompatible
 snapshot beyond `stale-readable` navigation, or turn a compatible persisted
 identity into a current repository/installation/registration/runtime claim.
+Memory-query-plan packets likewise transport producer-owned intent, claim
+shape, ordered routes, answer admission, generation/freshness state,
+insufficiency, and handoffs. MCP does not reinterpret those fields, admit the
+claim, execute a current-owner adapter, or run a mutating maintenance command
+named by the packet.
 
 Route hits are candidate evidence. Search results, atlas entries, diagnostics,
 and MCP responses are not reviewed truth.
@@ -45,6 +50,9 @@ and MCP responses are not reviewed truth.
   promotion commands.
 - No durable memory writeback.
 - No proof verdict computation.
+- No MCP-local claim-shape classification or answer admission.
+- No execution of owner/runtime or maintenance handoffs returned by a query
+  plan.
 - No entity canonicalization or collision resolution.
 - No raw transcript bulk exposure by default.
 - No treating MCP output as stronger than `.aoa` raw refs or reviewed owner
