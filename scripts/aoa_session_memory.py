@@ -109119,8 +109119,23 @@ def graph_compact_refs_map(refs: Any) -> dict[str, str]:
     if not isinstance(refs, dict):
         return {}
     compact: dict[str, str] = {}
-    for key in ("session", "segment", "raw", "raw_block"):
-        value = graph_compact_ref_value(refs.get(key))
+    aliases = {
+        "session": ("session",),
+        "segment": ("segment", "segment_ref"),
+        "raw": ("raw", "raw_ref"),
+        "raw_block": ("raw_block",),
+    }
+    for key, source_keys in aliases.items():
+        value = graph_compact_ref_value(
+            next(
+                (
+                    refs.get(source_key)
+                    for source_key in source_keys
+                    if refs.get(source_key)
+                ),
+                "",
+            )
+        )
         if value:
             if key == "segment" and "#" in value:
                 value = value.split("#", 1)[0]

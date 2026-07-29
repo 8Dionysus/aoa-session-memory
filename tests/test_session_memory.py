@@ -509,6 +509,55 @@ def test_graph_compact_node_hydrates_refs_from_evidence_refs() -> None:
     assert compact["evidence_refs"][0]["refs"]["segment"] == "001.md#event-000001"
 
 
+def test_graph_contribution_compaction_preserves_goal_event_ref_aliases() -> None:
+    edge = module.graph_relation_contract_payload(
+        {
+            "source": "goal_lifecycle:session:goal_0001",
+            "target": "event:session:001:000001",
+            "type": "goal_lifecycle_has_event",
+            "evidence_refs": [
+                {
+                    "session_id": "session",
+                    "event_id": "000001",
+                    "refs": {
+                        "raw_ref": "raw:line:1",
+                        "segment_ref": (
+                            "/workspace/.aoa/sessions/session/"
+                            "segments/001__initial-to-latest.md#event-000001"
+                        ),
+                        "segment_index": (
+                            "/workspace/.aoa/sessions/session/"
+                            "segments/001__initial-to-latest.index.json"
+                        ),
+                    },
+                }
+            ],
+        }
+    )
+
+    compact = module.graph_compact_contribution_payload(
+        edge,
+        kind="edge",
+    )
+    compact_refs = compact["evidence_refs"][0]["refs"]
+    rehydrated = module.graph_relation_contract_payload(
+        {
+            **edge,
+            "evidence_refs": compact["evidence_refs"],
+        }
+    )
+
+    assert compact_refs == {
+        "raw": "raw:line:1",
+        "segment": (
+            "sessions/session/segments/001__initial-to-latest.md"
+        ),
+    }
+    assert "segment_index" not in compact_refs
+    assert rehydrated["evidence_status"] == "present"
+    assert rehydrated["relation_state"] == "observed_projection"
+
+
 def test_graph_aggregate_payload_compaction_sample_detects_legacy_payload(tmp_path: Path) -> None:
     db_path = tmp_path / "graph.sqlite3"
     conn = sqlite3.connect(db_path)
