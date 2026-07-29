@@ -1990,6 +1990,57 @@ def _compact_episode_search_relation_entry(value: Any) -> dict[str, Any]:
     return compact
 
 
+def _compact_episode_search_interval_contents(
+    value: Any,
+) -> dict[str, Any]:
+    """Preserve interval-read admission state without copying event bodies."""
+    if not isinstance(value, dict):
+        return {}
+    compact = _compact_usage_mapping(
+        value,
+        allowed_keys=(
+            "status",
+            "from_raw_ref",
+            "to_raw_ref",
+            "readable_event_count",
+            "returned_event_count",
+            "omitted_event_count",
+            "event_limit",
+            "truncated",
+            "retention_truncated",
+            "output_truncated",
+            "source_read_truncated",
+            "authority",
+        ),
+        text_limit=320,
+    )
+    event_raw_refs = value.get("event_raw_refs")
+    if isinstance(event_raw_refs, list):
+        selected_refs = [
+            str(ref)
+            for ref in event_raw_refs[
+                :EPISODE_SEARCH_SUPPORT_LIMIT
+            ]
+            if str(ref).startswith("raw:line:")
+        ]
+        compact["event_raw_refs"] = selected_refs
+        compact["event_raw_ref_count"] = len(event_raw_refs)
+        omitted = max(0, len(event_raw_refs) - len(selected_refs))
+        if omitted:
+            compact["omitted_event_raw_ref_count"] = omitted
+    evidence_time_scope = _compact_usage_mapping(
+        value.get("evidence_time_scope"),
+        text_limit=320,
+    )
+    if evidence_time_scope:
+        compact["evidence_time_scope"] = (
+            _without_omitted_field_counts(evidence_time_scope)
+        )
+    compact["event_bodies_included"] = False
+    compact["event_body_route"] = "full_evidence_route"
+    return _without_omitted_field_counts(compact)
+
+
 def _compact_episode_search_relation(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
@@ -2003,11 +2054,13 @@ def _compact_episode_search_relation(value: Any) -> dict[str, Any]:
             "kind",
             "relation_basis",
             "answer_scope",
+            "interval_contents_status",
             "authority",
             "policy",
             "policy_version",
             "ambiguous",
             "ambiguous_within_episode",
+            "ambiguity_scope",
             "qualified_count",
             "qualified_candidate_count",
             "qualified_pair_count",
@@ -2060,6 +2113,11 @@ def _compact_episode_search_relation(value: Any) -> dict[str, Any]:
                 compact_chain[key] = entry
         if compact_chain:
             compact["chain"] = _without_omitted_field_counts(compact_chain)
+    interval_contents = _compact_episode_search_interval_contents(
+        value.get("interval_contents")
+    )
+    if interval_contents:
+        compact["interval_contents"] = interval_contents
     numeric_rows = value.get("numeric_rows")
     if isinstance(numeric_rows, list):
         selected_rows = [

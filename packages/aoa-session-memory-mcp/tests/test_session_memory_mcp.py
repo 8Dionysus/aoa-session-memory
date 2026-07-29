@@ -3509,6 +3509,114 @@ def test_episode_search_compaction_selects_the_admitted_relation_candidate() -> 
     assert len(json.dumps(compact)) < 30_000
 
 
+def test_compact_episode_search_preserves_temporal_interval_read_state() -> None:
+    from aoa_session_memory_mcp import core as core_module
+
+    relation = {
+        "active": True,
+        "accepted": True,
+        "status": "ordered_span_found",
+        "answer_scope": "interval_contents",
+        "interval_contents_status": (
+            "bounded_interval_contents_truncated"
+        ),
+        "left": {
+            "line": 22644,
+            "refs": {"raw": "raw:line:22644"},
+        },
+        "right": {
+            "line": 22731,
+            "refs": {"raw": "raw:line:22731"},
+        },
+        "interval_contents": {
+            "status": "bounded_interval_contents_truncated",
+            "from_raw_ref": "raw:line:22644",
+            "to_raw_ref": "raw:line:22731",
+            "readable_event_count": 46,
+            "returned_event_count": 46,
+            "omitted_event_count": 0,
+            "event_limit": 48,
+            "truncated": True,
+            "retention_truncated": False,
+            "output_truncated": False,
+            "source_read_truncated": True,
+            "event_raw_refs": [
+                f"raw:line:{line}"
+                for line in range(22645, 22691)
+            ],
+            "events": [
+                {
+                    "line": line,
+                    "text": "private bounded event body",
+                    "refs": {"raw": f"raw:line:{line}"},
+                }
+                for line in range(22645, 22691)
+            ],
+            "evidence_time_scope": {
+                "status": "not_requested",
+                "timestamp_coverage_complete": True,
+            },
+            "authority": "raw_session_transcript",
+        },
+    }
+
+    compact = core_module._compact_episode_search_relation(relation)
+
+    assert compact["interval_contents_status"] == (
+        "bounded_interval_contents_truncated"
+    )
+    contents = compact["interval_contents"]
+    assert contents["status"] == (
+        "bounded_interval_contents_truncated"
+    )
+    assert contents["from_raw_ref"] == "raw:line:22644"
+    assert contents["to_raw_ref"] == "raw:line:22731"
+    assert contents["truncated"] is True
+    assert contents["source_read_truncated"] is True
+    assert contents["event_bodies_included"] is False
+    assert contents["event_body_route"] == "full_evidence_route"
+    assert contents["event_raw_ref_count"] == 46
+    assert contents["omitted_event_raw_ref_count"] > 0
+    assert "events" not in contents
+    assert "private bounded event body" not in json.dumps(compact)
+
+
+def test_compact_episode_search_preserves_causal_ambiguity_scope() -> None:
+    from aoa_session_memory_mcp import core as core_module
+
+    relation = {
+        "active": True,
+        "status": "ambiguous_causal_attribution_chains",
+        "ambiguous": True,
+        "ambiguity_scope": "generic_plural_query_scope",
+        "qualified_chain_count": 1,
+        "candidate_chains": [
+            {
+                "correlation_id": "call_one_of_several",
+                "action": {
+                    "line": 201,
+                    "refs": {"raw": "raw:line:201"},
+                },
+                "result": {
+                    "line": 202,
+                    "refs": {"raw": "raw:line:202"},
+                },
+            }
+        ],
+    }
+
+    compact = core_module._compact_episode_search_relation(relation)
+
+    assert compact["status"] == (
+        "ambiguous_causal_attribution_chains"
+    )
+    assert compact["ambiguous"] is True
+    assert compact["ambiguity_scope"] == "generic_plural_query_scope"
+    assert compact["candidate_chains"][0]["correlation_id"] == (
+        "call_one_of_several"
+    )
+
+
 def test_retrieve_unsupported_recipe_returns_structured_diagnostic(tmp_path: Path) -> None:
     runner = FakeRunner()
     state = state_with_fixture(tmp_path, runner)

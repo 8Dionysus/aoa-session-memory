@@ -10995,6 +10995,72 @@ def test_causal_attribution_scope_gate_rejects_repeated_unanchored_command() -> 
     } == {"task-0012", "task-0006"}
 
 
+def test_causal_attribution_scope_gate_rejects_generic_plural_result_window() -> None:
+    query = "Что показали MCP-команды?"
+    terms = module.episode_semantic_query_terms(query)
+    profile = module.episode_causal_attribution_query_profile(
+        terms,
+        query_text=query,
+    )
+    assert profile["open_result_query"] is True
+    assert profile["plural_operation_query"] is True
+    assert profile["generic_plural_open_result_query"] is True
+    intent = module.memory_query_intent(query)
+    assert intent["primary"] == "causal_chain"
+    assert intent["claim_shape"]["kind"] == "causal"
+
+    result = {
+        "doc_id": "episode_semantic:session:task-0042",
+        "session_id": "session",
+        "task_episode_id": "task-0042",
+        "causal_attribution": {
+            "active": True,
+            "profile": profile,
+            "status": "ordered_action_result_attribution_chain",
+            "chain": {
+                "action": {
+                    "line": 201,
+                    "refs": {"raw": "raw:line:201"},
+                },
+                "result": {
+                    "line": 202,
+                    "refs": {"raw": "raw:line:202"},
+                },
+                "correlation_id": "call_one_of_several",
+            },
+        },
+        "explain": {},
+    }
+    gated_results, scope = module.episode_causal_attribution_scope_gate(
+        [result]
+    )
+
+    assert scope["status"] == "ambiguous_causal_attribution_chains"
+    assert scope["ambiguity_scope"] == "generic_plural_query_scope"
+    assert scope["qualified_chain_count"] == 1
+    attribution = gated_results[0]["causal_attribution"]
+    assert attribution["ambiguous"] is True
+    assert attribution["chain"] == {}
+    assert attribution["candidate_chains"][0]["correlation_id"] == (
+        "call_one_of_several"
+    )
+
+    exact_query = (
+        "Что показала MCP-команда с correlation "
+        "call_q82ZhpGgtOKHx3paoHS0zSBM?"
+    )
+    exact_profile = module.episode_causal_attribution_query_profile(
+        module.episode_semantic_query_terms(exact_query),
+        query_text=exact_query,
+    )
+    assert exact_profile["open_result_query"] is True
+    assert exact_profile["generic_plural_open_result_query"] is False
+    assert exact_profile["required_operation_specific_terms"]
+    assert module.memory_query_intent(exact_query)["primary"] == (
+        "exact_literal"
+    )
+
+
 def test_answer_admission_cannot_override_unresolved_causal_attribution_with_reranker() -> None:
     query = "какие сессии были подтверждены завершёнными этим поиском?"
     terms = module.episode_semantic_query_terms(query)
@@ -15296,6 +15362,183 @@ def test_episode_quantitative_comparison_requires_correlated_count_result(
     )["active"] is False
 
 
+def test_quantitative_length_comparison_requires_successful_measurement_chain(
+    tmp_path: Path,
+) -> None:
+    query_text = "Какие AGENTS.md были длиннее?"
+    query = module.episode_quantitative_comparison_query(query_text)
+    intent = module.memory_query_intent(query_text)
+
+    assert query["active"] is True
+    assert query["operation"] == "line_count"
+    assert query["relation_basis"] == (
+        "line_count_comparison_requires_correlated_numeric_result"
+    )
+    assert [term["token"] for term in query["subject_terms"]] == [
+        "agents",
+        "md",
+    ]
+    assert intent["primary"] == "quantitative_comparison"
+    assert intent["claim_shape"]["kind"] == "quantitative_comparison"
+
+    raw_path = tmp_path / "rollout-length-comparison.jsonl"
+    write_jsonl(
+        raw_path,
+        [
+            {
+                "timestamp": "2026-07-17T06:23:00Z",
+                "type": "session_meta",
+                "payload": {"id": "length-session"},
+            },
+            {
+                "timestamp": "2026-07-17T06:23:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": "call_lengths",
+                    "arguments": json.dumps(
+                        {
+                            "cmd": (
+                                "wc -l /workspace/one/AGENTS.md "
+                                "/workspace/two/AGENTS.md"
+                            )
+                        }
+                    ),
+                },
+            },
+            {
+                "timestamp": "2026-07-17T06:23:02Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call_lengths",
+                    "output": (
+                        "Process exited with code 1\n"
+                        "Final output:\n"
+                        "196 /workspace/one/AGENTS.md\n"
+                        "wc: /workspace/two/AGENTS.md: No such file\n"
+                    ),
+                },
+            },
+        ],
+    )
+    candidates = [
+        {
+            "doc_id": "episode_semantic:length-session:task-0001",
+            "session_id": "length-session",
+            "task_episode_id": "task-0001",
+            "event_range": {"from_line": 1, "to_line": 3},
+            "supporting_evidence": [],
+        }
+    ]
+    hydrated, hydration = (
+        module.episode_quantitative_comparison_scoped_raw_hydration(
+            raw_path=raw_path,
+            segments=[],
+            results=candidates,
+            comparison_query=query,
+            max_raw_bytes=1024 * 1024,
+            max_lines=100,
+        )
+    )
+    qualified, gate = module.episode_quantitative_comparison_relation_gate(
+        hydrated,
+        query,
+    )
+
+    assert hydration["candidate_action_count"] == 1
+    assert hydration["rejected_action_count"] == 1
+    assert hydration["qualified_candidate_count"] == 0
+    assert qualified == []
+    assert gate["status"] == "no_qualified_quantitative_comparison"
+
+    successful_path = tmp_path / "rollout-length-comparison-success.jsonl"
+    write_jsonl(
+        successful_path,
+        [
+            {
+                "timestamp": "2026-07-17T06:23:00Z",
+                "type": "session_meta",
+                "payload": {"id": "length-session"},
+            },
+            {
+                "timestamp": "2026-07-17T06:23:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": "call_lengths",
+                    "arguments": json.dumps(
+                        {
+                            "cmd": (
+                                "wc -l /workspace/one/AGENTS.md "
+                                "/workspace/two/AGENTS.md"
+                            )
+                        }
+                    ),
+                },
+            },
+            {
+                "timestamp": "2026-07-17T06:23:02Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call_lengths",
+                    "output": (
+                        "Process exited with code 0\n"
+                        "Final output:\n"
+                        "196 /workspace/one/AGENTS.md\n"
+                        "246 /workspace/two/AGENTS.md\n"
+                        "442 total\n"
+                    ),
+                },
+            },
+        ],
+    )
+    successful_hydrated, successful_hydration = (
+        module.episode_quantitative_comparison_scoped_raw_hydration(
+            raw_path=successful_path,
+            segments=[],
+            results=candidates,
+            comparison_query=query,
+            max_raw_bytes=1024 * 1024,
+            max_lines=100,
+        )
+    )
+    successful_qualified, successful_gate = (
+        module.episode_quantitative_comparison_relation_gate(
+            successful_hydrated,
+            query,
+        )
+    )
+    assert successful_hydration["qualified_candidate_count"] == 1
+    assert successful_gate["status"] == (
+        "qualified_quantitative_comparison_available"
+    )
+    successful_evidence = successful_qualified[0][
+        "quantitative_comparison"
+    ]
+    assert successful_evidence["numeric_row_count"] == 2
+    assert [
+        row["label"]
+        for row in successful_evidence["numeric_rows"]
+    ] == [
+        "/workspace/one/AGENTS.md",
+        "/workspace/two/AGENTS.md",
+    ]
+    successful_admission = module.episode_answer_admission(
+        successful_qualified[0],
+        query_term_count=3,
+        quantitative_comparison_gate=successful_gate,
+    )
+    assert successful_admission["admitted"] is True
+    assert successful_admission["basis"] == (
+        "typed_quantitative_comparison_evidence"
+    )
+    assert successful_admission["policy_version"] == 9
+
+
 def test_episode_search_quantitative_comparison_is_wired_to_raw_relation_gate(
     tmp_path: Path,
 ) -> None:
@@ -17939,17 +18182,23 @@ def test_episode_claim_shape_override_blocks_negative_and_current_projection_cla
     )
 
 
-def test_memory_query_intent_keeps_short_ru_paraphrase_and_completion_question_out_of_closeout_literal_lane() -> None:
-    semantic_queries = [
-        "искали поля состояния и завершённости сессии через rg",
-        "какие сессии были подтверждены завершёнными этим поиском?",
-    ]
+def test_memory_query_intent_keeps_short_ru_queries_out_of_closeout_literal_lane() -> None:
+    expected_intents = {
+        "искали поля состояния и завершённости сессии через rg": (
+            "semantic_episode"
+        ),
+        "какие сессии были подтверждены завершёнными этим поиском?": (
+            "causal_chain"
+        ),
+    }
 
-    for query in semantic_queries:
+    for query, expected_primary in expected_intents.items():
         intent = module.memory_query_intent(query)
-        assert intent["primary"] == "semantic_episode", (query, intent)
+        assert intent["primary"] == expected_primary, (query, intent)
         assert "exact_literal" not in intent["secondary"]
         assert intent["literal_shape"]["inferred_agent_event"] == ""
+        if expected_primary == "causal_chain":
+            assert intent["claim_shape"]["kind"] == "causal"
 
     explicit_closeout = module.memory_query_intent("финальный ответ ассистента")
     assert explicit_closeout["primary"] == "exact_literal"

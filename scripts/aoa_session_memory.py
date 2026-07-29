@@ -452,7 +452,7 @@ ATLAS_ENTRY_FILENAME_MAX_BYTES = 220
 SEARCH_SCHEMA_VERSION = 22
 SEARCH_CATALOG_SCHEMA_VERSION = 1
 EPISODE_SEMANTIC_PROJECTION_VERSION = 18
-EPISODE_ANSWER_ADMISSION_POLICY_VERSION = 8
+EPISODE_ANSWER_ADMISSION_POLICY_VERSION = 9
 EPISODE_QUERY_NORMALIZATION_VERSION = 1
 EPISODE_POSTING_CARDINALITY_METADATA_VERSION = 1
 TASK_EPISODE_SEMANTIC_DIGEST_VERSION = 1
@@ -60332,6 +60332,12 @@ EPISODE_QUANTITATIVE_COMPARISON_META_TOKENS = frozenset(
         "изменился",
         "изменилась",
         "изменилось",
+        "были",
+        "был",
+        "была",
+        "было",
+        "длиннее",
+        "короче",
         "после",
         "what",
         "which",
@@ -60352,6 +60358,10 @@ EPISODE_QUANTITATIVE_COMPARISON_META_TOKENS = frozenset(
         "changed",
         "changes",
         "change",
+        "were",
+        "was",
+        "longer",
+        "shorter",
         "after",
         "since",
         "in",
@@ -60376,7 +60386,7 @@ def episode_quantitative_comparison_query(query: str) -> dict[str, Any]:
         token in {"какие", "какой", "какая", "какое", "what", "which"}
         for token in tokens
     )
-    comparison = any(
+    ranked_change_comparison = any(
         token in {
             "сильнее",
             "больше",
@@ -60391,6 +60401,11 @@ def episode_quantitative_comparison_query(query: str) -> dict[str, Any]:
             "top",
         }
         or token.startswith(("наибольш", "максим", "миним"))
+        for token in tokens
+    )
+    length_comparison = any(
+        token in {"longer", "shorter"}
+        or token.startswith(("длин", "короч"))
         for token in tokens
     )
     change_intent = any(
@@ -60420,7 +60435,22 @@ def episode_quantitative_comparison_query(query: str) -> dict[str, Any]:
         }
         for token in tokens
     )
-    if not (question and comparison and change_intent and measured_object):
+    named_file_subject = bool(
+        re.search(
+            r"(?<![\w.-])[\w.+-]+\.[A-Za-z0-9]{1,12}(?![\w.-])",
+            text,
+        )
+    )
+    ranked_change_query = bool(
+        ranked_change_comparison
+        and change_intent
+        and measured_object
+    )
+    length_query = bool(
+        length_comparison
+        and (measured_object or named_file_subject)
+    )
+    if not (question and (ranked_change_query or length_query)):
         return {
             "active": False,
             "status": "not_a_quantitative_comparison_query",
@@ -60428,46 +60458,66 @@ def episode_quantitative_comparison_query(query: str) -> dict[str, Any]:
 
     subject_text = ""
     context_text = ""
-    english_prefix_match = re.search(
-        r"\b(?P<subject>[A-Za-z0-9_.:/+-]+)\s+"
-        r"(?:parts|sections|components|modules)"
-        r"(?:\s+in\s+(?P<context>.+?))?"
-        r"(?=\s+(?:changed|changes|change)\s+"
-        r"(?:most|least|highest|lowest|largest|smallest|top)\b)",
-        text,
-        flags=re.IGNORECASE,
-    )
-    subject_context_match = re.search(
-        r"\b(?:части|разделы|компоненты|модули|parts|sections|components|modules)"
-        r"(?:\s+of)?\s+(?P<subject>.+?)\s+(?:в|in)\s+(?P<context>.+?)"
-        r"(?=\s+(?:(?:changed|changes|change)\s+)?"
-        r"(?:сильнее|больше|чаще|меньше|most|least|highest|lowest|"
-        r"largest|smallest|top)\b)",
-        text,
-        flags=re.IGNORECASE,
-    )
-    if english_prefix_match:
-        subject_text = english_prefix_match.group("subject").strip(
-            " `\"'.,;:"
-        )
-        context_text = str(
-            english_prefix_match.group("context") or ""
-        ).strip(" `\"'.,;:")
-    elif subject_context_match:
-        subject_text = subject_context_match.group("subject").strip(" `\"'.,;:")
-        context_text = subject_context_match.group("context").strip(" `\"'.,;:")
-    else:
-        subject_match = re.search(
-            r"\b(?:части|разделы|компоненты|модули|parts|sections|components|modules)"
-            r"(?:\s+of)?\s+(?P<subject>.+?)"
-            r"(?=\s+(?:(?:changed|changes|change)\s+)?"
-            r"(?:сильнее|больше|чаще|меньше|most|least|highest|lowest|"
-            r"largest|smallest|top|после|after|since)\b)",
+    if length_query:
+        length_subject_match = re.search(
+            r"\b(?:какие|какой|какая|какое|which|what)\s+"
+            r"(?P<subject>.+?)\s+"
+            r"(?:(?:были|был|была|было|were|was)\s+)?"
+            r"(?:длиннее|короче|longer|shorter)\b",
             text,
             flags=re.IGNORECASE,
         )
-        if subject_match:
-            subject_text = subject_match.group("subject").strip(" `\"'.,;:")
+        if length_subject_match:
+            subject_text = length_subject_match.group("subject").strip(
+                " `\"'.,;:"
+            )
+    else:
+        english_prefix_match = re.search(
+            r"\b(?P<subject>[A-Za-z0-9_.:/+-]+)\s+"
+            r"(?:parts|sections|components|modules)"
+            r"(?:\s+in\s+(?P<context>.+?))?"
+            r"(?=\s+(?:changed|changes|change)\s+"
+            r"(?:most|least|highest|lowest|largest|smallest|top)\b)",
+            text,
+            flags=re.IGNORECASE,
+        )
+        subject_context_match = re.search(
+            r"\b(?:части|разделы|компоненты|модули|parts|sections|components|modules)"
+            r"(?:\s+of)?\s+(?P<subject>.+?)\s+(?:в|in)\s+(?P<context>.+?)"
+            r"(?=\s+(?:(?:changed|changes|change)\s+)?"
+            r"(?:сильнее|больше|чаще|меньше|most|least|highest|lowest|"
+            r"largest|smallest|top)\b)",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if english_prefix_match:
+            subject_text = english_prefix_match.group("subject").strip(
+                " `\"'.,;:"
+            )
+            context_text = str(
+                english_prefix_match.group("context") or ""
+            ).strip(" `\"'.,;:")
+        elif subject_context_match:
+            subject_text = subject_context_match.group("subject").strip(
+                " `\"'.,;:"
+            )
+            context_text = subject_context_match.group("context").strip(
+                " `\"'.,;:"
+            )
+        else:
+            subject_match = re.search(
+                r"\b(?:части|разделы|компоненты|модули|parts|sections|components|modules)"
+                r"(?:\s+of)?\s+(?P<subject>.+?)"
+                r"(?=\s+(?:(?:changed|changes|change)\s+)?"
+                r"(?:сильнее|больше|чаще|меньше|most|least|highest|lowest|"
+                r"largest|smallest|top|после|after|since)\b)",
+                text,
+                flags=re.IGNORECASE,
+            )
+            if subject_match:
+                subject_text = subject_match.group("subject").strip(
+                    " `\"'.,;:"
+                )
 
     baseline_match = re.search(
         r"\b(?:после|after|since)\s+(?P<baseline>.+?)\s*[?!.]*$",
@@ -60499,13 +60549,27 @@ def episode_quantitative_comparison_query(query: str) -> dict[str, Any]:
     return {
         "active": True,
         "status": "quantitative_comparison_parsed",
-        "relation_basis": "ranked_change_count_requires_correlated_numeric_result",
-        "operation": "change_count",
+        "relation_basis": (
+            "line_count_comparison_requires_correlated_numeric_result"
+            if length_query
+            else "ranked_change_count_requires_correlated_numeric_result"
+        ),
+        "operation": (
+            "line_count"
+            if length_query
+            else "change_count"
+        ),
         "direction": (
             "ascending"
             if any(
-                token in {"меньше", "least", "lowest", "smallest"}
-                or token.startswith("миним")
+                token in {
+                    "меньше",
+                    "least",
+                    "lowest",
+                    "smallest",
+                    "shorter",
+                }
+                or token.startswith(("миним", "короч"))
                 for token in tokens
             )
             else "descending"
@@ -66597,15 +66661,31 @@ def episode_quantitative_comparison_command_profile(command: str) -> dict[str, A
     ascending_rank = bool(
         re.search(r"(?<![a-z0-9_])sort\s+-[a-z]*n[a-z]*", folded)
     )
+    line_count_scope = bool(
+        re.search(r"(?<![a-z0-9_])wc\s+-[a-z]*l", folded)
+        and not change_scope
+    )
+    measurement_kind = (
+        "ranked_change_count"
+        if change_scope
+        else "line_count"
+        if line_count_scope
+        else "unknown"
+    )
     return {
         "change_scope": change_scope,
         "count_scope": count_scope,
         "descending_rank": descending_rank,
         "ascending_rank": ascending_rank,
+        "line_count_scope": line_count_scope,
+        "measurement_kind": measurement_kind,
         "accepted_shape": bool(
-            change_scope
-            and count_scope
-            and (descending_rank or ascending_rank)
+            (
+                change_scope
+                and count_scope
+                and (descending_rank or ascending_rank)
+            )
+            or line_count_scope
         ),
     }
 
@@ -66886,9 +66966,21 @@ def episode_quantitative_comparison_scoped_raw_hydration(
         ):
             rejected_action_count += 1
             continue
+        numeric_rows = [
+            row
+            for row in result.get("numeric_rows") or []
+            if isinstance(row, dict)
+        ]
+        if comparison_query.get("operation") == "line_count":
+            numeric_rows = [
+                row
+                for row in numeric_rows
+                if str(row.get("label") or "").strip().casefold()
+                not in {"total", "итого"}
+            ]
         if (
             str(result.get("status") or "") != "succeeded"
-            or len(result.get("numeric_rows") or []) < 2
+            or len(numeric_rows) < 2
         ):
             rejected_action_count += 1
             continue
@@ -66897,8 +66989,10 @@ def episode_quantitative_comparison_scoped_raw_hydration(
             if isinstance(action.get("profile"), dict)
             else {}
         )
-        if requested_direction == "descending" and not profile.get(
-            "descending_rank"
+        if (
+            comparison_query.get("operation") == "change_count"
+            and requested_direction == "descending"
+            and not profile.get("descending_rank")
         ):
             rejected_action_count += 1
             continue
@@ -67006,15 +67100,15 @@ def episode_quantitative_comparison_scoped_raw_hydration(
             "accepted": True,
             "status": "correlation_owned_ranked_count_available",
             "relation_basis": (
-                "structured_change_count_action_plus_"
+                "structured_measurement_action_plus_"
                 "correlation_owned_successful_numeric_result"
             ),
             "correlation_id": str(action.get("correlation_id") or ""),
             "action": action_entry,
             "result": result_entry,
             "result_status": str(result.get("status") or ""),
-            "numeric_rows": list(result.get("numeric_rows") or []),
-            "numeric_row_count": len(result.get("numeric_rows") or []),
+            "numeric_rows": numeric_rows,
+            "numeric_row_count": len(numeric_rows),
             "matched_subject_terms": matched_subject_terms,
             "matched_context_terms": matched_context_terms,
             "matched_baseline_terms": matched_baseline_terms,
@@ -68838,6 +68932,22 @@ def episode_causal_attribution_query_profile(
         for token in operation_identity_tokens
         if bool(re.search(r"[_./:@-]", token)) or len(token) >= 16
     ]
+    plural_operation_query = bool(
+        {
+            "команды",
+            "инструменты",
+            "вызовы",
+            "commands",
+            "tools",
+            "calls",
+        }
+        & set(raw_tokens)
+    )
+    generic_plural_open_result_query = bool(
+        open_result_query
+        and plural_operation_query
+        and not required_operation_specific_terms
+    )
     return {
         "active": active,
         "operation_kinds": operation_kinds,
@@ -68846,6 +68956,10 @@ def episode_causal_attribution_query_profile(
         "subject_relation_shape": subject_relation_shape,
         "explicit_named_operation_shape": explicit_named_operation_shape,
         "open_result_query": open_result_query,
+        "plural_operation_query": plural_operation_query,
+        "generic_plural_open_result_query": (
+            generic_plural_open_result_query
+        ),
         "shape_signals": list(dict.fromkeys(shape_signals)),
         "target_terms": target_tokens,
         "operation_identity_terms": operation_identity_tokens,
@@ -69489,7 +69603,14 @@ def episode_causal_attribution_scope_gate(
         source_candidate_truncated
         or len(candidates) > len(bounded_candidates)
     )
-    if len(candidates) <= 1:
+    generic_plural_query = bool(
+        candidates
+        and any(
+            profile.get("generic_plural_open_result_query")
+            for profile in open_result_profiles
+        )
+    )
+    if len(candidates) <= 1 and not generic_plural_query:
         return results, {
             "status": (
                 "single_causal_attribution_chain"
@@ -69522,8 +69643,18 @@ def episode_causal_attribution_scope_gate(
         "qualified_chain_count": len(candidates),
         "candidate_chains": bounded_candidates,
         "candidate_chains_truncated": candidate_truncated,
-        "ambiguity_scope": "cross_episode_query_scope",
-        "policy": "multiple distinct correlation-owned operations satisfy the open result query across candidate episodes; require a correlation id, time bound, task, or other unique action anchor",
+        "ambiguity_scope": (
+            "generic_plural_query_scope"
+            if generic_plural_query
+            else "cross_episode_query_scope"
+        ),
+        "policy": (
+            "a generic plural open-result query cannot admit one ranked "
+            "operation from a bounded candidate window; require a correlation "
+            "id, time bound, task, or other unique action anchor"
+            if generic_plural_query
+            else "multiple distinct correlation-owned operations satisfy the open result query across candidate episodes; require a correlation id, time bound, task, or other unique action anchor"
+        ),
     }
     top["causal_attribution"] = ambiguous_attribution
     explain = top.get("explain") if isinstance(top.get("explain"), dict) else {}
@@ -69539,7 +69670,11 @@ def episode_causal_attribution_scope_gate(
         "qualified_chain_count": len(candidates),
         "candidate_chains": bounded_candidates,
         "candidate_chains_truncated": candidate_truncated,
-        "ambiguity_scope": "cross_episode_query_scope",
+        "ambiguity_scope": (
+            "generic_plural_query_scope"
+            if generic_plural_query
+            else "cross_episode_query_scope"
+        ),
     }
 
 
@@ -103315,6 +103450,10 @@ def memory_query_intent(query: str) -> dict[str, Any]:
     tokens = {token.casefold() for token in search_tokenize(text)}
     quantitative_comparison = episode_quantitative_comparison_query(text)
     delegated_lifecycle = episode_delegated_lifecycle_query(text)
+    causal_attribution = episode_causal_attribution_query_profile(
+        episode_semantic_query_terms(text),
+        query_text=text,
+    )
     negative_claim_requested = memory_query_has_negative_claim_intent(text)
     causal_action_role = bool(
         tokens
@@ -103513,6 +103652,10 @@ def memory_query_intent(query: str) -> dict[str, Any]:
             for token in tokens
         )
         or structured_causal_chain_requested
+        or (
+            causal_attribution.get("active")
+            and not shape.get("identifier_anchor")
+        )
         or (
             not delegated_lifecycle.get("active")
             and (
