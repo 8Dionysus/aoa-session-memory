@@ -51537,16 +51537,17 @@ def test_auto_maintenance_resource_launch_scopes_hot_demand_identity(tmp_path: P
     assert parsed.resource_estimate_confidence == "medium"
 
 
-def test_auto_maintenance_resource_demand_epoch_changes_only_the_bounded_hot_envelope() -> None:
-    hot_command = ["python3", str(Path(module.__file__).resolve()), "auto-maintenance", "hot"]
-    backlog_command = ["python3", str(Path(module.__file__).resolve()), "auto-maintenance", "backlog"]
-
-    assert module.auto_maintenance_resource_demand_key("hot", hot_command) == (
-        "aoa-session-memory:auto-maintenance:hot:auto-maintenance-v2"
-    )
-    assert module.auto_maintenance_resource_demand_key("backlog", backlog_command) == (
-        "aoa-session-memory:auto-maintenance:backlog:auto-maintenance"
-    )
+def test_auto_maintenance_resource_demand_epoch_tracks_each_bounded_profile_envelope() -> None:
+    for profile in ("hot", "backlog", "catchup", "deep"):
+        child_command = [
+            "python3",
+            str(Path(module.__file__).resolve()),
+            "auto-maintenance",
+            profile,
+        ]
+        assert module.auto_maintenance_resource_demand_key(profile, child_command) == (
+            f"aoa-session-memory:auto-maintenance:{profile}:auto-maintenance-v2"
+        )
 
 
 def test_session_memory_resource_floor_uses_larger_learned_demand(monkeypatch: Any) -> None:
@@ -51690,7 +51691,7 @@ def test_auto_maintenance_resource_launch_uses_live_tail_fast_path_for_catchup(t
     assert calls["command"][:3] == ["abyss-machine", "resource", "launch"]
     assert "--force" in calls["command"]
     assert calls["command"][calls["command"].index("--demand-key") + 1] == (
-        "aoa-session-memory:auto-maintenance:catchup:index-maintenance"
+        "aoa-session-memory:auto-maintenance:catchup:index-maintenance-v2"
     )
     assert calls["command"][calls["command"].index("--demand-owner") + 1] == "aoa-session-memory"
     assert child[:4] == ["python3", str(Path(module.__file__).resolve()), "index-maintenance", session_label]

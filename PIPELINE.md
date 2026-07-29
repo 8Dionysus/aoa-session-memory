@@ -365,6 +365,15 @@ audits, migrations, and rebuild decisions. Thus recurring cost is bounded by
 the profile window while repeated successful runs still converge across a
 growing archive.
 
+Resource demand identity follows that bounded profile envelope. When a
+profile's discovery, repair, graph, or fallback envelope changes materially,
+its demand epoch advances so host runtime learning cannot carry an obsolete
+pre-change peak into the new route. Host-specific owner floors remain outside
+the portable bundle; they must cite revision-bound observations, retain a
+guarded margin, and allow larger learned peaks to win. A timer receipt that
+only proves admission or denial does not calibrate the floor; use successful
+transient-unit peaks from the matching demand epoch.
+
 Resource-blocked all-session graph fallback also maintains a separate bounded
 background candidate reserve. Existing entries count toward the reserve, and
 only the missing count is admitted from the generated ledger before ordinary
