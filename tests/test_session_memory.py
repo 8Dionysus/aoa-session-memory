@@ -11866,6 +11866,7 @@ def test_episode_sparse_ranking_prefers_coherent_raw_support_over_scattered_term
 
 def test_episode_search_explicit_time_window_requires_in_window_support(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Synthetic regression derived from a manual long-episode temporal false-support case."""
     aoa_root = tmp_path / ".aoa"
@@ -12140,6 +12141,38 @@ def test_episode_search_explicit_time_window_requires_in_window_support(
         f"evidence-window {session_id} raw:line:3 "
     )
     assert result["retrieval"]["answer_admission"]["admitted"] is True
+
+    with monkeypatch.context() as truncated_scope:
+        truncated_scope.setattr(
+            module,
+            "EPISODE_EXPLICIT_TIME_SUPPORT_MAX_EVENTS",
+            1,
+        )
+        truncated_result = module.episode_semantic_search(
+            aoa_root=aoa_root,
+            query=query,
+            session=session_id,
+            time_from="2026-07-14T00:00:30Z",
+            time_to="2026-07-14T00:01:30Z",
+            mode="sparse",
+            limit=5,
+            explain=True,
+        )
+    truncated_evidence_scope = truncated_result["retrieval"][
+        "explicit_time_evidence_scope"
+    ]
+    truncated_admission = truncated_result["retrieval"]["answer_admission"]
+    assert truncated_result["result_count"] == 1
+    assert truncated_evidence_scope["status"] == "applied_truncated"
+    assert truncated_evidence_scope["truncated"] is True
+    assert truncated_evidence_scope["admission_ready"] is False
+    assert truncated_admission["admitted"] is False
+    assert truncated_admission["status"] == "explicit_time_evidence_scope_unresolved"
+    assert (
+        truncated_admission["basis"]
+        == "critical_explicit_time_scope_truncation"
+    )
+    assert truncated_admission["explicit_time_evidence_gate"]["admitted"] is False
 
     out_of_window_causal = dict(result["results"][0])
     out_of_window_causal["causal_attribution"] = {

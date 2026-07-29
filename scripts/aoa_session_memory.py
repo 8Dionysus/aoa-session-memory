@@ -452,7 +452,7 @@ ATLAS_ENTRY_FILENAME_MAX_BYTES = 220
 SEARCH_SCHEMA_VERSION = 22
 SEARCH_CATALOG_SCHEMA_VERSION = 1
 EPISODE_SEMANTIC_PROJECTION_VERSION = 18
-EPISODE_ANSWER_ADMISSION_POLICY_VERSION = 9
+EPISODE_ANSWER_ADMISSION_POLICY_VERSION = 10
 EPISODE_QUERY_NORMALIZATION_VERSION = 1
 EPISODE_POSTING_CARDINALITY_METADATA_VERSION = 1
 TASK_EPISODE_SEMANTIC_DIGEST_VERSION = 1
@@ -77103,7 +77103,8 @@ def episode_explicit_time_evidence_scope(
         "raw_fallback": explicit_time_raw_fallback,
         "correction_followup": correction_followup,
         "admission_ready": bool(
-            any(
+            not truncated
+            and any(
                 isinstance(result.get("explicit_time_evidence"), dict)
                 and result["explicit_time_evidence"].get(
                     "anchor_coverage_admitted"
@@ -83198,28 +83199,39 @@ def episode_semantic_search(
             and live_tail_fallback["answer_admission"].get("admitted")
         )
         explicit_time_admission_ready = bool(
-            (
-                top_time_scope.get("status") == "in_window_support_available"
-                and not top_time_scope.get("ambiguous")
-                and top_time_scope.get("anchor_coverage_admitted") is not False
+            not explicit_time_evidence_scope.get("truncated")
+            and (
+                (
+                    top_time_scope.get("status") == "in_window_support_available"
+                    and not top_time_scope.get("ambiguous")
+                    and top_time_scope.get("anchor_coverage_admitted") is not False
+                )
+                or temporal_time_scope_admitted
+                or live_time_scope_admitted
             )
-            or temporal_time_scope_admitted
-            or live_time_scope_admitted
         )
         if not explicit_time_admission_ready:
             answer_admission = {
                 "admitted": False,
                 "status": "explicit_time_evidence_scope_unresolved",
                 "basis": str(
-                    "ambiguous_full_coverage_time_scoped_clusters"
+                    "critical_explicit_time_scope_truncation"
+                    if explicit_time_evidence_scope.get("truncated")
+                    else "ambiguous_full_coverage_time_scoped_clusters"
                     if top_time_scope.get("ambiguous")
                     else "explicit_time_structured_anchor_coverage_incomplete"
                     if top_time_scope.get("anchor_coverage_admitted") is False
                     else explicit_time_evidence_scope.get("status")
                     or "in_window_support_missing"
                 ),
-                "explicit_time_evidence_gate": explicit_time_evidence_scope,
-                "policy": "explicit time bounds require supporting refs inside the requested window",
+                "explicit_time_evidence_gate": {
+                    **explicit_time_evidence_scope,
+                    "admitted": False,
+                },
+                "policy": (
+                    "explicit time bounds require non-truncated supporting refs "
+                    "inside the requested window"
+                ),
             }
         else:
             answer_admission["explicit_time_evidence_gate"] = {
