@@ -109007,6 +109007,24 @@ def graph_work_context_node_id(work_root: str, work_name: str = "") -> str:
     return f"work_context:{route_key_slug(value, fallback='work', max_chars=120)}"
 
 
+def graph_work_context_projection_fields(
+    work_context: dict[str, Any],
+) -> dict[str, Any]:
+    status = str(work_context.get("status") or "unresolved")
+    confidence = str(work_context.get("confidence") or "none")
+    observed = status == "resolved" and confidence == "high"
+    return {
+        "source_projection_status": status,
+        "source_projection_confidence": confidence,
+        "source_projection_candidate": not observed,
+        "source_projection_admission": (
+            "observed_resolved_high_confidence"
+            if observed
+            else "candidate_not_resolved_high_confidence"
+        ),
+    }
+
+
 def graph_edge_id(source: str, target: str, edge_type: str) -> str:
     digest = hashlib.sha1(f"{source}\x00{edge_type}\x00{target}".encode("utf-8")).hexdigest()[:20]
     return f"edge:{digest}"
@@ -109615,6 +109633,9 @@ def graph_relation_contract_payload(
         normalized,
         contract,
     )
+    source_projection_candidate = (
+        normalized.get("source_projection_candidate") is True
+    )
     known_relation = contract is not None
     rejected = bool(
         domain_range_status == "invalid"
@@ -109628,6 +109649,7 @@ def graph_relation_contract_payload(
         and correlation_status
         in {"not_required", "matched_identity"}
         and evidence["status"] == "present"
+        and not source_projection_candidate
     )
     relation_state = (
         "rejected"
@@ -110857,6 +110879,9 @@ def graph_contributions_for_record(
 
         if isinstance(work_context, dict) and (work_context.get("work_root") or work_context.get("work_name")):
             work_node_id = graph_work_context_node_id(str(work_context.get("work_root") or ""), str(work_context.get("work_name") or ""))
+            work_projection_fields = graph_work_context_projection_fields(
+                work_context
+            )
             add_session_node(
                 {
                     "id": work_node_id,
@@ -110864,7 +110889,9 @@ def graph_contributions_for_record(
                     "label": work_context.get("work_name") or work_context.get("work_root"),
                     "work_root": work_context.get("work_root"),
                     "work_family": work_context.get("work_family"),
+                    "status": work_context.get("status"),
                     "confidence": work_context.get("confidence"),
+                    **work_projection_fields,
                     "evidence_refs": [{"session_id": session_id, "refs": session_refs}],
                 }
             )
@@ -110874,6 +110901,7 @@ def graph_contributions_for_record(
                     "target": work_node_id,
                     "type": "has_work_context",
                     "session_id": session_id,
+                    **work_projection_fields,
                     "evidence_refs": [{"session_id": session_id, "refs": session_refs}],
                 }
             )
@@ -117015,6 +117043,9 @@ def build_session_graph_legacy(
             work_context = manifest.get("work_context") if isinstance(manifest.get("work_context"), dict) else session_index.get("work_context")
             if isinstance(work_context, dict) and (work_context.get("work_root") or work_context.get("work_name")):
                 work_node_id = graph_work_context_node_id(str(work_context.get("work_root") or ""), str(work_context.get("work_name") or ""))
+                work_projection_fields = graph_work_context_projection_fields(
+                    work_context
+                )
                 add_node(
                     {
                         "id": work_node_id,
@@ -117022,7 +117053,9 @@ def build_session_graph_legacy(
                         "label": work_context.get("work_name") or work_context.get("work_root"),
                         "work_root": work_context.get("work_root"),
                         "work_family": work_context.get("work_family"),
+                        "status": work_context.get("status"),
                         "confidence": work_context.get("confidence"),
+                        **work_projection_fields,
                         "evidence_refs": [{"session_id": session_id, "refs": session_refs}],
                     }
                 )
@@ -117032,6 +117065,7 @@ def build_session_graph_legacy(
                         "target": work_node_id,
                         "type": "has_work_context",
                         "session_id": session_id,
+                        **work_projection_fields,
                         "evidence_refs": [{"session_id": session_id, "refs": session_refs}],
                     }
                 )

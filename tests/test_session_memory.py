@@ -558,6 +558,65 @@ def test_graph_contribution_compaction_preserves_goal_event_ref_aliases() -> Non
     assert rehydrated["relation_state"] == "observed_projection"
 
 
+def test_graph_work_context_projection_admits_only_resolved_high_confidence() -> None:
+    resolved_fields = module.graph_work_context_projection_fields(
+        {
+            "status": "resolved",
+            "confidence": "high",
+        }
+    )
+    ambiguous_fields = module.graph_work_context_projection_fields(
+        {
+            "status": "ambiguous",
+            "confidence": "low",
+        }
+    )
+    base = {
+        "source": "session:session",
+        "target": "work_context:workspace",
+        "type": "has_work_context",
+        "evidence_refs": [
+            {
+                "session_id": "session",
+                "refs": {"session": "sessions/session/session.manifest.json"},
+            }
+        ],
+    }
+    resolved = module.graph_relation_contract_payload(
+        {
+            **base,
+            **resolved_fields,
+        }
+    )
+    ambiguous = module.graph_relation_contract_payload(
+        {
+            **base,
+            **ambiguous_fields,
+        }
+    )
+    compact = module.graph_compact_contribution_payload(
+        ambiguous,
+        kind="edge",
+    )
+    rehydrated = module.graph_relation_contract_payload(
+        {
+            **base,
+            **compact,
+        }
+    )
+
+    assert resolved_fields["source_projection_candidate"] is False
+    assert resolved["relation_state"] == "observed_projection"
+    assert ambiguous_fields["source_projection_candidate"] is True
+    assert ambiguous["relation_state"] == "inferred_candidate"
+    assert ambiguous["navigation_admissible"] is True
+    assert ambiguous["answer_admissible"] is False
+    assert compact["source_projection_status"] == "ambiguous"
+    assert compact["source_projection_confidence"] == "low"
+    assert compact["source_projection_candidate"] is True
+    assert rehydrated["relation_state"] == "inferred_candidate"
+
+
 def test_graph_aggregate_payload_compaction_sample_detects_legacy_payload(tmp_path: Path) -> None:
     db_path = tmp_path / "graph.sqlite3"
     conn = sqlite3.connect(db_path)
@@ -42919,6 +42978,120 @@ def test_graph_projection_links_only_same_correlation_agent_activity_status(tmp_
     )
     assert status_node["event_type"] == "CONTEXT_STATE"
     assert status_node["refs"]["raw"] == status_event["raw_ref"]
+
+
+def test_graph_projection_keeps_ambiguous_work_context_as_navigation_candidate(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    transcript = (
+        tmp_path
+        / "rollout-2026-07-29T00-00-00-ambiguous-work-context.jsonl"
+    )
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-07-29T00:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "ambiguous-work-context",
+                    "cwd": str(repo),
+                    "model": "gpt-5",
+                },
+            },
+            {
+                "timestamp": "2026-07-29T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Inspect the current work context.",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "ambiguous-work-context",
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    record = module.resolve_session_record(
+        aoa_root,
+        "ambiguous-work-context",
+    )
+    session_dir = Path(record["path"])
+    ambiguous_work_context = {
+        "schema_version": module.WORK_CONTEXT_SCHEMA_VERSION,
+        "status": "ambiguous",
+        "work_root": str(repo),
+        "work_name": "aoa-session-memory",
+        "work_family": "aoa-session-memory",
+        "confidence": "low",
+        "score": 40,
+        "evidence": [],
+        "alternates": [
+            {
+                "work_root": str(workspace),
+                "work_name": "AbyssOS",
+                "work_family": "abyssos-workspace",
+                "score": 38,
+            }
+        ],
+    }
+    for path in (
+        session_dir / "session.manifest.json",
+        session_dir / "session.index.json",
+    ):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["work_context"] = ambiguous_work_context
+        path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    contributions, diagnostics = module.graph_contributions_for_record(
+        record
+    )
+
+    assert diagnostics == []
+    session_contribution = next(
+        contribution
+        for contribution in contributions
+        if contribution["source"]["source_type"] == "session"
+    )
+    edge = next(
+        edge
+        for edge in session_contribution["edges"]
+        if edge["type"] == "has_work_context"
+    )
+    node = next(
+        node
+        for node in session_contribution["nodes"]
+        if node["id"] == edge["target"]
+    )
+    assert edge["source_projection_status"] == "ambiguous"
+    assert edge["source_projection_confidence"] == "low"
+    assert edge["source_projection_candidate"] is True
+    assert edge["relation_state"] == "inferred_candidate"
+    assert edge["navigation_admissible"] is True
+    assert edge["answer_admissible"] is False
+    assert node["status"] == "ambiguous"
+    assert node["source_projection_candidate"] is True
 
 
 def test_graph_relation_contract_keeps_route_signals_out_of_usage_and_consequence() -> None:
