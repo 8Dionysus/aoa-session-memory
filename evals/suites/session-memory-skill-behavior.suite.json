@@ -45,7 +45,7 @@
     {
       "path": "skills",
       "kind": "tree",
-      "sha256": "5297c6791d81abf96a71e6050989af3c8eca755bbff697fcb4369194931749d9"
+      "sha256": "b89fa6a8bf7275bd02d833113b4649d8cc49d6a4629c56191283def9169a83da"
     },
     {
       "path": "config",
@@ -65,7 +65,7 @@
     {
       "path": "generated/capability_graph.json",
       "kind": "file",
-      "sha256": "29e7ba92cb1e242beb0b717484da0c6165e286fce9f9e7ab424f99e1a544577e"
+      "sha256": "0e943944ef82b4a6eac250cfa0f72c7d56a54f5fdc5d613be1b661d4ce3e0291"
     }
   ],
   "auto_run_allowed": false,
