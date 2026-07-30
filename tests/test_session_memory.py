@@ -15677,7 +15677,7 @@ def test_quantitative_length_comparison_requires_successful_measurement_chain(
     assert successful_admission["basis"] == (
         "typed_quantitative_comparison_evidence"
     )
-    assert successful_admission["policy_version"] == 9
+    assert successful_admission["policy_version"] == 10
 
 
 def test_episode_search_quantitative_comparison_is_wired_to_raw_relation_gate(
