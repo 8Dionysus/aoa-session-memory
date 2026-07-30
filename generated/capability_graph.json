@@ -29732,7 +29732,7 @@
   ],
   "schema_version": "aoa-capability-graph-v1",
   "source": {
-    "content_hash": "06c191c4291e42c644eba74bf47039a9f9cd8290b58f73898d9d23af2b7a2ec2",
+    "content_hash": "9d7f85a0d85c63d643ee4c80e20b15b7cc4dd64a9f07998b5c40ba500c2cac04",
     "contract": {
       "contract_files": [
         {
@@ -29757,7 +29757,7 @@
         },
         {
           "path": "scripts/skill_model/capability_system.py",
-          "sha256": "c6a46a3ad8d4c8724ecdbaa579fed0a56747306e1b4fe0f5b39d57bf1d49cea0"
+          "sha256": "625522f8f5e73615ab2e5f735535ae91e8a6635bdfb492a5e17122d9348a841b"
         },
         {
           "path": "scripts/skill_model/capability_home_port.py",
