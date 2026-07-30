@@ -7431,7 +7431,23 @@ def test_episode_dense_projection_exact_cosine_and_semantic_refresh_invalidation
         )
         episode = {
             "episode_id": "task-0001",
-            "representations": {"outcomes": [{"text": text}]},
+            "representations": {
+                "outcomes": [
+                    {
+                        "text": text,
+                        "refs": {
+                            "raw": (
+                                f"raw:line:{10 + index}"
+                            ),
+                            "session": (
+                                f"sessions/{session_id}/session.json"
+                            ),
+                        },
+                        "source_lane": "assistant",
+                        "admission_basis": "assistant_observation",
+                    }
+                ]
+            },
             "narrative": text,
         }
         conn.execute(
@@ -7492,6 +7508,51 @@ def test_episode_dense_projection_exact_cosine_and_semantic_refresh_invalidation
     assert built["ok"] is True
     assert built["coverage"]["status"] == "current"
     assert built["coverage"]["vector_count"] == 2
+    assert built["coverage"]["representation_vector_count"] == 2
+    assert built["generation_publish"]["status"] == "published"
+    metadata_conn = module.connect_existing_search_db(db_path)
+    stored_generations = module.projection_generation_from_json(
+        metadata_conn.execute(
+            "SELECT value FROM meta "
+            "WHERE key = 'generation_identities_json'"
+        ).fetchone()[0]
+    )
+    metadata_conn.close()
+    assert stored_generations["episode_dense"]["generation_id"] == (
+        module.session_memory_expected_generation_identities(aoa_root)[
+            "episode_dense"
+        ]["generation_id"]
+    )
+    stored_generations["episode_dense"] = {
+        "generation_id": "stale-dense-generation"
+    }
+    metadata_conn = module.init_search_db(
+        db_path,
+        rebuild=False,
+        create_indexes=False,
+    )
+    metadata_conn.execute(
+        "INSERT OR REPLACE INTO meta(key, value) "
+        "VALUES ('generation_identities_json', ?)",
+        (
+            json.dumps(
+                stored_generations,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        ),
+    )
+    metadata_conn.commit()
+    metadata_conn.close()
+    metadata_repair = module.episode_dense_index_sessions(
+        aoa_root=aoa_root,
+        dirty_only=True,
+    )
+    assert metadata_repair["status"] == "no_work"
+    assert metadata_repair["generation_publish"]["status"] == "published"
+    assert metadata_repair["generation_publish"][
+        "previous_generation_id"
+    ] == "stale-dense-generation"
 
     ranking = module.episode_dense_search_ranking(
         aoa_root=aoa_root,
@@ -7502,6 +7563,11 @@ def test_episode_dense_projection_exact_cosine_and_semantic_refresh_invalidation
     )
     assert ranking["ok"] is True
     assert ranking["ranking"][0]["doc_id"] == "episode_semantic:dense-session-1:task-0001"
+    assert ranking["representation_vector_count"] == 2
+    assert ranking["episode_fallback_vector_count"] == 0
+    assert ranking["ranking"][0]["representation_matches"][0][
+        "raw_ref"
+    ] == "raw:line:11"
     assert ranking["scanned_vector_bytes"] == 2 * module.EPISODE_DENSE_DEFAULT_DIMENSION * 4
 
     indexed_classifier_version = module.ROUTE_SIGNAL_CLASSIFIER_VERSION
@@ -7558,12 +7624,17 @@ def test_episode_dense_projection_exact_cosine_and_semantic_refresh_invalidation
     dense_vector_count = conn.execute(
         "SELECT COUNT(*) FROM episode_dense_vectors WHERE session_id = 'dense-session-1'"
     ).fetchone()[0]
+    representation_vector_count = conn.execute(
+        "SELECT COUNT(*) FROM episode_dense_representation_vectors "
+        "WHERE session_id = 'dense-session-1'"
+    ).fetchone()[0]
     dense_state_count = conn.execute(
         "SELECT COUNT(*) FROM episode_dense_session_state WHERE session_id = 'dense-session-1'"
     ).fetchone()[0]
     conn.close()
     assert removed == 1
     assert dense_vector_count == 0
+    assert representation_vector_count == 0
     assert dense_state_count == 0
 
 
@@ -7607,7 +7678,17 @@ def test_episode_dense_rebuild_is_semantically_deterministic_and_failed_store_pr
         "episode_id": "task-0001",
         "representations": {
             "outcomes": [
-                {"text": "dense atomic projection evidence"}
+                {
+                    "text": "dense atomic projection evidence",
+                    "refs": {
+                        "raw": "raw:line:7",
+                        "session": (
+                            "sessions/dense-atomic-session/session.json"
+                        ),
+                    },
+                    "source_lane": "assistant",
+                    "admission_basis": "assistant_observation",
+                }
             ]
         },
     }
@@ -7684,12 +7765,24 @@ def test_episode_dense_rebuild_is_semantically_deterministic_and_failed_store_pr
         ).fetchone()
         state = snapshot_conn.execute(
             "SELECT status, episode_document_count, vector_count, "
+            "representation_document_count, representation_vector_count, "
             "generation_id FROM episode_dense_session_state "
             "WHERE session_id = ?",
             (session_id,),
         ).fetchone()
+        representations = snapshot_conn.execute(
+            "SELECT representation_id, doc_id, role, raw_ref, "
+            "document_sha256, hex(vector_f32), generation_id "
+            "FROM episode_dense_representation_vectors "
+            "WHERE session_id = ? ORDER BY representation_id",
+            (session_id,),
+        ).fetchall()
         snapshot_conn.close()
-        return tuple(row) + tuple(state)
+        return (
+            tuple(row)
+            + tuple(state)
+            + tuple(tuple(item) for item in representations)
+        )
 
     first = module.episode_dense_index_sessions(
         aoa_root=aoa_root,
@@ -9005,6 +9098,129 @@ def test_episode_dense_document_keeps_several_recent_evidence_items() -> None:
     assert "verification-marker-0" not in document
     assert all(f"verification-marker-{index}" in document for index in range(1, 5))
     assert len(document) <= module.EPISODE_DENSE_DOCUMENT_MAX_CHARS
+
+
+def test_episode_dense_representation_documents_are_stable_bounded_and_raw_ref_backed() -> None:
+    entries = [
+        {
+            "text": f"verification evidence {index}",
+            "refs": {
+                "raw": f"raw:line:{index}",
+                "segment": f"sessions/representation/segments/{index}.json",
+                "session": "sessions/representation/session.json",
+            },
+            "source_lane": "assistant",
+            "admission_basis": "verification_observation",
+            "outcome": "success",
+        }
+        for index in range(1, 7)
+    ]
+    entries.insert(
+        0,
+        {
+            "text": "projection text without a raw ref must not be embedded",
+            "refs": {"segment": "sessions/representation/segments/0.json"},
+        },
+    )
+    episode = {"representations": {"verification": entries}}
+
+    first = module.episode_dense_representation_documents(
+        episode,
+        doc_id="episode_semantic:representation:task-0001",
+        session_id="representation",
+        episode_id="task-0001",
+    )
+    second = module.episode_dense_representation_documents(
+        copy.deepcopy(episode),
+        doc_id="episode_semantic:representation:task-0001",
+        session_id="representation",
+        episode_id="task-0001",
+    )
+
+    assert first == second
+    assert len(first) == module.EPISODE_DENSE_REPRESENTATION_PER_ROLE_LIMIT
+    assert [item["raw_ref"] for item in first] == [
+        "raw:line:3",
+        "raw:line:4",
+        "raw:line:5",
+        "raw:line:6",
+    ]
+    assert all(
+        len(item["document"])
+        <= module.EPISODE_DENSE_REPRESENTATION_TEXT_MAX_CHARS + 160
+        for item in first
+    )
+
+
+def test_episode_dense_representation_support_hydrates_distinct_raw_refs_only() -> None:
+    raw_one = "raw:line:40"
+    raw_two = "raw:line:41"
+    episode = {
+        "representations": {
+            "actions": [
+                {
+                    "text": "ran the bounded command",
+                    "refs": {"raw": raw_one},
+                    "admission_basis": "structured_operational_action",
+                }
+            ],
+            "verification": [
+                {
+                    "text": "verified the bounded outcome",
+                    "refs": {"raw": raw_two},
+                    "admission_basis": "verification_observation",
+                }
+            ],
+        }
+    }
+    matches = [
+        {
+            "representation_id": "rep-one",
+            "role": "actions",
+            "raw_ref": raw_one,
+            "score": 0.91,
+            "rank_within_episode": 1,
+        },
+        {
+            "representation_id": "rep-one-duplicate",
+            "role": "actions",
+            "raw_ref": raw_one,
+            "score": 0.90,
+            "rank_within_episode": 2,
+        },
+        {
+            "representation_id": "rep-two",
+            "role": "verification",
+            "raw_ref": raw_two,
+            "score": 0.89,
+            "rank_within_episode": 3,
+        },
+    ]
+
+    result = module.episode_dense_hydrate_result_support(
+        {
+            "supporting_evidence": [
+                {
+                    "role": "outcomes",
+                    "text": "duplicate existing evidence",
+                    "refs": {"raw": raw_one},
+                }
+            ]
+        },
+        episode,
+        matches,
+    )
+
+    returned_raw_refs = [
+        str(item.get("refs", {}).get("raw") or "")
+        for item in result["supporting_evidence"]
+    ]
+    assert returned_raw_refs == [raw_one, raw_two]
+    assert all(
+        item["dense_representation"]["truth_status"]
+        == "dense_representation_navigation_not_claim_truth"
+        for item in result["supporting_evidence"]
+    )
 
 
 def test_episode_dense_projection_state_remains_readable_during_search_writer(tmp_path: Path) -> None:

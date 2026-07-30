@@ -492,12 +492,16 @@ EPISODE_FAILURE_RECOVERY_WINDOW_AFTER_LINES = 24
 EPISODE_FAILURE_RECOVERY_WINDOW_LIMIT = 8
 EPISODE_FAILURE_RECOVERY_EVENT_MAX_CHARS = 700
 EPISODE_FAILURE_RECOVERY_FOLLOWUP_LIMIT = 12
-EPISODE_DENSE_PROJECTION_VERSION = 1
-EPISODE_DENSE_DOCUMENT_VERSION = 2
+EPISODE_DENSE_PROJECTION_VERSION = 2
+EPISODE_DENSE_DOCUMENT_VERSION = 3
+EPISODE_DENSE_REPRESENTATION_VERSION = 1
 EPISODE_DENSE_DEFAULT_MODEL = "qwen3-embed-0.6b-int8-ov"
 EPISODE_DENSE_DEFAULT_DIMENSION = 1024
 EPISODE_DENSE_EMBED_BATCH_SIZE = 4
 EPISODE_DENSE_DOCUMENT_MAX_CHARS = 3200
+EPISODE_DENSE_REPRESENTATION_TEXT_MAX_CHARS = 1600
+EPISODE_DENSE_REPRESENTATION_PER_ROLE_LIMIT = 4
+EPISODE_DENSE_REPRESENTATION_MATCH_LIMIT = 2
 EPISODE_DENSE_QUERY_TIMEOUT_SECONDS = 30
 EPISODE_DENSE_INDEX_TIMEOUT_SECONDS = 120
 EPISODE_DENSE_RRF_K = 60
@@ -30698,6 +30702,97 @@ def projection_generation_from_json(value: Any) -> dict[str, Any] | None:
     return parsed if isinstance(parsed, dict) else None
 
 
+def publish_search_projection_generation_identity(
+    *,
+    aoa_root: Path,
+    projection: str,
+    identity: dict[str, Any],
+    coverage_current: bool,
+) -> dict[str, Any]:
+    """Publish one projection identity only after its complete scope is current."""
+    generation_id = str(identity.get("generation_id") or "")
+    if not coverage_current or not projection or not generation_id:
+        return {
+            "status": "not_published_incomplete_coverage",
+            "projection": projection,
+            "generation_id": generation_id,
+            "changed": False,
+        }
+    db_path = search_db_path(aoa_root)
+    if not db_path.exists():
+        return {
+            "status": "not_published_search_index_missing",
+            "projection": projection,
+            "generation_id": generation_id,
+            "changed": False,
+        }
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = sqlite3.connect(
+            db_path,
+            timeout=5.0,
+            factory=SearchSqliteConnection,
+        )
+        conn.row_factory = sqlite3.Row
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT value FROM meta "
+            "WHERE key = 'generation_identities_json'"
+        ).fetchone()
+        stored = projection_generation_from_json(
+            row["value"] if row else ""
+        )
+        generations = dict(stored) if isinstance(stored, dict) else {}
+        previous = (
+            generations.get(projection)
+            if isinstance(generations.get(projection), dict)
+            else {}
+        )
+        previous_generation_id = str(
+            previous.get("generation_id") or ""
+        )
+        changed = previous != identity
+        if changed:
+            generations[projection] = identity
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value) "
+                "VALUES ('generation_identities_json', ?)",
+                (
+                    json.dumps(
+                        generations,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                ),
+            )
+        conn.commit()
+        return {
+            "status": "published" if changed else "already_current",
+            "projection": projection,
+            "generation_id": generation_id,
+            "previous_generation_id": previous_generation_id,
+            "changed": changed,
+            "authority_boundary": (
+                "generation metadata describes a reproducible projection; "
+                "per-session state and source refs still prove coverage"
+            ),
+        }
+    except sqlite3.Error as exc:
+        if conn is not None:
+            conn.rollback()
+        return {
+            "status": sqlite_error_status(exc),
+            "projection": projection,
+            "generation_id": generation_id,
+            "changed": False,
+            "diagnostics": [sqlite_error_diagnostic(exc)],
+        }
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def search_dirty_projection_states(
     fingerprints: list[dict[str, Any]],
     indexed_states: dict[str, dict[str, Any]],
@@ -57782,6 +57877,34 @@ def init_search_db(
     )
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS episode_dense_representation_vectors (
+            representation_id TEXT PRIMARY KEY,
+            doc_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            episode_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            raw_ref TEXT NOT NULL,
+            segment_ref TEXT NOT NULL DEFAULT '',
+            session_ref TEXT NOT NULL DEFAULT '',
+            source_lane TEXT NOT NULL DEFAULT '',
+            admission_basis TEXT NOT NULL DEFAULT '',
+            outcome TEXT NOT NULL DEFAULT '',
+            source_episode_projection_version INTEGER NOT NULL,
+            source_route_signal_classifier_version INTEGER NOT NULL DEFAULT 0,
+            dense_projection_version INTEGER NOT NULL,
+            dense_document_version INTEGER NOT NULL,
+            representation_version INTEGER NOT NULL,
+            model TEXT NOT NULL,
+            dimension INTEGER NOT NULL,
+            document_sha256 TEXT NOT NULL,
+            vector_f32 BLOB NOT NULL,
+            indexed_at TEXT NOT NULL,
+            generation_id TEXT NOT NULL DEFAULT ''
+        ) WITHOUT ROWID
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS episode_dense_session_state (
             session_id TEXT PRIMARY KEY,
             status TEXT NOT NULL,
@@ -57793,6 +57916,8 @@ def init_search_db(
             dimension INTEGER NOT NULL,
             episode_document_count INTEGER NOT NULL,
             vector_count INTEGER NOT NULL,
+            representation_document_count INTEGER NOT NULL DEFAULT -1,
+            representation_vector_count INTEGER NOT NULL DEFAULT -1,
             indexed_at TEXT NOT NULL,
             last_error TEXT NOT NULL DEFAULT '',
             generation_id TEXT NOT NULL DEFAULT '',
@@ -57830,6 +57955,16 @@ def init_search_db(
         conn.execute(
             "ALTER TABLE episode_dense_session_state "
             "ADD COLUMN generation_identity_json TEXT NOT NULL DEFAULT ''"
+        )
+    if "representation_document_count" not in episode_dense_state_columns:
+        conn.execute(
+            "ALTER TABLE episode_dense_session_state "
+            "ADD COLUMN representation_document_count INTEGER NOT NULL DEFAULT -1"
+        )
+    if "representation_vector_count" not in episode_dense_state_columns:
+        conn.execute(
+            "ALTER TABLE episode_dense_session_state "
+            "ADD COLUMN representation_vector_count INTEGER NOT NULL DEFAULT -1"
         )
     conn.execute(
         """
@@ -57992,6 +58127,19 @@ def init_search_db(
         "CREATE INDEX IF NOT EXISTS idx_episode_dense_vectors_generation "
         "ON episode_dense_vectors(generation_id, session_id, episode_id)"
     )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_episode_dense_representations_doc "
+        "ON episode_dense_representation_vectors(doc_id, role, raw_ref)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_episode_dense_representations_session "
+        "ON episode_dense_representation_vectors(session_id, episode_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_episode_dense_representations_generation "
+        "ON episode_dense_representation_vectors("
+        "generation_id, session_id, episode_id)"
+    )
     if create_indexes:
         if budget_deadline is not None:
             conn.set_progress_handler(lambda: 1 if time.monotonic() >= budget_deadline else 0, 10000)
@@ -58014,6 +58162,7 @@ def reset_search_db(conn: sqlite3.Connection) -> None:
     conn.execute("DELETE FROM episode_semantic_fts")
     conn.execute("DELETE FROM episode_semantic_payloads")
     conn.execute("DELETE FROM episode_dense_vectors")
+    conn.execute("DELETE FROM episode_dense_representation_vectors")
     conn.execute("DELETE FROM episode_dense_session_state")
     conn.execute("DELETE FROM episode_entity_postings")
     conn.execute("DELETE FROM episode_semantic_meta")
@@ -58283,6 +58432,20 @@ def delete_episode_semantic_for_session(
             "DELETE FROM episode_dense_vectors WHERE doc_id IN ("
             "SELECT doc_id FROM episode_semantic_meta "
             "WHERE doc_rowid IN (SELECT rowid FROM episode_semantic_delete_rowids))"
+        )
+    if (
+        count
+        and sqlite_table_exists(
+            conn,
+            "episode_dense_representation_vectors",
+        )
+    ):
+        conn.execute(
+            "DELETE FROM episode_dense_representation_vectors "
+            "WHERE doc_id IN ("
+            "SELECT doc_id FROM episode_semantic_meta "
+            "WHERE doc_rowid IN ("
+            "SELECT rowid FROM episode_semantic_delete_rowids))"
         )
     if count and sqlite_table_exists(conn, "episode_semantic_fts"):
         conn.execute("DELETE FROM episode_semantic_fts WHERE rowid IN (SELECT rowid FROM episode_semantic_delete_rowids)")
@@ -59569,6 +59732,263 @@ def episode_dense_document(episode: dict[str, Any]) -> str:
     return passage[:EPISODE_DENSE_DOCUMENT_MAX_CHARS]
 
 
+EPISODE_DENSE_REPRESENTATION_ROLES = tuple(
+    role for role, _quota in reversed(EPISODE_DENSE_ROLE_QUOTAS)
+)
+
+
+def episode_dense_representation_documents(
+    episode: dict[str, Any],
+    *,
+    doc_id: str,
+    session_id: str,
+    episode_id: str,
+) -> list[dict[str, Any]]:
+    """Build bounded independently attributable passages for one episode."""
+    representations = (
+        episode.get("representations")
+        if isinstance(episode.get("representations"), dict)
+        else {}
+    )
+    documents: list[dict[str, Any]] = []
+    for role in EPISODE_DENSE_REPRESENTATION_ROLES:
+        entries = [
+            item
+            for item in (
+                representations.get(role)
+                if isinstance(representations.get(role), list)
+                else []
+            )
+            if isinstance(item, dict)
+            and str(item.get("text") or "").strip()
+            and isinstance(item.get("refs"), dict)
+            and item["refs"].get("raw")
+        ][-EPISODE_DENSE_REPRESENTATION_PER_ROLE_LIMIT:]
+        for item in entries:
+            refs = item.get("refs") if isinstance(item.get("refs"), dict) else {}
+            raw_ref = str(refs.get("raw") or "")
+            text = str(item.get("text") or "").strip()[
+                :EPISODE_DENSE_REPRESENTATION_TEXT_MAX_CHARS
+            ]
+            identity_payload = {
+                "doc_id": doc_id,
+                "role": role,
+                "raw_ref": raw_ref,
+                "source_lane": str(item.get("source_lane") or ""),
+                "admission_basis": str(item.get("admission_basis") or ""),
+                "outcome": str(item.get("outcome") or ""),
+                "text_sha256": hashlib.sha256(
+                    text.encode("utf-8")
+                ).hexdigest(),
+            }
+            identity_digest = hashlib.sha256(
+                json.dumps(
+                    identity_payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()[:24]
+            document = (
+                "passage: "
+                f"role={role}; "
+                f"source={item.get('source_lane') or 'unknown'}; "
+                f"basis={item.get('admission_basis') or 'unknown'}; "
+                f"outcome={item.get('outcome') or 'unknown'}\n"
+                f"{text}"
+            )
+            documents.append(
+                {
+                    "representation_id": (
+                        f"{doc_id}:representation:{identity_digest}"
+                    ),
+                    "doc_id": doc_id,
+                    "session_id": session_id,
+                    "episode_id": episode_id,
+                    "role": role,
+                    "raw_ref": raw_ref,
+                    "segment_ref": str(refs.get("segment") or ""),
+                    "session_ref": str(refs.get("session") or ""),
+                    "source_lane": str(item.get("source_lane") or ""),
+                    "admission_basis": str(
+                        item.get("admission_basis") or ""
+                    ),
+                    "outcome": str(item.get("outcome") or ""),
+                    "document": document,
+                    "document_sha256": hashlib.sha256(
+                        document.encode("utf-8")
+                    ).hexdigest(),
+                }
+            )
+    documents.sort(
+        key=lambda item: (
+            str(item.get("role") or ""),
+            line_from_raw_ref(item.get("raw_ref")),
+            str(item.get("representation_id") or ""),
+        )
+    )
+    return documents
+
+
+def episode_dense_representation_support(
+    episode: dict[str, Any],
+    matches: Any,
+) -> list[dict[str, Any]]:
+    """Resolve vector matches back to distinct evidence-bearing representations."""
+    representations = (
+        episode.get("representations")
+        if isinstance(episode.get("representations"), dict)
+        else {}
+    )
+    by_role_ref: dict[tuple[str, str], dict[str, Any]] = {}
+    for role, entries in representations.items():
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            refs = (
+                entry.get("refs")
+                if isinstance(entry.get("refs"), dict)
+                else {}
+            )
+            raw_ref = str(refs.get("raw") or "")
+            if raw_ref:
+                by_role_ref.setdefault((str(role), raw_ref), entry)
+    support: list[dict[str, Any]] = []
+    seen_raw_refs: set[str] = set()
+    for match in matches if isinstance(matches, list) else []:
+        if not isinstance(match, dict):
+            continue
+        role = str(match.get("role") or "")
+        raw_ref = str(match.get("raw_ref") or "")
+        if not raw_ref or raw_ref in seen_raw_refs:
+            continue
+        entry = by_role_ref.get((role, raw_ref))
+        if not isinstance(entry, dict):
+            continue
+        refs = (
+            entry.get("refs")
+            if isinstance(entry.get("refs"), dict)
+            else {}
+        )
+        support.append(
+            {
+                "role": role,
+                "text": short_text(
+                    str(entry.get("text") or ""),
+                    max_chars=700,
+                ),
+                "matched_query_terms": [],
+                "source_lane": entry.get("source_lane"),
+                "admission_basis": entry.get("admission_basis"),
+                "correlation_id": str(
+                    entry.get("correlation_id") or ""
+                ),
+                "event_type": entry.get("event_type"),
+                "outcome": entry.get("outcome"),
+                "timestamp": entry.get("timestamp"),
+                "line": entry.get("line")
+                or line_from_raw_ref(raw_ref),
+                "refs": {
+                    "raw": raw_ref,
+                    "segment": str(refs.get("segment") or ""),
+                    "segment_index": str(
+                        refs.get("segment_index") or ""
+                    ),
+                    "session": str(refs.get("session") or ""),
+                },
+                "dense_representation": {
+                    "representation_id": str(
+                        match.get("representation_id") or ""
+                    ),
+                    "score": match.get("score"),
+                    "rank_within_episode": int_value(
+                        match.get("rank_within_episode")
+                    ),
+                    "truth_status": (
+                        "dense_representation_navigation_not_claim_truth"
+                    ),
+                },
+                "reading_score": round(
+                    120.0
+                    - float(
+                        int_value(
+                            match.get("rank_within_episode"),
+                            1,
+                        )
+                    ),
+                    4,
+                ),
+                "reading_signals": [
+                    "dense_representation_match",
+                    "representation_raw_ref_resolved",
+                ],
+            }
+        )
+        seen_raw_refs.add(raw_ref)
+        if (
+            len(support)
+            >= EPISODE_DENSE_REPRESENTATION_MATCH_LIMIT
+        ):
+            break
+    return support
+
+
+def episode_dense_hydrate_result_support(
+    result: dict[str, Any],
+    episode: dict[str, Any],
+    matches: Any,
+) -> dict[str, Any]:
+    clone = dict(result)
+    dense_support = episode_dense_representation_support(
+        episode,
+        matches,
+    )
+    if not dense_support:
+        return clone
+    existing = (
+        clone.get("supporting_evidence")
+        if isinstance(clone.get("supporting_evidence"), list)
+        else []
+    )
+    merged: list[dict[str, Any]] = []
+    seen_raw_refs: set[str] = set()
+    for entry in [*dense_support, *existing]:
+        if not isinstance(entry, dict):
+            continue
+        refs = (
+            entry.get("refs")
+            if isinstance(entry.get("refs"), dict)
+            else {}
+        )
+        raw_ref = str(refs.get("raw") or "")
+        if raw_ref and raw_ref in seen_raw_refs:
+            continue
+        if raw_ref:
+            seen_raw_refs.add(raw_ref)
+        merged.append(entry)
+        if len(merged) >= 12:
+            break
+    clone["supporting_evidence"] = merged
+    clone["dense_representation_matches"] = [
+        {
+            key: match.get(key)
+            for key in (
+                "representation_id",
+                "role",
+                "raw_ref",
+                "score",
+                "rank_within_episode",
+            )
+        }
+        for match in matches
+        if isinstance(match, dict)
+        and match.get("raw_ref")
+    ][:EPISODE_DENSE_REPRESENTATION_MATCH_LIMIT]
+    return clone
+
+
 def episode_dense_provider(aoa_root: Path) -> dict[str, Any]:
     config = search_provider_config(aoa_root)
     providers = config.get("providers") if isinstance(config.get("providers"), dict) else {}
@@ -59777,6 +60197,7 @@ def episode_dense_projection_state(
             "current_session_count": 0,
             "source_session_count": 0,
             "vector_count": 0,
+            "representation_vector_count": 0,
             "implicit_no_task_session_count": 0,
             "dirty_session_count": 0,
             "dirty_session_ids": [],
@@ -59816,13 +60237,33 @@ def episode_dense_projection_state(
         dirty: list[str] = []
         current_count = 0
         vector_count = 0
+        representation_vector_count = 0
         implicit_no_task_count = 0
         for source in source_rows:
             session_id = str(source["session_id"] or "")
             dense = dense_by_id.get(session_id)
             expected_count = int_value(source["episode_count"])
             stored_vector_count = int_value(dense["vector_count"]) if dense else 0
-            implicit_no_task = expected_count == 0 and stored_vector_count == 0
+            stored_representation_count = (
+                int_value(dense["representation_vector_count"], -1)
+                if dense
+                and "representation_vector_count" in dense.keys()
+                else -1
+            )
+            stored_representation_document_count = (
+                int_value(
+                    dense["representation_document_count"],
+                    -1,
+                )
+                if dense
+                and "representation_document_count" in dense.keys()
+                else -1
+            )
+            implicit_no_task = (
+                expected_count == 0
+                and stored_vector_count == 0
+                and stored_representation_count in {-1, 0}
+            )
             is_current = implicit_no_task or bool(
                 dense
                 and int_value(dense["source_episode_projection_version"]) == EPISODE_SEMANTIC_PROJECTION_VERSION
@@ -59835,11 +60276,18 @@ def episode_dense_projection_state(
                 and str(dense["model"] or "") == EPISODE_DENSE_DEFAULT_MODEL
                 and int_value(dense["episode_document_count"]) == expected_count
                 and int_value(dense["vector_count"]) == expected_count
+                and stored_representation_document_count >= 0
+                and stored_representation_count
+                == stored_representation_document_count
                 and str(dense["status"] or "") in {"current", "no_task_episodes"}
             )
             if is_current:
                 current_count += 1
                 vector_count += stored_vector_count
+                representation_vector_count += max(
+                    0,
+                    stored_representation_count,
+                )
                 implicit_no_task_count += 1 if implicit_no_task else 0
             elif session_id:
                 dirty.append(session_id)
@@ -59861,6 +60309,9 @@ def episode_dense_projection_state(
             "current_session_count": current_count,
             "source_session_count": len(source_rows),
             "vector_count": vector_count,
+            "representation_vector_count": (
+                representation_vector_count
+            ),
             "implicit_no_task_session_count": implicit_no_task_count,
             "dirty_session_count": len(dirty),
             "dirty_session_ids": dirty,
@@ -59881,6 +60332,7 @@ def episode_dense_projection_state(
             "current_session_count": 0,
             "source_session_count": 0,
             "vector_count": 0,
+            "representation_vector_count": 0,
             "implicit_no_task_session_count": 0,
             "dirty_session_count": 0,
             "dirty_session_ids": [],
@@ -77753,30 +78205,29 @@ def episode_dense_search_ranking(
     conn: sqlite3.Connection | None = None
     try:
         conn = connect_existing_search_db(db_path)
-        if not sqlite_table_exists(conn, "episode_dense_vectors"):
+        aggregate_table_available = sqlite_table_exists(
+            conn,
+            "episode_dense_vectors",
+        )
+        representation_table_available = sqlite_table_exists(
+            conn,
+            "episode_dense_representation_vectors",
+        )
+        if (
+            not aggregate_table_available
+            and not representation_table_available
+        ):
             return {
                 "ok": False,
                 "status": "dense_schema_missing",
                 "ranking": [],
                 "elapsed_ms": int((time.monotonic() - started) * 1000),
-                "diagnostics": ["episode_dense_vectors_missing"],
+                "diagnostics": [
+                    "episode_dense_vector_tables_missing"
+                ],
             }
         where = " AND ".join(filters)
-        vector_filters = [
-            "episode_dense_vectors.source_episode_projection_version = ?",
-            "episode_dense_vectors.source_route_signal_classifier_version = ?",
-            "episode_dense_vectors.dense_projection_version = ?",
-            "episode_dense_vectors.dense_document_version = ?",
-            "episode_dense_vectors.model = ?",
-            "episode_dense_vectors.dimension = ?",
-            "episode_dense_vectors.generation_id = ?",
-            "episode_semantic_meta.generation_id = ?",
-            "episode_semantic_state.projection_version = ?",
-            "episode_semantic_state.route_signal_classifier_version = ?",
-            "episode_semantic_state.generation_id = ?",
-            "episode_semantic_state.status IN ('current', 'no_task_episodes', 'no_admitted_episode_text')",
-        ]
-        vector_params: list[Any] = [
+        common_params: list[Any] = [
             EPISODE_SEMANTIC_PROJECTION_VERSION,
             ROUTE_SIGNAL_CLASSIFIER_VERSION,
             EPISODE_DENSE_PROJECTION_VERSION,
@@ -77789,19 +78240,137 @@ def episode_dense_search_ranking(
             ROUTE_SIGNAL_CLASSIFIER_VERSION,
             expected_episode_generation_id,
         ]
-        sql = (
-            "SELECT episode_dense_vectors.doc_id, episode_dense_vectors.vector_f32 "
-            "FROM episode_dense_vectors JOIN episode_semantic_meta "
-            "ON episode_semantic_meta.doc_id = episode_dense_vectors.doc_id "
-            "JOIN episode_semantic_session_state AS episode_semantic_state "
-            "ON episode_semantic_state.session_id = episode_semantic_meta.session_id "
-            f"WHERE {' AND '.join(vector_filters)}"
-        )
-        if where:
-            sql += " AND " + where
-            vector_params.extend(params)
-        sql += " ORDER BY episode_dense_vectors.doc_id"
-        vector_rows = conn.execute(sql, vector_params).fetchall()
+        vector_rows: list[dict[str, Any]] = []
+        if representation_table_available:
+            representation_filters = [
+                "dense_rep.source_episode_projection_version = ?",
+                "dense_rep.source_route_signal_classifier_version = ?",
+                "dense_rep.dense_projection_version = ?",
+                "dense_rep.dense_document_version = ?",
+                "dense_rep.model = ?",
+                "dense_rep.dimension = ?",
+                "dense_rep.generation_id = ?",
+                "episode_semantic_meta.generation_id = ?",
+                "episode_semantic_state.projection_version = ?",
+                "episode_semantic_state.route_signal_classifier_version = ?",
+                "episode_semantic_state.generation_id = ?",
+                (
+                    "episode_semantic_state.status IN "
+                    "('current', 'no_task_episodes', "
+                    "'no_admitted_episode_text')"
+                ),
+                "dense_rep.representation_version = ?",
+            ]
+            representation_params = [
+                *common_params,
+                EPISODE_DENSE_REPRESENTATION_VERSION,
+            ]
+            representation_sql = (
+                "SELECT dense_rep.doc_id, dense_rep.vector_f32, "
+                "dense_rep.representation_id, dense_rep.role, "
+                "dense_rep.raw_ref, dense_rep.segment_ref, "
+                "dense_rep.session_ref, dense_rep.source_lane, "
+                "dense_rep.admission_basis, dense_rep.outcome "
+                "FROM episode_dense_representation_vectors AS dense_rep "
+                "JOIN episode_semantic_meta "
+                "ON episode_semantic_meta.doc_id = dense_rep.doc_id "
+                "JOIN episode_semantic_session_state "
+                "AS episode_semantic_state "
+                "ON episode_semantic_state.session_id = "
+                "episode_semantic_meta.session_id "
+                f"WHERE {' AND '.join(representation_filters)}"
+            )
+            if where:
+                representation_sql += " AND " + where
+                representation_params.extend(params)
+            representation_sql += (
+                " ORDER BY dense_rep.doc_id, "
+                "dense_rep.representation_id"
+            )
+            vector_rows.extend(
+                {
+                    **dict(row),
+                    "vector_kind": "representation",
+                }
+                for row in conn.execute(
+                    representation_sql,
+                    representation_params,
+                ).fetchall()
+            )
+        if aggregate_table_available:
+            aggregate_filters = [
+                "dense_episode.source_episode_projection_version = ?",
+                "dense_episode.source_route_signal_classifier_version = ?",
+                "dense_episode.dense_projection_version = ?",
+                "dense_episode.dense_document_version = ?",
+                "dense_episode.model = ?",
+                "dense_episode.dimension = ?",
+                "dense_episode.generation_id = ?",
+                "episode_semantic_meta.generation_id = ?",
+                "episode_semantic_state.projection_version = ?",
+                "episode_semantic_state.route_signal_classifier_version = ?",
+                "episode_semantic_state.generation_id = ?",
+                (
+                    "episode_semantic_state.status IN "
+                    "('current', 'no_task_episodes', "
+                    "'no_admitted_episode_text')"
+                ),
+            ]
+            aggregate_params = list(common_params)
+            if representation_table_available:
+                aggregate_filters.append(
+                    "NOT EXISTS ("
+                    "SELECT 1 FROM "
+                    "episode_dense_representation_vectors AS rep_guard "
+                    "WHERE rep_guard.doc_id = dense_episode.doc_id "
+                    "AND rep_guard.representation_version = ? "
+                    "AND rep_guard.dense_projection_version = ? "
+                    "AND rep_guard.dense_document_version = ? "
+                    "AND rep_guard.generation_id = ?)"
+                )
+                aggregate_params.extend(
+                    [
+                        EPISODE_DENSE_REPRESENTATION_VERSION,
+                        EPISODE_DENSE_PROJECTION_VERSION,
+                        EPISODE_DENSE_DOCUMENT_VERSION,
+                        expected_dense_generation_id,
+                    ]
+                )
+            aggregate_sql = (
+                "SELECT dense_episode.doc_id, "
+                "dense_episode.vector_f32 "
+                "FROM episode_dense_vectors AS dense_episode "
+                "JOIN episode_semantic_meta "
+                "ON episode_semantic_meta.doc_id = "
+                "dense_episode.doc_id "
+                "JOIN episode_semantic_session_state "
+                "AS episode_semantic_state "
+                "ON episode_semantic_state.session_id = "
+                "episode_semantic_meta.session_id "
+                f"WHERE {' AND '.join(aggregate_filters)}"
+            )
+            if where:
+                aggregate_sql += " AND " + where
+                aggregate_params.extend(params)
+            aggregate_sql += " ORDER BY dense_episode.doc_id"
+            vector_rows.extend(
+                {
+                    **dict(row),
+                    "representation_id": "",
+                    "role": "",
+                    "raw_ref": "",
+                    "segment_ref": "",
+                    "session_ref": "",
+                    "source_lane": "",
+                    "admission_basis": "",
+                    "outcome": "",
+                    "vector_kind": "episode_fallback",
+                }
+                for row in conn.execute(
+                    aggregate_sql,
+                    aggregate_params,
+                ).fetchall()
+            )
     except sqlite3.Error as exc:
         return {
             "ok": False,
@@ -77850,7 +78419,7 @@ def episode_dense_search_ranking(
             "diagnostics": list(embedding.get("diagnostics") or []),
         }
     query_vector = query_vectors[0]
-    valid_rows: list[sqlite3.Row] = []
+    valid_rows: list[dict[str, Any]] = []
     blobs: list[bytes] = []
     expected_bytes = EPISODE_DENSE_DEFAULT_DIMENSION * 4
     for row in vector_rows:
@@ -77871,24 +78440,115 @@ def episode_dense_search_ranking(
         for blob in blobs:
             vector = episode_dense_vector_values(blob, EPISODE_DENSE_DEFAULT_DIMENSION)
             scores.append(sum(left * right for left, right in zip(vector, query_vector, strict=True)))
-    order = sorted(
+    representation_order = sorted(
         range(len(valid_rows)),
-        key=lambda index: (-scores[index], str(valid_rows[index]["doc_id"] or "")),
+        key=lambda index: (
+            -scores[index],
+            str(valid_rows[index]["doc_id"] or ""),
+            str(
+                valid_rows[index].get("representation_id")
+                or ""
+            ),
+        ),
     )
     requested = max(1, min(int_value(limit, 100), 300))
-    ranking = [
-        {
-            "doc_id": str(valid_rows[index]["doc_id"] or ""),
-            "score": round(scores[index], 7),
-            "rank": rank,
-        }
-        for rank, index in enumerate(order[:requested], start=1)
-    ]
+    episode_candidates: dict[str, dict[str, Any]] = {}
+    for representation_index in representation_order:
+        row = valid_rows[representation_index]
+        doc_id = str(row.get("doc_id") or "")
+        if not doc_id:
+            continue
+        candidate = episode_candidates.setdefault(
+            doc_id,
+            {
+                "doc_id": doc_id,
+                "score": round(
+                    scores[representation_index],
+                    7,
+                ),
+                "representation_matches": [],
+                "_seen_raw_refs": set(),
+                "vector_kind": str(
+                    row.get("vector_kind")
+                    or "episode_fallback"
+                ),
+            },
+        )
+        if (
+            str(row.get("vector_kind") or "")
+            != "representation"
+        ):
+            continue
+        raw_ref = str(row.get("raw_ref") or "")
+        if (
+            not raw_ref
+            or raw_ref in candidate["_seen_raw_refs"]
+            or len(candidate["representation_matches"])
+            >= EPISODE_DENSE_REPRESENTATION_MATCH_LIMIT
+        ):
+            continue
+        candidate["_seen_raw_refs"].add(raw_ref)
+        candidate["representation_matches"].append(
+            {
+                "representation_id": str(
+                    row.get("representation_id") or ""
+                ),
+                "role": str(row.get("role") or ""),
+                "raw_ref": raw_ref,
+                "segment_ref": str(
+                    row.get("segment_ref") or ""
+                ),
+                "session_ref": str(
+                    row.get("session_ref") or ""
+                ),
+                "source_lane": str(
+                    row.get("source_lane") or ""
+                ),
+                "admission_basis": str(
+                    row.get("admission_basis") or ""
+                ),
+                "outcome": str(row.get("outcome") or ""),
+                "score": round(
+                    scores[representation_index],
+                    7,
+                ),
+                "rank_within_episode": (
+                    len(candidate["representation_matches"]) + 1
+                ),
+            }
+        )
+    ranked_episodes = sorted(
+        episode_candidates.values(),
+        key=lambda item: (
+            -float(item.get("score") or 0.0),
+            str(item.get("doc_id") or ""),
+        ),
+    )[:requested]
+    ranking: list[dict[str, Any]] = []
+    for rank, candidate in enumerate(ranked_episodes, start=1):
+        candidate.pop("_seen_raw_refs", None)
+        candidate["rank"] = rank
+        ranking.append(candidate)
+    representation_vector_count = sum(
+        str(row.get("vector_kind") or "")
+        == "representation"
+        for row in valid_rows
+    )
+    episode_fallback_vector_count = (
+        len(valid_rows) - representation_vector_count
+    )
     return {
         "ok": True,
         "status": "available",
         "ranking": ranking,
         "vector_count": len(valid_rows),
+        "representation_vector_count": (
+            representation_vector_count
+        ),
+        "episode_fallback_vector_count": (
+            episode_fallback_vector_count
+        ),
+        "candidate_episode_count": len(episode_candidates),
         "scanned_vector_bytes": len(valid_rows) * expected_bytes,
         "candidate_limit": requested,
         "model": EPISODE_DENSE_DEFAULT_MODEL,
@@ -77897,7 +78557,23 @@ def episode_dense_search_ranking(
         "embedding_elapsed_ms": int_value(embedding.get("elapsed_ms")),
         "elapsed_ms": int((time.monotonic() - started) * 1000),
         "provider": provider,
-        "truth_status": "dense_episode_navigation_not_raw_truth",
+        "representation_policy": {
+            "version": EPISODE_DENSE_REPRESENTATION_VERSION,
+            "episode_score": (
+                "maximum_cosine_over_representation_vectors"
+            ),
+            "match_limit": (
+                EPISODE_DENSE_REPRESENTATION_MATCH_LIMIT
+            ),
+            "distinct_raw_refs": True,
+            "fallback": (
+                "episode_vector_only_when_no_current_"
+                "representation_vector_exists"
+            ),
+        },
+        "truth_status": (
+            "dense_representation_navigation_not_raw_truth"
+        ),
         "diagnostics": [],
     }
 
@@ -82188,32 +82864,39 @@ def episode_semantic_search(
         if dense_payload.get("ok") and dense_ranking:
             sparse_by_id = {str(item.get("doc_id") or ""): item for item in ranked}
             dense_doc_ids = [str(item.get("doc_id") or "") for item in dense_ranking if item.get("doc_id")]
-            missing_doc_ids = [doc_id for doc_id in dense_doc_ids if doc_id not in sparse_by_id]
-            if missing_doc_ids:
+            dense_episodes_by_id: dict[str, dict[str, Any]] = {}
+            if dense_doc_ids:
                 dense_conn: sqlite3.Connection | None = None
                 try:
                     dense_conn = connect_existing_search_db(db_path)
-                    placeholders = ",".join("?" for _ in missing_doc_ids)
+                    placeholders = ",".join("?" for _ in dense_doc_ids)
                     dense_rows = dense_conn.execute(
                         "SELECT episode_semantic_meta.*, episode_semantic_payloads.payload_zlib "
                         "FROM episode_semantic_meta JOIN episode_semantic_payloads "
                         "ON episode_semantic_payloads.doc_rowid = episode_semantic_meta.doc_rowid "
                         f"WHERE episode_semantic_meta.doc_id IN ({placeholders}) "
                         "AND episode_semantic_meta.generation_id = ?",
-                        [*missing_doc_ids, expected_generation_id],
+                        [*dense_doc_ids, expected_generation_id],
                     ).fetchall()
                     for dense_row in dense_rows:
-                        result = episode_semantic_result_from_row(
-                            dense_row,
-                            terms=terms,
-                            temporal_span=temporal_span,
-                            query_text=query,
-                            normalized_query=fts_query,
-                            explain=explain,
-                            bm25_rank=0.0,
-                            match_channel="episode_dense_cosine",
+                        doc_id = str(dense_row["doc_id"] or "")
+                        dense_episode = episode_semantic_payload_from_blob(
+                            dense_row["payload_zlib"]
                         )
-                        sparse_by_id[str(result.get("doc_id") or "")] = result
+                        if dense_episode:
+                            dense_episodes_by_id[doc_id] = dense_episode
+                        if doc_id not in sparse_by_id:
+                            result = episode_semantic_result_from_row(
+                                dense_row,
+                                terms=terms,
+                                temporal_span=temporal_span,
+                                query_text=query,
+                                normalized_query=fts_query,
+                                explain=explain,
+                                bm25_rank=0.0,
+                                match_channel="episode_dense_cosine",
+                            )
+                            sparse_by_id[doc_id] = result
                 except sqlite3.Error as exc:
                     diagnostics.append(sqlite_error_diagnostic(exc))
                 finally:
@@ -82253,9 +82936,21 @@ def episode_semantic_search(
                 item = sparse_by_id.get(doc_id)
                 if not isinstance(item, dict):
                     continue
-                clone = dict(item)
                 sparse_rank = sparse_rank_by_id.get(doc_id)
                 dense_item = dense_by_id.get(doc_id, {})
+                representation_matches = (
+                    dense_item.get("representation_matches")
+                    if isinstance(
+                        dense_item.get("representation_matches"),
+                        list,
+                    )
+                    else []
+                )
+                clone = episode_dense_hydrate_result_support(
+                    dict(item),
+                    dense_episodes_by_id.get(doc_id, {}),
+                    representation_matches,
+                )
                 dense_rank = int_value(dense_item.get("rank")) or None
                 dense_score = dense_item.get("score")
                 is_sparse_anchor = bool(
@@ -82316,6 +83011,10 @@ def episode_semantic_search(
                     for channel, present in (
                         ("episode_contextual_bm25", bool(sparse_rank)),
                         ("episode_dense_cosine", bool(dense_rank)),
+                        (
+                            "episode_dense_representation_cosine",
+                            bool(representation_matches),
+                        ),
                     )
                     if present
                 ]
@@ -82327,6 +83026,20 @@ def episode_semantic_search(
                         "k": EPISODE_DENSE_RRF_K,
                         "sparse_rank": sparse_rank,
                         "dense_rank": dense_rank,
+                        "dense_representation_matches": [
+                            {
+                                key: match.get(key)
+                                for key in (
+                                    "representation_id",
+                                    "role",
+                                    "raw_ref",
+                                    "score",
+                                    "rank_within_episode",
+                                )
+                            }
+                            for match in representation_matches
+                            if isinstance(match, dict)
+                        ],
                         "sparse_anchor": is_sparse_anchor,
                         "sparse_anchor_reasons": sparse_anchor_reasons,
                         "sparse_anchor_bonus": clone["sparse_anchor_bonus"],
@@ -83989,9 +84702,13 @@ def episode_semantic_search(
             "dense": {
                 key: dense_payload.get(key)
                 for key in (
-                    "ok", "status", "vector_count", "scanned_vector_bytes", "candidate_limit",
+                    "ok", "status", "vector_count",
+                    "representation_vector_count",
+                    "episode_fallback_vector_count",
+                    "candidate_episode_count",
+                    "scanned_vector_bytes", "candidate_limit",
                     "model", "dimension", "accelerator", "embedding_elapsed_ms", "elapsed_ms",
-                    "truth_status", "diagnostics",
+                    "representation_policy", "truth_status", "diagnostics",
                 )
             },
             "fusion": "reciprocal_rank_fusion" if effective_mode == "hybrid" else "not_applied",
@@ -94570,6 +95287,23 @@ def episode_dense_index_sessions(
             selection["selected_session_ids"] = [str(row["session_id"] or "") for row in selected]
         selected_count = len(selected)
         if not selected:
+            generation_publish = (
+                publish_search_projection_generation_identity(
+                    aoa_root=aoa_root,
+                    projection="episode_dense",
+                    identity=dense_generation_identity,
+                    coverage_current=bool(
+                        dense_state.get("status") == "current"
+                        and not dense_state.get("projection_dirty")
+                        and int_value(
+                            dense_state.get("current_session_count")
+                        )
+                        == int_value(
+                            dense_state.get("source_session_count")
+                        )
+                    ),
+                )
+            )
             return {
                 "schema_version": SCHEMA_VERSION,
                 "artifact_type": "episode_dense_index",
@@ -94585,6 +95319,7 @@ def episode_dense_index_sessions(
                 "selection": selection,
                 "coverage": dense_state,
                 "provider": {**provider, "embedding_api_url": provider.get("embedding_api_url")},
+                "generation_publish": generation_publish,
                 "elapsed_ms": int((time.monotonic() - started) * 1000),
                 "diagnostics": [],
             }
@@ -94636,13 +95371,17 @@ def episode_dense_index_sessions(
                 "provider": provider,
                 "provider_preflight": provider_preflight,
                 "coverage": dense_state,
-                "storage_mode": "normalized_float32_exact_cosine_sidecar_v1",
+                "storage_mode": (
+                    "normalized_float32_exact_cosine_"
+                    "episode_and_representation_sidecars_v2"
+                ),
                 "index_choice": (
                     "exact vector scan is lossless and bounded at the current episode cardinality; "
                     "ANN is deferred until measured scale requires it"
                 ),
                 "authority_boundary": (
-                    "dense scores navigate generated episode documents; raw transcript refs remain authority"
+                    "dense scores navigate generated episode representations; "
+                    "only resolved raw transcript refs remain authority"
                 ),
                 "elapsed_ms": int((time.monotonic() - started) * 1000),
                 "db_path": str(db_path),
@@ -94695,6 +95434,7 @@ def episode_dense_index_sessions(
                 continue
             documents: list[str] = []
             document_hashes: list[str] = []
+            representation_documents: list[dict[str, Any]] = []
             payload_ok = True
             for episode_row in episode_rows:
                 episode = episode_semantic_payload_from_blob(episode_row["payload_zlib"])
@@ -94704,6 +95444,16 @@ def episode_dense_index_sessions(
                     break
                 documents.append(document)
                 document_hashes.append(hashlib.sha256(document.encode("utf-8")).hexdigest())
+                representation_documents.extend(
+                    episode_dense_representation_documents(
+                        episode,
+                        doc_id=str(episode_row["doc_id"] or ""),
+                        session_id=session_id,
+                        episode_id=str(
+                            episode_row["episode_id"] or ""
+                        ),
+                    )
+                )
             if not payload_ok:
                 diagnostic = f"episode_dense_payload_unreadable:{session_id}"
                 diagnostics.append(diagnostic)
@@ -94719,9 +95469,15 @@ def episode_dense_index_sessions(
                 continue
             embedding = episode_dense_embed_texts(
                 url=str(provider.get("embedding_api_url") or ""),
-                texts=documents,
+                texts=[
+                    *documents,
+                    *[
+                        str(item.get("document") or "")
+                        for item in representation_documents
+                    ],
+                ],
                 timeout=EPISODE_DENSE_INDEX_TIMEOUT_SECONDS,
-            ) if documents else {
+            ) if documents or representation_documents else {
                 "ok": True,
                 "status": "no_task_episodes",
                 "vectors": [],
@@ -94734,15 +95490,20 @@ def episode_dense_index_sessions(
             model = str(embedding.get("model") or EPISODE_DENSE_DEFAULT_MODEL)
             dimension = int_value(embedding.get("dimension"), EPISODE_DENSE_DEFAULT_DIMENSION)
             vectors = embedding.get("vectors") if isinstance(embedding.get("vectors"), list) else []
+            expected_vector_count = (
+                len(episode_rows)
+                + len(representation_documents)
+            )
             if (
                 not embedding.get("ok")
-                or len(vectors) != len(episode_rows)
+                or len(vectors) != expected_vector_count
                 or model != EPISODE_DENSE_DEFAULT_MODEL
                 or (episode_rows and dimension != EPISODE_DENSE_DEFAULT_DIMENSION)
             ):
                 diagnostic = (
                     f"episode_dense_embedding_failed:{session_id}:status={embedding.get('status')}:"
-                    f"model={model}:dimension={dimension}:vectors={len(vectors)}/{len(episode_rows)}"
+                    f"model={model}:dimension={dimension}:"
+                    f"vectors={len(vectors)}/{expected_vector_count}"
                 )
                 diagnostics.append(diagnostic)
                 results.append(
@@ -94759,10 +95520,22 @@ def episode_dense_index_sessions(
                     }
                 )
                 continue
+            episode_vectors = vectors[: len(episode_rows)]
+            representation_vectors = vectors[len(episode_rows) :]
             conn.execute("BEGIN")
             try:
                 conn.execute("DELETE FROM episode_dense_vectors WHERE session_id = ?", (session_id,))
-                for episode_row, document_hash, vector in zip(episode_rows, document_hashes, vectors, strict=True):
+                conn.execute(
+                    "DELETE FROM episode_dense_representation_vectors "
+                    "WHERE session_id = ?",
+                    (session_id,),
+                )
+                for episode_row, document_hash, vector in zip(
+                    episode_rows,
+                    document_hashes,
+                    episode_vectors,
+                    strict=True,
+                ):
                     conn.execute(
                         """
                         INSERT INTO episode_dense_vectors (
@@ -94790,6 +95563,87 @@ def episode_dense_index_sessions(
                             dense_generation_id,
                         ),
                     )
+                for representation, vector in zip(
+                    representation_documents,
+                    representation_vectors,
+                    strict=True,
+                ):
+                    conn.execute(
+                        """
+                        INSERT INTO episode_dense_representation_vectors (
+                            representation_id, doc_id, session_id,
+                            episode_id, role, raw_ref, segment_ref,
+                            session_ref, source_lane, admission_basis,
+                            outcome, source_episode_projection_version,
+                            source_route_signal_classifier_version,
+                            dense_projection_version,
+                            dense_document_version,
+                            representation_version, model, dimension,
+                            document_sha256, vector_f32, indexed_at,
+                            generation_id
+                        )
+                        VALUES (
+                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                            ?, ?, ?, ?, ?, ?, ?, ?, ?
+                        )
+                        """,
+                        (
+                            str(
+                                representation.get(
+                                    "representation_id"
+                                )
+                                or ""
+                            ),
+                            str(representation.get("doc_id") or ""),
+                            session_id,
+                            str(
+                                representation.get("episode_id")
+                                or ""
+                            ),
+                            str(representation.get("role") or ""),
+                            str(representation.get("raw_ref") or ""),
+                            str(
+                                representation.get("segment_ref")
+                                or ""
+                            ),
+                            str(
+                                representation.get("session_ref")
+                                or ""
+                            ),
+                            str(
+                                representation.get("source_lane")
+                                or ""
+                            ),
+                            str(
+                                representation.get(
+                                    "admission_basis"
+                                )
+                                or ""
+                            ),
+                            str(
+                                representation.get("outcome")
+                                or ""
+                            ),
+                            EPISODE_SEMANTIC_PROJECTION_VERSION,
+                            ROUTE_SIGNAL_CLASSIFIER_VERSION,
+                            EPISODE_DENSE_PROJECTION_VERSION,
+                            EPISODE_DENSE_DOCUMENT_VERSION,
+                            EPISODE_DENSE_REPRESENTATION_VERSION,
+                            model,
+                            dimension,
+                            str(
+                                representation.get(
+                                    "document_sha256"
+                                )
+                                or ""
+                            ),
+                            sqlite3.Binary(
+                                episode_dense_vector_blob(vector)
+                            ),
+                            now,
+                            dense_generation_id,
+                        ),
+                    )
                 status = "current" if episode_rows else "no_task_episodes"
                 conn.execute(
                     """
@@ -94797,10 +95651,15 @@ def episode_dense_index_sessions(
                         session_id, status, source_episode_projection_version,
                         source_route_signal_classifier_version,
                         dense_projection_version, dense_document_version, model,
-                        dimension, episode_document_count, vector_count, indexed_at,
+                        dimension, episode_document_count, vector_count,
+                        representation_document_count,
+                        representation_vector_count, indexed_at,
                         last_error, generation_id, generation_identity_json
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?)
+                    VALUES (
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '',
+                        ?, ?
+                    )
                     """,
                     (
                         session_id,
@@ -94812,7 +95671,9 @@ def episode_dense_index_sessions(
                         model,
                         dimension,
                         len(episode_rows),
-                        len(vectors),
+                        len(episode_vectors),
+                        len(representation_documents),
+                        len(representation_vectors),
                         now,
                         dense_generation_id,
                         dense_generation_identity_json,
@@ -94838,10 +95699,22 @@ def episode_dense_index_sessions(
                     "session_id": session_id,
                     "status": status,
                     "episode_document_count": len(episode_rows),
-                    "vector_count": len(vectors),
+                    "vector_count": len(episode_vectors),
+                    "representation_document_count": len(
+                        representation_documents
+                    ),
+                    "representation_vector_count": len(
+                        representation_vectors
+                    ),
                     "model": model,
                     "dimension": dimension,
-                    "document_chars": sum(len(item) for item in documents),
+                    "document_chars": sum(
+                        len(item) for item in documents
+                    ),
+                    "representation_document_chars": sum(
+                        len(str(item.get("document") or ""))
+                        for item in representation_documents
+                    ),
                     "embedding_elapsed_ms": int_value(embedding.get("elapsed_ms")),
                     "prompt_tokens": int_value(embedding.get("prompt_tokens")),
                     "elapsed_ms": int((time.monotonic() - session_started) * 1000),
@@ -94851,6 +95724,19 @@ def episode_dense_index_sessions(
     finally:
         conn.close()
     coverage = episode_dense_projection_state(aoa_root, records=selected_records)
+    generation_publish = (
+        publish_search_projection_generation_identity(
+            aoa_root=aoa_root,
+            projection="episode_dense",
+            identity=dense_generation_identity,
+            coverage_current=bool(
+                coverage.get("status") == "current"
+                and not coverage.get("projection_dirty")
+                and int_value(coverage.get("current_session_count"))
+                == int_value(coverage.get("source_session_count"))
+            ),
+        )
+    )
     processed_count = len(results)
     successful_count = sum(1 for item in results if item.get("status") in {"current", "no_task_episodes"})
     completed_session_ids = [
@@ -94882,9 +95768,16 @@ def episode_dense_index_sessions(
         "source_episode_projection_version": EPISODE_SEMANTIC_PROJECTION_VERSION,
         "provider": provider,
         "coverage": coverage,
-        "storage_mode": "normalized_float32_exact_cosine_sidecar_v1",
+        "generation_publish": generation_publish,
+        "storage_mode": (
+            "normalized_float32_exact_cosine_"
+            "episode_and_representation_sidecars_v2"
+        ),
         "index_choice": "exact vector scan is lossless and bounded at the current episode cardinality; ANN is deferred until measured scale requires it",
-        "authority_boundary": "dense scores navigate generated episode documents; raw transcript refs remain authority",
+        "authority_boundary": (
+            "dense scores navigate generated episode representations; "
+            "only resolved raw transcript refs remain authority"
+        ),
         "elapsed_ms": int((time.monotonic() - started) * 1000),
         "db_path": str(db_path),
         "diagnostics": diagnostics,
@@ -104722,7 +105615,28 @@ def session_memory_expected_generation_identities(
                 or EPISODE_DENSE_DEFAULT_MODEL
             ),
             "dimensions": EPISODE_DENSE_DEFAULT_DIMENSION,
-            "normalization": "l2_normalized_float32_v1",
+            "normalization": (
+                "episode_aggregate_plus_representation_"
+                "l2_normalized_float32_v1"
+            ),
+            "representation_policy": {
+                "version": EPISODE_DENSE_REPRESENTATION_VERSION,
+                "roles": list(
+                    EPISODE_DENSE_REPRESENTATION_ROLES
+                ),
+                "per_role_tail_limit": (
+                    EPISODE_DENSE_REPRESENTATION_PER_ROLE_LIMIT
+                ),
+                "text_max_chars": (
+                    EPISODE_DENSE_REPRESENTATION_TEXT_MAX_CHARS
+                ),
+                "episode_score": (
+                    "maximum_cosine_over_representation_vectors"
+                ),
+                "evidence_match_limit": (
+                    EPISODE_DENSE_REPRESENTATION_MATCH_LIMIT
+                ),
+            },
             "dependency_generations": {
                 "episode_semantic": episode_semantic["generation_id"],
             },
