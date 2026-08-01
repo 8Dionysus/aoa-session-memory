@@ -450,6 +450,9 @@ ATLAS_SCHEMA_VERSION = 2
 ATLAS_PUBLISH_IDENTITY_VERSION = 2
 ATLAS_ENTRY_FILENAME_MAX_BYTES = 220
 SEARCH_SCHEMA_VERSION = 22
+SEARCH_SOURCE_SET_IDENTITY_VERSION = 1
+SEARCH_SOURCE_SET_META_KEY = "search_source_set_identity_json"
+SEARCH_SOURCE_SET_REMOVED_REASON = "search_source_set_removed"
 SEARCH_CATALOG_SCHEMA_VERSION = 1
 EPISODE_SEMANTIC_PROJECTION_VERSION = 18
 EPISODE_ANSWER_ADMISSION_POLICY_VERSION = 10
@@ -30849,11 +30852,307 @@ def search_dirty_projection_states(
     return dirty
 
 
+def search_source_set_session_ids_for_records(
+    records: Iterable[dict[str, Any]],
+) -> list[str]:
+    return sorted(
+        {
+            str(record.get("session_id") or "")
+            for record in records
+            if isinstance(record, dict)
+            and str(record.get("session_id") or "")
+        }
+    )
+
+
+def session_registry_source_set_is_complete(aoa_root: Path) -> bool:
+    registry_path = aoa_root / REGISTRY_NAME
+    if not registry_path.is_file():
+        return False
+    payload = read_json(registry_path, {})
+    return bool(
+        isinstance(payload, dict)
+        and isinstance(payload.get("sessions"), list)
+    )
+
+
+def search_source_set_identity_for_session_ids(
+    session_ids: Iterable[str],
+) -> dict[str, Any]:
+    normalized = sorted({str(item) for item in session_ids if str(item)})
+    semantic = {
+        "identity_version": SEARCH_SOURCE_SET_IDENTITY_VERSION,
+        "session_ids": normalized,
+    }
+    return {
+        **semantic,
+        "session_count": len(normalized),
+        "sha256": hashlib.sha256(
+            json.dumps(
+                semantic,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest(),
+    }
+
+
+def search_source_set_identity_for_records(
+    records: Iterable[dict[str, Any]],
+) -> dict[str, Any]:
+    return search_source_set_identity_for_session_ids(
+        search_source_set_session_ids_for_records(records)
+    )
+
+
+def search_source_set_identity_from_metadata(
+    metadata: dict[str, Any],
+) -> dict[str, Any]:
+    raw = metadata.get(SEARCH_SOURCE_SET_META_KEY)
+    if not raw:
+        return {}
+    try:
+        payload = json.loads(str(raw))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    session_ids = payload.get("session_ids")
+    if not isinstance(session_ids, list):
+        return {}
+    return search_source_set_identity_for_session_ids(
+        str(item) for item in session_ids if item
+    )
+
+
+def search_source_set_change_state_from_metadata(
+    *,
+    aoa_root: Path,
+    metadata: dict[str, Any],
+) -> dict[str, Any]:
+    stored = search_source_set_identity_from_metadata(metadata)
+    current = search_source_set_identity_for_records(
+        registry_sessions(aoa_root)
+    )
+    if not session_registry_source_set_is_complete(aoa_root):
+        return {
+            "status": "unproven_registry_source_set",
+            "compatible": None,
+            "stored": stored,
+            "current": current,
+            "removed_session_ids": [],
+            "added_session_ids": [],
+            "reason": "session_registry_source_set_unavailable",
+            "answer_admission": (
+                "legacy_compatibility_no_source_set_claim"
+            ),
+        }
+    if not stored:
+        return {
+            "status": "legacy_untracked",
+            "compatible": None,
+            "stored": {},
+            "current": current,
+            "removed_session_ids": [],
+            "added_session_ids": [],
+            "reason": "search_source_set_identity_missing",
+            "answer_admission": "legacy_compatibility_no_source_set_claim",
+        }
+    stored_ids = set(stored.get("session_ids", []))
+    current_ids = set(current.get("session_ids", []))
+    removed = sorted(stored_ids - current_ids)
+    added = sorted(current_ids - stored_ids)
+    if removed:
+        status = "blocked_removed_sources"
+        reason = SEARCH_SOURCE_SET_REMOVED_REASON
+        answer_admission = "blocked_until_deep_source_set_replacement"
+    elif added:
+        status = "stale_readable_added_sources"
+        reason = "search_source_set_added"
+        answer_admission = "stored_scope_only_until_incremental_catchup"
+    else:
+        status = "current"
+        reason = ""
+        answer_admission = "current_source_set"
+    return {
+        "status": status,
+        "compatible": not removed,
+        "stored": stored,
+        "current": current,
+        "removed_session_ids": removed,
+        "added_session_ids": added,
+        "reason": reason,
+        "answer_admission": answer_admission,
+    }
+
+
+def search_source_set_change_state(
+    *,
+    aoa_root: Path,
+    db_path: Path | None = None,
+) -> dict[str, Any]:
+    resolved = db_path or search_db_path(aoa_root)
+    if not resolved.exists():
+        return {
+            "status": "missing",
+            "compatible": False,
+            "stored": {},
+            "current": search_source_set_identity_for_records(
+                registry_sessions(aoa_root)
+            ),
+            "removed_session_ids": [],
+            "added_session_ids": [],
+            "reason": "search_index_missing",
+            "answer_admission": "projection_missing",
+        }
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = connect_existing_search_db(resolved)
+        metadata = search_index_metadata(conn)
+        state = search_source_set_change_state_from_metadata(
+            aoa_root=aoa_root,
+            metadata=metadata,
+        )
+        if (
+            state.get("status") == "legacy_untracked"
+            and session_registry_source_set_is_complete(aoa_root)
+        ):
+            orphaned = search_projection_orphaned_session_states(
+                conn,
+                active_session_ids=(
+                    search_source_set_session_ids_for_records(
+                        registry_sessions(aoa_root)
+                    )
+                ),
+            )
+            if orphaned:
+                removed_ids = [
+                    str(item.get("session_id") or "")
+                    for item in orphaned
+                    if item.get("session_id")
+                ]
+                state = {
+                    **state,
+                    "status": "blocked_removed_sources",
+                    "compatible": False,
+                    "removed_session_ids": removed_ids,
+                    "reason": SEARCH_SOURCE_SET_REMOVED_REASON,
+                    "answer_admission": (
+                        "blocked_until_deep_source_set_replacement"
+                    ),
+                    "identity_basis": (
+                        "legacy_projection_state_vs_complete_registry"
+                    ),
+                }
+    except sqlite3.Error as exc:
+        return {
+            "status": sqlite_error_status(exc),
+            "compatible": False,
+            "stored": {},
+            "current": {},
+            "removed_session_ids": [],
+            "added_session_ids": [],
+            "reason": sqlite_error_diagnostic(exc),
+            "answer_admission": "projection_unreadable",
+        }
+    finally:
+        if conn is not None:
+            conn.close()
+    return state
+
+
+def search_projection_stored_session_states(
+    conn: sqlite3.Connection,
+) -> dict[str, dict[str, Any]]:
+    states = sqlite_search_session_states(conn)
+
+    def merge_rows(
+        table: str,
+        *,
+        label_column: str = "session_label",
+        fingerprint_column: str = "source_fingerprint",
+        directory_column: str = "",
+    ) -> None:
+        if not sqlite_table_exists(conn, table):
+            return
+        columns = {
+            str(row[1])
+            for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if "session_id" not in columns:
+            return
+        label_expr = (
+            label_column if label_column in columns else "''"
+        )
+        fingerprint_expr = (
+            fingerprint_column if fingerprint_column in columns else "''"
+        )
+        directory_expr = (
+            directory_column
+            if directory_column and directory_column in columns
+            else "''"
+        )
+        for row in conn.execute(
+            "SELECT session_id, "
+            f"{label_expr} AS session_label, "
+            f"{fingerprint_expr} AS source_fingerprint, "
+            f"{directory_expr} AS session_dir "
+            f"FROM {table} WHERE COALESCE(session_id, '') <> ''"
+        ).fetchall():
+            session_id = str(row["session_id"] or "")
+            if not session_id:
+                continue
+            current = states.setdefault(
+                session_id,
+                {"session_id": session_id},
+            )
+            for key in (
+                "session_label",
+                "source_fingerprint",
+                "session_dir",
+            ):
+                if not current.get(key) and row[key]:
+                    current[key] = str(row[key])
+            current.setdefault("projection_tables", [])
+            if table not in current["projection_tables"]:
+                current["projection_tables"].append(table)
+
+    merge_rows("session_index_state")
+    merge_rows("exact_literal_session_state")
+    merge_rows("episode_semantic_session_state")
+    merge_rows("episode_dense_session_state")
+    merge_rows(
+        "episode_semantic_queue",
+        directory_column="session_dir",
+    )
+    return states
+
+
+def search_projection_orphaned_session_states(
+    conn: sqlite3.Connection,
+    *,
+    active_session_ids: Iterable[str],
+) -> list[dict[str, Any]]:
+    active = {str(item) for item in active_session_ids if str(item)}
+    states = search_projection_stored_session_states(conn)
+    return [
+        {
+            **states[session_id],
+            "lifecycle_status": "source_removed_from_complete_registry",
+            "reasons": [SEARCH_SOURCE_SET_REMOVED_REASON],
+        }
+        for session_id in sorted(set(states) - active)
+    ]
+
+
 def sqlite_search_index_scoped_state(
     aoa_root: Path,
     latest_source_mtime: float,
     records: list[dict[str, Any]],
     projection_fingerprints: list[dict[str, Any]] | None = None,
+    *,
+    source_scope_complete: bool = False,
 ) -> dict[str, Any]:
     db_path = search_db_path(aoa_root)
     if not db_path.exists():
@@ -30868,11 +31167,47 @@ def sqlite_search_index_scoped_state(
     try:
         conn = connect_existing_search_db(db_path)
         metadata = search_index_metadata(conn)
+        source_set_state = search_source_set_change_state_from_metadata(
+            aoa_root=aoa_root,
+            metadata=metadata,
+        )
         schema_diagnostics = search_schema_diagnostics(conn)
         has_documents = bool(conn.execute("SELECT 1 FROM documents LIMIT 1").fetchone()) if sqlite_table_exists(conn, "documents") else False
         has_routes = sqlite_table_exists(conn, "document_routes") and bool(conn.execute("SELECT 1 FROM document_routes LIMIT 1").fetchone())
         has_route_terms = sqlite_table_exists(conn, "route_terms") and bool(conn.execute("SELECT 1 FROM route_terms LIMIT 1").fetchone())
         indexed_session_states = sqlite_search_session_states(conn)
+        removed_source_ids = set(
+            str(item)
+            for item in source_set_state.get("removed_session_ids", [])
+            if item
+        )
+        if removed_source_ids:
+            stored_states = search_projection_stored_session_states(conn)
+            orphaned_sessions = [
+                {
+                    **stored_states.get(session_id, {"session_id": session_id}),
+                    "session_id": session_id,
+                    "lifecycle_status": (
+                        "source_removed_from_complete_registry"
+                    ),
+                    "reasons": [SEARCH_SOURCE_SET_REMOVED_REASON],
+                }
+                for session_id in sorted(removed_source_ids)
+            ]
+        elif (
+            source_set_state.get("status") == "legacy_untracked"
+            and session_registry_source_set_is_complete(aoa_root)
+        ):
+            orphaned_sessions = search_projection_orphaned_session_states(
+                conn,
+                active_session_ids=(
+                    search_source_set_session_ids_for_records(
+                        registry_sessions(aoa_root)
+                    )
+                ),
+            )
+        else:
+            orphaned_sessions = []
         conn.close()
     except sqlite3.Error as exc:
         status = sqlite_error_status(exc)
@@ -30903,6 +31238,7 @@ def sqlite_search_index_scoped_state(
             expected_generations["exact_literal"]["generation_id"]
         ),
     )
+    dirty_sessions.extend(orphaned_sessions)
     reasons: list[str] = list(schema_diagnostics)
     if schema_version != str(SEARCH_SCHEMA_VERSION):
         reasons.append("search_schema_mismatch")
@@ -30914,6 +31250,8 @@ def sqlite_search_index_scoped_state(
         reasons.append("search_route_terms_empty")
     if dirty_sessions:
         reasons.append("session_projection_dirty")
+    if orphaned_sessions:
+        reasons.append(SEARCH_SOURCE_SET_REMOVED_REASON)
     status = "current" if not reasons else ("stale" if reasons != ["search_index_empty"] else "empty")
     return {
         "status": status,
@@ -30937,6 +31275,14 @@ def sqlite_search_index_scoped_state(
         "dirty_session_count": len(dirty_sessions),
         "dirty_session_ids": [str(item.get("session_id") or "") for item in dirty_sessions if item.get("session_id")],
         "dirty_sessions": dirty_sessions[:40],
+        "source_scope_complete": source_scope_complete,
+        "source_set_state": source_set_state,
+        "orphaned_session_count": len(orphaned_sessions),
+        "orphaned_session_ids": [
+            str(item.get("session_id") or "")
+            for item in orphaned_sessions
+            if item.get("session_id")
+        ],
         "reasons": reasons,
         "truth_status": "scoped_search_session_state_no_document_count_scan",
         "source_scan": True,
@@ -36065,6 +36411,8 @@ def sqlite_search_index_state(
     latest_source_mtime: float,
     records: list[dict[str, Any]] | None = None,
     projection_fingerprints: list[dict[str, Any]] | None = None,
+    *,
+    source_scope_complete: bool = False,
 ) -> dict[str, Any]:
     if records is not None:
         return sqlite_search_index_scoped_state(
@@ -36072,6 +36420,7 @@ def sqlite_search_index_state(
             latest_source_mtime,
             records,
             projection_fingerprints=projection_fingerprints,
+            source_scope_complete=source_scope_complete,
         )
     db_path = search_db_path(aoa_root)
     if not db_path.exists():
@@ -36324,6 +36673,8 @@ def atlas_index_state(
     latest_source_mtime: float,
     records: list[dict[str, Any]] | None = None,
     projection_fingerprints: list[dict[str, Any]] | None = None,
+    *,
+    source_scope_complete: bool = False,
 ) -> dict[str, Any]:
     index_path = aoa_root / ATLAS_ROOT / "index.json"
     payload = read_json(index_path, {})
@@ -36357,6 +36708,38 @@ def atlas_index_state(
     )
     selected_fingerprints = projection_fingerprints if projection_fingerprints is not None else projection_fingerprints_for_records(records or [])
     dirty_sessions = atlas_dirty_projection_states(aoa_root, selected_fingerprints) if records is not None else []
+    projection_state = read_atlas_projection_state(aoa_root)
+    projection_sessions = (
+        projection_state.get("sessions")
+        if isinstance(projection_state.get("sessions"), dict)
+        else {}
+    )
+    current_registry_session_ids = {
+        str(record.get("session_id") or "")
+        for record in registry_sessions(aoa_root)
+        if record.get("session_id")
+    }
+    orphaned_sessions = [
+        {
+            **(
+                projection_sessions.get(session_id)
+                if isinstance(
+                    projection_sessions.get(session_id), dict
+                )
+                else {}
+            ),
+            "session_id": session_id,
+            "lifecycle_status": (
+                "source_removed_from_complete_registry"
+            ),
+            "reasons": ["atlas_source_set_removed"],
+        }
+        for session_id in sorted(
+            set(str(item) for item in projection_sessions)
+            - current_registry_session_ids
+        )
+    ] if session_registry_source_set_is_complete(aoa_root) else []
+    dirty_sessions.extend(orphaned_sessions)
     reasons: list[str] = []
     if int_value(payload.get("schema_version")) != ATLAS_SCHEMA_VERSION:
         reasons.append("atlas_schema_mismatch")
@@ -36373,6 +36756,8 @@ def atlas_index_state(
         reasons.append("atlas_index_empty")
     if dirty_sessions:
         reasons.append("session_projection_dirty")
+    if orphaned_sessions:
+        reasons.append("atlas_source_set_removed")
     elif records is None and latest_source_mtime > 0 and index_mtime < latest_source_mtime:
         reasons.append("source_newer_than_atlas_index")
     status = "current" if not reasons else ("stale" if reasons != ["atlas_index_empty"] else "empty")
@@ -36398,6 +36783,13 @@ def atlas_index_state(
         "dirty_session_count": len(dirty_sessions),
         "dirty_session_ids": [str(item.get("session_id") or "") for item in dirty_sessions if item.get("session_id")],
         "dirty_sessions": dirty_sessions[:40],
+        "source_scope_complete": source_scope_complete,
+        "orphaned_session_count": len(orphaned_sessions),
+        "orphaned_session_ids": [
+            str(item.get("session_id") or "")
+            for item in orphaned_sessions
+            if item.get("session_id")
+        ],
         "reasons": reasons,
         "diagnostics": [],
     }
@@ -37704,6 +38096,33 @@ def maintain_indexes(
             "actions": [],
         }
 
+    bounded_discovery = bool(
+        isinstance(selection_scope, dict)
+        and selection_scope.get("global_scope_complete") is False
+    )
+    maintenance_profile = (
+        str(selection_scope.get("profile") or "")
+        if isinstance(selection_scope, dict)
+        else ""
+    )
+    declared_global_scope_complete = bool(
+        isinstance(selection_scope, dict)
+        and selection_scope.get("global_scope_complete") is True
+    )
+    stable_selected_records_global = bool(
+        not bounded_discovery
+        and graph_selection_is_global(
+            target=target,
+            since=since,
+            until=until,
+            limit=limit,
+        )
+        and (
+            selected_records is None
+            or declared_global_scope_complete
+        )
+    )
+
     latest_source_mtime, latest_source_paths = latest_index_source_mtime(aoa_root, records)
     route_drift = route_index_drift_records(records)
     effective_route_max_raw_bytes = (
@@ -37836,7 +38255,18 @@ def maintain_indexes(
             search_projection_records = budgeted_search_projection_records or records
             search_projection_fingerprints = search_projection_fingerprints_for_records(search_projection_records)
         search_state_records = budgeted_search_projection_records or records
-        search_state = sqlite_search_index_state(aoa_root, latest_source_mtime, search_state_records, projection_fingerprints=search_projection_fingerprints)
+        search_state = sqlite_search_index_state(
+            aoa_root,
+            latest_source_mtime,
+            search_state_records,
+            projection_fingerprints=search_projection_fingerprints,
+            **(
+                {"source_scope_complete": True}
+                if stable_selected_records_global
+                and not budgeted_search_projection_records
+                else {}
+            ),
+        )
         if not has_budget():
             planning_budget_exhausted = True
             if "index_maintenance_planning_budget_exhausted" not in diagnostics:
@@ -37873,30 +38303,22 @@ def maintain_indexes(
                         atlas_projection_fingerprints = projection_fingerprints_for_records(atlas_projection_records)
                     else:
                         atlas_projection_records = records
-                    atlas_state = atlas_index_state(aoa_root, latest_source_mtime, atlas_projection_records, projection_fingerprints=atlas_projection_fingerprints)
+                    atlas_state = atlas_index_state(
+                        aoa_root,
+                        latest_source_mtime,
+                        atlas_projection_records,
+                        projection_fingerprints=atlas_projection_fingerprints,
+                        **(
+                            {"source_scope_complete": True}
+                            if stable_selected_records_global
+                            and atlas_projection_records is records
+                            else {}
+                        ),
+                    )
                     if not has_budget():
                         planning_budget_exhausted = True
                         if "index_maintenance_planning_budget_exhausted" not in diagnostics:
                             diagnostics.append("index_maintenance_planning_budget_exhausted")
-    bounded_discovery = bool(
-        isinstance(selection_scope, dict)
-        and selection_scope.get("global_scope_complete") is False
-    )
-    maintenance_profile = (
-        str(selection_scope.get("profile") or "")
-        if isinstance(selection_scope, dict)
-        else ""
-    )
-    stable_selected_records_global = bool(
-        selected_records is None
-        and not bounded_discovery
-        and graph_selection_is_global(
-            target=target,
-            since=since,
-            until=until,
-            limit=limit,
-        )
-    )
     if planning_budget_exhausted and repair_graph:
         graph_state = {
             "status": "deferred_budget_exhausted",
@@ -38074,7 +38496,35 @@ def maintain_indexes(
     def current_selected_records() -> list[dict[str, Any]]:
         return list(records)
 
-    search_rebuild_required = search_rebuild_required_for(search_state)
+    search_full_rebuild_reasons = (
+        auto_maintenance_search_full_rebuild_reasons(
+            {"search_index": search_state}
+        )
+    )
+    search_rebuild_required = bool(search_full_rebuild_reasons)
+    search_source_set_replacement_required = bool(
+        SEARCH_SOURCE_SET_REMOVED_REASON
+        in search_full_rebuild_reasons
+    )
+    if search_source_set_replacement_required:
+        search_shards_repair_needed = bool(
+            repair_indexes
+            and (
+                int_value(search_shards_state.get("existing_shard_count")) > 0
+                or int_value(search_shards_state.get("shard_db_total_bytes")) > 0
+            )
+        )
+        if repair_graph:
+            graph_repair_needed = True
+    search_rebuild_deferred_to_deep = bool(
+        search_rebuild_required
+        and maintenance_profile != "deep"
+        and bool(maintenance_profile or bounded_discovery)
+    )
+    source_set_dependents_deferred_to_deep = bool(
+        search_source_set_replacement_required
+        and search_rebuild_deferred_to_deep
+    )
     atlas_rebuild_required = atlas_rebuild_required_for(atlas_state)
     atlas_clean_rebuild_reasons = atlas_clean_rebuild_reasons_for_state(
         atlas_state
@@ -38085,7 +38535,13 @@ def maintain_indexes(
     )
     atlas_rebuild_deferred_to_deep = bool(
         atlas_rebuild_required
-        and bounded_discovery
+        and bool(
+            bounded_discovery
+            or (
+                maintenance_profile
+                and maintenance_profile != "deep"
+            )
+        )
         and maintenance_profile != "deep"
         and not atlas_bounded_bootstrap_eligible
     )
@@ -38248,16 +38704,37 @@ def maintain_indexes(
     if atlas_rebuild_deferred_to_deep:
         atlas_repair_records = []
         atlas_repair_limited = True
+    if search_rebuild_deferred_to_deep:
+        search_reindex_records = []
+        search_repair_limited = True
     search_update_target = "all" if search_rebuild_required else target
     search_update_selection_args = [] if search_rebuild_required else selection_args
     maintenance_readiness_sample_limit = 0
-    search_command = (
+    deep_maintenance_command = (
         base
-        + ["search-index", search_update_target, *root_args]
-        + search_update_selection_args
-        + (["--max-raw-mb", max_raw_mb_text] if max_raw_mb_text else [])
-        + ([] if search_rebuild_required else ["--no-rebuild"])
-        + ["--write-report"]
+        + [
+            "auto-maintenance",
+            "deep",
+            "all",
+            "--workspace-root",
+            str(workspace_root_for(None, aoa_root)),
+            "--aoa-root",
+            str(aoa_root),
+            "--apply",
+            "--write-report",
+        ]
+    )
+    search_command = (
+        list(deep_maintenance_command)
+        if search_rebuild_deferred_to_deep
+        else (
+            base
+            + ["search-index", search_update_target, *root_args]
+            + search_update_selection_args
+            + (["--max-raw-mb", max_raw_mb_text] if max_raw_mb_text else [])
+            + ([] if search_rebuild_required else ["--no-rebuild"])
+            + ["--write-report"]
+        )
     )
     entity_registry_search_command = (
         base
@@ -38289,17 +38766,7 @@ def maintain_indexes(
     )
     atlas_command = (
         (
-            base
-            + [
-                "auto-maintenance",
-                "deep",
-                "all",
-                "--workspace-root",
-                str(workspace_root_for(None, aoa_root)),
-                "--aoa-root",
-                str(aoa_root),
-            ]
-            + ["--apply", "--write-report"]
+            list(deep_maintenance_command)
         )
         if atlas_rebuild_deferred_to_deep
         else (
@@ -38337,7 +38804,11 @@ def maintain_indexes(
         ),
         maintenance_action(
             "rebuild_search_index",
-            reason="portable_sqlite_missing_or_stale",
+            reason=(
+                "search_clean_rebuild_requires_deep_profile"
+                if search_rebuild_deferred_to_deep
+                else "portable_sqlite_missing_or_stale"
+            ),
             needed=repair_indexes
             and (
                 search_rebuild_required
@@ -38384,12 +38855,16 @@ def maintain_indexes(
         ),
         maintenance_action(
             "graph_maintenance",
-            reason="graph_store_missing_or_dirty",
+            reason=(
+                "graph_store_requires_source_set_replacement"
+                if search_source_set_replacement_required
+                else "graph_store_missing_or_dirty"
+            ),
             needed=repair_graph and graph_repair_needed,
             command=base
             + [
                 "graph-maintenance",
-                target,
+                "all" if search_source_set_replacement_required else target,
                 *root_args,
                 "--apply",
                 "--batch-limit",
@@ -38465,19 +38940,40 @@ def maintain_indexes(
     actions.append(episode_dense_action)
     search_shards_action = maintenance_action(
         "refresh_search_shards",
-        reason="existing_search_shards_missing_current_session_projection",
+        reason=(
+            "existing_search_shards_require_source_set_replacement"
+            if search_source_set_replacement_required
+            else "existing_search_shards_missing_current_session_projection"
+        ),
         needed=search_shards_repair_needed,
         command=(
             base
-            + ["search-shards", target, *root_args]
-            + (["--since", since] if since else [])
-            + (["--until", until] if until else [])
+            + [
+                "search-shards",
+                "all" if search_source_set_replacement_required else target,
+                *root_args,
+            ]
+            + (
+                []
+                if search_source_set_replacement_required
+                else (["--since", since] if since else [])
+            )
+            + (
+                []
+                if search_source_set_replacement_required
+                else (["--until", until] if until else [])
+            )
             + (
                 ["--limit", str(effective_search_shard_repair_limit)]
                 if effective_search_shard_repair_limit is not None
+                and not search_source_set_replacement_required
                 else []
             )
-            + ["--no-rebuild", "--dirty-only"]
+            + (
+                []
+                if search_source_set_replacement_required
+                else ["--no-rebuild", "--dirty-only"]
+            )
             + (["--budget-seconds", budget_seconds_text] if budget_seconds_text else [])
             + ["--write-report"]
         ),
@@ -38504,6 +39000,32 @@ def maintain_indexes(
         atlas_action["clean_rebuild_reasons"] = list(
             atlas_clean_rebuild_reasons
         )
+    if search_rebuild_deferred_to_deep and search_action["needed"]:
+        search_action["status"] = "deferred"
+        search_action["action_kind"] = "full_rebuild"
+        search_action["skip_reason"] = (
+            "search_clean_rebuild_requires_deep_profile"
+        )
+        search_action["deep_next_command"] = list(search_command)
+        search_action["clean_rebuild_reasons"] = list(
+            search_full_rebuild_reasons
+        )
+    for dependent_action in (
+        search_shards_action,
+        episode_dense_action,
+        graph_action,
+    ):
+        if (
+            source_set_dependents_deferred_to_deep
+            and dependent_action.get("needed")
+        ):
+            dependent_action["status"] = "deferred"
+            dependent_action["skip_reason"] = (
+                "source_set_replacement_requires_deep_profile"
+            )
+            dependent_action["deep_next_command"] = list(
+                deep_maintenance_command
+            )
     deferred_graph_action: dict[str, Any] | None = None
     if not repair_graph and graph_repair_needed:
         deferred_graph_action = maintenance_action(
@@ -38545,9 +39067,21 @@ def maintain_indexes(
         },
         "rebuild_search_index": {
             "action_kind": "full_rebuild" if search_rebuild_required else "incremental_update",
-            "selection_count": len(records) if search_rebuild_required else len(search_reindex_records),
+            "selection_count": (
+                0
+                if search_rebuild_deferred_to_deep
+                else len(records)
+                if search_rebuild_required
+                else len(search_reindex_records)
+            ),
             "dirty_count": len(search_dirty_records) + (1 if search_non_projection_repair_needed else 0),
-            "deferred_count": 0 if search_rebuild_required else int_value(search_repair_selection_state.get("remaining_count")),
+            "deferred_count": (
+                max(1, len(search_state.get("orphaned_session_ids", [])))
+                if search_rebuild_deferred_to_deep
+                else 0
+                if search_rebuild_required
+                else int_value(search_repair_selection_state.get("remaining_count"))
+            ),
         },
         "refresh_entity_registry": {
             "action_kind": "state_reconcile",
@@ -39134,7 +39668,32 @@ def maintain_indexes(
                 if not result.get("ok") and result.get("diagnostics"):
                     diagnostics.extend(str(item) for item in result.get("diagnostics", []))
         if search_action["needed"] or reindex_ran or token_backfill_ran:
-            if not has_budget():
+            if search_rebuild_deferred_to_deep:
+                search_action["result"] = {
+                    "ok": True,
+                    "status": "deferred_clean_rebuild_to_deep",
+                    "selected_count": 0,
+                    "processed_count": 0,
+                    "completed_session_ids": [],
+                    "remaining_count": max(
+                        1,
+                        len(search_state.get("orphaned_session_ids", [])),
+                    ),
+                    "budget_exhausted": False,
+                    "clean_rebuild_reasons": list(
+                        search_full_rebuild_reasons
+                    ),
+                    "source_set_tombstone_session_ids": list(
+                        search_state.get("orphaned_session_ids", [])
+                    ),
+                    "exact_next_command": list(search_command),
+                    "diagnostics": [],
+                    "truth_status": (
+                        "generated_projection_retirement_deferred_raw_unchanged"
+                    ),
+                }
+                action_results.append(search_action)
+            elif not has_budget():
                 budget_exhausted = True
                 search_action["status"] = "deferred_budget_exhausted"
                 action_results.append(search_action)
@@ -39195,8 +39754,13 @@ def maintain_indexes(
                         rebuild=search_rebuild_required,
                         write_report=write_report,
                         selected_records=selected_search_records,
-                        budget_seconds=None if search_rebuild_required else budget_remaining(),
+                        budget_seconds=budget_remaining(),
                         progress_every=progress_every,
+                        source_scope_complete=(
+                            True
+                            if search_source_set_replacement_required
+                            else None
+                        ),
                     )
                     note_dense_upstream_changes(result)
                     search_action["status"] = "applied" if result.get("ok") else ("deferred_budget_exhausted" if result.get("budget_exhausted") else "failed")
@@ -39216,6 +39780,12 @@ def maintain_indexes(
                             "updated_entity_registry_document_count",
                             "unchanged_entity_registry_document_count",
                             "removed_entity_registry_document_count",
+                            "source_scope_complete",
+                            "source_set_identity",
+                            "previous_source_set_identity",
+                            "source_set_tombstone_count",
+                            "source_set_tombstones",
+                            "source_set_tombstone_truth_status",
                             "report_json",
                             "report_markdown",
                             "diagnostics",
@@ -39355,26 +39925,61 @@ def maintain_indexes(
                     if not result.get("ok"):
                         diagnostics.extend(str(item) for item in result.get("diagnostics", []))
         if search_shards_action["needed"]:
-            if not has_budget():
+            if source_set_dependents_deferred_to_deep:
+                search_shards_action["result"] = {
+                    "ok": True,
+                    "status": "deferred_clean_rebuild_to_deep",
+                    "selected_count": 0,
+                    "processed_count": 0,
+                    "remaining_count": max(
+                        1,
+                        len(search_state.get("orphaned_session_ids", [])),
+                    ),
+                    "budget_exhausted": False,
+                    "exact_next_command": list(deep_maintenance_command),
+                    "diagnostics": [],
+                }
+                action_results.append(search_shards_action)
+            elif not has_budget():
                 budget_exhausted = True
                 search_shards_action["status"] = "deferred_budget_exhausted"
                 action_results.append(search_shards_action)
             else:
                 result = materialize_search_shards(
                     aoa_root=aoa_root,
-                    target=target,
-                    since=since,
-                    until=until,
-                    limit=effective_search_shard_repair_limit,
+                    target=(
+                        "all"
+                        if search_source_set_replacement_required
+                        else target
+                    ),
+                    since=(
+                        None
+                        if search_source_set_replacement_required
+                        else since
+                    ),
+                    until=(
+                        None
+                        if search_source_set_replacement_required
+                        else until
+                    ),
+                    limit=(
+                        None
+                        if search_source_set_replacement_required
+                        else effective_search_shard_repair_limit
+                    ),
                     max_raw_bytes=max_raw_bytes,
                     write_report=write_report,
                     budget_seconds=budget_remaining(),
                     progress_every=progress_every,
                     structured_only=True,
-                    rebuild_shards=False,
-                    dirty_only=True,
+                    rebuild_shards=search_source_set_replacement_required,
+                    dirty_only=not search_source_set_replacement_required,
                     include_deferred_live=False,
-                    selected_records=records,
+                    selected_records=(
+                        None
+                        if search_source_set_replacement_required
+                        else records
+                    ),
                 )
                 global_remaining_dirty_session_count = int_value(
                     result.get("global_remaining_count"),
@@ -39796,7 +40401,22 @@ def maintain_indexes(
                 len(dense_upstream_changed_session_ids),
             )
         if episode_dense_action["needed"]:
-            if not has_budget():
+            if source_set_dependents_deferred_to_deep:
+                episode_dense_action["result"] = {
+                    "ok": True,
+                    "status": "deferred_clean_rebuild_to_deep",
+                    "selected_count": 0,
+                    "processed_count": 0,
+                    "remaining_count": max(
+                        1,
+                        len(search_state.get("orphaned_session_ids", [])),
+                    ),
+                    "budget_exhausted": False,
+                    "exact_next_command": list(deep_maintenance_command),
+                    "diagnostics": [],
+                }
+                action_results.append(episode_dense_action)
+            elif not has_budget():
                 budget_exhausted = True
                 episode_dense_action["status"] = "deferred_budget_exhausted"
                 action_results.append(episode_dense_action)
@@ -39874,17 +40494,48 @@ def maintain_indexes(
                 ):
                     diagnostics.extend(str(item) for item in result.get("diagnostics", []))
         if repair_graph and (graph_action["needed"] or reindex_ran or token_backfill_ran):
-            if not has_budget():
+            if source_set_dependents_deferred_to_deep:
+                graph_action["result"] = {
+                    "ok": True,
+                    "status": "deferred_clean_rebuild_to_deep",
+                    "selected_count": 0,
+                    "processed_count": 0,
+                    "remaining_count": max(
+                        1,
+                        len(search_state.get("orphaned_session_ids", [])),
+                    ),
+                    "budget_exhausted": False,
+                    "exact_next_command": list(deep_maintenance_command),
+                    "diagnostics": [],
+                }
+                action_results.append(graph_action)
+            elif not has_budget():
                 budget_exhausted = True
                 graph_action["status"] = "deferred_budget_exhausted"
                 action_results.append(graph_action)
             else:
                 result = graph_maintenance(
                     aoa_root=aoa_root,
-                    target=target,
-                    since=since,
-                    until=until,
-                    limit=limit,
+                    target=(
+                        "all"
+                        if search_source_set_replacement_required
+                        else target
+                    ),
+                    since=(
+                        None
+                        if search_source_set_replacement_required
+                        else since
+                    ),
+                    until=(
+                        None
+                        if search_source_set_replacement_required
+                        else until
+                    ),
+                    limit=(
+                        None
+                        if search_source_set_replacement_required
+                        else limit
+                    ),
                     apply=True,
                     batch_limit=effective_graph_batch_limit,
                     refresh_chunk_size=effective_graph_refresh_chunk_size,
@@ -39893,8 +40544,16 @@ def maintain_indexes(
                     budget_seconds=budget_remaining(),
                     write_report=write_report,
                     reason="index_maintenance",
-                    selected_records=current_selected_records(),
-                    selected_records_global=stable_selected_records_global,
+                    selected_records=(
+                        None
+                        if search_source_set_replacement_required
+                        else current_selected_records()
+                    ),
+                    selected_records_global=(
+                        True
+                        if search_source_set_replacement_required
+                        else stable_selected_records_global
+                    ),
                     query_demand=query_demand_payload,
                     priority_session_ids=list(
                         dict.fromkeys(
@@ -40353,6 +41012,22 @@ def maintain_indexes(
             - len(search_reindex_records),
         ),
         "search_repair_limited": search_repair_limited,
+        "search_clean_rebuild_required": bool(search_rebuild_required),
+        "search_clean_rebuild_reasons": search_full_rebuild_reasons,
+        "search_source_set_replacement_required": (
+            search_source_set_replacement_required
+        ),
+        "search_rebuild_deferred_to_deep": (
+            search_rebuild_deferred_to_deep
+        ),
+        "search_deep_next_command": (
+            list(search_command)
+            if search_rebuild_deferred_to_deep
+            else []
+        ),
+        "search_source_set_tombstone_session_ids": list(
+            search_state.get("orphaned_session_ids", [])
+        ),
         "search_dirty_sessions": [
             {"session_id": item.get("session_id"), "session_label": item.get("session_label"), "reasons": item.get("reasons", [])}
             for item in (search_state.get("dirty_sessions", []) if isinstance(search_state.get("dirty_sessions"), list) else [])[:20]
@@ -47821,7 +48496,12 @@ def auto_maintenance_has_budget_remaining_backlog(maintenance: dict[str, Any]) -
 
 
 SEARCH_FULL_REBUILD_STATUSES = {"missing", "empty", "sqlite_error"}
-SEARCH_FULL_REBUILD_REASONS = {"search_schema_mismatch", "search_route_index_empty", "search_route_terms_empty"}
+SEARCH_FULL_REBUILD_REASONS = {
+    "search_schema_mismatch",
+    "search_route_index_empty",
+    "search_route_terms_empty",
+    SEARCH_SOURCE_SET_REMOVED_REASON,
+}
 ATLAS_CLEAN_REBUILD_STATUSES = {"invalid"}
 ATLAS_CLEAN_REBUILD_REASONS = {
     "atlas_schema_mismatch",
@@ -47831,6 +48511,7 @@ ATLAS_CLEAN_REBUILD_REASONS = {
     "atlas_projection_state_schema_mismatch",
     "atlas_projection_state_generation_changed",
     "route_signal_classifier_version_changed",
+    "atlas_source_set_removed",
 }
 SEARCH_INCREMENTAL_SCHEMA_TRANSITIONS = frozenset(
     {
@@ -54402,6 +55083,16 @@ def build_search_catalog(
         expected_generations["lexical_search"].get("generation_id") or ""
     )
     diagnostics: list[str] = []
+    active_registry_records = registry_sessions(aoa_root)
+    registry_source_set_complete = session_registry_source_set_is_complete(
+        aoa_root
+    )
+    active_registry_session_ids = {
+        str(record.get("session_id") or "")
+        for record in active_registry_records
+        if record.get("session_id")
+    }
+    retired_projection_session_ids: set[str] = set()
     if not db_path.exists():
         payload = {
             "schema_version": SCHEMA_VERSION,
@@ -54658,6 +55349,13 @@ def build_search_catalog(
     for row in rows:
         session_id = str(row["session_id"] or "")
         session_label = str(row["session_label"] or "")
+        if (
+            registry_source_set_complete
+            and session_id
+            and session_id not in active_registry_session_ids
+        ):
+            retired_projection_session_ids.add(session_id)
+            continue
         live_state = live_state_by_session.get(session_id) or live_state_by_session.get(session_label) or {}
         expected_fingerprint = str(live_state.get("fingerprint") or row["source_fingerprint"] or "")
         expected_latest_mtime = float(live_state.get("latest_source_mtime") or row["source_latest_mtime"] or 0.0)
@@ -54826,6 +55524,12 @@ def build_search_catalog(
             session_label = str(shard_session_state.get("session_label") or "")
             if not session_id or session_id in existing_catalog_keys or (session_label and session_label in existing_catalog_keys):
                 continue
+            if (
+                registry_source_set_complete
+                and session_id not in active_registry_session_ids
+            ):
+                retired_projection_session_ids.add(session_id)
+                continue
             doc = shard_doc_cache[str(shard_path)].get(session_id) or shard_doc_cache[str(shard_path)].get(session_label) or {}
             live_state = live_state_by_session.get(session_id) or live_state_by_session.get(session_label) or {}
             expected_fingerprint = str(live_state.get("fingerprint") or shard_session_state.get("source_fingerprint") or "")
@@ -54921,8 +55625,19 @@ def build_search_catalog(
         "artifact_type": "session_memory_search_catalog",
         "generated_at": now,
         "generation_identity": catalog_generation_identity,
-        "ok": bool(sessions) and not diagnostics,
-        "status": "current" if sessions and not diagnostics else "empty",
+        "ok": bool(
+            not diagnostics
+            and (bool(sessions) or registry_source_set_complete)
+        ),
+        "status": (
+            "current"
+            if not diagnostics
+            and (bool(sessions) or registry_source_set_complete)
+            else "empty"
+        ),
+        "authoritative_empty_source_set": bool(
+            registry_source_set_complete and not sessions
+        ),
         "mutates": bool(write or write_report),
         "aoa_root": str(aoa_root),
         "catalog_path": str(catalog_path),
@@ -54936,6 +55651,15 @@ def build_search_catalog(
             "recovered_shard_only_session_count": recovered_shard_only_count,
             "truth_status": "generated_catalog_navigation_recovery_not_raw_archive_truth",
         },
+        "retired_projection_session_count": len(
+            retired_projection_session_ids
+        ),
+        "retired_projection_session_ids": sorted(
+            retired_projection_session_ids
+        ),
+        "retirement_truth_status": (
+            "generated_catalog_rows_withheld_owner_registry_and_raw_unchanged"
+        ),
         "shard_strategy": SEARCH_SHARD_STRATEGY,
         "active_projection": SEARCH_ACTIVE_PROJECTION_MONOLITH,
         "fallback": {
@@ -78573,6 +79297,23 @@ def episode_dense_search_ranking(
 ) -> dict[str, Any]:
     started = time.monotonic()
     db_path = search_db_path(aoa_root)
+    source_set_state = search_source_set_change_state(
+        aoa_root=aoa_root,
+        db_path=db_path,
+    )
+    if source_set_state.get("removed_session_ids"):
+        return {
+            "ok": False,
+            "status": "source_set_removed_requires_deep_rebuild",
+            "ranking": [],
+            "source_set_state": source_set_state,
+            "elapsed_ms": int(
+                (time.monotonic() - started) * 1000
+            ),
+            "diagnostics": [
+                "episode_dense_source_set_removed_candidates_withheld"
+            ],
+        }
     provider = episode_dense_provider(aoa_root)
     expected_generations = session_memory_expected_generation_identities(
         aoa_root
@@ -82788,6 +83529,41 @@ def episode_semantic_search(
             "result_count": 0,
             "results": [],
             "diagnostics": ["search_index_missing"],
+        }
+    source_set_state = search_source_set_change_state(
+        aoa_root=aoa_root,
+        db_path=db_path,
+    )
+    if source_set_state.get("removed_session_ids"):
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "artifact_type": "episode_semantic_search_results",
+            "generated_at": now,
+            "ok": True,
+            "query": query,
+            "db_path": str(db_path),
+            "result_count": 0,
+            "results": [],
+            "source_set_state": source_set_state,
+            "answer_admission": {
+                "admitted": False,
+                "status": (
+                    "source_set_removed_requires_deep_rebuild"
+                ),
+                "reason": SEARCH_SOURCE_SET_REMOVED_REASON,
+            },
+            "exact_next_command": (
+                "python3 scripts/aoa_session_memory.py "
+                "auto-maintenance deep all --aoa-root "
+                f"{shlex.quote(str(aoa_root))} --apply "
+                "--write-report"
+            ),
+            "diagnostics": [
+                "episode_semantic_source_set_removed_candidates_withheld"
+            ],
+            "truth_status": (
+                "generated_projection_withheld_raw_evidence_unchanged"
+            ),
         }
     projection_state = episode_semantic_route_state(aoa_root, session=session)
     expected_episode_generation_identity = (
@@ -94219,6 +94995,7 @@ def search_index_sessions(
     store_raw_text: bool = True,
     projection_storage_mode: str | None = None,
     context_tail_omission_policy: str = SEARCH_CONTEXT_TAIL_OMISSION_POLICY_AUTO,
+    source_scope_complete: bool | None = None,
 ) -> dict[str, Any]:
     now = utc_now()
     started = time.monotonic()
@@ -94285,7 +95062,97 @@ def search_index_sessions(
             "diagnostics": [str(exc)],
             "sessions": [],
         }
-    if not records:
+    inferred_source_scope_complete = bool(
+        selected_records is None
+        and target == "all"
+        and since is None
+        and until is None
+        and limit is None
+        and db_path_override is None
+    )
+    requested_source_scope_complete = (
+        inferred_source_scope_complete
+        if source_scope_complete is None
+        else bool(source_scope_complete)
+    )
+    effective_source_scope_complete = bool(
+        requested_source_scope_complete
+        and session_registry_source_set_is_complete(aoa_root)
+    )
+    previous_source_set_identity: dict[str, Any] = {}
+    source_set_tombstones: list[dict[str, Any]] = []
+    if db_path.exists():
+        previous_conn: sqlite3.Connection | None = None
+        try:
+            previous_conn = connect_existing_search_db(db_path)
+            previous_metadata = search_index_metadata(previous_conn)
+            previous_source_set_identity = (
+                search_source_set_identity_from_metadata(
+                    previous_metadata
+                )
+            )
+            if effective_source_scope_complete:
+                source_set_tombstones = (
+                    search_projection_orphaned_session_states(
+                        previous_conn,
+                        active_session_ids=(
+                            search_source_set_session_ids_for_records(
+                                records
+                            )
+                        ),
+                    )
+                )
+        except sqlite3.Error:
+            previous_source_set_identity = {}
+            source_set_tombstones = []
+        finally:
+            if previous_conn is not None:
+                previous_conn.close()
+    if source_set_tombstones and not rebuild:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "artifact_type": "search_index",
+            "search_schema_version": SEARCH_SCHEMA_VERSION,
+            "generated_at": now,
+            "ok": False,
+            "status": "deferred_source_set_replacement_to_deep",
+            "target": target,
+            "selected_count": len(records),
+            "processed_count": 0,
+            "remaining_count": len(source_set_tombstones),
+            "document_count": 0,
+            "removed_document_count": 0,
+            "source_scope_complete": effective_source_scope_complete,
+            "source_set_tombstone_count": len(
+                source_set_tombstones
+            ),
+            "source_set_tombstones": source_set_tombstones,
+            "exact_next_command": [
+                "python3",
+                "scripts/aoa_session_memory.py",
+                "auto-maintenance",
+                "deep",
+                "all",
+                "--aoa-root",
+                str(aoa_root),
+                "--apply",
+                "--write-report",
+            ],
+            "diagnostics": [
+                "search_source_set_removed_clean_replacement_required"
+            ],
+            "truth_status": (
+                "generated_projection_retirement_not_raw_deletion"
+            ),
+            "sessions": [],
+        }
+    authoritative_empty_rebuild = bool(
+        not records
+        and rebuild
+        and effective_source_scope_complete
+        and previous_source_set_identity
+    )
+    if not records and not authoritative_empty_rebuild:
         return {
             "schema_version": SCHEMA_VERSION,
             "artifact_type": "search_index",
@@ -94415,6 +95282,38 @@ def search_index_sessions(
                 ),
             ),
         )
+        if effective_source_scope_complete:
+            published_source_set_identity = (
+                search_source_set_identity_for_records(records)
+            )
+        elif previous_source_set_identity:
+            published_source_set_identity = (
+                search_source_set_identity_for_session_ids(
+                    [
+                        *previous_source_set_identity.get(
+                            "session_ids", []
+                        ),
+                        *search_source_set_session_ids_for_records(
+                            records
+                        ),
+                    ]
+                )
+            )
+        else:
+            published_source_set_identity = {}
+        if published_source_set_identity:
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+                (
+                    SEARCH_SOURCE_SET_META_KEY,
+                    json.dumps(
+                        published_source_set_identity,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                ),
+            )
         conn.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
             ("search_body_storage_mode", effective_body_storage_mode if rebuild else f"{effective_body_storage_mode}_mixed"),
@@ -94962,7 +95861,21 @@ def search_index_sessions(
         "search_tags_preview_chars": storage_profile.get("tags_preview_chars"),
         "search_tags_storage_policy": storage_profile.get("tags_storage_policy"),
         "generated_at": now,
-        "ok": document_count > 0 and not diagnostics and not (rebuild and budget_exhausted),
+        "source_scope_complete": effective_source_scope_complete,
+        "source_set_identity": published_source_set_identity,
+        "previous_source_set_identity": (
+            previous_source_set_identity
+        ),
+        "source_set_tombstone_count": len(source_set_tombstones),
+        "source_set_tombstones": source_set_tombstones,
+        "source_set_tombstone_truth_status": (
+            "generated_projection_retirement_not_raw_deletion"
+        ),
+        "ok": bool(
+            (document_count > 0 or authoritative_empty_rebuild)
+            and not diagnostics
+            and not (rebuild and budget_exhausted)
+        ),
         "target": target,
         "since": since,
         "until": until,
@@ -97343,6 +98256,53 @@ def search_sessions_shard_fanout(
             "catalog_generation"
         ] = catalog_generation
         return payload
+    source_set_state = search_source_set_change_state(
+        aoa_root=aoa_root,
+    )
+    if source_set_state.get("removed_session_ids"):
+        payload = search_shard_fanout_unavailable_payload(
+            reason="search_source_set_removed_fallback_monolith",
+            aoa_root=aoa_root,
+            query=query,
+            limit=limit,
+            provider=provider,
+            include_host_context=include_host_context,
+            include_semantic_context=include_semantic_context,
+            rerank_local=rerank_local,
+            rerank_candidate_limit=rerank_candidate_limit,
+            allow_host_warnings=allow_host_warnings,
+            host_timeout=host_timeout,
+            session=session,
+            event_id_before=event_id_before,
+            doc_type=doc_type,
+            event_type=event_type,
+            family=family,
+            outcome=outcome,
+            conversation_act=conversation_act,
+            session_act=session_act,
+            agent_event=agent_event,
+            usage_role=usage_role,
+            task_episode_id=task_episode_id,
+            route_layer=route_layer,
+            route_signal=route_signal,
+            archive_status=archive_status,
+            freshness_status=freshness_status,
+            date_from=date_from,
+            date_to=date_to,
+            explain=explain,
+            semantic_preview=semantic_preview,
+            hydrate_body=hydrate_body,
+            raw_ref_preview=raw_ref_preview,
+            exclude_agent_event_stream_copies=(
+                exclude_agent_event_stream_copies
+            ),
+            include_archived_raw_fallback=False,
+            query_timeout_ms=query_timeout_ms,
+        )
+        payload.setdefault("search_projection", {})[
+            "source_set_state"
+        ] = source_set_state
+        return payload
     shards = catalog.get("shards") if isinstance(catalog.get("shards"), list) else []
     session_filter_column, session_filter_value = exact_session_filter_for_search(aoa_root, session)
     session_scope_shard = ""
@@ -98464,6 +99424,63 @@ def search_sessions(
                 query_timeout_ms=query_timeout_ms,
             )
         stored_metadata = search_index_metadata(conn)
+        source_set_state = search_source_set_change_state(
+            aoa_root=aoa_root,
+            db_path=db_path,
+        )
+        if (
+            db_path_override is None
+            and source_set_state.get("removed_session_ids")
+        ):
+            return {
+                "schema_version": SCHEMA_VERSION,
+                "artifact_type": "search_results",
+                "search_schema_version": SEARCH_SCHEMA_VERSION,
+                "generated_at": now,
+                "ok": True,
+                "mutates": False,
+                "query": query,
+                "normalized_query": fts_query_from_user(query),
+                "db_path": str(db_path),
+                "aoa_root": str(aoa_root),
+                "result_count": 0,
+                "results": [],
+                "search_projection": {
+                    "mode": effective_projection_mode,
+                    "db_path": str(db_path),
+                    "status": "stale",
+                    "source_set_state": source_set_state,
+                },
+                "answer_admission": {
+                    "admitted": False,
+                    "status": (
+                        "source_set_removed_requires_deep_rebuild"
+                    ),
+                    "reason": SEARCH_SOURCE_SET_REMOVED_REASON,
+                },
+                "abstention": {
+                    "status": (
+                        "source_set_removed_requires_deep_rebuild"
+                    ),
+                    "reason": (
+                        "indexed sessions were removed from the complete "
+                        "current registry; generated candidates remain "
+                        "navigation-only until clean replacement"
+                    ),
+                },
+                "exact_next_command": (
+                    "python3 scripts/aoa_session_memory.py "
+                    "auto-maintenance deep all --aoa-root "
+                    f"{shlex.quote(str(aoa_root))} --apply "
+                    "--write-report"
+                ),
+                "diagnostics": [
+                    "search_source_set_removed_candidates_withheld"
+                ],
+                "truth_status": (
+                    "generated_projection_withheld_raw_evidence_unchanged"
+                ),
+            }
         stored_generations = projection_generation_from_json(
             stored_metadata.get("generation_identities_json")
         )
@@ -138877,19 +139894,43 @@ def graph_freshness_gates(
     latest_source_mtime, latest_source_paths = latest_index_source_mtime(aoa_root, gate_records)
     latest_graph_mtime, latest_graph_paths = latest_graph_source_mtime(aoa_root, gate_records)
     route_drift = route_index_drift_records(gate_records)
-    search_gate_projection_fingerprints = search_projection_fingerprints_for_records(gate_records) if stable_mode else None
-    search_state = sqlite_search_index_state(aoa_root, latest_source_mtime, gate_records, projection_fingerprints=search_gate_projection_fingerprints)
-    atlas_state = atlas_index_state(aoa_root, latest_source_mtime, gate_records, projection_fingerprints=gate_projection_fingerprints)
+    declared_global_scope_complete = bool(
+        isinstance(selection_scope, dict)
+        and selection_scope.get("global_scope_complete") is True
+    )
     global_selection = bool(
-        selected_records is None
-        and graph_selection_is_global(
+        graph_selection_is_global(
             target=target,
             since=since,
             until=until,
             limit=limit,
         )
+        and (selected_records is None or declared_global_scope_complete)
     )
     graph_selection_global = global_selection and not deferred_live_sessions
+    search_gate_projection_fingerprints = search_projection_fingerprints_for_records(gate_records) if stable_mode else None
+    search_state = sqlite_search_index_state(
+        aoa_root,
+        latest_source_mtime,
+        gate_records,
+        projection_fingerprints=search_gate_projection_fingerprints,
+        **(
+            {"source_scope_complete": True}
+            if graph_selection_global
+            else {}
+        ),
+    )
+    atlas_state = atlas_index_state(
+        aoa_root,
+        latest_source_mtime,
+        gate_records,
+        projection_fingerprints=gate_projection_fingerprints,
+        **(
+            {"source_scope_complete": True}
+            if graph_selection_global
+            else {}
+        ),
+    )
     store_state = graph_store_state(
         aoa_root=aoa_root,
         target=target,
@@ -139122,13 +140163,42 @@ def route_cache_freshness_gates(
             }
         latest_source_mtime, latest_source_paths = latest_index_source_mtime(aoa_root, records)
         route_drift = route_index_drift_records(records)
+        source_scope_complete = bool(
+            graph_selection_is_global(
+                target=target,
+                since=since,
+                until=until,
+                limit=limit,
+            )
+            and (
+                selected_records is None
+                or (
+                    isinstance(selection_scope, dict)
+                    and selection_scope.get("global_scope_complete") is True
+                )
+            )
+        )
         search_state = sqlite_search_index_state(
             aoa_root,
             latest_source_mtime,
             records,
             projection_fingerprints=search_projection_fingerprints_for_records(records),
+            **(
+                {"source_scope_complete": True}
+                if source_scope_complete
+                else {}
+            ),
         )
-        atlas_state = atlas_index_state(aoa_root, latest_source_mtime, records)
+        atlas_state = atlas_index_state(
+            aoa_root,
+            latest_source_mtime,
+            records,
+            **(
+                {"source_scope_complete": True}
+                if source_scope_complete
+                else {}
+            ),
+        )
         truth_status = "hot_route_cache_bounded_projection_scan"
         selection_source = "provided_records" if selected_records is not None else "target_filters"
         selected_count = len(records)

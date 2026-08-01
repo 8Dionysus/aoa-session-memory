@@ -28295,7 +28295,11 @@ def test_skill_usage_chain_rejects_parallel_foreign_correlation(tmp_path: Path) 
         aoa_root=aoa_root,
     )
     record = module.resolve_session_record(aoa_root, fixture["session_id"])
-    indexed = module.search_index_sessions(aoa_root=aoa_root, target="all")
+    indexed = module.search_index_sessions(
+        aoa_root=aoa_root,
+        target="all",
+        include_entity_registry=False,
+    )
     assert indexed["ok"] is True
 
     expected = fixture["expected"]
@@ -64188,6 +64192,412 @@ def test_index_maintenance_defers_incompatible_atlas_to_deep_and_deep_plans_clea
     assert deep_atlas["action_kind"] == "full_rebuild"
     assert deep_atlas["command"][2:5] == ["atlas", "build", "all"]
     assert "--no-clean" not in deep_atlas["command"]
+
+
+def test_projection_source_set_retirement_fails_closed_and_deep_rebuilds_without_raw_loss(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    sessions = (
+        (
+            "lifecycle-keep",
+            "KEEP-LIFECYCLE-7A91",
+            "2026-07-18T03:00:00Z",
+        ),
+        (
+            "lifecycle-retire",
+            "RETIRE-LIFECYCLE-9F3B",
+            "2026-07-18T04:00:00Z",
+        ),
+    )
+    for session_id, marker, timestamp in sessions:
+        transcript = tmp_path / f"{session_id}.jsonl"
+        write_jsonl(
+            transcript,
+            [
+                {
+                    "timestamp": timestamp,
+                    "type": "session_meta",
+                    "payload": {
+                        "id": session_id,
+                        "cwd": str(repo),
+                    },
+                },
+                {
+                    "timestamp": timestamp,
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": f"Investigate {marker} and preserve evidence.",
+                            }
+                        ],
+                    },
+                },
+                {
+                    "timestamp": timestamp,
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": f"Verified {marker} in the owner source.",
+                            }
+                        ],
+                    },
+                },
+            ],
+        )
+        module.handle_hook_event(
+            "Stop",
+            {
+                "session_id": session_id,
+                "transcript_path": str(transcript),
+                "cwd": str(repo),
+                "hook_event_name": "Stop",
+            },
+            workspace_root=workspace,
+            aoa_root=aoa_root,
+        )
+
+    indexed = module.search_index_sessions(aoa_root=aoa_root, target="all")
+    assert indexed["ok"] is True
+    assert indexed["source_scope_complete"] is True
+    assert indexed["source_set_identity"]["session_count"] == 2
+    assert module.build_agent_atlas(
+        aoa_root=aoa_root,
+        target="all",
+        clean=True,
+    )["ok"] is True
+    assert module.build_session_graph(
+        aoa_root=aoa_root,
+        target="all",
+        write=True,
+        include_rows=False,
+    )["ok"] is True
+    sharded = module.materialize_search_shards(
+        aoa_root=aoa_root,
+        target="all",
+        rebuild_shards=True,
+        dirty_only=False,
+        structured_only=True,
+    )
+    assert sharded["ok"] is True
+
+    registry_path = aoa_root / module.REGISTRY_NAME
+    registry = module.read_json(registry_path, {})
+    retired_record = next(
+        item
+        for item in registry["sessions"]
+        if item.get("session_id") == "lifecycle-retire"
+    )
+    retired_raw = (
+        Path(str(retired_record["path"]))
+        / "raw"
+        / "session.raw.jsonl"
+    )
+    raw_sha_before = module.sha256_file(retired_raw)
+    registry["sessions"] = [
+        item
+        for item in registry["sessions"]
+        if item.get("session_id") != "lifecycle-retire"
+    ]
+    module.write_json(registry_path, registry)
+    current_records = module.chronological_session_records(aoa_root)
+    latest_source_mtime, _ = module.latest_index_source_mtime(
+        aoa_root,
+        current_records,
+    )
+
+    bounded_state = module.sqlite_search_index_state(
+        aoa_root,
+        latest_source_mtime,
+        current_records,
+        source_scope_complete=False,
+    )
+    assert bounded_state["status"] == "stale"
+    assert bounded_state["orphaned_session_ids"] == [
+        "lifecycle-retire"
+    ]
+    assert module.SEARCH_SOURCE_SET_REMOVED_REASON in bounded_state["reasons"]
+    atlas_state = module.atlas_index_state(
+        aoa_root,
+        latest_source_mtime,
+        current_records,
+        source_scope_complete=False,
+    )
+    assert atlas_state["orphaned_session_ids"] == ["lifecycle-retire"]
+    assert "atlas_source_set_removed" in atlas_state["reasons"]
+
+    withheld = module.search_sessions(
+        aoa_root=aoa_root,
+        query="RETIRE-LIFECYCLE-9F3B",
+        limit=5,
+    )
+    assert withheld["result_count"] == 0
+    assert withheld["answer_admission"]["admitted"] is False
+    assert withheld["search_projection"]["source_set_state"][
+        "removed_session_ids"
+    ] == ["lifecycle-retire"]
+    episode_withheld = module.episode_semantic_search(
+        aoa_root=aoa_root,
+        query="RETIRE-LIFECYCLE-9F3B",
+        limit=5,
+    )
+    assert episode_withheld["result_count"] == 0
+    assert episode_withheld["answer_admission"]["admitted"] is False
+
+    original_search_index_sessions = module.search_index_sessions
+    producer_calls: list[dict[str, Any]] = []
+
+    def forbidden_bounded_replacement(**kwargs: Any) -> dict[str, Any]:
+        producer_calls.append(kwargs)
+        raise AssertionError(
+            "bounded catchup must defer source-set replacement"
+        )
+
+    monkeypatch.setattr(
+        module,
+        "search_index_sessions",
+        forbidden_bounded_replacement,
+    )
+    catchup = module.maintain_indexes(
+        aoa_root=aoa_root,
+        target="all",
+        apply=True,
+        repair_token_accounting=False,
+        repair_graph=False,
+        selected_records=current_records,
+        selection_scope={
+            "profile": "catchup",
+            "global_scope_complete": False,
+        },
+        budget_seconds=30.0,
+    )
+    catchup_search = next(
+        action
+        for action in catchup["actions"]
+        if action["id"] == "rebuild_search_index"
+    )
+    assert producer_calls == []
+    assert catchup_search["status"] == "deferred"
+    assert catchup_search["result"]["status"] == (
+        "deferred_clean_rebuild_to_deep"
+    )
+    assert catchup_search["result"][
+        "source_set_tombstone_session_ids"
+    ] == ["lifecycle-retire"]
+    assert catchup_search["command"][2:5] == [
+        "auto-maintenance",
+        "deep",
+        "all",
+    ]
+    monkeypatch.setattr(
+        module,
+        "search_index_sessions",
+        original_search_index_sessions,
+    )
+
+    deep = module.maintain_indexes(
+        aoa_root=aoa_root,
+        target="all",
+        apply=True,
+        repair_token_accounting=False,
+        repair_graph=True,
+        selected_records=current_records,
+        selection_scope={
+            "profile": "deep",
+            "global_scope_complete": False,
+        },
+        graph_batch_limit=20,
+        budget_seconds=60.0,
+    )
+    deep_search = next(
+        action
+        for action in deep["actions"]
+        if action["id"] == "rebuild_search_index"
+    )
+    deep_atlas = next(
+        action
+        for action in deep["actions"]
+        if action["id"] == "rebuild_agent_atlas"
+    )
+    deep_graph = next(
+        action
+        for action in deep["actions"]
+        if action["id"] == "graph_maintenance"
+    )
+    deep_shards = next(
+        action
+        for action in deep["actions"]
+        if action["id"] == "refresh_search_shards"
+    )
+    assert deep_search["status"] == "applied"
+    assert deep_search["result"]["source_set_tombstone_count"] == 1
+    assert deep_search["result"]["source_set_tombstones"][0][
+        "session_id"
+    ] == "lifecycle-retire"
+    assert deep_atlas["status"] == "applied"
+    assert deep_atlas["action_kind"] == "full_rebuild"
+    assert deep_graph["status"] == "applied"
+    assert deep_shards["status"] == "applied"
+    assert module.sha256_file(retired_raw) == raw_sha_before
+
+    conn = module.connect_existing_search_db(
+        module.search_db_path(aoa_root)
+    )
+    for table in (
+        "session_index_state",
+        "exact_literal_session_state",
+        "episode_semantic_session_state",
+    ):
+        assert conn.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE session_id = ?",
+            ("lifecycle-retire",),
+        ).fetchone()[0] == 0
+    first_digest = module.search_projection_semantic_digest(conn)
+    conn.close()
+    graph_conn = sqlite3.connect(str(aoa_root / "graph" / "graph.sqlite3"))
+    assert graph_conn.execute(
+        "SELECT COUNT(*) FROM graph_sources WHERE session_id = ?",
+        ("lifecycle-retire",),
+    ).fetchone()[0] == 0
+    graph_conn.close()
+    catalog = module.build_search_catalog(aoa_root, write=False)
+    assert "lifecycle-retire" not in {
+        str(item.get("session_id") or "")
+        for item in catalog["sessions"]
+    }
+    assert catalog["retired_projection_session_count"] == 0
+
+    repeated = module.search_index_sessions(
+        aoa_root=aoa_root,
+        target="all",
+    )
+    assert repeated["ok"] is True
+    assert repeated["source_set_tombstone_count"] == 0
+    conn = module.connect_existing_search_db(
+        module.search_db_path(aoa_root)
+    )
+    second_digest = module.search_projection_semantic_digest(conn)
+    conn.close()
+    assert second_digest == first_digest
+
+    restored_registry = module.read_json(registry_path, {})
+    restored_registry["sessions"].append(retired_record)
+    module.write_json(registry_path, restored_registry)
+    added_state = module.search_source_set_change_state(aoa_root=aoa_root)
+    assert added_state["status"] == "stale_readable_added_sources"
+    assert added_state["added_session_ids"] == ["lifecycle-retire"]
+    corrected = module.search_index_sessions(
+        aoa_root=aoa_root,
+        target="all",
+        rebuild=False,
+        selected_records=[retired_record],
+    )
+    assert corrected["ok"] is True
+    assert corrected["source_set_identity"]["session_count"] == 2
+    restored = module.search_sessions(
+        aoa_root=aoa_root,
+        query="RETIRE-LIFECYCLE-9F3B",
+        limit=5,
+    )
+    assert any(
+        item.get("session_id") == "lifecycle-retire"
+        for item in restored["results"]
+    )
+    assert module.sha256_file(retired_raw) == raw_sha_before
+
+
+def test_search_source_set_can_rebuild_to_authoritative_empty_registry(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "last-source.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-07-18T05:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "last-source",
+                    "cwd": str(repo),
+                },
+            },
+            {
+                "timestamp": "2026-07-18T05:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Find LAST-SOURCE-31D7.",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "last-source",
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    indexed = module.search_index_sessions(aoa_root=aoa_root, target="all")
+    assert indexed["ok"] is True
+    record = module.registry_sessions(aoa_root)[0]
+    raw_path = Path(str(record["path"])) / "raw" / "session.raw.jsonl"
+    raw_sha_before = module.sha256_file(raw_path)
+    registry_path = aoa_root / module.REGISTRY_NAME
+    registry = module.read_json(registry_path, {})
+    registry["sessions"] = []
+    module.write_json(registry_path, registry)
+
+    rebuilt = module.search_index_sessions(
+        aoa_root=aoa_root,
+        target="all",
+        include_entity_registry=False,
+    )
+
+    assert rebuilt["ok"] is True
+    assert rebuilt["selected_count"] == 0
+    assert rebuilt["document_count"] == 0
+    assert rebuilt["source_set_identity"]["session_count"] == 0
+    assert rebuilt["source_set_tombstone_count"] == 1
+    assert rebuilt["source_set_tombstones"][0]["session_id"] == "last-source"
+    assert rebuilt["search_catalog"]["status"] == "current"
+    source_set_state = module.search_source_set_change_state(
+        aoa_root=aoa_root
+    )
+    assert source_set_state["status"] == "current"
+    assert source_set_state["current"]["session_count"] == 0
+    assert module.search_sessions(
+        aoa_root=aoa_root,
+        query="LAST-SOURCE-31D7",
+        limit=5,
+    )["result_count"] == 0
+    assert module.sha256_file(raw_path) == raw_sha_before
 
 
 def test_search_schema_transition_unknown_or_structural_drift_still_requires_deep() -> None:

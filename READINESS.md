@@ -110,6 +110,13 @@ Ready when:
 - incompatible Atlas generations and mixed publish epochs are deferred from
   bounded non-deep profiles to the clean deep route; current admission requires
   matching root, projection-state, and axis generation/publish identities;
+- a valid complete registry source set is distinguished from a bounded batch;
+  a removed projected session blocks answer candidates until deep atomic
+  replacement removes monolith, shard, Atlas, and graph contributions, while
+  raw evidence and its digest remain unchanged;
+- an authoritative empty registry can publish an empty current source set, and
+  reinstating a preserved owner record is an indexed correction rather than
+  raw recovery;
 - compaction markers do not create false semantic microsegments.
 
 Progress transport is a separate runtime-observability gate. A disconnected
