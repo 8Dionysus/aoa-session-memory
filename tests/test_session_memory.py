@@ -9152,6 +9152,55 @@ def test_episode_dense_representation_documents_are_stable_bounded_and_raw_ref_b
     )
 
 
+def test_episode_dense_representation_match_selection_preserves_primary_and_adds_distinct_roles() -> None:
+    candidates = [
+        {
+            "representation_id": f"rep-{index}",
+            "role": role,
+            "raw_ref": f"raw:line:{40 + index}",
+            "score": round(0.99 - index / 100, 2),
+            "rank_within_episode": index,
+        }
+        for index, role in enumerate(
+            (
+                "actions",
+                "actions",
+                "outcomes",
+                "outcomes",
+                "failures",
+                "verification",
+            ),
+            start=1,
+        )
+    ]
+
+    selected = module.episode_dense_select_representation_matches(
+        candidates
+    )
+
+    assert [item["representation_id"] for item in selected] == [
+        "rep-1",
+        "rep-2",
+        "rep-3",
+        "rep-5",
+    ]
+    assert [item["selection_basis"] for item in selected] == [
+        "primary_similarity",
+        "primary_similarity",
+        "role_diversity",
+        "role_diversity",
+    ]
+    assert [item["rank_within_episode"] for item in selected] == [
+        1,
+        2,
+        3,
+        5,
+    ]
+    assert len(selected) == (
+        module.EPISODE_DENSE_REPRESENTATION_MATCH_LIMIT
+    )
+
+
 def test_episode_dense_representation_support_hydrates_distinct_raw_refs_only() -> None:
     raw_one = "raw:line:40"
     raw_two = "raw:line:41"
@@ -9763,11 +9812,12 @@ def test_episode_selective_rerank_is_bounded_and_only_promotes_decisive_winner(
             for document in payload["documents"]
         )
         calls["count"] += 1
-        scores = (
-            [0.20, 0.95, 0.10]
-            if calls["count"] in {1, 3}
-            else [0.91, 0.95, 0.90]
-        )
+        if calls["count"] in {1, 3}:
+            scores = [0.20, 0.95, 0.10]
+        elif calls["count"] in {4, 5}:
+            scores = [0.002, 0.69, 0.02]
+        else:
+            scores = [0.91, 0.95, 0.90]
         ranked = sorted(range(3), key=lambda index: -scores[index])
         return {
             "ok": True,
@@ -9837,6 +9887,97 @@ def test_episode_selective_rerank_is_bounded_and_only_promotes_decisive_winner(
             "still requires source evidence"
         ),
     }
+
+    consensus_results = copy.deepcopy(results)
+    consensus_results[0].update(
+        {
+            "dense_rank": 2,
+            "sparse_rank": 1,
+            "fusion_score": 0.032522475,
+        }
+    )
+    consensus_results[1].update(
+        {
+            "dense_rank": 1,
+            "sparse_rank": 2,
+            "fusion_score": 0.032522475,
+        }
+    )
+    consensus_results[2].update(
+        {
+            "dense_rank": 3,
+            "sparse_rank": 3,
+            "fusion_score": 0.031746032,
+        }
+    )
+    consensus = module.episode_selective_local_rerank(
+        aoa_root=aoa_root,
+        query="which pre-publication review found a partial index",
+        results=consensus_results,
+        candidate_limit=24,
+    )
+    assert (
+        consensus["status"]
+        == "dense_reranker_consensus_promoted"
+    )
+    assert (
+        consensus["results"][0]["task_episode_id"]
+        == "task-0002"
+    )
+    assert consensus["promotion_min_score"] == 0.80
+    assert consensus["promotion_min_margin"] == 0.10
+    assert consensus["dense_reranker_consensus"] == {
+        "active": True,
+        "winner_doc_id": (
+            "episode_semantic:rerank-session:task-0002"
+        ),
+        "winner_dense_rank": 1,
+        "fusion_tied": True,
+        "reranker_margin_admitted": True,
+        "typed_sparse_anchor_protected": False,
+        "policy": (
+            "an unprotected exact RRF tie may be broken only when "
+            "dense rank 1 and the reranker winner independently agree "
+            "under the existing margin floor; model-only score and "
+            "claim-admission thresholds remain unchanged"
+        ),
+    }
+
+    protected_consensus_results = copy.deepcopy(
+        consensus_results
+    )
+    protected_consensus_results[0]["explain"] = {
+        "fusion": {
+            "sparse_anchor": True,
+            "sparse_anchor_reasons": [
+                "decisive_typed_sparse_evidence",
+            ],
+        },
+    }
+    protected_consensus = module.episode_selective_local_rerank(
+        aoa_root=aoa_root,
+        query="which pre-publication review found a partial index",
+        results=protected_consensus_results,
+        candidate_limit=24,
+    )
+    assert (
+        protected_consensus["status"]
+        == "ambiguous_preserved_fusion_order"
+    )
+    assert (
+        protected_consensus["results"][0]["task_episode_id"]
+        == "task-0001"
+    )
+    assert (
+        protected_consensus["dense_reranker_consensus"]["active"]
+        is False
+    )
+    assert (
+        protected_consensus["dense_reranker_consensus"][
+            "typed_sparse_anchor_protected"
+        ]
+        is True
+    )
 
 
 def test_episode_auto_rerank_trigger_does_not_confuse_kakoi_with_kak() -> None:

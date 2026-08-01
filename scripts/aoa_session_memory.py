@@ -501,7 +501,12 @@ EPISODE_DENSE_EMBED_BATCH_SIZE = 4
 EPISODE_DENSE_DOCUMENT_MAX_CHARS = 3200
 EPISODE_DENSE_REPRESENTATION_TEXT_MAX_CHARS = 1600
 EPISODE_DENSE_REPRESENTATION_PER_ROLE_LIMIT = 4
-EPISODE_DENSE_REPRESENTATION_MATCH_LIMIT = 2
+EPISODE_DENSE_REPRESENTATION_PRIMARY_MATCH_LIMIT = 2
+EPISODE_DENSE_REPRESENTATION_DIVERSITY_MATCH_LIMIT = 2
+EPISODE_DENSE_REPRESENTATION_MATCH_LIMIT = (
+    EPISODE_DENSE_REPRESENTATION_PRIMARY_MATCH_LIMIT
+    + EPISODE_DENSE_REPRESENTATION_DIVERSITY_MATCH_LIMIT
+)
 EPISODE_DENSE_QUERY_TIMEOUT_SECONDS = 30
 EPISODE_DENSE_INDEX_TIMEOUT_SECONDS = 120
 EPISODE_DENSE_RRF_K = 60
@@ -574,6 +579,7 @@ EPISODE_RERANK_EVIDENCE_CARD_LIMIT = 5
 EPISODE_RERANK_EVIDENCE_TEXT_MAX_CHARS = 140
 EPISODE_RERANK_CONTEXT_MAX_CHARS = 180
 EPISODE_RERANK_DOCUMENT_POLICY = "source_labeled_bounded_evidence_cards_v1"
+EPISODE_RERANK_PROMOTION_POLICY_VERSION = 2
 EPISODE_RERANK_PROMOTION_MIN_SCORE = 0.80
 EPISODE_RERANK_PROMOTION_MIN_MARGIN = 0.10
 EPISODE_AUTO_RERANK_POLICY_VERSION = 1
@@ -59909,6 +59915,9 @@ def episode_dense_representation_support(
                     "truth_status": (
                         "dense_representation_navigation_not_claim_truth"
                     ),
+                    "selection_basis": str(
+                        match.get("selection_basis") or ""
+                    ),
                 },
                 "reading_score": round(
                     120.0
@@ -59980,6 +59989,7 @@ def episode_dense_hydrate_result_support(
                 "raw_ref",
                 "score",
                 "rank_within_episode",
+                "selection_basis",
             )
         }
         for match in matches
@@ -78182,6 +78192,56 @@ def episode_semantic_result_from_row(
     return result
 
 
+def episode_dense_select_representation_matches(
+    candidates: Any,
+) -> list[dict[str, Any]]:
+    """Preserve top semantic refs, then add bounded role-diverse evidence."""
+    ordered = [
+        match
+        for match in (
+            candidates if isinstance(candidates, list) else []
+        )
+        if isinstance(match, dict)
+        and match.get("raw_ref")
+    ]
+    primary = ordered[
+        :EPISODE_DENSE_REPRESENTATION_PRIMARY_MATCH_LIMIT
+    ]
+    selected: list[dict[str, Any]] = [
+        {
+            **match,
+            "selection_basis": "primary_similarity",
+        }
+        for match in primary
+    ]
+    selected_roles = {
+        str(match.get("role") or "")
+        for match in primary
+        if match.get("role")
+    }
+    diversity_count = 0
+    for match in ordered[
+        EPISODE_DENSE_REPRESENTATION_PRIMARY_MATCH_LIMIT:
+    ]:
+        role = str(match.get("role") or "")
+        if (
+            not role
+            or role in selected_roles
+            or diversity_count
+            >= EPISODE_DENSE_REPRESENTATION_DIVERSITY_MATCH_LIMIT
+        ):
+            continue
+        selected.append(
+            {
+                **match,
+                "selection_basis": "role_diversity",
+            }
+        )
+        selected_roles.add(role)
+        diversity_count += 1
+    return selected[:EPISODE_DENSE_REPRESENTATION_MATCH_LIMIT]
+
+
 def episode_dense_search_ranking(
     *,
     aoa_root: Path,
@@ -78466,7 +78526,7 @@ def episode_dense_search_ranking(
                     scores[representation_index],
                     7,
                 ),
-                "representation_matches": [],
+                "_representation_candidates": [],
                 "_seen_raw_refs": set(),
                 "vector_kind": str(
                     row.get("vector_kind")
@@ -78483,12 +78543,15 @@ def episode_dense_search_ranking(
         if (
             not raw_ref
             or raw_ref in candidate["_seen_raw_refs"]
-            or len(candidate["representation_matches"])
-            >= EPISODE_DENSE_REPRESENTATION_MATCH_LIMIT
+            or len(candidate["_representation_candidates"])
+            >= (
+                EPISODE_DENSE_REPRESENTATION_PER_ROLE_LIMIT
+                * len(EPISODE_DENSE_REPRESENTATION_ROLES)
+            )
         ):
             continue
         candidate["_seen_raw_refs"].add(raw_ref)
-        candidate["representation_matches"].append(
+        candidate["_representation_candidates"].append(
             {
                 "representation_id": str(
                     row.get("representation_id") or ""
@@ -78513,9 +78576,18 @@ def episode_dense_search_ranking(
                     7,
                 ),
                 "rank_within_episode": (
-                    len(candidate["representation_matches"]) + 1
+                    len(
+                        candidate["_representation_candidates"]
+                    )
+                    + 1
                 ),
             }
+        )
+    for candidate in episode_candidates.values():
+        candidate["representation_matches"] = (
+            episode_dense_select_representation_matches(
+                candidate.pop("_representation_candidates", [])
+            )
         )
     ranked_episodes = sorted(
         episode_candidates.values(),
@@ -78564,6 +78636,15 @@ def episode_dense_search_ranking(
             ),
             "match_limit": (
                 EPISODE_DENSE_REPRESENTATION_MATCH_LIMIT
+            ),
+            "primary_similarity_match_limit": (
+                EPISODE_DENSE_REPRESENTATION_PRIMARY_MATCH_LIMIT
+            ),
+            "role_diversity_supplement_limit": (
+                EPISODE_DENSE_REPRESENTATION_DIVERSITY_MATCH_LIMIT
+            ),
+            "match_selection": (
+                "primary_similarity_then_distinct_role_supplements"
             ),
             "distinct_raw_refs": True,
             "fallback": (
@@ -78722,6 +78803,28 @@ def episode_selective_local_rerank(
         original_top_fusion.get("sparse_anchor")
         and typed_sparse_anchor_reasons
     )
+    winner = annotated_candidates[winner_index]
+    current_fusion_score = annotated_candidates[0].get(
+        "fusion_score"
+    )
+    winner_fusion_score = winner.get("fusion_score")
+    fusion_tied = bool(
+        isinstance(current_fusion_score, (int, float))
+        and isinstance(winner_fusion_score, (int, float))
+        and math.isclose(
+            float(current_fusion_score),
+            float(winner_fusion_score),
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        )
+    )
+    dense_reranker_consensus = bool(
+        winner_index != 0
+        and int_value(winner.get("dense_rank")) == 1
+        and fusion_tied
+        and margin >= EPISODE_RERANK_PROMOTION_MIN_MARGIN
+        and not typed_sparse_anchor_protected
+    )
     if (
         decisive
         and winner_index != 0
@@ -78734,6 +78837,13 @@ def episode_selective_local_rerank(
             item for index, item in enumerate(annotated_candidates) if index != winner_index
         ]
         status = "decisive_winner_promoted"
+    elif dense_reranker_consensus:
+        final_candidates = [annotated_candidates[winner_index]] + [
+            item
+            for index, item in enumerate(annotated_candidates)
+            if index != winner_index
+        ]
+        status = "dense_reranker_consensus_promoted"
     else:
         final_candidates = annotated_candidates
         status = "decisive_winner_already_first" if decisive else "ambiguous_preserved_fusion_order"
@@ -78758,6 +78868,34 @@ def episode_selective_local_rerank(
         "margin": round(margin, 7),
         "promotion_min_score": EPISODE_RERANK_PROMOTION_MIN_SCORE,
         "promotion_min_margin": EPISODE_RERANK_PROMOTION_MIN_MARGIN,
+        "promotion_policy_version": (
+            EPISODE_RERANK_PROMOTION_POLICY_VERSION
+        ),
+        "dense_reranker_consensus": {
+            "active": dense_reranker_consensus,
+            "winner_doc_id": (
+                str(winner.get("doc_id") or "")
+                if winner_index != 0
+                else ""
+            ),
+            "winner_dense_rank": int_value(
+                winner.get("dense_rank")
+            )
+            or None,
+            "fusion_tied": fusion_tied,
+            "reranker_margin_admitted": (
+                margin >= EPISODE_RERANK_PROMOTION_MIN_MARGIN
+            ),
+            "typed_sparse_anchor_protected": (
+                typed_sparse_anchor_protected
+            ),
+            "policy": (
+                "an unprotected exact RRF tie may be broken only when "
+                "dense rank 1 and the reranker winner independently agree "
+                "under the existing margin floor; model-only score and "
+                "claim-admission thresholds remain unchanged"
+            ),
+        },
         "typed_sparse_anchor_protection": {
             "active": typed_sparse_anchor_protected,
             "doc_id": (
@@ -83035,6 +83173,7 @@ def episode_semantic_search(
                                     "raw_ref",
                                     "score",
                                     "rank_within_episode",
+                                    "selection_basis",
                                 )
                             }
                             for match in representation_matches
@@ -84768,6 +84907,8 @@ def episode_semantic_search(
                     "evidence_text_max_chars", "context_max_chars",
                     "lineage_consolidation_before_rerank", "top_score",
                     "second_score", "margin", "promotion_min_score", "promotion_min_margin",
+                    "promotion_policy_version",
+                    "dense_reranker_consensus",
                     "typed_sparse_anchor_protection",
                     "model", "meta", "elapsed_ms", "truth_level", "diagnostics",
                     "trigger", "auto_reasons", "observed_signals",
@@ -105635,6 +105776,16 @@ def session_memory_expected_generation_identities(
                 ),
                 "evidence_match_limit": (
                     EPISODE_DENSE_REPRESENTATION_MATCH_LIMIT
+                ),
+                "primary_similarity_match_limit": (
+                    EPISODE_DENSE_REPRESENTATION_PRIMARY_MATCH_LIMIT
+                ),
+                "role_diversity_supplement_limit": (
+                    EPISODE_DENSE_REPRESENTATION_DIVERSITY_MATCH_LIMIT
+                ),
+                "evidence_match_selection": (
+                    "primary_similarity_then_distinct_role_"
+                    "supplements"
                 ),
             },
             "dependency_generations": {
