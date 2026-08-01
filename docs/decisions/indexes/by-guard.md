@@ -91,6 +91,7 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0004 Declared Incremental Search Schema Transitions](../AOA-SM-D-0004-declared-incremental-search-schema-transitions.md) | 2026-07-15 | Accepted | `docs/decisions/AOA-SM-D-0004-declared-incremental-search-schema-transitions.md` |
+| [AOA-SM-D-0041 Incompatible Atlas Generations Use the Deep Clean-Rebuild Route](../AOA-SM-D-0041-incompatible-atlas-generations-use-the-deep-clean-rebuild-route.md) | 2026-07-31 | Accepted | `docs/decisions/AOA-SM-D-0041-incompatible-atlas-generations-use-the-deep-clean-rebuild-route.md` |
 
 ## bounded discovery
 
@@ -248,6 +249,7 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0004 Declared Incremental Search Schema Transitions](../AOA-SM-D-0004-declared-incremental-search-schema-transitions.md) | 2026-07-15 | Accepted | `docs/decisions/AOA-SM-D-0004-declared-incremental-search-schema-transitions.md` |
+| [AOA-SM-D-0041 Incompatible Atlas Generations Use the Deep Clean-Rebuild Route](../AOA-SM-D-0041-incompatible-atlas-generations-use-the-deep-clean-rebuild-route.md) | 2026-07-31 | Accepted | `docs/decisions/AOA-SM-D-0041-incompatible-atlas-generations-use-the-deep-clean-rebuild-route.md` |
 
 ## dense-reranker consensus
 
@@ -472,6 +474,7 @@
 | [AOA-SM-D-0030 Projection-Scoped Producer Generation Identity](../AOA-SM-D-0030-projection-scoped-producer-generation-identity.md) | 2026-07-26 | Accepted | `docs/decisions/AOA-SM-D-0030-projection-scoped-producer-generation-identity.md` |
 | [AOA-SM-D-0037 Evidence-Backed Representation Vectors for Dense Episode Retrieval](../AOA-SM-D-0037-evidence-backed-representation-vectors-for-dense-episode-retrieval.md) | 2026-07-29 | Accepted | `docs/decisions/AOA-SM-D-0037-evidence-backed-representation-vectors-for-dense-episode-retrieval.md` |
 | [AOA-SM-D-0038 Primary-Preserving Role-Diverse Dense Evidence Hydration](../AOA-SM-D-0038-primary-preserving-role-diverse-dense-evidence-hydration.md) | 2026-07-29 | Accepted | `docs/decisions/AOA-SM-D-0038-primary-preserving-role-diverse-dense-evidence-hydration.md` |
+| [AOA-SM-D-0041 Incompatible Atlas Generations Use the Deep Clean-Rebuild Route](../AOA-SM-D-0041-incompatible-atlas-generations-use-the-deep-clean-rebuild-route.md) | 2026-07-31 | Accepted | `docs/decisions/AOA-SM-D-0041-incompatible-atlas-generations-use-the-deep-clean-rebuild-route.md` |
 
 ## global recall honesty
 
@@ -713,6 +716,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0021 Raw-Preserving Derived-Text Privacy Boundary](../AOA-SM-D-0021-raw-preserving-derived-text-privacy-boundary.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0021-raw-preserving-derived-text-privacy-boundary.md` |
 
+## publish epoch
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0041 Incompatible Atlas Generations Use the Deep Clean-Rebuild Route](../AOA-SM-D-0041-incompatible-atlas-generations-use-the-deep-clean-rebuild-route.md) | 2026-07-31 | Accepted | `docs/decisions/AOA-SM-D-0041-incompatible-atlas-generations-use-the-deep-clean-rebuild-route.md` |
+
 ## quantitative comparison
 
 | Decision | Date | Status | Path |
@@ -847,6 +856,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0024 Semantic Generation Pins for Evaluation Admission](../AOA-SM-D-0024-semantic-generation-pins-for-evaluation-admission.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0024-semantic-generation-pins-for-evaluation-admission.md` |
+
+## semantic progress
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0041 Incompatible Atlas Generations Use the Deep Clean-Rebuild Route](../AOA-SM-D-0041-incompatible-atlas-generations-use-the-deep-clean-rebuild-route.md) | 2026-07-31 | Accepted | `docs/decisions/AOA-SM-D-0041-incompatible-atlas-generations-use-the-deep-clean-rebuild-route.md` |
 
 ## sensitive-query abstention
 

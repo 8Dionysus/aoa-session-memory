@@ -107,6 +107,9 @@ Ready when:
 - generation identities name the producer bytes loaded by the writer, and a
   changed producer source refuses publication;
 - stale indexes are detected and rebuildable;
+- incompatible Atlas generations and mixed publish epochs are deferred from
+  bounded non-deep profiles to the clean deep route; current admission requires
+  matching root, projection-state, and axis generation/publish identities;
 - compaction markers do not create false semantic microsegments.
 
 Progress transport is a separate runtime-observability gate. A disconnected

@@ -37474,6 +37474,9 @@ def route_projection_dependency_coherence(
         )
         deferred.update(upstream_capture_deferred)
         if str(action.get("status") or "") in {
+            "deferred",
+            "deferred_clean_rebuild_to_deep",
+            "deferred_dependency_bound",
             "deferred_budget_exhausted",
             "applied_partial_budget_exhausted",
             "deferred_upstream_capture",
@@ -37482,6 +37485,9 @@ def route_projection_dependency_coherence(
         if name == "episode_semantic":
             deferred.update(declared_deferred_ids(projection_actions["search"]))
             if str(projection_actions["search"].get("status") or "") in {
+                "deferred",
+                "deferred_clean_rebuild_to_deep",
+                "deferred_dependency_bound",
                 "deferred_budget_exhausted",
                 "applied_partial_budget_exhausted",
                 "deferred_upstream_capture",
@@ -37876,6 +37882,11 @@ def maintain_indexes(
         isinstance(selection_scope, dict)
         and selection_scope.get("global_scope_complete") is False
     )
+    maintenance_profile = (
+        str(selection_scope.get("profile") or "")
+        if isinstance(selection_scope, dict)
+        else ""
+    )
     stable_selected_records_global = bool(
         selected_records is None
         and not bounded_discovery
@@ -38055,10 +38066,9 @@ def maintain_indexes(
         )
 
     def atlas_rebuild_required_for(state: dict[str, Any]) -> bool:
-        reasons = state.get("reasons") if isinstance(state.get("reasons"), list) else []
         return (
             str(state.get("status") or "") in {"missing", "empty", "invalid"}
-            or "atlas_schema_mismatch" in reasons
+            or bool(atlas_clean_rebuild_reasons_for_state(state))
         )
 
     def current_selected_records() -> list[dict[str, Any]]:
@@ -38066,6 +38076,19 @@ def maintain_indexes(
 
     search_rebuild_required = search_rebuild_required_for(search_state)
     atlas_rebuild_required = atlas_rebuild_required_for(atlas_state)
+    atlas_clean_rebuild_reasons = atlas_clean_rebuild_reasons_for_state(
+        atlas_state
+    )
+    atlas_bounded_bootstrap_eligible = bool(
+        str(atlas_state.get("status") or "") in {"missing", "empty"}
+        and not atlas_clean_rebuild_reasons
+    )
+    atlas_rebuild_deferred_to_deep = bool(
+        atlas_rebuild_required
+        and bounded_discovery
+        and maintenance_profile != "deep"
+        and not atlas_bounded_bootstrap_eligible
+    )
     search_dirty_selector = search_state.get("dirty_session_ids") if isinstance(search_state.get("dirty_session_ids"), list) else search_state.get("dirty_sessions", [])
     atlas_dirty_selector = atlas_state.get("dirty_session_ids") if isinstance(atlas_state.get("dirty_session_ids"), list) else atlas_state.get("dirty_sessions", [])
     episode_semantic_dirty_selector = (
@@ -38074,7 +38097,11 @@ def maintain_indexes(
         else episode_semantic_state.get("dirty_sessions", [])
     )
     search_dirty_records = [] if search_rebuild_required else records_matching_projection_states(records, search_dirty_selector if isinstance(search_dirty_selector, list) else [])
-    if atlas_rebuild_required and bounded_discovery:
+    if (
+        atlas_rebuild_required
+        and bounded_discovery
+        and atlas_bounded_bootstrap_eligible
+    ):
         atlas_rebuild_required = False
         atlas_dirty_records = list(records)
         atlas_state = {
@@ -38096,6 +38123,8 @@ def maintain_indexes(
                 )
             ),
         }
+    elif atlas_rebuild_deferred_to_deep:
+        atlas_dirty_records = list(records)
     else:
         atlas_dirty_records = (
             []
@@ -38216,6 +38245,9 @@ def maintain_indexes(
         < len(search_state_refresh_candidate_records) + len(search_reindex_candidate_records)
     )
     atlas_repair_limited = effective_repair_limit is not None and len(atlas_repair_records) < len(atlas_dirty_records)
+    if atlas_rebuild_deferred_to_deep:
+        atlas_repair_records = []
+        atlas_repair_limited = True
     search_update_target = "all" if search_rebuild_required else target
     search_update_selection_args = [] if search_rebuild_required else selection_args
     maintenance_readiness_sample_limit = 0
@@ -38256,10 +38288,26 @@ def maintain_indexes(
         ]
     )
     atlas_command = (
-        base
-        + ["atlas", "build", "all", *root_args]
-        + ([] if atlas_rebuild_required else ["--no-clean"])
-        + ["--write-report"]
+        (
+            base
+            + [
+                "auto-maintenance",
+                "deep",
+                "all",
+                "--workspace-root",
+                str(workspace_root_for(None, aoa_root)),
+                "--aoa-root",
+                str(aoa_root),
+            ]
+            + ["--apply", "--write-report"]
+        )
+        if atlas_rebuild_deferred_to_deep
+        else (
+            base
+            + ["atlas", "build", "all", *root_args]
+            + ([] if atlas_rebuild_required else ["--no-clean"])
+            + ["--write-report"]
+        )
     )
     actions = [
         maintenance_action(
@@ -38308,7 +38356,11 @@ def maintain_indexes(
         ),
         maintenance_action(
             "rebuild_agent_atlas",
-            reason="atlas_missing_or_stale",
+            reason=(
+                "atlas_clean_rebuild_requires_deep_profile"
+                if atlas_rebuild_deferred_to_deep
+                else "atlas_missing_or_stale"
+            ),
             needed=repair_indexes and (bool(atlas_repair_records) or atlas_rebuild_required or bool(route_drift) or token_backfill_needed),
             command=atlas_command,
         ),
@@ -38442,6 +38494,16 @@ def maintain_indexes(
     readiness_action = actions[8]
     graph_action = actions[9]
     sample_action = actions[10]
+    if atlas_rebuild_deferred_to_deep and atlas_action["needed"]:
+        atlas_action["status"] = "deferred"
+        atlas_action["action_kind"] = "full_rebuild"
+        atlas_action["skip_reason"] = (
+            "atlas_clean_rebuild_requires_deep_profile"
+        )
+        atlas_action["deep_next_command"] = list(atlas_command)
+        atlas_action["clean_rebuild_reasons"] = list(
+            atlas_clean_rebuild_reasons
+        )
     deferred_graph_action: dict[str, Any] | None = None
     if not repair_graph and graph_repair_needed:
         deferred_graph_action = maintenance_action(
@@ -38494,8 +38556,19 @@ def maintain_indexes(
         },
         "rebuild_agent_atlas": {
             "action_kind": "full_rebuild" if atlas_rebuild_required else "incremental_update",
-            "selection_count": len(records) if atlas_rebuild_required else len(atlas_repair_records),
+            "selection_count": (
+                0
+                if atlas_rebuild_deferred_to_deep
+                else len(records)
+                if atlas_rebuild_required
+                else len(atlas_repair_records)
+            ),
             "dirty_count": len(atlas_dirty_records) + (1 if atlas_rebuild_required else 0),
+            "deferred_count": (
+                max(1, len(atlas_dirty_records))
+                if atlas_rebuild_deferred_to_deep
+                else 0
+            ),
         },
         "refresh_operational_route_rollup": {
             "action_kind": "state_reconcile",
@@ -39208,7 +39281,23 @@ def maintain_indexes(
                 if not result.get("ok") and result.get("diagnostics"):
                     diagnostics.extend(str(item) for item in result.get("diagnostics", []))
         if atlas_action["needed"] or reindex_ran or token_backfill_ran:
-            if not has_budget():
+            if atlas_rebuild_deferred_to_deep:
+                atlas_action["result"] = {
+                    "ok": True,
+                    "status": "deferred_clean_rebuild_to_deep",
+                    "selected_count": 0,
+                    "processed_count": 0,
+                    "completed_session_ids": [],
+                    "remaining_count": max(1, len(atlas_dirty_records)),
+                    "budget_exhausted": False,
+                    "clean_rebuild_reasons": list(
+                        atlas_clean_rebuild_reasons
+                    ),
+                    "exact_next_command": list(atlas_command),
+                    "diagnostics": [],
+                }
+                action_results.append(atlas_action)
+            elif not has_budget():
                 budget_exhausted = True
                 atlas_action["status"] = "deferred_budget_exhausted"
                 action_results.append(atlas_action)
@@ -39256,7 +39345,7 @@ def maintain_indexes(
                         clean=atlas_rebuild_required,
                         selected_records=selected_atlas_records,
                         write_report=write_report,
-                        budget_seconds=None if atlas_rebuild_required else budget_remaining(),
+                        budget_seconds=budget_remaining(),
                         progress_every=progress_every,
                     )
                     atlas_action["status"] = "applied" if result.get("ok") else ("deferred_budget_exhausted" if result.get("budget_exhausted") else "failed")
@@ -39538,7 +39627,11 @@ def maintain_indexes(
                 refreshed_latest_source_mtime, refreshed_latest_source_paths = latest_index_source_mtime(aoa_root, refreshed_records)
                 refreshed_atlas_state = atlas_index_state(aoa_root, refreshed_latest_source_mtime, refreshed_records)
                 post_maintenance_states["post_projection_atlas_index"] = refreshed_atlas_state
-                if refreshed_atlas_state.get("needs_refresh") and not atlas_repair_limited:
+                if (
+                    refreshed_atlas_state.get("needs_refresh")
+                    and not atlas_repair_limited
+                    and not atlas_rebuild_deferred_to_deep
+                ):
                     refreshed_atlas_rebuild_required = atlas_rebuild_required_for(refreshed_atlas_state)
                     refreshed_atlas_dirty_selector = (
                         refreshed_atlas_state.get("dirty_session_ids")
@@ -40268,6 +40361,14 @@ def maintain_indexes(
         "atlas_repair_session_count": len(atlas_repair_records),
         "atlas_repair_remaining_count": max(0, len(atlas_dirty_records) - len(atlas_repair_records)),
         "atlas_repair_limited": atlas_repair_limited,
+        "atlas_clean_rebuild_required": bool(atlas_rebuild_required),
+        "atlas_clean_rebuild_reasons": atlas_clean_rebuild_reasons,
+        "atlas_rebuild_deferred_to_deep": atlas_rebuild_deferred_to_deep,
+        "atlas_deep_next_command": (
+            list(atlas_command)
+            if atlas_rebuild_deferred_to_deep
+            else []
+        ),
         "atlas_repair_sessions": [
             {
                 "session_id": record.get("session_id"),
@@ -47721,6 +47822,16 @@ def auto_maintenance_has_budget_remaining_backlog(maintenance: dict[str, Any]) -
 
 SEARCH_FULL_REBUILD_STATUSES = {"missing", "empty", "sqlite_error"}
 SEARCH_FULL_REBUILD_REASONS = {"search_schema_mismatch", "search_route_index_empty", "search_route_terms_empty"}
+ATLAS_CLEAN_REBUILD_STATUSES = {"invalid"}
+ATLAS_CLEAN_REBUILD_REASONS = {
+    "atlas_schema_mismatch",
+    "atlas_generation_identity_changed",
+    "atlas_publish_epoch_incomplete",
+    "atlas_axis_publish_epoch_mismatch",
+    "atlas_projection_state_schema_mismatch",
+    "atlas_projection_state_generation_changed",
+    "route_signal_classifier_version_changed",
+}
 SEARCH_INCREMENTAL_SCHEMA_TRANSITIONS = frozenset(
     {
         ("20", "21"),
@@ -47807,6 +47918,26 @@ def auto_maintenance_search_full_rebuild_reasons(freshness: dict[str, Any]) -> l
             and schema_transition.get("incremental_compatible") is True
         )
     )
+    return sorted(set(rebuild_reasons))
+
+
+def atlas_clean_rebuild_reasons_for_state(
+    atlas_state: dict[str, Any],
+) -> list[str]:
+    """Return structural Atlas states that cannot converge with --no-clean."""
+    status = str(atlas_state.get("status") or "")
+    reasons = (
+        atlas_state.get("reasons")
+        if isinstance(atlas_state.get("reasons"), list)
+        else []
+    )
+    rebuild_reasons = [
+        str(reason)
+        for reason in reasons
+        if str(reason) in ATLAS_CLEAN_REBUILD_REASONS
+    ]
+    if status in ATLAS_CLEAN_REBUILD_STATUSES:
+        rebuild_reasons.append(f"atlas_status:{status}")
     return sorted(set(rebuild_reasons))
 
 

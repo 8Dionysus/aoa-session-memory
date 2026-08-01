@@ -287,6 +287,16 @@ backlog, catch-up, deep, and manual-bulk profiles represent different resource
 and mutation envelopes. Timer-driven work yields to active owners and records
 resource-pressure deferrals.
 
+Atlas maintenance separates compatible session drift from structural
+generation migration. Missing or empty state may bootstrap incrementally, and
+current-generation source-fingerprint changes remain bounded. An invalid
+schema, incompatible producer generation, incomplete root/state publish epoch,
+or mismatched axis epoch requires a clean build. Non-deep automatic profiles
+defer that work with the exact deep next route instead of invoking
+`--no-clean`; the deep profile owns the budgeted all-session rebuild. Readers
+remain stale until root, projection state, and every axis share the expected
+generation and publish identity.
+
 Each writer pins its generation identities to the producer bytes loaded by the
 current process. It rechecks the resolved producer source before atomic
 publication; a missing, unreadable, or changed source refuses publication and

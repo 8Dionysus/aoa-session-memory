@@ -14,6 +14,7 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0006 Bounded Query-Demand Projection Catch-Up](../AOA-SM-D-0006-bounded-query-demand-projection-catch-up.md) | 2026-07-16 | Accepted | `docs/decisions/AOA-SM-D-0006-bounded-query-demand-projection-catch-up.md` |
 | [AOA-SM-D-0034 Bounded Dirty-First Automatic Index Discovery](../AOA-SM-D-0034-bounded-dirty-first-automatic-index-discovery.md) | 2026-07-28 | Accepted | `docs/decisions/AOA-SM-D-0034-bounded-dirty-first-automatic-index-discovery.md` |
+| [AOA-SM-D-0041 Incompatible Atlas Generations Use the Deep Clean-Rebuild Route](../AOA-SM-D-0041-incompatible-atlas-generations-use-the-deep-clean-rebuild-route.md) | 2026-07-31 | Accepted | `docs/decisions/AOA-SM-D-0041-incompatible-atlas-generations-use-the-deep-clean-rebuild-route.md` |
 
 ## agent event
 
@@ -53,6 +54,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0035 Transactional Preservation of Runtime-Generated Maps Across Upgrades](../AOA-SM-D-0035-transactional-preservation-of-runtime-generated-maps-across-upgrades.md) | 2026-07-28 | Accepted | `docs/decisions/AOA-SM-D-0035-transactional-preservation-of-runtime-generated-maps-across-upgrades.md` |
+
+## atlas projection state
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0041 Incompatible Atlas Generations Use the Deep Clean-Rebuild Route](../AOA-SM-D-0041-incompatible-atlas-generations-use-the-deep-clean-rebuild-route.md) | 2026-07-31 | Accepted | `docs/decisions/AOA-SM-D-0041-incompatible-atlas-generations-use-the-deep-clean-rebuild-route.md` |
 
 ## bounded trace search
 
@@ -504,6 +511,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0012 Bounded Background Graph Queue Reserve](../AOA-SM-D-0012-bounded-background-graph-queue-reserve.md) | 2026-07-17 | Accepted | `docs/decisions/AOA-SM-D-0012-bounded-background-graph-queue-reserve.md` |
+
+## route readiness
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0041 Incompatible Atlas Generations Use the Deep Clean-Rebuild Route](../AOA-SM-D-0041-incompatible-atlas-generations-use-the-deep-clean-rebuild-route.md) | 2026-07-31 | Accepted | `docs/decisions/AOA-SM-D-0041-incompatible-atlas-generations-use-the-deep-clean-rebuild-route.md` |
 
 ## route terms
 

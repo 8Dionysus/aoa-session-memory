@@ -64022,6 +64022,174 @@ def test_index_maintenance_plans_declared_search_schema_transition_incrementally
     assert search_action["selection_count"] == 1
 
 
+def test_atlas_clean_rebuild_policy_separates_structural_drift_from_session_drift() -> None:
+    assert module.atlas_clean_rebuild_reasons_for_state(
+        {
+            "status": "stale",
+            "reasons": [
+                "atlas_generation_identity_changed",
+                "session_projection_dirty",
+            ],
+        }
+    ) == ["atlas_generation_identity_changed"]
+    assert module.atlas_clean_rebuild_reasons_for_state(
+        {
+            "status": "stale",
+            "reasons": [
+                "atlas_publish_epoch_incomplete",
+                "atlas_axis_publish_epoch_mismatch",
+            ],
+        }
+    ) == [
+        "atlas_axis_publish_epoch_mismatch",
+        "atlas_publish_epoch_incomplete",
+    ]
+    assert module.atlas_clean_rebuild_reasons_for_state(
+        {
+            "status": "stale",
+            "reasons": ["session_projection_dirty"],
+        }
+    ) == []
+
+
+def test_index_maintenance_defers_incompatible_atlas_to_deep_and_deep_plans_clean(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "atlas-incompatible-generation.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-07-18T02:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "atlas-incompatible-generation",
+                    "cwd": str(workspace),
+                },
+            },
+            {
+                "timestamp": "2026-07-18T02:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Find the Atlas migration evidence.",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "atlas-incompatible-generation",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    assert module.search_index_sessions(
+        aoa_root=aoa_root,
+        target="all",
+    )["ok"] is True
+    assert module.build_agent_atlas(
+        aoa_root=aoa_root,
+        target="all",
+        clean=True,
+    )["ok"] is True
+    root_path = aoa_root / "maps" / "index.json"
+    root_payload = module.read_json(root_path, {})
+    root_payload["generation_identity"]["generation_id"] = (
+        "legacy-incompatible-atlas-generation"
+    )
+    module.write_json(root_path, root_payload)
+    records = module.chronological_session_records(aoa_root)
+
+    producer_calls: list[dict[str, Any]] = []
+
+    def forbidden_incremental_atlas(**kwargs: Any) -> dict[str, Any]:
+        producer_calls.append(kwargs)
+        raise AssertionError(
+            "bounded catchup must defer incompatible Atlas before producer invocation"
+        )
+
+    monkeypatch.setattr(
+        module,
+        "build_agent_atlas",
+        forbidden_incremental_atlas,
+    )
+    catchup = module.maintain_indexes(
+        aoa_root=aoa_root,
+        target="all",
+        apply=True,
+        repair_token_accounting=False,
+        repair_graph=False,
+        selected_records=records,
+        selection_scope={
+            "profile": "catchup",
+            "global_scope_complete": False,
+        },
+        budget_seconds=30.0,
+    )
+    catchup_atlas = next(
+        action
+        for action in catchup["actions"]
+        if action["id"] == "rebuild_agent_atlas"
+    )
+    assert producer_calls == []
+    assert catchup_atlas["status"] == "deferred"
+    assert catchup_atlas["action_kind"] == "full_rebuild"
+    assert catchup_atlas["result"]["status"] == (
+        "deferred_clean_rebuild_to_deep"
+    )
+    assert catchup_atlas["result"]["processed_count"] == 0
+    assert catchup_atlas["result"]["remaining_count"] == 1
+    assert catchup_atlas["command"][2:5] == [
+        "auto-maintenance",
+        "deep",
+        "all",
+    ]
+    assert "--no-clean" not in catchup_atlas["command"]
+    assert "<workspace>" not in catchup_atlas["command"]
+    assert str(workspace.resolve()) in catchup_atlas["command"]
+    assert catchup["atlas_rebuild_deferred_to_deep"] is True
+    assert catchup["atlas_repair_remaining_count"] == 1
+
+    deep = module.maintain_indexes(
+        aoa_root=aoa_root,
+        target="all",
+        apply=False,
+        repair_token_accounting=False,
+        repair_graph=False,
+        selected_records=records,
+        selection_scope={
+            "profile": "deep",
+            "global_scope_complete": False,
+        },
+        budget_seconds=30.0,
+    )
+    deep_atlas = next(
+        action
+        for action in deep["actions"]
+        if action["id"] == "rebuild_agent_atlas"
+    )
+    assert deep["atlas_clean_rebuild_required"] is True
+    assert deep["atlas_rebuild_deferred_to_deep"] is False
+    assert deep_atlas["status"] == "planned"
+    assert deep_atlas["action_kind"] == "full_rebuild"
+    assert deep_atlas["command"][2:5] == ["atlas", "build", "all"]
+    assert "--no-clean" not in deep_atlas["command"]
+
+
 def test_search_schema_transition_unknown_or_structural_drift_still_requires_deep() -> None:
     unknown_transition = {
         "search_index": {
