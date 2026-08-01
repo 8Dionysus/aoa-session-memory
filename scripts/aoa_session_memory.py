@@ -51,13 +51,15 @@ DERIVED_TEXT_PRIVACY_POLICY_VERSION = 1
 DERIVED_TEXT_PRIVACY_LOOKAHEAD_CHARS = 8192
 SESSION_PROJECTION_PUBLISH_IDENTITY_VERSION = 1
 SESSION_MEMORY_EVIDENCE_PACKET_SCHEMA_VERSION = 1
-DERIVED_TEXT_REDACTION_POLICY_VERSION = 1
+DERIVED_TEXT_REDACTION_POLICY_VERSION = 2
 DERIVED_TEXT_REDACTION_MARKER = "[REDACTED:credential]"
 DERIVED_PRIVATE_KEY_REDACTION_MARKER = "".join(
     ["[REDACTED:", "private-key]"]
 )
 DERIVED_SEGMENT_RAW_VIEW_MAX_CHARS = 32_000
 DERIVED_NESTED_JSON_REDACTION_MAX_CHARS = 1_000_000
+DERIVED_SESSION_SENSITIVE_LITERAL_MIN_CHARS = 8
+DERIVED_SESSION_SENSITIVE_LITERAL_MAX_CHARS = 1024
 SHA256_FILE_CACHE: dict[tuple[str, int, int], str] = {}
 SEARCH_ROUTE_TERM_CACHE: dict[int, dict[tuple[str, str], int]] = {}
 ENTITY_REGISTRY_INDEX_CACHE: dict[str, tuple[tuple[float, float, int], dict[tuple[str, str], dict[str, Any]]]] = {}
@@ -12367,7 +12369,137 @@ def derived_text_sensitive_value_key(key: Any) -> bool:
     )
 
 
-def redact_derived_text_with_report(text: Any) -> tuple[str, dict[str, Any]]:
+class DerivedSessionSensitiveLiteralPolicy:
+    """Ephemeral exact-value scrubber derived from one raw session.
+
+    Literal bytes remain process-local, are never serialized, and are hidden
+    from repr so diagnostics cannot accidentally become a credential oracle.
+    """
+
+    __slots__ = ("_pattern", "literal_count", "kind_counts")
+
+    def __init__(
+        self,
+        *,
+        values_by_kind: dict[str, set[str]],
+    ) -> None:
+        literals = sorted(
+            {
+                value
+                for values in values_by_kind.values()
+                for value in values
+            },
+            key=lambda value: (-len(value), value),
+        )
+        self._pattern = (
+            re.compile("|".join(re.escape(value) for value in literals))
+            if literals
+            else None
+        )
+        self.literal_count = len(literals)
+        self.kind_counts = {
+            kind: len(values)
+            for kind, values in sorted(values_by_kind.items())
+            if values
+        }
+
+    def __repr__(self) -> str:
+        return (
+            "DerivedSessionSensitiveLiteralPolicy("
+            f"literal_count={self.literal_count}, "
+            f"kinds={sorted(self.kind_counts)})"
+        )
+
+    def redact(self, value: Any) -> tuple[str, int]:
+        text = str(value or "")
+        if self._pattern is None or not text:
+            return text, 0
+        return self._pattern.subn(DERIVED_TEXT_REDACTION_MARKER, text)
+
+    def report(self) -> dict[str, Any]:
+        return {
+            "policy_version": DERIVED_TEXT_REDACTION_POLICY_VERSION,
+            "literal_count": self.literal_count,
+            "kind_counts": dict(self.kind_counts),
+            "values_persisted": False,
+            "reversible_digests_persisted": False,
+            "authority_boundary": (
+                "literal values are process-local rebuild inputs; raw evidence "
+                "remains authoritative"
+            ),
+        }
+
+
+def derived_session_sensitive_literal_policy_from_texts(
+    sources: Iterable[str],
+) -> DerivedSessionSensitiveLiteralPolicy:
+    values_by_kind: dict[str, set[str]] = defaultdict(set)
+
+    def add(kind: str, value: Any, *, label: str = "") -> None:
+        candidate, _quote = derived_text_privacy_unquote(str(value or ""))
+        candidate = candidate.strip()
+        normalized_label = re.sub(
+            r"[^a-z0-9]+",
+            "_",
+            str(label or "").casefold(),
+        ).strip("_")
+        if normalized_label.endswith(("encrypted_content", "ciphertext")):
+            return
+        if label and derived_text_privacy_named_value_is_safe(label, candidate):
+            return
+        if not (
+            DERIVED_SESSION_SENSITIVE_LITERAL_MIN_CHARS
+            <= len(candidate)
+            <= DERIVED_SESSION_SENSITIVE_LITERAL_MAX_CHARS
+        ):
+            return
+        if candidate in {
+            DERIVED_TEXT_REDACTION_MARKER,
+            DERIVED_PRIVATE_KEY_REDACTION_MARKER,
+        } or DERIVED_TEXT_SAFE_NAMED_VALUE_RE.fullmatch(candidate):
+            return
+        values_by_kind[kind].add(candidate)
+
+    for source in sources:
+        for match in DERIVED_BEARER_CREDENTIAL_RE.finditer(source):
+            add("bearer_credential", match.groupdict().get("value"))
+        for match in DERIVED_SENSITIVE_CLI_ARGUMENT_RE.finditer(source):
+            add("sensitive_cli_argument", match.groupdict().get("value"))
+        for match in DERIVED_SENSITIVE_ASSIGNMENT_RE.finditer(source):
+            add(
+                "sensitive_assignment",
+                match.groupdict().get("value"),
+                label=str(match.groupdict().get("key") or ""),
+            )
+        for match in DERIVED_URI_USERINFO_RE.finditer(source):
+            add("uri_userinfo_password", match.groupdict().get("value"))
+        for match in DERIVED_KNOWN_CREDENTIAL_RE.finditer(source):
+            add("known_credential_prefix", match.group(0))
+    return DerivedSessionSensitiveLiteralPolicy(
+        values_by_kind=values_by_kind,
+    )
+
+
+def derived_session_sensitive_literal_policy(
+    events: Iterable[RawEvent],
+) -> DerivedSessionSensitiveLiteralPolicy:
+    return derived_session_sensitive_literal_policy_from_texts(
+        event.raw for event in events
+    )
+
+
+def derived_session_sensitive_literal_policy_from_raw_path(
+    raw_path: Path,
+) -> DerivedSessionSensitiveLiteralPolicy:
+    with raw_path.open("r", encoding="utf-8", errors="replace") as handle:
+        return derived_session_sensitive_literal_policy_from_texts(handle)
+
+
+def redact_derived_text_with_report(
+    text: Any,
+    *,
+    literal_policy: DerivedSessionSensitiveLiteralPolicy | None = None,
+) -> tuple[str, dict[str, Any]]:
     """Redact credential values copied into rebuildable read models.
 
     The raw transcript and raw-block evidence are deliberately outside this
@@ -12377,6 +12509,10 @@ def redact_derived_text_with_report(text: Any) -> tuple[str, dict[str, Any]]:
 
     redacted = str(text or "")
     counts: Counter[str] = Counter()
+
+    if literal_policy is not None:
+        redacted, count = literal_policy.redact(redacted)
+        counts["session_sensitive_literal"] += count
 
     redacted, count = DERIVED_PRIVATE_KEY_BLOCK_RE.subn(
         DERIVED_PRIVATE_KEY_REDACTION_MARKER,
@@ -12438,28 +12574,73 @@ def redact_derived_text_with_report(text: Any) -> tuple[str, dict[str, Any]]:
     }
 
 
-def redact_derived_text(text: Any) -> str:
-    return redact_derived_text_with_report(text)[0]
+def redact_derived_text(
+    text: Any,
+    *,
+    literal_policy: DerivedSessionSensitiveLiteralPolicy | None = None,
+) -> str:
+    return redact_derived_text_with_report(
+        text,
+        literal_policy=literal_policy,
+    )[0]
 
 
 def redact_derived_value(
     value: Any,
     *,
     field_name: str = "",
+    literal_policy: DerivedSessionSensitiveLiteralPolicy | None = None,
 ) -> Any:
     if isinstance(value, dict):
-        return {
-            key: redact_derived_value(item, field_name=str(key))
-            for key, item in value.items()
-        }
+        redacted_mapping: dict[Any, Any] = {}
+        for key, item in value.items():
+            redacted_key = (
+                redact_derived_text(
+                    key,
+                    literal_policy=literal_policy,
+                )
+                if literal_policy is not None and isinstance(key, str)
+                else key
+            )
+            redacted_item = redact_derived_value(
+                item,
+                field_name=str(key),
+                literal_policy=literal_policy,
+            )
+            if redacted_key not in redacted_mapping:
+                redacted_mapping[redacted_key] = redacted_item
+            elif (
+                isinstance(redacted_mapping[redacted_key], list)
+                and isinstance(redacted_item, list)
+            ):
+                redacted_mapping[redacted_key] = [
+                    *redacted_mapping[redacted_key],
+                    *redacted_item,
+                ]
+            elif (
+                isinstance(redacted_mapping[redacted_key], (int, float))
+                and not isinstance(redacted_mapping[redacted_key], bool)
+                and isinstance(redacted_item, (int, float))
+                and not isinstance(redacted_item, bool)
+            ):
+                redacted_mapping[redacted_key] += redacted_item
+        return redacted_mapping
     if isinstance(value, list):
         return [
-            redact_derived_value(item, field_name=field_name)
+            redact_derived_value(
+                item,
+                field_name=field_name,
+                literal_policy=literal_policy,
+            )
             for item in value
         ]
     if isinstance(value, tuple):
         return tuple(
-            redact_derived_value(item, field_name=field_name)
+            redact_derived_value(
+                item,
+                field_name=field_name,
+                literal_policy=literal_policy,
+            )
             for item in value
         )
     if isinstance(value, str):
@@ -12480,16 +12661,26 @@ def redact_derived_value(
                 nested = None
             if isinstance(nested, (dict, list)):
                 return json.dumps(
-                    redact_derived_value(nested),
+                    redact_derived_value(
+                        nested,
+                        literal_policy=literal_policy,
+                    ),
                     ensure_ascii=False,
                     sort_keys=True,
                     separators=(",", ":"),
                 )
-        return redact_derived_text(value)
+        return redact_derived_text(
+            value,
+            literal_policy=literal_policy,
+        )
     return value
 
 
-def derived_segment_event_view(event: RawEvent) -> tuple[str, dict[str, Any]]:
+def derived_segment_event_view(
+    event: RawEvent,
+    *,
+    literal_policy: DerivedSessionSensitiveLiteralPolicy | None = None,
+) -> tuple[str, dict[str, Any]]:
     if len(event.raw) > DERIVED_SEGMENT_RAW_VIEW_MAX_CHARS:
         payload = {
             "derived_view": "omitted_large_raw_event",
@@ -12510,11 +12701,17 @@ def derived_segment_event_view(event: RawEvent) -> tuple[str, dict[str, Any]]:
         }
     if isinstance(event.parsed, dict):
         rendered = json.dumps(
-            redact_derived_value(event.parsed),
+            redact_derived_value(
+                event.parsed,
+                literal_policy=literal_policy,
+            ),
             ensure_ascii=False,
             sort_keys=True,
         )
-        _, report = redact_derived_text_with_report(event.raw)
+        _, report = redact_derived_text_with_report(
+            event.raw,
+            literal_policy=literal_policy,
+        )
         if DERIVED_TEXT_REDACTION_MARKER in rendered:
             report = {
                 **report,
@@ -12525,7 +12722,10 @@ def derived_segment_event_view(event: RawEvent) -> tuple[str, dict[str, Any]]:
                 ),
             }
         return rendered, report
-    return redact_derived_text_with_report(event.raw)
+    return redact_derived_text_with_report(
+        event.raw,
+        literal_policy=literal_policy,
+    )
 
 
 RUNTIME_CONTEXT_ENVELOPE_PREFIX_KINDS = (
@@ -19169,7 +19369,13 @@ def generated_goal_lifecycles_for_events(
     }
 
 
-def event_index_record(event: RawEvent, md_name: str, relationships: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+def event_index_record(
+    event: RawEvent,
+    md_name: str,
+    relationships: list[dict[str, Any]] | None = None,
+    *,
+    literal_policy: DerivedSessionSensitiveLiteralPolicy | None = None,
+) -> dict[str, Any]:
     token_observations = token_accounting_for_event(event)
     record = {
         "event_id": event.event_id,
@@ -19206,7 +19412,10 @@ def event_index_record(event: RawEvent, md_name: str, relationships: list[dict[s
         )
     if relationships:
         record["relationships"] = relationships
-    return redact_derived_value(record)
+    return redact_derived_value(
+        record,
+        literal_policy=literal_policy,
+    )
 
 
 def raw_block_status_for_role(role: str) -> str:
@@ -19331,6 +19540,7 @@ def write_segment(
     *,
     reference_session_dir: Path | None = None,
     publish_identity: dict[str, Any] | None = None,
+    literal_policy: DerivedSessionSensitiveLiteralPolicy | None = None,
 ) -> dict[str, Any]:
     segment_id = f"{segment_no:03d}"
     md_name = f"{segment_id}__{role}.md"
@@ -19347,7 +19557,14 @@ def write_segment(
     first_line = events[0].line_no if events else None
     last_line = events[-1].line_no if events else None
     event_views = [
-        (event, *derived_segment_event_view(event)) for event in events
+        (
+            event,
+            *derived_segment_event_view(
+                event,
+                literal_policy=literal_policy,
+            ),
+        )
+        for event in events
     ]
     redaction_kind_counts: Counter[str] = Counter()
     redacted_event_count = 0
@@ -19365,6 +19582,16 @@ def write_segment(
         "redaction_count": sum(redaction_kind_counts.values()),
         "kind_counts": dict(sorted(redaction_kind_counts.items())),
         "raw_authority_preserved": True,
+        "session_sensitive_literals": (
+            literal_policy.report()
+            if literal_policy is not None
+            else {
+                "policy_version": DERIVED_TEXT_REDACTION_POLICY_VERSION,
+                "literal_count": 0,
+                "values_persisted": False,
+                "reversible_digests_persisted": False,
+            }
+        ),
     }
     lines = [
         "---",
@@ -19427,12 +19654,23 @@ def write_segment(
             ]
         )
     md_path.write_text(
-        redact_derived_text("\n".join(lines)),
+        redact_derived_text(
+            "\n".join(lines),
+            literal_policy=literal_policy,
+        ),
         encoding="utf-8",
     )
 
     relationship_map = event_relationships(events)
-    records = [event_index_record(event, md_name, relationship_map.get(event.event_id, [])) for event in events]
+    records = [
+        event_index_record(
+            event,
+            md_name,
+            relationship_map.get(event.event_id, []),
+            literal_policy=literal_policy,
+        )
+        for event in events
+    ]
     by_type: dict[str, list[str]] = defaultdict(list)
     by_tag: dict[str, list[str]] = defaultdict(list)
     by_source_type: dict[str, list[str]] = defaultdict(list)
@@ -19518,7 +19756,13 @@ def write_segment(
         "by_route_signal": dict(sorted(by_route_signal.items())),
         "token_accounting": token_accounting,
     }
-    write_json(index_path, index)
+    write_json(
+        index_path,
+        redact_derived_value(
+            index,
+            literal_policy=literal_policy,
+        ),
+    )
     return {
         "segment_id": segment_id,
         "role": role,
@@ -19712,6 +19956,7 @@ def write_session_index(
     *,
     reference_session_dir: Path | None = None,
     publish_identity: dict[str, Any] | None = None,
+    literal_policy: DerivedSessionSensitiveLiteralPolicy | None = None,
 ) -> None:
     counts = Counter(event.event_type for event in events)
     by_type = {event_type: counts[event_type] for event_type in EVENT_TYPE_ORDER if counts[event_type]}
@@ -19732,6 +19977,10 @@ def write_session_index(
         task_episodes,
         session_dir=reference_session_dir or session_dir,
         manifest=manifest,
+    )
+    task_episodes = redact_derived_value(
+        task_episodes,
+        literal_policy=literal_policy,
     )
     task_episode_counts = task_episode_counts_for_episodes(task_episodes)
     goal_lifecycle_payload = generated_goal_lifecycles_for_events(
@@ -19839,8 +20088,18 @@ def write_session_index(
             "goal_lifecycle_text",
             "generated_metadata_text",
         ],
+        "session_sensitive_literals": (
+            literal_policy.report()
+            if literal_policy is not None
+            else DerivedSessionSensitiveLiteralPolicy(
+                values_by_kind={},
+            ).report()
+        ),
     }
-    session_index_json = redact_derived_value(session_index_json)
+    session_index_json = redact_derived_value(
+        session_index_json,
+        literal_policy=literal_policy,
+    )
     write_json(session_dir / SESSION_INDEX_JSON, session_index_json)
     legacy_json = session_dir / LEGACY_SESSION_INDEX_JSON
     if legacy_json.exists():
@@ -19968,7 +20227,10 @@ def write_session_index(
                 lines.append(f"  - `{key}`: {count}")
         lines.append("")
     (session_dir / SESSION_INDEX_MARKDOWN).write_text(
-        redact_derived_text("\n".join(lines)),
+        redact_derived_text(
+            "\n".join(lines),
+            literal_policy=literal_policy,
+        ),
         encoding="utf-8",
     )
     legacy_md = session_dir / LEGACY_SESSION_INDEX_MARKDOWN
@@ -21439,6 +21701,9 @@ def sync_session_from_transcript(
         transcript_path
     )
     events = parse_raw_events(snapshot_path)
+    literal_policy = derived_session_sensitive_literal_policy(
+        events
+    )
     display = session_display(
         aoa_root=aoa_root,
         session_dir=initial_session_dir,
@@ -21510,6 +21775,7 @@ def sync_session_from_transcript(
                 raw_blocks_by_segment.get(segment_id),
                 reference_session_dir=session_dir,
                 publish_identity=publish_identity,
+                literal_policy=literal_policy,
             )
         )
     token_accounting = token_accounting_summary_for_session(events, session_id=session_id)
@@ -21623,6 +21889,7 @@ def sync_session_from_transcript(
         events,
         reference_session_dir=session_dir,
         publish_identity=publish_identity,
+        literal_policy=literal_policy,
     )
     try:
         publish_result = atomic_publish_session_projection(
@@ -28366,6 +28633,9 @@ def reindex_session_from_raw(
     )
     now = utc_now()
     events = parse_raw_events(raw_path)
+    literal_policy = derived_session_sensitive_literal_policy(
+        events
+    )
     publish_identity = session_projection_publish_identity(
         raw_path=raw_path,
         events=events,
@@ -28431,6 +28701,7 @@ def reindex_session_from_raw(
                 ),
                 reference_session_dir=session_dir,
                 publish_identity=publish_identity,
+                literal_policy=literal_policy,
             )
             for segment_no, (start, end, role) in enumerate(
                 ranges
@@ -28631,6 +28902,7 @@ def reindex_session_from_raw(
             events,
             reference_session_dir=session_dir,
             publish_identity=publish_identity,
+            literal_policy=literal_policy,
         )
         publish_result = atomic_publish_session_projection(
             stage_dir=stage_dir,
@@ -94446,6 +94718,11 @@ def search_documents_for_record(
     source = manifest.get("source") if isinstance(manifest.get("source"), dict) else {}
     raw = manifest.get("raw") if isinstance(manifest.get("raw"), dict) else {}
     raw_path = Path(str(raw.get("path"))) if raw.get("path") else None
+    literal_policy = (
+        derived_session_sensitive_literal_policy_from_raw_path(raw_path)
+        if raw_path is not None and raw_path.is_file()
+        else DerivedSessionSensitiveLiteralPolicy(values_by_kind={})
+    )
     raw_sha = str(raw.get("sha256") or "")
     session_label = str(display.get("label") or manifest.get("session_label") or record.get("session_label") or session_dir.name)
     session_title = str(display.get("title") or manifest.get("session_title") or record.get("session_title") or "")
@@ -94911,6 +95188,10 @@ def search_documents_for_record(
                     "exact_literal_source_lane": exact_literal_source_lane,
                 }
             )
+    documents = redact_derived_value(
+        documents,
+        literal_policy=literal_policy,
+    )
     return documents, {
         "status": "indexed",
         "session_label": session_label,
@@ -94933,6 +95214,10 @@ def search_documents_for_record(
         "raw_bytes": raw_bytes,
         "max_raw_bytes": max_raw_bytes,
         "diagnostics": [],
+        "derived_text_redaction": {
+            "policy_version": DERIVED_TEXT_REDACTION_POLICY_VERSION,
+            "session_sensitive_literals": literal_policy.report(),
+        },
     }
 
 

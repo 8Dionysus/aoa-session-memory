@@ -87673,6 +87673,77 @@ def test_derived_text_redaction_is_idempotent_and_preserves_benign_identity() ->
     )
 
 
+def test_session_sensitive_literal_policy_redacts_detached_values_without_persisting_them() -> None:
+    bearer_secret = "".join(
+        ["bearer", "abcdefghijklmnop", "qrstuvwxyz0123456789"]
+    )
+    assignment_secret = "".join(
+        ["assignment", "abcdefghijklmnop", "qrstuvwxyz0123456789"]
+    )
+    encrypted_content = "".join(
+        ["ciphertext", "abcdefghijklmnop", "qrstuvwxyz0123456789"]
+    )
+    raw = json.dumps(
+        {
+            "command": f"Authorization: Bearer {bearer_secret}",
+            "".join(["api_", "key"]): assignment_secret,
+            "password": "placeholder",
+            "encrypted_content": encrypted_content,
+        }
+    )
+    event = module.RawEvent(
+        event_id="privacy:1",
+        line_no=1,
+        raw=raw,
+        parsed=json.loads(raw),
+        event_type="message",
+        source_type="response_item",
+        title="Synthetic privacy context",
+        timestamp="2026-07-18T00:00:00Z",
+        tags=[],
+        importance="normal",
+        compaction_boundary=False,
+    )
+
+    policy = module.derived_session_sensitive_literal_policy([event])
+    detached = dict(
+        [
+            (bearer_secret, [f"detached {bearer_secret}"]),
+            (assignment_secret, [f"detached {assignment_secret}"]),
+            ("safe", ["placeholder", encrypted_content]),
+        ]
+    )
+    rendered = json.dumps(
+        module.redact_derived_value(
+            detached,
+            literal_policy=policy,
+        ),
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    report_text = json.dumps(
+        policy.report(),
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    repr_text = repr(policy)
+
+    assert bearer_secret not in rendered
+    assert assignment_secret not in rendered
+    assert encrypted_content in rendered
+    assert "placeholder" in rendered
+    assert policy.report()["literal_count"] == 2
+    assert policy.report()["values_persisted"] is False
+    assert policy.report()["reversible_digests_persisted"] is False
+    for sensitive_value in (
+        bearer_secret,
+        assignment_secret,
+        encrypted_content,
+    ):
+        assert sensitive_value not in report_text
+        assert sensitive_value not in repr_text
+
+
 def test_generated_session_search_and_graph_views_do_not_duplicate_credentials(
     tmp_path: Path,
     monkeypatch,
@@ -87775,6 +87846,23 @@ def test_generated_session_search_and_graph_views_do_not_duplicate_credentials(
                     "type": "function_call_output",
                     "call_id": "call-oversized",
                     "output": oversized_secret + ("x" * 40_000),
+                },
+            },
+            {
+                "timestamp": "2026-07-18T00:00:04.500000Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": (
+                                "Detached values must remain private: "
+                                f"{bearer_secret} {json_secret}"
+                            ),
+                        }
+                    ],
                 },
             },
             {
@@ -87894,7 +87982,12 @@ def test_generated_session_search_and_graph_views_do_not_duplicate_credentials(
         write=True,
         include_rows=False,
     )
-    assert graph["ok"] is True
+    assert graph["ok"] is True, json.dumps(
+        graph,
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+    )
 
     def decoded_sqlite_text(path: Path) -> str:
         conn = sqlite3.connect(str(path))
