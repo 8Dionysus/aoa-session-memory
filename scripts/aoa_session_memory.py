@@ -51,7 +51,7 @@ DERIVED_TEXT_PRIVACY_POLICY_VERSION = 1
 DERIVED_TEXT_PRIVACY_LOOKAHEAD_CHARS = 8192
 SESSION_PROJECTION_PUBLISH_IDENTITY_VERSION = 1
 SESSION_MEMORY_EVIDENCE_PACKET_SCHEMA_VERSION = 1
-DERIVED_TEXT_REDACTION_POLICY_VERSION = 2
+DERIVED_TEXT_REDACTION_POLICY_VERSION = 3
 DERIVED_TEXT_REDACTION_MARKER = "[REDACTED:credential]"
 DERIVED_PRIVATE_KEY_REDACTION_MARKER = "".join(
     ["[REDACTED:", "private-key]"]
@@ -60,6 +60,10 @@ DERIVED_SEGMENT_RAW_VIEW_MAX_CHARS = 32_000
 DERIVED_NESTED_JSON_REDACTION_MAX_CHARS = 1_000_000
 DERIVED_SESSION_SENSITIVE_LITERAL_MIN_CHARS = 8
 DERIVED_SESSION_SENSITIVE_LITERAL_MAX_CHARS = 1024
+DERIVED_SESSION_SENSITIVE_LITERAL_SAFE_RE = re.compile(
+    r"(?:credential|credentials|password|passwords)",
+    flags=re.IGNORECASE,
+)
 SHA256_FILE_CACHE: dict[tuple[str, int, int], str] = {}
 SEARCH_ROUTE_TERM_CACHE: dict[int, dict[tuple[str, str], int]] = {}
 ENTITY_REGISTRY_INDEX_CACHE: dict[str, tuple[tuple[float, float, int], dict[tuple[str, str], dict[str, Any]]]] = {}
@@ -12456,7 +12460,12 @@ def derived_session_sensitive_literal_policy_from_texts(
         if candidate in {
             DERIVED_TEXT_REDACTION_MARKER,
             DERIVED_PRIVATE_KEY_REDACTION_MARKER,
-        } or DERIVED_TEXT_SAFE_NAMED_VALUE_RE.fullmatch(candidate):
+        } or (
+            DERIVED_TEXT_SAFE_NAMED_VALUE_RE.fullmatch(candidate)
+            or DERIVED_SESSION_SENSITIVE_LITERAL_SAFE_RE.fullmatch(
+                candidate
+            )
+        ):
             return
         values_by_kind[kind].add(candidate)
 

@@ -87689,6 +87689,11 @@ def test_session_sensitive_literal_policy_redacts_detached_values_without_persis
             "".join(["api_", "key"]): assignment_secret,
             "password": "placeholder",
             "encrypted_content": encrypted_content,
+            "examples": (
+                "Authorization: Bearer "
+                + "credential; "
+                + "".join(["pass", "word=passwords"])
+            ),
         }
     )
     event = module.RawEvent(
@@ -87710,7 +87715,17 @@ def test_session_sensitive_literal_policy_redacts_detached_values_without_persis
         [
             (bearer_secret, [f"detached {bearer_secret}"]),
             (assignment_secret, [f"detached {assignment_secret}"]),
-            ("safe", ["placeholder", encrypted_content]),
+            (
+                "safe",
+                [
+                    "placeholder",
+                    encrypted_content,
+                    "credential",
+                    "credentials",
+                    "password",
+                    "passwords",
+                ],
+            ),
         ]
     )
     rendered = json.dumps(
@@ -87732,6 +87747,13 @@ def test_session_sensitive_literal_policy_redacts_detached_values_without_persis
     assert assignment_secret not in rendered
     assert encrypted_content in rendered
     assert "placeholder" in rendered
+    for safe_literal in (
+        "credential",
+        "credentials",
+        "password",
+        "passwords",
+    ):
+        assert safe_literal in rendered
     assert policy.report()["literal_count"] == 2
     assert policy.report()["values_persisted"] is False
     assert policy.report()["reversible_digests_persisted"] is False
