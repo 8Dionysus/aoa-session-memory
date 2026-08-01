@@ -76185,7 +76185,213 @@ def test_search_provider_status_keeps_host_backends_optional(tmp_path: Path) -> 
     assert status["freshness_mode"] == "hot"
     assert status["providers"]["portable_sqlite"]["freshness"]["source_scan"] is False
     assert status["providers"]["abyss_machine_nervous"]["status"] == "disabled_by_default"
+    served = status["providers"]["abyss_machine_nervous"]["served_request_health"]
+    assert served["status"] == "unobserved"
+    assert served["observed"] is False
+    assert served["ok"] is None
     assert "Host providers are optional accelerators" in status["authority_law"]
+
+
+@pytest.mark.parametrize(
+    ("preflight", "expected_status", "expected_provider_ok"),
+    [
+        (
+            {
+                "ok": True,
+                "status": "available",
+                "provider_status": "embedded",
+                "model": module.EPISODE_DENSE_DEFAULT_MODEL,
+                "dimension": module.EPISODE_DENSE_DEFAULT_DIMENSION,
+                "elapsed_ms": 7,
+                "diagnostics": [],
+            },
+            "served",
+            True,
+        ),
+        (
+            {
+                "ok": False,
+                "status": "provider_unavailable",
+                "provider_status": "error",
+                "model": "",
+                "dimension": 0,
+                "elapsed_ms": 8,
+                "diagnostics": [
+                    "private response body "
+                    + "/"
+                    + "srv/private/provider payload"
+                ],
+            },
+            "failed",
+            False,
+        ),
+        (
+            {
+                "ok": False,
+                "status": "provider_contract_drift",
+                "provider_status": "embedded",
+                "model": "wrong-model",
+                "expected_model": module.EPISODE_DENSE_DEFAULT_MODEL,
+                "dimension": 3,
+                "expected_dimension": module.EPISODE_DENSE_DEFAULT_DIMENSION,
+                "elapsed_ms": 9,
+                "diagnostics": [
+                    "private response body "
+                    + "/"
+                    + "srv/private/provider payload"
+                ],
+            },
+            "contract_drift",
+            False,
+        ),
+    ],
+)
+def test_host_provider_status_separates_real_served_request_health_from_availability(
+    monkeypatch: Any,
+    preflight: dict[str, Any],
+    expected_status: str,
+    expected_provider_ok: bool,
+) -> None:
+    config = module.default_search_provider_config()
+
+    def fake_command(command: list[str], **_kwargs: Any) -> dict[str, Any]:
+        if "semantic-status" in command:
+            return {
+                "ok": True,
+                "status": "ok",
+                "command": command,
+                "payload": {
+                    "schema": "semantic-status-v1",
+                    "generated_at": "2026-08-01T03:00:00Z",
+                    "ok": True,
+                    "embedding": {
+                        "status": "ready",
+                        "model_exists": True,
+                        "dimension": module.EPISODE_DENSE_DEFAULT_DIMENSION,
+                    },
+                    "counts": {"vectors": 1},
+                    "freshness": {"stale": False},
+                },
+            }
+        return {
+            "ok": True,
+            "status": "ok",
+            "command": command,
+            "payload": {
+                "schema": "gate-v1",
+                "generated_at": "2026-08-01T03:00:00Z",
+                "summary": {"fails": 0, "warnings": 0, "checks": 1},
+            },
+        }
+
+    monkeypatch.setattr(module, "run_json_command", fake_command)
+    monkeypatch.setattr(
+        module,
+        "run_json_url",
+        lambda url, **_kwargs: {
+            "ok": True,
+            "status": "ok",
+            "url": url,
+            "payload": {"ok": True, "loaded": True},
+        },
+    )
+    calls: list[dict[str, Any]] = []
+
+    def fake_preflight(provider: dict[str, Any]) -> dict[str, Any]:
+        calls.append(provider)
+        return dict(preflight)
+
+    monkeypatch.setattr(module, "episode_dense_provider_preflight", fake_preflight)
+
+    provider = module.host_provider_status(
+        config=config,
+        provider_name="abyss_machine_nervous",
+        force_probe=True,
+        probe_served_request=True,
+    )
+
+    assert len(calls) == 1
+    assert provider["ok"] is expected_provider_ok
+    health = provider["served_request_health"]
+    assert health["status"] == expected_status
+    assert health["observed"] is True
+    assert health["ok"] is expected_provider_ok
+    assert health["freshness"] == {
+        "status": "current",
+        "scope": "single_status_invocation",
+        "reuse_allowed": False,
+    }
+    assert health["truth_status"] == (
+        "bounded_served_request_observation_not_semantic_quality_proof"
+    )
+    compact = module.compact_search_provider_status_for_route(
+        {
+            "schema_version": 1,
+            "artifact_type": "search_provider_status",
+            "provider_schema_version": module.SEARCH_PROVIDER_SCHEMA_VERSION,
+            "generated_at": "2026-08-01T03:00:00Z",
+            "served_request_probe": True,
+            "providers": {"abyss_machine_nervous": provider},
+        },
+        provider_name="abyss_machine_nervous",
+    )
+    compact_health = compact["providers"]["abyss_machine_nervous"][
+        "served_request_health"
+    ]
+    assert compact_health["status"] == expected_status
+    rendered = json.dumps(compact_health, ensure_ascii=False)
+    assert module.EPISODE_DENSE_PROVIDER_PROBE_TEXT not in rendered
+    assert "private response body" not in rendered
+    assert "/" + "srv/private" not in rendered
+
+
+def test_host_provider_status_does_not_conflate_unrequested_probe_with_health(
+    monkeypatch: Any,
+) -> None:
+    config = module.default_search_provider_config()
+    monkeypatch.setattr(
+        module,
+        "episode_dense_provider_preflight",
+        lambda _provider: (_ for _ in ()).throw(
+            AssertionError("unrequested served-request probe must not run")
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "run_json_command",
+        lambda command, **_kwargs: {
+            "ok": True,
+            "status": "ok",
+            "command": command,
+            "payload": {
+                "schema": "gate-v1",
+                "generated_at": "2026-08-01T03:00:00Z",
+                "summary": {"fails": 0, "warnings": 0, "checks": 1},
+            },
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "run_json_url",
+        lambda url, **_kwargs: {
+            "ok": True,
+            "status": "ok",
+            "url": url,
+            "payload": {"ok": True},
+        },
+    )
+
+    provider = module.host_provider_status(
+        config=config,
+        provider_name="abyss_machine_nervous",
+        force_probe=True,
+        probe_served_request=False,
+    )
+
+    assert provider["ok"] is True
+    assert provider["served_request_health"]["status"] == "unobserved"
+    assert provider["served_request_health"]["observed"] is False
+    assert provider["served_request_health"]["ok"] is None
 
 
 def test_search_provider_status_hot_route_uses_persisted_state_without_archive_scan(tmp_path: Path, monkeypatch: Any) -> None:

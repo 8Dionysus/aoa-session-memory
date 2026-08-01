@@ -334,6 +334,25 @@ python3 scripts/aoa_session_memory.py search-provider-status \
   --aoa-root /path/to/workspace/.aoa
 ```
 
+The default provider packet separates capability/model availability from a
+real served request. An optional host provider reports
+`served_request_health.status=unobserved` until an operator deliberately asks
+for one bounded end-to-end embedding probe:
+
+```bash
+python3 scripts/aoa_session_memory.py search-provider-status \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --provider abyss_machine_nervous \
+  --include-host \
+  --probe-served-request
+```
+
+`served` is current only for that invocation and is not semantic-quality
+proof. `failed` or `contract_drift` blocks the explicitly probed provider even
+when its process or model gate remains available. The dense generation route
+continues to run its own real-request preflight at the generation boundary.
+
 Use their exact next action rather than copying a generic maintenance command.
 For a portable checkout, use the standalone audit:
 

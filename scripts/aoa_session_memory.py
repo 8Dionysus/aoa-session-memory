@@ -614,7 +614,7 @@ INDEX_PROJECTION_STATE_SCHEMA_VERSION = 2
 MAINTENANCE_PLANNING_PHASE_MIN_SECONDS = 1.0
 MAINTENANCE_COMBINED_PROJECTION_MIN_SECONDS = 8.0
 MAINTENANCE_FINAL_FRESHNESS_SNAPSHOT_MIN_SECONDS = 8.0
-SEARCH_PROVIDER_SCHEMA_VERSION = 1
+SEARCH_PROVIDER_SCHEMA_VERSION = 2
 SEARCH_FRESHNESS_STATE_SCHEMA_VERSION = 2
 SEARCH_PROJECTION_FINGERPRINT_MODE = (
     "semantic_projection_sources_without_rendered_markdown_v2"
@@ -56680,6 +56680,105 @@ def search_provider_status_fast(
     }
 
 
+def unobserved_served_request_health(
+    *,
+    provider_name: str,
+    requested: bool = False,
+) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "observation_kind": "real_served_embedding_request",
+        "provider": provider_name,
+        "requested": requested,
+        "observed": False,
+        "ok": None,
+        "status": "unobserved",
+        "observed_at": None,
+        "expected_model": EPISODE_DENSE_DEFAULT_MODEL,
+        "expected_dimension": EPISODE_DENSE_DEFAULT_DIMENSION,
+        "model": "",
+        "dimension": 0,
+        "elapsed_ms": None,
+        "freshness": {
+            "status": "unobserved",
+            "scope": "single_status_invocation",
+            "reuse_allowed": False,
+        },
+        "truth_status": (
+            "availability_only_not_served_request_health_or_semantic_quality"
+        ),
+        "diagnostics": [
+            (
+                "served request probe was requested but not executed because "
+                "the provider route was not admitted"
+                if requested
+                else "served request probe was not requested; capability, model, "
+                "and health gates do not prove request serving"
+            )
+        ],
+    }
+
+
+def host_embedding_served_request_health(
+    *,
+    provider_name: str,
+    provider: dict[str, Any],
+) -> dict[str, Any]:
+    """Return one non-reusable, privacy-bounded real embedding observation."""
+    observed_at = utc_now()
+    preflight = episode_dense_provider_preflight(
+        {
+            "embedding_api_url": str(provider.get("embedding_api_url") or ""),
+            "expected_model": str(
+                provider.get("embedding_model")
+                or EPISODE_DENSE_DEFAULT_MODEL
+            ),
+        }
+    )
+    preflight_status = str(preflight.get("status") or "provider_probe_failed")
+    if preflight.get("ok"):
+        status = "served"
+    elif preflight_status == "provider_contract_drift":
+        status = "contract_drift"
+    else:
+        status = "failed"
+    provider_status = str(preflight.get("provider_status") or "unknown")
+    diagnostics = [] if preflight.get("ok") else [
+        f"served_embedding_request_{status}:{provider_status}"
+    ]
+    return {
+        "schema_version": 1,
+        "observation_kind": "real_served_embedding_request",
+        "provider": provider_name,
+        "requested": True,
+        "observed": True,
+        "ok": bool(preflight.get("ok")),
+        "status": status,
+        "observed_at": observed_at,
+        "expected_model": str(
+            preflight.get("expected_model")
+            or provider.get("embedding_model")
+            or EPISODE_DENSE_DEFAULT_MODEL
+        ),
+        "expected_dimension": int_value(
+            preflight.get("expected_dimension"),
+            EPISODE_DENSE_DEFAULT_DIMENSION,
+        ),
+        "model": str(preflight.get("model") or ""),
+        "dimension": int_value(preflight.get("dimension")),
+        "elapsed_ms": int_value(preflight.get("elapsed_ms")),
+        "freshness": {
+            "status": "current",
+            "scope": "single_status_invocation",
+            "reuse_allowed": False,
+        },
+        "truth_status": (
+            "bounded_served_request_observation_not_semantic_quality_proof"
+        ),
+        "diagnostics": diagnostics,
+    }
+
+
 def host_provider_status(
     *,
     config: dict[str, Any],
@@ -56687,6 +56786,7 @@ def host_provider_status(
     force_probe: bool = False,
     refresh_host: bool = False,
     refresh_host_index: bool = False,
+    probe_served_request: bool = False,
     timeout: int = 45,
 ) -> dict[str, Any]:
     provider = config.get("providers", {}).get(provider_name, {}) if isinstance(config.get("providers"), dict) else {}
@@ -56702,6 +56802,10 @@ def host_provider_status(
             "truth_level": provider.get("truth_level"),
             "write_policy": provider.get("write_policy"),
             "host_write_requires_operator_enablement": bool(provider.get("host_write_requires_operator_enablement")),
+            "served_request_health": unobserved_served_request_health(
+                provider_name=provider_name,
+                requested=probe_served_request,
+            ),
             "diagnostics": ["provider is declared for future runtime integration and is not used by portable search"],
         }
     if not provider.get("enabled") and not force_probe:
@@ -56712,6 +56816,10 @@ def host_provider_status(
             "portable": bool(provider.get("portable")),
             "role": provider.get("role"),
             "truth_level": provider.get("truth_level"),
+            "served_request_health": unobserved_served_request_health(
+                provider_name=provider_name,
+                requested=probe_served_request,
+            ),
             "diagnostics": ["provider disabled in config; use explicit host probing before relying on it"],
         }
     gates: dict[str, Any] = {}
@@ -56750,12 +56858,39 @@ def host_provider_status(
             model_warning_count += 1
             diagnostics.append(f"reranker_status:{models['reranker'].get('status')}")
 
+    served_request_health = (
+        host_embedding_served_request_health(
+            provider_name=provider_name,
+            provider=provider,
+        )
+        if probe_served_request
+        else unobserved_served_request_health(
+            provider_name=provider_name,
+            requested=False,
+        )
+    )
+    request_fail_count = (
+        1
+        if served_request_health.get("observed")
+        and served_request_health.get("ok") is False
+        else 0
+    )
+    if request_fail_count:
+        diagnostics.append(
+            "served_embedding_request:"
+            f"{served_request_health.get('status') or 'failed'}"
+        )
+
     warning_count = (
         int(gates["capability_gate"].get("warnings") or 0)
         + int(gates["quality_gate"].get("warnings") or 0)
         + model_warning_count
     )
-    fail_count = int(gates["capability_gate"].get("fails") or 0) + int(gates["quality_gate"].get("fails") or 0)
+    fail_count = (
+        int(gates["capability_gate"].get("fails") or 0)
+        + int(gates["quality_gate"].get("fails") or 0)
+        + request_fail_count
+    )
     if warning_count:
         diagnostics.append("host_backend_has_warnings")
     status = "ready"
@@ -56775,8 +56910,10 @@ def host_provider_status(
         "host_write_requires_operator_enablement": bool(provider.get("host_write_requires_operator_enablement")),
         "warning_count": warning_count,
         "fail_count": fail_count,
+        "request_fail_count": request_fail_count,
         "gates": gates,
         "models": models,
+        "served_request_health": served_request_health,
         "diagnostics": diagnostics,
     }
 
@@ -56788,6 +56925,7 @@ def search_provider_status(
     include_host: bool = False,
     refresh_host: bool = False,
     refresh_host_index: bool = False,
+    probe_served_request: bool = False,
     freshness_records: list[dict[str, Any]] | None = None,
     projection_fingerprints: list[dict[str, Any]] | None = None,
     timeout: int = 45,
@@ -56819,6 +56957,7 @@ def search_provider_status(
                     force_probe=include_host,
                     refresh_host=refresh_host,
                     refresh_host_index=refresh_host_index,
+                    probe_served_request=probe_served_request,
                     timeout=timeout,
                 )
             else:
@@ -56830,6 +56969,10 @@ def search_provider_status(
                     "portable": bool(provider.get("portable")),
                     "role": provider.get("role"),
                     "truth_level": provider.get("truth_level"),
+                    "served_request_health": unobserved_served_request_health(
+                        provider_name=name,
+                        requested=probe_served_request,
+                    ),
                     "diagnostics": ["host provider not probed; pass --include-host to run host gates"],
                 }
         else:
@@ -56862,6 +57005,7 @@ def search_provider_status(
         "selected_provider": provider_name,
         "freshness_mode": effective_freshness_mode,
         "record_freshness_state": record_freshness_state,
+        "served_request_probe": probe_served_request,
         "providers": results,
         "diagnostics": diagnostics,
     }
@@ -56971,6 +57115,7 @@ def compact_search_provider_status_for_route(
         "selected_provider",
         "freshness_mode",
         "status_mode",
+        "served_request_probe",
         "diagnostics",
     )
     provider_keys = (
@@ -57001,6 +57146,30 @@ def compact_search_provider_status_for_route(
             continue
         compact_provider = {key: value.get(key) for key in provider_keys if key in value}
         compact_provider["freshness"] = compact_search_provider_freshness_for_route(value.get("freshness"))
+        if isinstance(value.get("served_request_health"), dict):
+            served = value["served_request_health"]
+            compact_provider["served_request_health"] = {
+                key: served.get(key)
+                for key in (
+                    "schema_version",
+                    "observation_kind",
+                    "provider",
+                    "requested",
+                    "observed",
+                    "ok",
+                    "status",
+                    "observed_at",
+                    "expected_model",
+                    "expected_dimension",
+                    "model",
+                    "dimension",
+                    "elapsed_ms",
+                    "freshness",
+                    "truth_status",
+                    "diagnostics",
+                )
+                if key in served
+            }
         compact_providers[str(name)] = compact_provider
     compact["providers"] = compact_providers
     compact["full_status_route"] = f"search-provider-status --provider {provider_name}"
@@ -57041,6 +57210,27 @@ def search_provider_status_markdown(payload: dict[str, Any]) -> str:
     if model_rows:
         lines.extend(["", "## Local Model Gates", "", "| provider | model gate | status | ok | model | device |", "| --- | --- | --- | --- | --- | --- |"])
         lines.extend(model_rows)
+    served_rows: list[str] = []
+    for name, item in providers.items():
+        if not isinstance(item, dict) or not isinstance(item.get("served_request_health"), dict):
+            continue
+        served = item["served_request_health"]
+        served_rows.append(
+            f"| `{name}` | `{served.get('status')}` | `{served.get('observed')}` | "
+            f"`{served.get('ok')}` | `{served.get('model') or ''}` | "
+            f"`{served.get('dimension') or ''}` |"
+        )
+    if served_rows:
+        lines.extend(
+            [
+                "",
+                "## Served-Request Health",
+                "",
+                "| provider | status | observed | ok | model | dimension |",
+                "| --- | --- | --- | --- | --- | --- |",
+            ]
+        )
+        lines.extend(served_rows)
     lines.extend(["", "## Authority Law", "", str(payload.get("authority_law") or "")])
     return "\n".join(lines)
 
@@ -173590,6 +173780,7 @@ def command_search_provider_status(args: argparse.Namespace) -> int:
         include_host=args.include_host,
         refresh_host=args.refresh_host,
         refresh_host_index=args.refresh_host_index,
+        probe_served_request=args.probe_served_request,
         freshness_mode=freshness_mode,
         record_freshness_state=args.refresh_state,
         freshness_records=freshness_records,
@@ -183244,6 +183435,14 @@ def build_parser() -> argparse.ArgumentParser:
     provider_status.add_argument("--include-host", action="store_true", help="Run optional host provider gates such as abyss-machine quality audit.")
     provider_status.add_argument("--refresh-host", action="store_true", help="Use the host deterministic refresh quality gate where configured.")
     provider_status.add_argument("--refresh-host-index", action="store_true", help="Use the host refresh-index quality gate where configured.")
+    provider_status.add_argument(
+        "--probe-served-request",
+        action="store_true",
+        help=(
+            "With --include-host, make one bounded real embedding request and "
+            "report served-request health separately from process/model availability."
+        ),
+    )
     provider_status.add_argument("--session", help="Limit portable SQLite freshness to one session id, label, semantic name, or latest.")
     provider_status.add_argument("--deep", action="store_true", help="Run archive projection freshness scan instead of the hot persisted state route.")
     provider_status.add_argument("--refresh-state", action="store_true", help="With --deep or --session, persist the scanned freshness state into the hot provider queue.")
