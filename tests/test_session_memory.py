@@ -87802,7 +87802,9 @@ def test_session_sensitive_literal_policy_redacts_detached_values_without_persis
             "examples": (
                 "Authorization: Bearer "
                 + "credential; "
-                + "".join(["pass", "word=passwords"])
+                + "".join(["pass", "word=passwords; "])
+                + "".join(["api_", "key=contract; "])
+                + "".join(["pass", "word=contracts"])
             ),
         }
     )
@@ -87832,6 +87834,8 @@ def test_session_sensitive_literal_policy_redacts_detached_values_without_persis
                     encrypted_content,
                     "credential",
                     "credentials",
+                    "contract",
+                    "contracts",
                     "password",
                     "passwords",
                 ],
@@ -87860,6 +87864,8 @@ def test_session_sensitive_literal_policy_redacts_detached_values_without_persis
     for safe_literal in (
         "credential",
         "credentials",
+        "contract",
+        "contracts",
         "password",
         "passwords",
     ):
