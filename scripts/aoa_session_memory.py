@@ -152024,16 +152024,41 @@ def graph_queue_report_selected_sources_advanced(
     report_mtime = ops_float_value(
         report.get("_diagnostic_mtime")
     )
-    selected_source_keys = [
-        str(item)
-        for item in (
-            report.get("selected_source_keys")
+    selected_values = (
+        report.get("selected_source_keys")
+        if isinstance(
+            report.get("selected_source_keys"),
+            list,
+        )
+        else []
+    )
+    if not selected_values:
+        detail = (
+            report.get("maintenance_detail")
             if isinstance(
-                report.get("selected_source_keys"),
-                list,
+                report.get("maintenance_detail"),
+                dict,
             )
+            else {}
+        )
+        selected_values = (
+            detail.get("selected_sources")
+            if isinstance(detail.get("selected_sources"), list)
             else []
         )
+    if not selected_values:
+        selected_values = [
+            item.get("source_key")
+            for item in (
+                report.get("selected")
+                if isinstance(report.get("selected"), list)
+                else []
+            )
+            if isinstance(item, dict) and item.get("source_key")
+        ]
+    selected_source_keys = [
+        str(item)
+        for item in selected_values
         if str(item)
     ][: max(1, min(int_value(sample_limit, 40), 200))]
     base = {

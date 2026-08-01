@@ -54329,7 +54329,9 @@ def test_graph_drip_circuit_reopens_after_selected_upstream_source_changes(
         conn.close()
     report = {
         "_diagnostic_mtime": 1000.0,
-        "selected_source_keys": ["segment:test:000"],
+        "maintenance_detail": {
+            "selected_sources": ["segment:test:000"],
+        },
     }
 
     unchanged = module.graph_queue_report_selected_sources_advanced(
