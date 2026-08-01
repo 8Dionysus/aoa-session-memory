@@ -416,7 +416,9 @@ raw evidence is not.
 If the latest globally usable graph-maintenance report selected sources but
 explicitly records `semantic_progress=false`, automatic graph recommendation
 opens a circuit and emits no retry command until dependency or freshness state
-changes. Capture, search, and non-graph sweep lanes continue independently.
+changes. A queued hook-worker graph job is retained in the deferred queue and
+promoted only after the circuit closes. Capture, search, and non-graph sweep
+lanes continue independently.
 
 A search schema mismatch is incremental only for an owner-declared additive
 version pair whose live store still has documents, route indexes, route terms,

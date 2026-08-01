@@ -72,8 +72,10 @@ crosses the full-rebuild boundary.
 An automatic graph recommendation opens a circuit when the latest globally
 usable maintenance report selected sources but explicitly recorded
 `semantic_progress=false`. It emits no graph-maintenance command until
-freshness or dependency state changes. Capture, indexing, and non-graph sweep
-lanes remain independent.
+freshness or dependency state changes. The same guard applies when a queued
+hook-worker graph job reaches execution: the job moves to the deferred queue
+and is promoted automatically only after the circuit closes. Capture,
+indexing, and non-graph sweep lanes remain independent.
 
 ## Rationale
 
@@ -112,8 +114,9 @@ materialization proof, and it does not hide unresolved source-generation or
 graph-schema migrations.
 
 The circuit breaker is not a freshness claim and does not discard queued work.
-It prevents automatic repetition until a relevant state transition supplies a
-new reason to run.
+Resource retry intent is cleared, while an already queued hook-worker graph job
+is retained as deferred work. It prevents automatic repetition until a
+relevant state transition supplies a new reason to run.
 
 ## Source Surfaces
 

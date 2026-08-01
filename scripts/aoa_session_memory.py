@@ -22145,6 +22145,33 @@ def promote_deferred_hook_jobs(
         job = read_json(deferred_path, {})
         if not isinstance(job, dict):
             continue
+        job_type = str(job.get("job_type") or "hook_sync_transcript")
+        if job_type == "graph_maintenance":
+            circuit = graph_automatic_drip_circuit_state(aoa_root)
+            if circuit.get("open"):
+                continue
+            reason = "graph_drip_circuit_closed"
+            pending_path = pending_dir / deferred_path.name
+            if pending_path.exists():
+                pending_path = pending_dir / (
+                    f"{compact_stamp()}__promoted__"
+                    f"{deferred_path.name}"
+                )
+            job["promoted_at"] = utc_now()
+            job["promotion_reason"] = reason
+            job["queue_state"] = "pending_retry"
+            write_json(pending_path, job)
+            deferred_path.unlink(missing_ok=True)
+            promoted.append(
+                {
+                    "from": str(deferred_path),
+                    "to": str(pending_path),
+                    "session_id": str(job.get("session_id") or "all"),
+                    "status": "promoted_deferred_job",
+                    "reason": reason,
+                }
+            )
+            continue
         transcript_value = job.get("transcript_path")
         transcript_path = (
             Path(str(transcript_value)).expanduser()
@@ -22316,37 +22343,54 @@ def run_hook_worker(*, workspace_root: Path | None, aoa_root: Path, limit: int =
                             "diagnostics": maintained.get("diagnostics", []),
                         }
                     elif job_type == "graph_maintenance":
-                        budget_seconds_value = job.get("budget_seconds")
-                        maintained = graph_maintenance(
-                            aoa_root=aoa_root,
-                            target=str(job.get("target") or "all"),
-                            observe_query_demand=True,
-                            apply=True,
-                            batch_limit=int_value(job.get("batch_limit"), GRAPH_MAINTENANCE_AUTO_BATCH_LIMIT),
-                            refresh_chunk_size=int_value(job.get("refresh_chunk_size"), GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE),
-                            max_refresh_nodes=job.get("max_refresh_nodes") if job.get("max_refresh_nodes") is not None else None,
-                            max_refresh_edges=job.get("max_refresh_edges") if job.get("max_refresh_edges") is not None else None,
-                            budget_seconds=float(budget_seconds_value) if budget_seconds_value is not None else None,
-                            write_report=True,
-                            reason=str(job.get("reason") or "queued_graph_maintenance"),
+                        circuit = graph_automatic_drip_circuit_state(
+                            aoa_root
                         )
-                        result = {
-                            "job": str(running_path),
-                            "status": "maintained_graph" if maintained.get("ok") else "failed",
-                            "target": maintained.get("target"),
-                            "reason": maintained.get("reason"),
-                            "source_state": maintained.get("source_state"),
-                            "selected_count": maintained.get("selected_count"),
-                            "remaining_count": maintained.get("remaining_count"),
-                            "budget_seconds": maintained.get("budget_seconds"),
-                            "budget_exhausted": maintained.get("budget_exhausted"),
-                            "refresh_chunk_size": maintained.get("refresh_chunk_size"),
-                            "query_demand_count": maintained.get("query_demand_count"),
-                            "query_demand_priority_session_ids": maintained.get("query_demand_priority_session_ids", []),
-                            "maintenance_detail": maintained.get("maintenance_detail"),
-                            "report_json": maintained.get("report_json"),
-                            "diagnostics": maintained.get("diagnostics", []),
-                        }
+                        if circuit.get("open"):
+                            result = {
+                                "job": str(running_path),
+                                "status": (
+                                    "deferred_graph_drip_circuit_open"
+                                ),
+                                "target": str(job.get("target") or "all"),
+                                "reason": circuit.get("reason"),
+                                "retry_required": True,
+                                "job_disposition": "deferred",
+                                "graph_drip_circuit": circuit,
+                                "next_route": circuit.get("next_route"),
+                            }
+                        else:
+                            budget_seconds_value = job.get("budget_seconds")
+                            maintained = graph_maintenance(
+                                aoa_root=aoa_root,
+                                target=str(job.get("target") or "all"),
+                                observe_query_demand=True,
+                                apply=True,
+                                batch_limit=int_value(job.get("batch_limit"), GRAPH_MAINTENANCE_AUTO_BATCH_LIMIT),
+                                refresh_chunk_size=int_value(job.get("refresh_chunk_size"), GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE),
+                                max_refresh_nodes=job.get("max_refresh_nodes") if job.get("max_refresh_nodes") is not None else None,
+                                max_refresh_edges=job.get("max_refresh_edges") if job.get("max_refresh_edges") is not None else None,
+                                budget_seconds=float(budget_seconds_value) if budget_seconds_value is not None else None,
+                                write_report=True,
+                                reason=str(job.get("reason") or "queued_graph_maintenance"),
+                            )
+                            result = {
+                                "job": str(running_path),
+                                "status": "maintained_graph" if maintained.get("ok") else "failed",
+                                "target": maintained.get("target"),
+                                "reason": maintained.get("reason"),
+                                "source_state": maintained.get("source_state"),
+                                "selected_count": maintained.get("selected_count"),
+                                "remaining_count": maintained.get("remaining_count"),
+                                "budget_seconds": maintained.get("budget_seconds"),
+                                "budget_exhausted": maintained.get("budget_exhausted"),
+                                "refresh_chunk_size": maintained.get("refresh_chunk_size"),
+                                "query_demand_count": maintained.get("query_demand_count"),
+                                "query_demand_priority_session_ids": maintained.get("query_demand_priority_session_ids", []),
+                                "maintenance_detail": maintained.get("maintenance_detail"),
+                                "report_json": maintained.get("report_json"),
+                                "diagnostics": maintained.get("diagnostics", []),
+                            }
                     else:
                         transcript_value = job.get("transcript_path")
                         transcript_path = Path(str(transcript_value)).expanduser() if transcript_value else None

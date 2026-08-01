@@ -573,7 +573,8 @@ freshness.
 Explicit semantic non-progress is also a control signal. When a globally
 applicable graph pass selected work but changed no semantic graph content, the
 automatic graph lane must open a circuit instead of escalating the same state
-to a larger retry. Capture and unrelated projection lanes stay live.
+to a larger retry. Queued hook-worker graph work waits in the deferred queue
+until that circuit closes. Capture and unrelated projection lanes stay live.
 
 Resource-gated maintenance receipts therefore keep four claims independent:
 

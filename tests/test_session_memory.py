@@ -54047,6 +54047,97 @@ def test_hook_worker_automatic_maintenance_jobs_observe_query_demand(
     assert calls["graph"]["observe_query_demand"] is True
 
 
+def test_hook_worker_defers_graph_job_until_drip_circuit_closes(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    dirs = module.hook_worker_dirs(aoa_root)
+    for path in dirs.values():
+        path.mkdir(parents=True, exist_ok=True)
+    write_json(
+        dirs["pending"] / "001-graph.json",
+        {
+            "job_type": "graph_maintenance",
+            "target": "all",
+            "reason": "automatic_graph_circuit_test",
+        },
+    )
+    circuit_open = {"value": True}
+    maintenance_calls: list[dict[str, Any]] = []
+
+    def fake_circuit(_aoa_root: Path) -> dict[str, Any]:
+        if circuit_open["value"]:
+            return {
+                "open": True,
+                "reason": "graph_registry_dependency_rebind_required",
+                "next_route": "graph-registry-rebind",
+            }
+        return {
+            "open": False,
+            "reason": "no_blocking_graph_drip_evidence",
+        }
+
+    def fake_graph_maintenance(**kwargs: Any) -> dict[str, Any]:
+        maintenance_calls.append(kwargs)
+        return {
+            "ok": True,
+            "target": kwargs.get("target"),
+            "reason": kwargs.get("reason"),
+            "source_state": {},
+            "selected_count": 1,
+            "remaining_count": 0,
+            "budget_exhausted": False,
+            "refresh_chunk_size": kwargs.get("refresh_chunk_size"),
+            "query_demand_count": 0,
+            "query_demand_priority_session_ids": [],
+            "maintenance_detail": {},
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr(
+        module,
+        "graph_automatic_drip_circuit_state",
+        fake_circuit,
+    )
+    monkeypatch.setattr(
+        module,
+        "graph_maintenance",
+        fake_graph_maintenance,
+    )
+
+    deferred = module.run_hook_worker(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        limit=1,
+    )
+
+    assert deferred["ok"] is True
+    assert deferred["processed"] == 1
+    assert deferred["results"][0]["status"] == (
+        "deferred_graph_drip_circuit_open"
+    )
+    assert deferred["results"][0]["job_disposition"] == "deferred"
+    assert maintenance_calls == []
+    assert len(list(dirs["deferred"].glob("*.json"))) == 1
+
+    circuit_open["value"] = False
+    resumed = module.run_hook_worker(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        limit=1,
+    )
+
+    assert resumed["ok"] is True
+    assert resumed["processed"] == 1
+    assert resumed["promoted_deferred"][0]["reason"] == (
+        "graph_drip_circuit_closed"
+    )
+    assert resumed["results"][0]["status"] == "maintained_graph"
+    assert len(maintenance_calls) == 1
+    assert not list(dirs["deferred"].glob("*.json"))
+
+
 def test_catchup_auto_maintenance_resource_defaults_to_profile_graph_drip(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
