@@ -557,10 +557,23 @@ segmentation, indexes, episodes, search, graph, and narrative layers.
 Incremental workers should be idempotent, bounded, restartable, and safe under
 concurrent readers.
 
+Generated dependencies must distinguish semantic contract epochs from content
+watermarks. For the entity registry, adding a new entity changes the content
+revision and complete transaction pin but not the declared schema and
+canonicalization epoch. Existing graph contributions remain structurally
+interpretable; query admission pauses until a proof-gated registry-only rebind
+updates the derived materialization and dependency pins. Unknown or changed
+epochs remain explicit rebuild boundaries.
+
 Active sessions need quiet-window/debounce behavior. Resource-heavy work needs
 backpressure, bounded retry, priority, and starvation visibility. A timer or
 systemd success proves only that a launcher ran; it does not prove semantic
 freshness.
+
+Explicit semantic non-progress is also a control signal. When a globally
+applicable graph pass selected work but changed no semantic graph content, the
+automatic graph lane must open a circuit instead of escalating the same state
+to a larger retry. Capture and unrelated projection lanes stay live.
 
 Resource-gated maintenance receipts therefore keep four claims independent:
 

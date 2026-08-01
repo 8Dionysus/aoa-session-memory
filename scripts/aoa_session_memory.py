@@ -972,6 +972,7 @@ GRAPH_SOURCE_FINGERPRINT_MODE = (
 GRAPH_HOT_LIVE_DEFER_SECONDS = 600.0
 GRAPH_STORE_SCHEMA_VERSION = 4
 GRAPH_ENTITY_REGISTRY_DEPENDENCY_VERSION = 1
+GRAPH_ENTITY_REGISTRY_SEMANTIC_EPOCH_VERSION = 1
 GRAPH_STORE_AGGREGATE_PAYLOAD_MODE = "compact_refs"
 GRAPH_STORE_CONTRIB_PAYLOAD_MODE = "compact_column_evidence_refs_v3"
 GRAPH_RAW_REF_MATERIALIZATION_POLICY = "event_evidence_refs_only_v1"
@@ -9757,6 +9758,53 @@ def entity_registry_entry_index_from_snapshot(
     return index
 
 
+def graph_entity_registry_semantic_epoch_identity(
+    dependency_or_identity: dict[str, Any],
+) -> dict[str, Any]:
+    """Return the rare registry semantics identity, excluding content growth."""
+
+    identity = (
+        dependency_or_identity.get("identity")
+        if isinstance(
+            dependency_or_identity.get("identity"),
+            dict,
+        )
+        else dependency_or_identity
+    )
+    epoch = {
+        "version": GRAPH_ENTITY_REGISTRY_SEMANTIC_EPOCH_VERSION,
+        "entity_registry_schema_version": int_value(
+            identity.get("schema_version")
+        ),
+        "canonicalization_version": int_value(
+            identity.get("canonicalization_version")
+        ),
+    }
+    epoch_id = (
+        hashlib.sha256(
+            json.dumps(
+                epoch,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        if (
+            epoch["entity_registry_schema_version"] > 0
+            and epoch["canonicalization_version"] > 0
+        )
+        else ""
+    )
+    return {
+        **epoch,
+        "semantic_epoch_id": epoch_id,
+        "truth_status": (
+            "declared_registry_schema_and_canonicalization_epoch_"
+            "excluding_content_revision"
+        ),
+    }
+
+
 def graph_entity_registry_dependency_snapshot(
     aoa_root: Path,
     *,
@@ -9917,6 +9965,35 @@ def graph_entity_registry_dependency_snapshot(
         )
         else ""
     )
+    semantic_epoch = (
+        graph_entity_registry_semantic_epoch_identity(
+            identity_payload
+        )
+    )
+    content_revision_identity = {
+        "version": GRAPH_ENTITY_REGISTRY_DEPENDENCY_VERSION,
+        "source_fingerprint": stored_source_fingerprint,
+        "semantic_digest_sha256": stored_semantic_sha256,
+        "entity_count": len(entries),
+    }
+    content_revision_id = (
+        hashlib.sha256(
+            json.dumps(
+                content_revision_identity,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        if stored_source_fingerprint and stored_semantic_sha256
+        else ""
+    )
+    identity_payload["semantic_epoch_id"] = (
+        semantic_epoch["semantic_epoch_id"]
+    )
+    identity_payload["content_revision_id"] = (
+        content_revision_id
+    )
     reasons: list[str] = []
     if payload.get("artifact_type") != "entity_registry_snapshot":
         reasons.append("entity_registry_snapshot_missing")
@@ -9947,6 +10024,9 @@ def graph_entity_registry_dependency_snapshot(
         "ephemeral": ephemeral,
         "dependency_id": dependency_id,
         "identity": identity_payload,
+        "semantic_epoch": semantic_epoch,
+        "semantic_epoch_id": semantic_epoch["semantic_epoch_id"],
+        "content_revision_id": content_revision_id,
         "snapshot_ref": ENTITY_REGISTRY_PATH.as_posix(),
         "generation_compatible": generation_compatible,
         "source_fingerprint_verified": (
@@ -9967,6 +10047,131 @@ def graph_entity_registry_dependency_snapshot(
             "pinned_generated_entity_registry_dependency_not_owner_truth"
         ),
     }
+
+
+def graph_entity_registry_dependency_transition_state(
+    aoa_root: Path,
+    observed_dependency_id: str,
+    observed_dependency: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Classify content drift without changing graph row semantics."""
+
+    state = graph_entity_registry_dependency_state(
+        aoa_root,
+        observed_dependency_id,
+    )
+    observed_dependency = (
+        observed_dependency
+        if isinstance(observed_dependency, dict)
+        else {}
+    )
+    current_dependency = (
+        state.get("current_dependency")
+        if isinstance(state.get("current_dependency"), dict)
+        else {}
+    )
+    current_semantic_epoch_id = str(
+        current_dependency.get("semantic_epoch_id")
+        or (
+            current_dependency.get("semantic_epoch", {})
+            if isinstance(
+                current_dependency.get("semantic_epoch"),
+                dict,
+            )
+            else {}
+        ).get("semantic_epoch_id")
+        or graph_entity_registry_semantic_epoch_identity(
+            current_dependency
+        ).get("semantic_epoch_id")
+        or ""
+    )
+    observed_semantic_epoch_id = str(
+        observed_dependency.get("semantic_epoch_id")
+        or (
+            observed_dependency.get("semantic_epoch", {})
+            if isinstance(
+                observed_dependency.get("semantic_epoch"),
+                dict,
+            )
+            else {}
+        ).get("semantic_epoch_id")
+        or graph_entity_registry_semantic_epoch_identity(
+            observed_dependency
+        ).get("semantic_epoch_id")
+        or ""
+    )
+    reasons = list(
+        state.get("reasons")
+        if isinstance(state.get("reasons"), list)
+        else []
+    )
+    semantic_epoch_compatible = bool(
+        current_semantic_epoch_id
+        and observed_semantic_epoch_id
+        and current_semantic_epoch_id
+        == observed_semantic_epoch_id
+    )
+    refresh_required = bool(
+        "entity_registry_owner_sources_newer" in reasons
+    )
+    dependency_mismatch = bool(
+        state.get("expected_dependency_id")
+        and state.get("observed_dependency_id")
+        and state.get("expected_dependency_id")
+        != state.get("observed_dependency_id")
+    )
+    rebindable = bool(
+        state.get("observed_dependency_id")
+        and semantic_epoch_compatible
+        and reasons
+        and set(reasons).issubset(
+            {
+                "graph_entity_registry_dependency_mismatch",
+                "entity_registry_owner_sources_newer",
+            }
+        )
+        and (dependency_mismatch or refresh_required)
+    )
+    return {
+        **state,
+        "status": (
+            "current"
+            if state.get("compatible")
+            else "rebind_required"
+            if rebindable
+            else "stale"
+        ),
+        "rebindable": rebindable,
+        "refresh_required": refresh_required,
+        "semantic_epoch_compatible": (
+            semantic_epoch_compatible
+        ),
+        "expected_semantic_epoch_id": (
+            current_semantic_epoch_id
+        ),
+        "observed_semantic_epoch_id": (
+            observed_semantic_epoch_id
+        ),
+    }
+
+
+def graph_entity_registry_dependency_from_metadata(
+    metadata: dict[str, Any],
+) -> dict[str, Any]:
+    raw = metadata.get("entity_registry_dependency_json")
+    if isinstance(raw, dict):
+        dependency = dict(raw)
+    else:
+        try:
+            parsed = json.loads(str(raw or "{}"))
+        except json.JSONDecodeError:
+            parsed = {}
+        dependency = parsed if isinstance(parsed, dict) else {}
+    dependency.setdefault(
+        "dependency_id",
+        str(metadata.get("entity_registry_dependency_id") or ""),
+    )
+    return dependency
 
 
 def mcp_tool_identity_from_registry_entry(
@@ -43673,6 +43878,11 @@ def mutate_auto_maintenance_retry_queue(
 
 def auto_maintenance_resource_status_retryable(status: str) -> bool:
     normalized = str(status or "")
+    if (
+        normalized
+        == "resource_blocked_graph_drip_circuit_open"
+    ):
+        return False
     return (
         normalized.startswith("resource_blocked")
         or normalized in AUTO_MAINTENANCE_CHILD_PROGRESS_RETRY_STATUSES
@@ -43980,6 +44190,70 @@ def auto_maintenance_retry_reconcile(
             "reason": "only timer-originated apply launches schedule background retries",
         }
     if not retryable:
+        if (
+            launch_status
+            == "resource_blocked_graph_drip_circuit_open"
+        ):
+            def clear_circuit_open(
+                queue_payload: dict[str, Any],
+            ) -> tuple[dict[str, Any], bool]:
+                items = (
+                    queue_payload.get("items")
+                    if isinstance(
+                        queue_payload.get("items"),
+                        dict,
+                    )
+                    else {}
+                )
+                existing = items.pop(queue_key, None)
+                if not isinstance(existing, dict):
+                    return (
+                        {"status": "circuit_open_not_queued"},
+                        False,
+                    )
+                auto_maintenance_retry_add_history(
+                    queue_payload,
+                    {
+                        "queue_key": queue_key,
+                        "profile": profile,
+                        "target": target,
+                        "disposition": (
+                            "cleared_graph_drip_circuit_open"
+                        ),
+                        "completed_at": (
+                            auto_maintenance_retry_iso(
+                                effective_now
+                            )
+                        ),
+                        "launch_status": launch_status,
+                        "attempts_started": existing.get(
+                            "attempts_started",
+                            0,
+                        ),
+                    },
+                )
+                return (
+                    {"status": "cleared_circuit_open"},
+                    True,
+                )
+
+            result, queue_status = (
+                mutate_auto_maintenance_retry_queue(
+                    aoa_root,
+                    clear_circuit_open,
+                    now_epoch=effective_now,
+                )
+            )
+            return {
+                **result,
+                "retryable": False,
+                "eligible_origin": True,
+                "queue_key": queue_key,
+                "queued_count": queue_status.get(
+                    "queued_count"
+                ),
+                "queue_path": queue_status.get("path"),
+            }
         return {
             "status": "not_retryable",
             "retryable": False,
@@ -44981,7 +45255,37 @@ def auto_maintenance_resource_launch(
             status = "resource_blocked_index_drip_failed"
             diagnostics.append(f"index_drip_fallback_{fallback_status}")
     fallback_graph_drip: dict[str, Any] = {}
-    if status == "resource_blocked" and effective_graph_drip_on_block and apply and repair_graph is not False:
+    graph_drip_circuit = (
+        graph_automatic_drip_circuit_state(aoa_root)
+        if (
+            status == "resource_blocked"
+            and effective_graph_drip_on_block
+            and apply
+            and repair_graph is not False
+        )
+        else {
+            "open": False,
+            "reason": "graph_drip_not_admitted",
+        }
+    )
+    if graph_drip_circuit.get("open"):
+        status = "resource_blocked_graph_drip_circuit_open"
+        diagnostics.append(
+            "graph_drip_circuit_open:"
+            f"{graph_drip_circuit.get('reason') or 'unknown'}"
+        )
+        fallback_graph_drip = {
+            "enabled": False,
+            "ok": False,
+            "status": "circuit_open",
+            "made_progress": False,
+            "remaining_work": True,
+            "circuit": graph_drip_circuit,
+            "diagnostics": [
+                "automatic_graph_drip_not_launched"
+            ],
+        }
+    elif status == "resource_blocked" and effective_graph_drip_on_block and apply and repair_graph is not False:
         graph_queue_scope_eligible = (
             str(target or "all") == "all"
             and since is None
@@ -45289,6 +45593,7 @@ def auto_maintenance_resource_launch(
         "fallback_index_drip": fallback_index_drip,
         "graph_drip_on_block": effective_graph_drip_on_block,
         "graph_drip_on_block_source": "profile_default" if graph_drip_on_block is None else "explicit",
+        "graph_drip_circuit": graph_drip_circuit,
         "fallback_graph_drip": fallback_graph_drip,
         "resource_class": settings.get("resource_class"),
         "resource_kind": settings.get("resource_kind"),
@@ -111659,6 +111964,9 @@ def graph_entity_registry_dependency_packet(
             "status",
             "dependency_id",
             "identity",
+            "semantic_epoch",
+            "semantic_epoch_id",
+            "content_revision_id",
             "snapshot_ref",
             "truth_status",
         )
@@ -118508,6 +118816,14 @@ def graph_source_maintenance_recommendation(
             or bool(latest_maintenance.get("mutation_rolled_back"))
         )
     )
+    latest_semantic_no_progress = bool(
+        latest_usable
+        and latest_remaining > 0
+        and int_value(
+            latest_maintenance.get("selected_count")
+        ) > 0
+        and latest_maintenance.get("semantic_progress") is False
+    )
     recent_budget_no_progress_remaining = int_value(latest_maintenance.get("recent_budget_no_progress_remaining_count"))
     recent_budget_no_progress_near_current = (
         latest_usable
@@ -118552,6 +118868,13 @@ def graph_source_maintenance_recommendation(
             "materialization_proof"
         )
         command = graph_registry_rebind_command()
+    elif latest_semantic_no_progress:
+        route = "paused_no_semantic_progress"
+        reason = (
+            "latest_graph_maintenance_selected_sources_without_"
+            "semantic_progress"
+        )
+        command = ""
     elif mostly_missing_partial_store:
         route = "store_only_rebuild"
         reason = "graph_store_mostly_missing_sources_store_only_rebuild"
@@ -118661,6 +118984,14 @@ def graph_source_maintenance_recommendation(
         notes.append(
             "materialization_mismatch_refuses_and_returns_to_source_"
             "contribution_refresh"
+        )
+    if route == "paused_no_semantic_progress":
+        notes.append(
+            "automatic_graph_retries_are_circuit_broken_until_"
+            "freshness_or_dependency_state_changes"
+        )
+        notes.append(
+            "capture_and_non_graph_sweep_lanes_remain_independent"
         )
     if route == "graph_event_sequence_prune":
         notes.append("generated_sequence_edges_can_be_pruned_without_full_source_regeneration")
@@ -119069,25 +119400,18 @@ def graph_store_state(
         and observed_generation_id == expected_generation_id
     )
     entity_registry_dependency_state = (
-        graph_entity_registry_dependency_state(
+        graph_entity_registry_dependency_transition_state(
             aoa_root,
             str(
                 metadata.get("entity_registry_dependency_id") or ""
             ),
+            graph_entity_registry_dependency_from_metadata(
+                metadata
+            ),
         )
     )
     dependency_rebind_needed = bool(
-        entity_registry_dependency_state.get("status") == "stale"
-        and entity_registry_dependency_state.get(
-            "expected_dependency_id"
-        )
-        and entity_registry_dependency_state.get(
-            "observed_dependency_id"
-        )
-        and set(
-            entity_registry_dependency_state.get("reasons", [])
-        )
-        == {"graph_entity_registry_dependency_mismatch"}
+        entity_registry_dependency_state.get("rebindable")
     )
     reasons: list[str] = []
     if int_value(metadata.get("graph_store_schema_version")) != GRAPH_STORE_SCHEMA_VERSION:
@@ -124607,25 +124931,18 @@ def graph_store_query_state(aoa_root: Path) -> dict[str, Any]:
             "diagnostics": [f"graph_store_sqlite_error:{exc}"],
         }
     entity_registry_dependency_state = (
-        graph_entity_registry_dependency_state(
+        graph_entity_registry_dependency_transition_state(
             aoa_root,
             str(
                 metadata.get("entity_registry_dependency_id") or ""
             ),
+            graph_entity_registry_dependency_from_metadata(
+                metadata
+            ),
         )
     )
     query_dependency_rebind_needed = bool(
-        entity_registry_dependency_state.get("status") == "stale"
-        and entity_registry_dependency_state.get(
-            "expected_dependency_id"
-        )
-        and entity_registry_dependency_state.get(
-            "observed_dependency_id"
-        )
-        and set(
-            entity_registry_dependency_state.get("reasons", [])
-        )
-        == {"graph_entity_registry_dependency_mismatch"}
+        entity_registry_dependency_state.get("rebindable")
     )
     reasons: list[str] = []
     if int_value(metadata.get("graph_store_schema_version")) != GRAPH_STORE_SCHEMA_VERSION:
@@ -151652,6 +151969,100 @@ def recent_graph_maintenance_no_progress_evidence(
     return {"exists": False}
 
 
+def graph_automatic_drip_circuit_state(
+    aoa_root: Path,
+) -> dict[str, Any]:
+    """Refuse graph drips that cannot repair the current graph state."""
+
+    hot_state = graph_store_hot_state(aoa_root)
+    if hot_state.get("needs_dependency_rebind"):
+        return {
+            "open": True,
+            "reason": "graph_registry_dependency_rebind_required",
+            "next_route": "graph-registry-rebind",
+            "evidence": {
+                "entity_registry_dependency": (
+                    hot_state.get("entity_registry_dependency")
+                ),
+            },
+        }
+    if hot_state.get("needs_full_rebuild"):
+        return {
+            "open": True,
+            "reason": "graph_structural_rebuild_required",
+            "next_route": "manual_resource_gated_graph_rebuild",
+            "evidence": {
+                "diagnostics": hot_state.get("diagnostics", []),
+            },
+        }
+    reports = diagnostic_json_payloads(
+        aoa_root,
+        "*__graph-maintenance.json",
+        limit=GRAPH_MAINTENANCE_RECENT_REPORT_LIMIT,
+    )
+    latest_queue_report = (
+        latest_graph_queue_maintenance_report(reports)
+    )
+    if not latest_queue_report:
+        return {
+            "open": False,
+            "reason": "no_blocking_graph_drip_evidence",
+        }
+    report_mtime = ops_float_value(
+        latest_queue_report.get("_diagnostic_mtime")
+    )
+    store_mtime = path_mtime(graph_paths(aoa_root)["store"])
+    queue_update = (
+        latest_queue_report.get("queue_update")
+        if isinstance(
+            latest_queue_report.get("queue_update"),
+            dict,
+        )
+        else {}
+    )
+    explicit_no_progress = bool(
+        latest_queue_report.get("apply", True)
+        and int_value(
+            latest_queue_report.get("selected_count")
+        ) > 0
+        and latest_queue_report.get("semantic_progress") is False
+        and int_value(queue_update.get("removed_count")) <= 0
+        and not graph_maintenance_report_mutation_rolled_back(
+            latest_queue_report
+        )
+    )
+    report_still_applies = bool(
+        report_mtime > 0
+        and (store_mtime <= 0 or report_mtime >= store_mtime)
+    )
+    if explicit_no_progress and report_still_applies:
+        return {
+            "open": True,
+            "reason": "latest_graph_queue_drip_no_semantic_progress",
+            "next_route": (
+                "wait_for_dependency_or_graph_store_state_change"
+            ),
+            "evidence": {
+                "path": latest_queue_report.get(
+                    "_diagnostic_path"
+                ),
+                "mtime": report_mtime,
+                "store_mtime": store_mtime,
+                "selected_count": latest_queue_report.get(
+                    "selected_count"
+                ),
+                "semantic_progress": False,
+                "queue_removed_count": queue_update.get(
+                    "removed_count"
+                ),
+            },
+        }
+    return {
+        "open": False,
+        "reason": "graph_state_changed_or_latest_drip_not_proven_no_progress",
+    }
+
+
 def graph_hot_scope_source_summary(
     source_keys: Iterable[str],
     *,
@@ -152000,6 +152411,9 @@ def graph_store_hot_state(
             "max_refresh_nodes": latest_report.get("max_refresh_nodes"),
             "max_refresh_edges": latest_report.get("max_refresh_edges"),
             "budget_exhausted": bool(latest_report.get("budget_exhausted")),
+            "semantic_progress": latest_report.get(
+                "semantic_progress"
+            ),
             "elapsed_ms": latest_report.get("elapsed_ms"),
             "aggregate_refresh_ms": graph_maintenance_report_aggregate_refresh_ms(latest_report),
             "mutation_rolled_back": graph_maintenance_report_mutation_rolled_back(latest_report),
@@ -152140,25 +152554,18 @@ def graph_store_hot_state(
     if not generation_compatible:
         diagnostics.append("graph_generation_mismatch")
     entity_registry_dependency_state = (
-        graph_entity_registry_dependency_state(
+        graph_entity_registry_dependency_transition_state(
             aoa_root,
             str(
                 metadata.get("entity_registry_dependency_id") or ""
             ),
+            graph_entity_registry_dependency_from_metadata(
+                metadata
+            ),
         )
     )
     dependency_rebind_needed = bool(
-        entity_registry_dependency_state.get("status") == "stale"
-        and entity_registry_dependency_state.get(
-            "expected_dependency_id"
-        )
-        and entity_registry_dependency_state.get(
-            "observed_dependency_id"
-        )
-        and set(
-            entity_registry_dependency_state.get("reasons", [])
-        )
-        == {"graph_entity_registry_dependency_mismatch"}
+        entity_registry_dependency_state.get("rebindable")
     )
     if not entity_registry_dependency_state.get("compatible"):
         diagnostics.extend(
@@ -152192,9 +152599,13 @@ def graph_store_hot_state(
         "entity_registry_generation_incompatible",
         "entity_registry_source_fingerprint_unverified",
         "entity_registry_semantic_digest_unverified",
-        "entity_registry_owner_sources_newer",
     }
     needs_full_rebuild = any(item in diagnostics for item in structural_rebuild_reasons)
+    if (
+        "entity_registry_owner_sources_newer" in diagnostics
+        and not dependency_rebind_needed
+    ):
+        needs_full_rebuild = True
     if not generation_compatible or needs_full_rebuild:
         status = "stale"
     elif queued_actionable_count or ledger_actionable_count or source_version_maintenance_count or actionable_store_missing_count or ledger_coverage_gap_count or latest_remaining_actionable_count:

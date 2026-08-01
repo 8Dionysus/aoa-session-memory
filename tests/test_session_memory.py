@@ -24387,6 +24387,147 @@ def test_graph_dependency_auto_refresh_preserves_authoritative_registry_policy(
     )
 
 
+def test_graph_registry_content_growth_preserves_semantic_epoch_and_routes_rebind(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    module.build_entity_registry(
+        aoa_root=aoa_root,
+        write=True,
+        include_runtime=True,
+        observed_source="none",
+        limit=1_000_000,
+    )
+    initial = module.graph_entity_registry_dependency_snapshot(
+        aoa_root,
+        ensure_current=False,
+        allow_ephemeral=False,
+    )
+
+    skill_path = (
+        aoa_root / "skills" / "incremental-arrival" / "SKILL.md"
+    )
+    skill_path.parent.mkdir(parents=True)
+    skill_path.write_text(
+        "---\n"
+        "name: incremental-arrival\n"
+        "description: A newly discovered registry entity.\n"
+        "---\n",
+        encoding="utf-8",
+    )
+    refreshed = module.graph_entity_registry_dependency_snapshot(
+        aoa_root,
+        ensure_current=True,
+        allow_ephemeral=False,
+    )
+    transition = module.graph_entity_registry_dependency_transition_state(
+        aoa_root,
+        str(initial["dependency_id"]),
+        module.graph_entity_registry_dependency_packet(initial),
+    )
+
+    assert initial["semantic_epoch_id"]
+    assert (
+        refreshed["semantic_epoch_id"]
+        == initial["semantic_epoch_id"]
+    )
+    assert (
+        refreshed["content_revision_id"]
+        != initial["content_revision_id"]
+    )
+    assert refreshed["dependency_id"] != initial["dependency_id"]
+    assert transition["status"] == "rebind_required"
+    assert transition["rebindable"] is True
+    assert transition["semantic_epoch_compatible"] is True
+    assert transition["refresh_required"] is False
+    assert transition["reasons"] == [
+        "graph_entity_registry_dependency_mismatch"
+    ]
+
+
+def test_graph_owner_source_growth_requests_rebind_without_full_rebuild(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    store = module.GraphSqliteStore(aoa_root, reset=True)
+    try:
+        store.rebuild(
+            [
+                {
+                    "source": {
+                        "source_key": "session:epoch-route",
+                        "source_type": "session",
+                        "session_id": "epoch-route",
+                        "session_label": "epoch-route",
+                        "segment_id": "",
+                        "source_path": str(tmp_path / "epoch-route.json"),
+                        "source_paths": [
+                            str(tmp_path / "epoch-route.json")
+                        ],
+                        "source_sha": "epoch-route-sha",
+                        "source_mtime": 1.0,
+                        "graph_schema_version": (
+                            module.GRAPH_SCHEMA_VERSION
+                        ),
+                        "graph_store_schema_version": (
+                            module.GRAPH_STORE_SCHEMA_VERSION
+                        ),
+                        "graph_event_route_signal_edge_policy": (
+                            module.GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY
+                        ),
+                        "route_signal_classifier_version": (
+                            module.ROUTE_SIGNAL_CLASSIFIER_VERSION
+                        ),
+                    },
+                    "nodes": [
+                        {"id": "session:epoch-route", "type": "session"},
+                        {"id": "event:epoch-route", "type": "event"},
+                    ],
+                    "edges": [
+                        {
+                            "id": "edge:epoch-route",
+                            "source": "session:epoch-route",
+                            "target": "event:epoch-route",
+                            "type": "session_has_event",
+                        }
+                    ],
+                }
+            ]
+        )
+    finally:
+        store.close()
+
+    registry = module.read_json(
+        aoa_root / module.ENTITY_REGISTRY_PATH,
+        {},
+    )
+    skill_path = (
+        aoa_root / "skills" / "owner-newer" / "SKILL.md"
+    )
+    skill_path.parent.mkdir(parents=True)
+    skill_path.write_text(
+        "---\n"
+        "name: owner-newer\n"
+        "description: New owner entity after graph publication.\n"
+        "---\n",
+        encoding="utf-8",
+    )
+    newer_mtime = float(registry["generated_at_epoch"]) + 10.0
+    os.utime(skill_path, (newer_mtime, newer_mtime))
+
+    state = module.graph_store_state(aoa_root=aoa_root)
+
+    assert state["status"] == "dirty"
+    assert state["needs_dependency_rebind"] is True
+    assert state["needs_full_rebuild"] is False
+    assert state["entity_registry_dependency"][
+        "refresh_required"
+    ] is True
+    assert state["entity_registry_dependency"][
+        "semantic_epoch_compatible"
+    ] is True
+
+
 def test_entity_registry_cli_identities_are_per_subcommand_contract(
     tmp_path: Path,
 ) -> None:
@@ -42788,6 +42929,47 @@ def test_graph_source_recommendation_routes_budget_rollback_to_heavy_tail_drip()
     assert "interactive_drip_uses_aggregate_refresh_caps" in recommendation["notes"]
 
 
+def test_graph_source_recommendation_circuit_breaks_explicit_semantic_no_progress() -> None:
+    recommendation = module.graph_source_maintenance_recommendation(
+        source_count=16_864,
+        existing_source_count=16_864,
+        dirty_count=16_786,
+        missing_count=0,
+        orphaned_count=0,
+        blocked_count=25,
+        reason_group_counts={
+            "route_signal_classifier_mismatch": 16_786,
+            "graph_generation_mismatch": 16_864,
+        },
+        workspace_root="/srv/example/AbyssOS",
+        aoa_root="/srv/example/AbyssOS/.aoa",
+        latest_maintenance={
+            "usable_for_hot_gate": True,
+            "remaining_count": 10_309,
+            "actionable_remaining_count": 10_309,
+            "selected_count": 25,
+            "batch_limit": 25,
+            "candidate_pool_limit": 250,
+            "budget_exhausted": False,
+            "mutation_rolled_back": False,
+            "semantic_progress": False,
+        },
+    )
+
+    assert recommendation["route"] == "paused_no_semantic_progress"
+    assert recommendation["command"] == ""
+    assert (
+        recommendation["reason"]
+        == "latest_graph_maintenance_selected_sources_without_"
+        "semantic_progress"
+    )
+    assert (
+        "automatic_graph_retries_are_circuit_broken_until_"
+        "freshness_or_dependency_state_changes"
+        in recommendation["notes"]
+    )
+
+
 def test_graph_source_recommendation_keeps_recent_no_progress_sticky() -> None:
     recommendation = module.graph_source_maintenance_recommendation(
         source_count=5625,
@@ -53946,6 +54128,84 @@ def test_catchup_auto_maintenance_resource_defaults_to_profile_graph_drip(tmp_pa
     assert payload["fallback_graph_drip"]["queue_had_items"] is False
     assert payload["fallback_graph_drip"]["queue_seed_from_ledger"] is True
     assert "graph_drip_fallback_completed" in payload["diagnostics"]
+
+
+def test_auto_maintenance_graph_drip_circuit_prevents_launch_and_retry(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    calls: list[list[str]] = []
+
+    def fake_run(
+        command: list[str],
+        **_kwargs: Any,
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps(
+                {
+                    "schema": "abyss_machine_resource_plan_v1",
+                    "ok": False,
+                    "blocked_reasons": [
+                        "indexing_unattended_swap_used_pressure"
+                    ],
+                    "denied_reasons": [],
+                    "request": {
+                        "class": "medium",
+                        "kind": "indexing",
+                    },
+                    "execution": {
+                        "ok": None,
+                        "returncode": None,
+                    },
+                }
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        module,
+        "graph_automatic_drip_circuit_state",
+        lambda _root: {
+            "open": True,
+            "reason": "graph_registry_dependency_rebind_required",
+            "next_route": "graph-registry-rebind",
+        },
+    )
+
+    payload = module.auto_maintenance_resource_launch(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        profile="backlog",
+        apply=True,
+        reason="timer_backlog",
+    )
+
+    assert len(calls) == 1
+    assert (
+        payload["status"]
+        == "resource_blocked_graph_drip_circuit_open"
+    )
+    assert payload["fallback_graph_drip"]["status"] == "circuit_open"
+    assert payload["fallback_graph_drip"]["enabled"] is False
+    assert payload["graph_drip_circuit"]["open"] is True
+    assert payload["automatic_retry"]["retryable"] is False
+    assert payload["automatic_retry"]["status"] in {
+        "circuit_open_not_queued",
+        "cleared_circuit_open",
+    }
+    assert (
+        module.auto_maintenance_resource_status_retryable(
+            payload["status"]
+        )
+        is False
+    )
 
 
 def test_graph_drip_fallback_does_not_mutate_without_apply(tmp_path: Path, monkeypatch: Any) -> None:

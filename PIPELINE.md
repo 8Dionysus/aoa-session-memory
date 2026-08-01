@@ -145,6 +145,12 @@ entity-registry snapshot is pinned for the complete build or maintenance
 operation. Every source contribution uses the immutable index from that
 snapshot, and both graph metadata and source rows record its dependency
 identity. Runtime aliases are not re-resolved independently per record.
+That dependency separates a rare declared semantic epoch (registry schema and
+canonicalization versions) from the frequent content revision (source
+fingerprint, semantic digest, and entity count). The complete dependency ID
+still pins one immutable operation. Same-epoch content growth makes graph reads
+abstain only until a proof-gated registry-materialization rebind advances the
+pins; it is not a structural full-rebuild reason.
 
 Entity-registry construction distinguishes incremental navigation history from
 an authoritative rebuild. Incremental refresh may retain bounded prior-snapshot
@@ -407,6 +413,11 @@ Missing schemas, corrupt stores, or large policy migrations route to explicit
 rebuilds. Interrupted generated-store temporary files are cleanup candidates;
 raw evidence is not.
 
+If the latest globally usable graph-maintenance report selected sources but
+explicitly records `semantic_progress=false`, automatic graph recommendation
+opens a circuit and emits no retry command until dependency or freshness state
+changes. Capture, search, and non-graph sweep lanes continue independently.
+
 A search schema mismatch is incremental only for an owner-declared additive
 version pair whose live store still has documents, route indexes, route terms,
 and no structural schema diagnostic. The first committed dirty-session repair
@@ -431,6 +442,10 @@ Full rebuild publishes a temporary store only after the same recheck, so a
 rejected rebuild leaves the previous graph intact. A graph store from before
 the dependency contract requires an explicit full rebuild; a bounded
 maintenance batch cannot silently upgrade its global semantics.
+Known same-epoch dependency drift instead routes through the complete
+registry-derived materialization proof and atomic rebind. Unknown epochs,
+schema or canonicalization changes, malformed legacy bindings, and rejected
+proofs retain the full-rebuild boundary.
 
 Optional graph sidecar export is a separate manifest-committed projection.
 Nodes and edges are rendered in private staging, the graph transaction and
