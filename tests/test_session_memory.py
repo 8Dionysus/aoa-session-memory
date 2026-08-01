@@ -39644,6 +39644,116 @@ def test_session_stage_cleanup_preserves_last_good_and_allows_reindex(
     ] == 0
 
 
+def test_session_projection_semantic_digest_matches_materialized_reference_without_bulk_normalizer(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    projection_dir = tmp_path / "session-projection"
+    raw_dir = projection_dir / "raw"
+    segments_dir = projection_dir / "segments"
+    raw_dir.mkdir(parents=True)
+    segments_dir.mkdir(parents=True)
+    payloads = {
+        "manifest": {
+            "session_id": "streamed-digest",
+            "updated_at": "volatile",
+            "segments": ["001", "002"],
+        },
+        "session_index": {
+            "session_id": "streamed-digest",
+            "generated_at": "volatile",
+            "task_episodes": [{"episode_id": "episode-1"}],
+        },
+        "raw_block_index": {
+            "blocks": [{"block_id": "block-1"}],
+            "generated_at": "volatile",
+        },
+        "raw_source": {"source_path": "/source/session.jsonl"},
+        "raw_capture_state": {
+            "status": "indexed_with_projection",
+            "captured_at": "volatile",
+        },
+        "segment_indexes": {
+            "001.index.json": {
+                "segment_id": "001",
+                "updated_at": "volatile",
+                "events": [1, 2],
+            },
+            "002.index.json": {
+                "segment_id": "002",
+                "events": [3],
+            },
+        },
+    }
+    write_json(
+        projection_dir / "session.manifest.json",
+        payloads["manifest"],
+    )
+    write_json(
+        projection_dir / module.SESSION_INDEX_JSON,
+        payloads["session_index"],
+    )
+    write_json(
+        raw_dir / module.RAW_BLOCK_INDEX_JSON,
+        payloads["raw_block_index"],
+    )
+    write_json(
+        raw_dir / module.RAW_SOURCE_JSON,
+        payloads["raw_source"],
+    )
+    write_json(
+        raw_dir / module.RAW_CAPTURE_STATE_JSON,
+        payloads["raw_capture_state"],
+    )
+    for name, payload in payloads["segment_indexes"].items():
+        write_json(segments_dir / name, payload)
+    (segments_dir / "001.md").write_text(
+        "first segment\n",
+        encoding="utf-8",
+    )
+    (segments_dir / "002.md").write_text(
+        "second segment\n",
+        encoding="utf-8",
+    )
+    materialized = module.session_projection_semantic_digest_value(
+        {
+            "manifest": payloads["manifest"],
+            "session_index": payloads["session_index"],
+            "raw_block_index": payloads["raw_block_index"],
+            "raw_source": payloads["raw_source"],
+            "raw_capture_state": payloads["raw_capture_state"],
+            "segment_indexes": payloads["segment_indexes"],
+            "segment_markdown_sha256": {
+                name: module.sha256_file(segments_dir / name)
+                for name in ("001.md", "002.md")
+            },
+        }
+    )
+    expected_sha256 = hashlib.sha256(
+        json.dumps(
+            materialized,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+    monkeypatch.setattr(
+        module,
+        "session_projection_semantic_digest_value",
+        lambda _value: (_ for _ in ()).throw(
+            AssertionError("bulk semantic normalization is forbidden")
+        ),
+    )
+    actual = module.session_projection_semantic_digest(
+        projection_dir
+    )
+
+    assert actual["sha256"] == expected_sha256
+    assert actual["segment_index_count"] == 2
+    assert actual["segment_markdown_count"] == 2
+
+
 def test_maintenance_cleanup_clears_stale_active_job_and_orphaned_graph_tmp(tmp_path: Path, monkeypatch: Any) -> None:
     aoa_root = tmp_path / ".aoa"
     graph_root = aoa_root / module.GRAPH_ROOT

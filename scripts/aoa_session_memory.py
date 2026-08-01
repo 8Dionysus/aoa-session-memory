@@ -20484,71 +20484,197 @@ def projection_semantic_file_fingerprint(
     }
 
 
+def projection_semantic_json_hash_update(
+    digest: Any,
+    value: Any,
+    *,
+    volatile_keys: frozenset[str],
+    logical_root: Path | None = None,
+) -> None:
+    """Feed canonical semantic JSON into a digest without bulk materialization."""
+    if isinstance(value, dict):
+        digest.update(b"{")
+        first = True
+        items = sorted(
+            (
+                (str(key), item)
+                for key, item in value.items()
+                if str(key) not in volatile_keys
+            ),
+            key=lambda pair: pair[0],
+        )
+        for key, item in items:
+            if not first:
+                digest.update(b",")
+            first = False
+            digest.update(
+                json.dumps(
+                    key,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            )
+            digest.update(b":")
+            projection_semantic_json_hash_update(
+                digest,
+                item,
+                volatile_keys=volatile_keys,
+                logical_root=logical_root,
+            )
+        digest.update(b"}")
+        return
+    if isinstance(value, (list, tuple)):
+        digest.update(b"[")
+        for index, item in enumerate(value):
+            if index:
+                digest.update(b",")
+            projection_semantic_json_hash_update(
+                digest,
+                item,
+                volatile_keys=volatile_keys,
+                logical_root=logical_root,
+            )
+        digest.update(b"]")
+        return
+    if isinstance(value, str) and logical_root is not None:
+        root_text = str(logical_root)
+        if root_text:
+            value = value.replace(root_text, "{projection_root}")
+    digest.update(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
+
+
 def session_projection_semantic_digest(
     projection_dir: Path,
 ) -> dict[str, Any]:
-    manifest = read_json(
-        projection_dir / "session.manifest.json",
-        {},
+    volatile_keys = (
+        SESSION_PROJECTION_SEMANTIC_DIGEST_VOLATILE_KEYS
     )
-    session_index = read_json(
-        projection_dir / SESSION_INDEX_JSON,
-        {},
-    )
-    raw_block_index = read_json(
-        projection_dir / "raw" / RAW_BLOCK_INDEX_JSON,
-        {},
-    )
-    raw_source = read_json(
-        projection_dir / "raw" / RAW_SOURCE_JSON,
-        {},
-    )
-    raw_capture_state = read_json(
-        projection_dir / "raw" / RAW_CAPTURE_STATE_JSON,
-        {},
-    )
-    segment_indexes: dict[str, Any] = {}
-    segment_markdown_sha256: dict[str, str] = {}
-    segments_dir = projection_dir / "segments"
-    if segments_dir.is_dir():
-        for index_path in sorted(
-            segments_dir.glob("*.index.json")
-        ):
-            segment_indexes[index_path.name] = read_json(
-                index_path,
-                {},
-            )
-        for markdown_path in sorted(segments_dir.glob("*.md")):
-            segment_markdown_sha256[markdown_path.name] = (
-                sha256_file(markdown_path)
-            )
-    payload = session_projection_semantic_digest_value(
-        {
-            "manifest": manifest,
-            "session_index": session_index,
-            "raw_block_index": raw_block_index,
-            "raw_source": raw_source,
-            "raw_capture_state": raw_capture_state,
-            "segment_indexes": segment_indexes,
-            "segment_markdown_sha256": (
-                segment_markdown_sha256
-            ),
-        }
-    )
-    return {
-        "version": SESSION_PROJECTION_SEMANTIC_DIGEST_VERSION,
-        "sha256": hashlib.sha256(
+    digest = hashlib.sha256()
+    digest.update(b"{")
+    first_top_level = True
+
+    def write_top_level_value(key: str, value: Any) -> None:
+        nonlocal first_top_level
+        if not first_top_level:
+            digest.update(b",")
+        first_top_level = False
+        digest.update(
             json.dumps(
-                payload,
+                key,
                 ensure_ascii=False,
-                sort_keys=True,
                 separators=(",", ":"),
             ).encode("utf-8")
-        ).hexdigest(),
-        "segment_index_count": len(segment_indexes),
-        "segment_markdown_count": len(
-            segment_markdown_sha256
+        )
+        digest.update(b":")
+        projection_semantic_json_hash_update(
+            digest,
+            value,
+            volatile_keys=volatile_keys,
+        )
+
+    write_top_level_value(
+        "manifest",
+        read_json(
+            projection_dir / "session.manifest.json",
+            {},
         ),
+    )
+    write_top_level_value(
+        "raw_block_index",
+        read_json(
+            projection_dir / "raw" / RAW_BLOCK_INDEX_JSON,
+            {},
+        ),
+    )
+    write_top_level_value(
+        "raw_capture_state",
+        read_json(
+            projection_dir / "raw" / RAW_CAPTURE_STATE_JSON,
+            {},
+        ),
+    )
+    write_top_level_value(
+        "raw_source",
+        read_json(
+            projection_dir / "raw" / RAW_SOURCE_JSON,
+            {},
+        ),
+    )
+    segments_dir = projection_dir / "segments"
+    segment_index_paths = (
+        sorted(segments_dir.glob("*.index.json"))
+        if segments_dir.is_dir()
+        else []
+    )
+    segment_markdown_paths = (
+        sorted(segments_dir.glob("*.md"))
+        if segments_dir.is_dir()
+        else []
+    )
+
+    if not first_top_level:
+        digest.update(b",")
+    first_top_level = False
+    digest.update(b'"segment_indexes":{')
+    for index, index_path in enumerate(segment_index_paths):
+        if index:
+            digest.update(b",")
+        digest.update(
+            json.dumps(
+                index_path.name,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
+        digest.update(b":")
+        projection_semantic_json_hash_update(
+            digest,
+            read_json(index_path, {}),
+            volatile_keys=volatile_keys,
+        )
+    digest.update(b"}")
+
+    digest.update(b',"segment_markdown_sha256":{')
+    for index, markdown_path in enumerate(
+        segment_markdown_paths
+    ):
+        if index:
+            digest.update(b",")
+        digest.update(
+            json.dumps(
+                markdown_path.name,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
+        digest.update(b":")
+        projection_semantic_json_hash_update(
+            digest,
+            sha256_file(markdown_path),
+            volatile_keys=volatile_keys,
+        )
+    digest.update(b"}")
+
+    write_top_level_value(
+        "session_index",
+        read_json(
+            projection_dir / SESSION_INDEX_JSON,
+            {},
+        ),
+    )
+    digest.update(b"}")
+    return {
+        "version": SESSION_PROJECTION_SEMANTIC_DIGEST_VERSION,
+        "sha256": digest.hexdigest(),
+        "segment_index_count": len(segment_index_paths),
+        "segment_markdown_count": len(segment_markdown_paths),
         "excluded_keys": sorted(
             SESSION_PROJECTION_SEMANTIC_DIGEST_VOLATILE_KEYS
         ),
