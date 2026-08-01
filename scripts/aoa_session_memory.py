@@ -152013,6 +152013,119 @@ def recent_graph_maintenance_no_progress_evidence(
     return {"exists": False}
 
 
+def graph_queue_report_selected_sources_advanced(
+    aoa_root: Path,
+    report: dict[str, Any],
+    *,
+    sample_limit: int = 40,
+) -> dict[str, Any]:
+    """Detect bounded upstream source changes after a no-progress drip."""
+
+    report_mtime = ops_float_value(
+        report.get("_diagnostic_mtime")
+    )
+    selected_source_keys = [
+        str(item)
+        for item in (
+            report.get("selected_source_keys")
+            if isinstance(
+                report.get("selected_source_keys"),
+                list,
+            )
+            else []
+        )
+        if str(item)
+    ][: max(1, min(int_value(sample_limit, 40), 200))]
+    base = {
+        "checked": False,
+        "advanced": False,
+        "report_mtime": report_mtime,
+        "selected_source_count": len(selected_source_keys),
+        "checked_path_count": 0,
+        "advanced_source_keys": [],
+        "missing_source_keys": [],
+        "missing_paths": [],
+    }
+    store_path = graph_paths(aoa_root)["store"]
+    if report_mtime <= 0 or not selected_source_keys:
+        return base
+    if not store_path.is_file():
+        return {
+            **base,
+            "checked": True,
+            "advanced": True,
+            "missing_store": True,
+        }
+    placeholders = ",".join("?" for _ in selected_source_keys)
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = sqlite3.connect(
+            f"{store_path.resolve().as_uri()}?mode=ro",
+            uri=True,
+        )
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT source_key, source_path, source_paths_json "
+            "FROM graph_sources WHERE source_key IN ("
+            + placeholders
+            + ")",
+            selected_source_keys,
+        ).fetchall()
+    except (OSError, sqlite3.Error) as exc:
+        return {
+            **base,
+            "diagnostics": [
+                "selected_source_change_check_unavailable:"
+                + str(exc)
+            ],
+        }
+    finally:
+        if conn is not None:
+            conn.close()
+    rows_by_key = {str(row["source_key"]): row for row in rows}
+    advanced_source_keys: list[str] = []
+    missing_source_keys: list[str] = []
+    missing_paths: list[str] = []
+    checked_path_count = 0
+    for source_key in selected_source_keys:
+        row = rows_by_key.get(source_key)
+        if row is None:
+            missing_source_keys.append(source_key)
+            advanced_source_keys.append(source_key)
+            continue
+        try:
+            source_paths = json.loads(
+                str(row["source_paths_json"] or "[]")
+            )
+        except json.JSONDecodeError:
+            source_paths = []
+        if not isinstance(source_paths, list) or not source_paths:
+            source_paths = [str(row["source_path"] or "")]
+        source_advanced = False
+        for path_value in source_paths:
+            if not str(path_value):
+                continue
+            checked_path_count += 1
+            source_path = Path(str(path_value))
+            if not source_path.is_file():
+                missing_paths.append(str(source_path))
+                source_advanced = True
+                continue
+            if path_mtime(source_path) > report_mtime:
+                source_advanced = True
+        if source_advanced:
+            advanced_source_keys.append(source_key)
+    return {
+        **base,
+        "checked": True,
+        "advanced": bool(advanced_source_keys),
+        "checked_path_count": checked_path_count,
+        "advanced_source_keys": advanced_source_keys[:20],
+        "missing_source_keys": missing_source_keys[:20],
+        "missing_paths": missing_paths[:20],
+    }
+
+
 def graph_automatic_drip_circuit_state(
     aoa_root: Path,
 ) -> dict[str, Any]:
@@ -152075,16 +152188,26 @@ def graph_automatic_drip_circuit_state(
             latest_queue_report
         )
     )
+    selected_source_change = (
+        graph_queue_report_selected_sources_advanced(
+            aoa_root,
+            latest_queue_report,
+        )
+        if explicit_no_progress
+        else {"checked": False, "advanced": False}
+    )
     report_still_applies = bool(
         report_mtime > 0
         and (store_mtime <= 0 or report_mtime >= store_mtime)
+        and not selected_source_change.get("advanced")
     )
     if explicit_no_progress and report_still_applies:
         return {
             "open": True,
             "reason": "latest_graph_queue_drip_no_semantic_progress",
             "next_route": (
-                "wait_for_dependency_or_graph_store_state_change"
+                "wait_for_selected_upstream_source_or_graph_store_"
+                "state_change"
             ),
             "evidence": {
                 "path": latest_queue_report.get(
@@ -152099,6 +152222,7 @@ def graph_automatic_drip_circuit_state(
                 "queue_removed_count": queue_update.get(
                     "removed_count"
                 ),
+                "selected_source_change": selected_source_change,
             },
         }
     return {

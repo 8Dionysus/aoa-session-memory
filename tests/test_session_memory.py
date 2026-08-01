@@ -54299,6 +54299,56 @@ def test_auto_maintenance_graph_drip_circuit_prevents_launch_and_retry(
     )
 
 
+def test_graph_drip_circuit_reopens_after_selected_upstream_source_changes(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    store_path = module.graph_paths(aoa_root)["store"]
+    store_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path = tmp_path / "segment.index.json"
+    source_path.write_text("{}\n", encoding="utf-8")
+    os.utime(source_path, (900.0, 900.0))
+    conn = sqlite3.connect(store_path)
+    try:
+        conn.execute(
+            "CREATE TABLE graph_sources ("
+            "source_key TEXT PRIMARY KEY, "
+            "source_path TEXT NOT NULL, "
+            "source_paths_json TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO graph_sources VALUES (?, ?, ?)",
+            (
+                "segment:test:000",
+                str(source_path),
+                json.dumps([str(source_path)]),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    report = {
+        "_diagnostic_mtime": 1000.0,
+        "selected_source_keys": ["segment:test:000"],
+    }
+
+    unchanged = module.graph_queue_report_selected_sources_advanced(
+        aoa_root,
+        report,
+    )
+    assert unchanged["checked"] is True
+    assert unchanged["advanced"] is False
+
+    os.utime(source_path, (1100.0, 1100.0))
+    advanced = module.graph_queue_report_selected_sources_advanced(
+        aoa_root,
+        report,
+    )
+    assert advanced["checked"] is True
+    assert advanced["advanced"] is True
+    assert advanced["advanced_source_keys"] == ["segment:test:000"]
+
+
 def test_graph_drip_fallback_does_not_mutate_without_apply(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"

@@ -74,8 +74,10 @@ usable maintenance report selected sources but explicitly recorded
 `semantic_progress=false`. It emits no graph-maintenance command until
 freshness or dependency state changes. The same guard applies when a queued
 hook-worker graph job reaches execution: the job moves to the deferred queue
-and is promoted automatically only after the circuit closes. Capture,
-indexing, and non-graph sweep lanes remain independent.
+and is promoted automatically only after the circuit closes. A bounded check
+of the selected source paths closes a no-progress circuit after an upstream
+session or segment projection actually changes; unrelated background activity
+does not. Capture, indexing, and non-graph sweep lanes remain independent.
 
 ## Rationale
 
