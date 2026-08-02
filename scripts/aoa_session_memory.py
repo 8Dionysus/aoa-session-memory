@@ -444,9 +444,9 @@ TASK_EPISODE_REPRESENTATION_LIMITS = {
     "reasoning": 12,
 }
 GOAL_LIFECYCLE_SCHEMA_VERSION = 3
-WORK_CONTEXT_SCHEMA_VERSION = 2
+WORK_CONTEXT_SCHEMA_VERSION = 4
 ROUTE_SIGNAL_SCHEMA_VERSION = 1
-ROUTE_SIGNAL_CLASSIFIER_VERSION = 46
+ROUTE_SIGNAL_CLASSIFIER_VERSION = 48
 TOKEN_ACCOUNTING_SCHEMA_VERSION = 1
 TOKEN_ACCOUNTING_GENERATOR_VERSION = 2
 TOKEN_ACCOUNTING_CONTRACT = "abyss_token_accounting_v1"
@@ -52238,6 +52238,51 @@ def abyssos_owner_root_from_parts(
     return None
 
 
+def archived_home_owner_root(path_value: str) -> str | None:
+    """Resolve a recorded ``~`` path without consulting this host's home map."""
+    raw = str(path_value or "").strip()
+    if not raw.startswith("~") or "\x00" in raw:
+        return None
+    home_token, separator, remainder = raw.partition("/")
+    if not home_token:
+        return None
+    if not separator or not remainder:
+        return home_token
+    parts = Path(remainder).parts
+    if (
+        len(parts) > 1
+        and parts[0] == ".codex"
+    ):
+        return str(Path(home_token) / ".codex" / parts[1])
+    if (
+        len(parts) > 1
+        and parts[0] == "src"
+    ):
+        return str(Path(home_token) / "src" / parts[1])
+    return home_token
+
+
+def archived_memory_surface_root(
+    surface: str,
+    cwd_value: Any = None,
+) -> str | None:
+    """Map an archived memory act without reading the current host environment."""
+    if surface == "codex_memories":
+        return "~/.codex/memories"
+    if surface == "codex_transcripts":
+        return "~/.codex/sessions"
+    if surface != "aoa_session_memory":
+        return None
+    raw_cwd = str(cwd_value or "").strip()
+    if not raw_cwd or "\x00" in raw_cwd:
+        return ".aoa"
+    normalized = raw_cwd.rstrip("/") or raw_cwd
+    cwd_path = Path(normalized)
+    if cwd_path.name == ".aoa":
+        return str(cwd_path)
+    return str(cwd_path / ".aoa")
+
+
 def lexical_owner_root_for_path(path_value: str) -> str | None:
     """Return a stable owner root using path syntax alone.
 
@@ -52376,6 +52421,9 @@ def archived_path_route_owner_root(path_value: str) -> str | None:
     raw = str(path_value or "").strip()
     if not raw or "\x00" in raw:
         return None
+    archived_home_root = archived_home_owner_root(raw)
+    if archived_home_root:
+        return archived_home_root
     try:
         expanded = str(Path(raw).expanduser())
     except (OSError, RuntimeError, ValueError):
@@ -52500,30 +52548,18 @@ def work_context_for_session_events(source: dict[str, Any], events: list[RawEven
             value=transcript_path,
         )
 
-    codex_home = Path(
-        os.environ.get("CODEX_HOME") or (Path.home() / ".codex")
-    ).expanduser()
-    cwd_path = Path(str(cwd_value)).expanduser() if cwd_value else None
-    session_memory_root = (
-        cwd_path
-        if cwd_path is not None and cwd_path.name == ".aoa"
-        else (
-            cwd_path / ".aoa"
-            if cwd_path is not None
-            else default_source_aoa_root()
-        )
-    )
-
+    archived_cwd_value = cwd_value
     for event in events:
         if event.event_type == "SESSION_META" and isinstance(event.parsed, dict):
             payload = event.parsed.get("payload") if isinstance(event.parsed.get("payload"), dict) else event.parsed
-            cwd_value = payload.get("cwd") if isinstance(payload, dict) else None
-            if cwd_value:
+            event_cwd_value = payload.get("cwd") if isinstance(payload, dict) else None
+            if event_cwd_value:
+                archived_cwd_value = event_cwd_value
                 add(
-                    archived_path_route_owner_root(str(cwd_value)),
+                    archived_path_route_owner_root(str(event_cwd_value)),
                     score=18,
                     kind="raw_session_meta_cwd",
-                    value=cwd_value,
+                    value=event_cwd_value,
                     ref=f"raw:line:{event.line_no}",
                 )
         texts: list[str] = [event.title, " ".join(event.tags)]
@@ -52533,12 +52569,16 @@ def work_context_for_session_events(source: dict[str, Any], events: list[RawEven
                 texts.append(str(value))
         session_act = event.facets.get("session_act") if isinstance(event.facets.get("session_act"), dict) else {}
         surface = str(session_act.get("memory_surface") or "")
-        if surface == "codex_memories":
-            add(str(codex_home / "memories"), score=5, kind="memory_surface", value=surface, ref=f"raw:line:{event.line_no}")
-        elif surface == "codex_transcripts":
-            add(str(codex_home / "sessions"), score=4, kind="memory_surface", value=surface, ref=f"raw:line:{event.line_no}")
-        elif surface == "aoa_session_memory":
-            add(str(session_memory_root), score=5, kind="memory_surface", value=surface, ref=f"raw:line:{event.line_no}")
+        surface_root = archived_memory_surface_root(surface, archived_cwd_value)
+        if surface_root:
+            score = 4 if surface == "codex_transcripts" else 5
+            add(
+                surface_root,
+                score=score,
+                kind="memory_surface",
+                value=surface,
+                ref=f"raw:line:{event.line_no}",
+            )
         for text in texts:
             for mention in path_mentions_from_text(text):
                 add(

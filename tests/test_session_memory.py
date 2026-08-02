@@ -49671,6 +49671,18 @@ def test_archived_path_routing_does_not_depend_on_live_owner_markers(
             )
             == "/srv/example/AbyssOS/aoa-session-memory"
         )
+        assert (
+            module.archived_path_route_owner_root(
+                "~/.codex/skills/aoa-eval/SKILL.md"
+            )
+            == "~/.codex/skills"
+        )
+        assert (
+            module.archived_path_route_owner_root(
+                "~operator/src/aoa-session-memory/scripts/aoa_session_memory.py"
+            )
+            == "~operator/src/aoa-session-memory"
+        )
 
 
 def test_archived_path_routing_is_stable_for_existing_and_missing_codex_paths(
@@ -49755,10 +49767,81 @@ def test_archived_session_context_projections_do_not_read_live_owner_markers(
             "/home/example/.codex/skills",
         )
     }
-    assert work_context["schema_version"] == 2
+    assert work_context["schema_version"] == 4
     assert work_context["work_root"] == "/home/example/.codex/skills"
     assert work_context["work_name"] == "skills"
     assert work_context["work_family"] == "codex-memory"
+
+
+def test_archived_home_routes_are_independent_of_current_home(
+    monkeypatch,
+) -> None:
+    archived_path = "~/.codex/skills/aoa-eval/SKILL.md"
+
+    monkeypatch.setenv("HOME", "/home/alpha")
+    first_route = module.archived_path_route_owner_root(archived_path)
+    first_context = module.work_context_for_session_events(
+        {"cwd": archived_path},
+        [],
+    )
+
+    monkeypatch.setenv("HOME", "/srv/example/home/beta")
+    second_route = module.archived_path_route_owner_root(archived_path)
+    second_context = module.work_context_for_session_events(
+        {"cwd": archived_path},
+        [],
+    )
+
+    assert first_route == second_route == "~/.codex/skills"
+    assert first_context == second_context
+    assert first_context["schema_version"] == 4
+    assert first_context["work_root"] == "~/.codex/skills"
+    assert first_context["work_name"] == "skills"
+    assert first_context["work_family"] == "codex-memory"
+
+
+def test_archived_memory_surfaces_ignore_current_home_and_codex_home(
+    monkeypatch,
+) -> None:
+    def event_for(surface: str) -> module.RawEvent:
+        return module.RawEvent(
+            event_id=f"evt-{surface}",
+            line_no=1,
+            raw="{}",
+            parsed={},
+            event_type="ASSISTANT_MESSAGE",
+            source_type="message",
+            title=surface,
+            timestamp="2026-07-23T00:00:00Z",
+            tags=[],
+            importance="medium",
+            compaction_boundary=False,
+            facets={"session_act": {"memory_surface": surface}},
+        )
+
+    expected_roots = {
+        "codex_memories": "~/.codex/memories",
+        "codex_transcripts": "~/.codex/sessions",
+        "aoa_session_memory": ".aoa",
+    }
+    for surface, expected_root in expected_roots.items():
+        monkeypatch.setenv("HOME", "/home/alpha")
+        monkeypatch.setenv("CODEX_HOME", "/runtime/alpha/.codex")
+        first = module.work_context_for_session_events(
+            {},
+            [event_for(surface)],
+        )
+
+        monkeypatch.setenv("HOME", "/srv/example/home/beta")
+        monkeypatch.setenv("CODEX_HOME", "/runtime/beta/.codex")
+        second = module.work_context_for_session_events(
+            {},
+            [event_for(surface)],
+        )
+
+        assert first == second
+        assert first["schema_version"] == 4
+        assert first["work_root"] == expected_root
 
 
 def test_agent_atlas_build_generates_route_entries(tmp_path: Path) -> None:
