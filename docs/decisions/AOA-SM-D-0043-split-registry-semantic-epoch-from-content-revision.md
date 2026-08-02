@@ -6,7 +6,7 @@ Accepted.
 
 ## Index Metadata
 
-- Decision ID: AOA-SM-D-0037
+- Decision ID: AOA-SM-D-0043
 - Original date: 2026-07-30
 - Owner surfaces: `scripts/aoa_session_memory.py`, `PIPELINE.md`, `DESIGN.md`, `tests/test_session_memory.py`, `docs/decisions/`
 - Surface classes: graph indexing, entity canonicalization, freshness, incremental maintenance, orchestration
