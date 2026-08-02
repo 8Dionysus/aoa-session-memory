@@ -1,0 +1,17 @@
+{
+  "allowed_bytes": 23787838,
+  "allowed_tracked_bytes": 24170725,
+  "approved_by": "repository-owner",
+  "base_ref": "010fa4cd4b02f5d7bc03702aa78f6746e6b9ab9d",
+  "changed_generated_bytes": 23787838,
+  "changed_generated_files": 335,
+  "decision_ref": "aoa-kag:docs/decisions/AOA-KAG-D-0017-portable-content-addressed-repository-family.md",
+  "default_limit_bytes": 1048576,
+  "head_family_digest": "f287984ac64a522795242900fe38133d1c83a0bb4df01b37711a9c34eda0c785",
+  "reason": "Local union of reviewed session-memory branches while remote publication is frozen",
+  "repo": "aoa-session-memory",
+  "schema_version": "aoa-repo-local-kag-budget-receipt-v1",
+  "scope": "generated_delta_and_tracked_size",
+  "tracked_bytes": 24170725,
+  "tracked_bytes_max": 13631488
+}
