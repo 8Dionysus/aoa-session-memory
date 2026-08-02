@@ -1389,6 +1389,7 @@ def _compact_usage_refs(refs: Any) -> dict[str, Any]:
             "session_ref",
             "graph",
             "graph_ref",
+            "task_episode",
             "line",
             "value",
             "kind",
@@ -1989,6 +1990,57 @@ def _compact_episode_search_relation_entry(value: Any) -> dict[str, Any]:
     return compact
 
 
+def _compact_episode_search_interval_contents(
+    value: Any,
+) -> dict[str, Any]:
+    """Preserve interval-read admission state without copying event bodies."""
+    if not isinstance(value, dict):
+        return {}
+    compact = _compact_usage_mapping(
+        value,
+        allowed_keys=(
+            "status",
+            "from_raw_ref",
+            "to_raw_ref",
+            "readable_event_count",
+            "returned_event_count",
+            "omitted_event_count",
+            "event_limit",
+            "truncated",
+            "retention_truncated",
+            "output_truncated",
+            "source_read_truncated",
+            "authority",
+        ),
+        text_limit=320,
+    )
+    event_raw_refs = value.get("event_raw_refs")
+    if isinstance(event_raw_refs, list):
+        selected_refs = [
+            str(ref)
+            for ref in event_raw_refs[
+                :EPISODE_SEARCH_SUPPORT_LIMIT
+            ]
+            if str(ref).startswith("raw:line:")
+        ]
+        compact["event_raw_refs"] = selected_refs
+        compact["event_raw_ref_count"] = len(event_raw_refs)
+        omitted = max(0, len(event_raw_refs) - len(selected_refs))
+        if omitted:
+            compact["omitted_event_raw_ref_count"] = omitted
+    evidence_time_scope = _compact_usage_mapping(
+        value.get("evidence_time_scope"),
+        text_limit=320,
+    )
+    if evidence_time_scope:
+        compact["evidence_time_scope"] = (
+            _without_omitted_field_counts(evidence_time_scope)
+        )
+    compact["event_bodies_included"] = False
+    compact["event_body_route"] = "full_evidence_route"
+    return _without_omitted_field_counts(compact)
+
+
 def _compact_episode_search_relation(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
@@ -2002,11 +2054,13 @@ def _compact_episode_search_relation(value: Any) -> dict[str, Any]:
             "kind",
             "relation_basis",
             "answer_scope",
+            "interval_contents_status",
             "authority",
             "policy",
             "policy_version",
             "ambiguous",
             "ambiguous_within_episode",
+            "ambiguity_scope",
             "qualified_count",
             "qualified_candidate_count",
             "qualified_pair_count",
@@ -2059,6 +2113,11 @@ def _compact_episode_search_relation(value: Any) -> dict[str, Any]:
                 compact_chain[key] = entry
         if compact_chain:
             compact["chain"] = _without_omitted_field_counts(compact_chain)
+    interval_contents = _compact_episode_search_interval_contents(
+        value.get("interval_contents")
+    )
+    if interval_contents:
+        compact["interval_contents"] = interval_contents
     numeric_rows = value.get("numeric_rows")
     if isinstance(numeric_rows, list):
         selected_rows = [
@@ -3287,7 +3346,11 @@ def _compact_entity_usage_chain_quality(value: Any) -> dict[str, Any]:
             "execution_usage_invocation_admitted_count",
             "execution_usage_invocation_unverifiable_count",
             "hook_usage_invocation_admitted_count",
+            "hook_usage_command_invocation_admitted_count",
             "hook_usage_invocation_unverifiable_count",
+            "exact_instance_mode",
+            "exact_correlation_id",
+            "exact_correlation_source_hit_count",
             "skipped_graph_neighborhood",
             "skipped_graph_rag_packet",
             "skipped_raw_preview_neighborhood",
@@ -3375,6 +3438,11 @@ def _compact_usage_chain_event(event: Any) -> dict[str, Any]:
             "skill_evidence_state",
             "usage_actions",
             "primary_usage_action",
+            "mcp_usage_admission",
+            "mcp_tool_usage_admission",
+            "tool_usage_admission",
+            "hook_usage_admission",
+            "execution_entity_usage_admission",
         ),
         text_limit=320,
     )
@@ -3401,6 +3469,8 @@ def _compact_entity_usage_audit_payload(payload: dict[str, Any], *, full_route: 
         "kind",
         "requested_kind",
         "session",
+        "correlation_id",
+        "selection_scope",
         "event_count",
         "entrypoint_event_count",
         "usage_event_count",
@@ -3485,7 +3555,8 @@ def _compact_entity_usage_chain_payload(payload: dict[str, Any], *, full_route: 
         "kind",
         "requested_kind",
         "session",
-        "normalized_entity",
+        "correlation_id",
+        "selection_scope",
         "freshness",
         "incomplete",
         "truncated",
@@ -3497,6 +3568,44 @@ def _compact_entity_usage_chain_payload(payload: dict[str, Any], *, full_route: 
     for key in passthrough_keys:
         if payload.get(key) not in (None, "", [], {}):
             compact[key] = payload.get(key)
+    normalized_entity = payload.get("normalized_entity")
+    if isinstance(normalized_entity, dict):
+        compact_entity = _compact_usage_mapping(
+            normalized_entity,
+            allowed_keys=(
+                "anchor",
+                "route_key",
+                "kind",
+                "requested_kind",
+                "route_signal",
+            ),
+            text_limit=200,
+        )
+        identity = _compact_usage_mapping(
+            normalized_entity.get("identity"),
+            allowed_keys=(
+                "status",
+                "aggregate_entry_count",
+                "candidate_count",
+                "candidate_ids",
+                "entity_ids",
+                "collision_preserved",
+                "identity_attribution_admitted",
+                "observed_instance_status",
+                "observed_instance_candidate_ids",
+                "observed_instance_identity_attribution_admitted",
+                "claim_boundary",
+            ),
+            text_limit=240,
+        )
+        if identity:
+            compact_entity["identity"] = _without_omitted_field_counts(
+                identity
+            )
+        if compact_entity:
+            compact["normalized_entity"] = (
+                _without_omitted_field_counts(compact_entity)
+            )
     counts = _compact_entity_usage_chain_counts(payload.get("counts"))
     if counts:
         compact["counts"] = counts
@@ -3511,6 +3620,37 @@ def _compact_entity_usage_chain_payload(payload: dict[str, Any], *, full_route: 
     first_ref = _compact_first_ref(payload.get("first_ref"))
     if first_ref:
         compact["first_ref"] = first_ref
+    source_episode_refs = payload.get("source_episode_refs")
+    if isinstance(source_episode_refs, list):
+        selected_episode_limit = (
+            1 if payload.get("evidence_envelope") else 3
+        )
+        selected_episode_refs = [
+            _without_omitted_field_counts(
+                _compact_usage_mapping(
+                    item,
+                    allowed_keys=(
+                        "episode_ref",
+                        "session_id",
+                        "task_episode_id",
+                    ),
+                    text_limit=720,
+                )
+            )
+            for item in source_episode_refs[:selected_episode_limit]
+            if isinstance(item, dict)
+        ]
+        compact["source_episode_refs"] = [
+            item for item in selected_episode_refs if item
+        ]
+        compact["source_episode_ref_count"] = len(
+            source_episode_refs
+        )
+        compact["omitted_source_episode_ref_count"] = max(
+            0,
+            len(source_episode_refs)
+            - len(compact["source_episode_refs"]),
+        )
     skill_evidence = _compact_skill_evidence(payload.get("skill_evidence"))
     if skill_evidence:
         compact["skill_evidence"] = skill_evidence
@@ -7120,6 +7260,7 @@ class AoASessionMemoryMCPState:
         consequence_window: int = 6,
         document_limit: int = 24,
         session: str = "",
+        correlation_id: str = "",
         full: bool = False,
     ) -> dict[str, Any]:
         anchor_text = _ensure_short_text(anchor, "anchor")
@@ -7139,6 +7280,17 @@ class AoASessionMemoryMCPState:
         ]
         if session:
             base_args.extend(["--session", _safe_selector(session, "session")])
+        if correlation_id:
+            if not session:
+                raise ValueError(
+                    "correlation_id requires an explicit session"
+                )
+            base_args.extend(
+                [
+                    "--correlation-id",
+                    _safe_selector(correlation_id, "correlation_id"),
+                ]
+            )
         full_args = [*base_args, "--full"]
         run_args = full_args if full else base_args
         full_route = self._archive_command_line("usage-chain", full_args)

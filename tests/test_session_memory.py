@@ -542,6 +542,114 @@ def test_graph_compact_node_hydrates_refs_from_evidence_refs() -> None:
     assert compact["evidence_refs"][0]["refs"]["segment"] == "001.md#event-000001"
 
 
+def test_graph_contribution_compaction_preserves_goal_event_ref_aliases() -> None:
+    edge = module.graph_relation_contract_payload(
+        {
+            "source": "goal_lifecycle:session:goal_0001",
+            "target": "event:session:001:000001",
+            "type": "goal_lifecycle_has_event",
+            "evidence_refs": [
+                {
+                    "session_id": "session",
+                    "event_id": "000001",
+                    "refs": {
+                        "raw_ref": "raw:line:1",
+                        "segment_ref": (
+                            "/workspace/.aoa/sessions/session/"
+                            "segments/001__initial-to-latest.md#event-000001"
+                        ),
+                        "segment_index": (
+                            "/workspace/.aoa/sessions/session/"
+                            "segments/001__initial-to-latest.index.json"
+                        ),
+                    },
+                }
+            ],
+        }
+    )
+
+    compact = module.graph_compact_contribution_payload(
+        edge,
+        kind="edge",
+    )
+    compact_refs = compact["evidence_refs"][0]["refs"]
+    rehydrated = module.graph_relation_contract_payload(
+        {
+            **edge,
+            "evidence_refs": compact["evidence_refs"],
+        }
+    )
+
+    assert compact_refs == {
+        "raw": "raw:line:1",
+        "segment": (
+            "sessions/session/segments/001__initial-to-latest.md"
+        ),
+    }
+    assert "segment_index" not in compact_refs
+    assert rehydrated["evidence_status"] == "present"
+    assert rehydrated["relation_state"] == "observed_projection"
+
+
+def test_graph_work_context_projection_admits_only_resolved_high_confidence() -> None:
+    resolved_fields = module.graph_work_context_projection_fields(
+        {
+            "status": "resolved",
+            "confidence": "high",
+        }
+    )
+    ambiguous_fields = module.graph_work_context_projection_fields(
+        {
+            "status": "ambiguous",
+            "confidence": "low",
+        }
+    )
+    base = {
+        "source": "session:session",
+        "target": "work_context:workspace",
+        "type": "has_work_context",
+        "evidence_refs": [
+            {
+                "session_id": "session",
+                "refs": {"session": "sessions/session/session.manifest.json"},
+            }
+        ],
+    }
+    resolved = module.graph_relation_contract_payload(
+        {
+            **base,
+            **resolved_fields,
+        }
+    )
+    ambiguous = module.graph_relation_contract_payload(
+        {
+            **base,
+            **ambiguous_fields,
+        }
+    )
+    compact = module.graph_compact_contribution_payload(
+        ambiguous,
+        kind="edge",
+    )
+    rehydrated = module.graph_relation_contract_payload(
+        {
+            **base,
+            **compact,
+        }
+    )
+
+    assert resolved_fields["source_projection_candidate"] is False
+    assert resolved["relation_state"] == "observed_projection"
+    assert ambiguous_fields["source_projection_candidate"] is True
+    assert ambiguous["relation_state"] == "inferred_candidate"
+    assert ambiguous["navigation_admissible"] is True
+    assert ambiguous["answer_admissible"] is False
+    assert compact["source_projection_status"] == "ambiguous"
+    assert compact["source_projection_confidence"] == "low"
+    assert compact["source_projection_candidate"] is True
+    assert rehydrated["relation_state"] == "inferred_candidate"
+
+
 def test_graph_aggregate_payload_compaction_sample_detects_legacy_payload(tmp_path: Path) -> None:
     db_path = tmp_path / "graph.sqlite3"
     conn = sqlite3.connect(db_path)
@@ -7356,7 +7464,23 @@ def test_episode_dense_projection_exact_cosine_and_semantic_refresh_invalidation
         )
         episode = {
             "episode_id": "task-0001",
-            "representations": {"outcomes": [{"text": text}]},
+            "representations": {
+                "outcomes": [
+                    {
+                        "text": text,
+                        "refs": {
+                            "raw": (
+                                f"raw:line:{10 + index}"
+                            ),
+                            "session": (
+                                f"sessions/{session_id}/session.json"
+                            ),
+                        },
+                        "source_lane": "assistant",
+                        "admission_basis": "assistant_observation",
+                    }
+                ]
+            },
             "narrative": text,
         }
         conn.execute(
@@ -7417,6 +7541,51 @@ def test_episode_dense_projection_exact_cosine_and_semantic_refresh_invalidation
     assert built["ok"] is True
     assert built["coverage"]["status"] == "current"
     assert built["coverage"]["vector_count"] == 2
+    assert built["coverage"]["representation_vector_count"] == 2
+    assert built["generation_publish"]["status"] == "published"
+    metadata_conn = module.connect_existing_search_db(db_path)
+    stored_generations = module.projection_generation_from_json(
+        metadata_conn.execute(
+            "SELECT value FROM meta "
+            "WHERE key = 'generation_identities_json'"
+        ).fetchone()[0]
+    )
+    metadata_conn.close()
+    assert stored_generations["episode_dense"]["generation_id"] == (
+        module.session_memory_expected_generation_identities(aoa_root)[
+            "episode_dense"
+        ]["generation_id"]
+    )
+    stored_generations["episode_dense"] = {
+        "generation_id": "stale-dense-generation"
+    }
+    metadata_conn = module.init_search_db(
+        db_path,
+        rebuild=False,
+        create_indexes=False,
+    )
+    metadata_conn.execute(
+        "INSERT OR REPLACE INTO meta(key, value) "
+        "VALUES ('generation_identities_json', ?)",
+        (
+            json.dumps(
+                stored_generations,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        ),
+    )
+    metadata_conn.commit()
+    metadata_conn.close()
+    metadata_repair = module.episode_dense_index_sessions(
+        aoa_root=aoa_root,
+        dirty_only=True,
+    )
+    assert metadata_repair["status"] == "no_work"
+    assert metadata_repair["generation_publish"]["status"] == "published"
+    assert metadata_repair["generation_publish"][
+        "previous_generation_id"
+    ] == "stale-dense-generation"
 
     ranking = module.episode_dense_search_ranking(
         aoa_root=aoa_root,
@@ -7427,6 +7596,11 @@ def test_episode_dense_projection_exact_cosine_and_semantic_refresh_invalidation
     )
     assert ranking["ok"] is True
     assert ranking["ranking"][0]["doc_id"] == "episode_semantic:dense-session-1:task-0001"
+    assert ranking["representation_vector_count"] == 2
+    assert ranking["episode_fallback_vector_count"] == 0
+    assert ranking["ranking"][0]["representation_matches"][0][
+        "raw_ref"
+    ] == "raw:line:11"
     assert ranking["scanned_vector_bytes"] == 2 * module.EPISODE_DENSE_DEFAULT_DIMENSION * 4
 
     indexed_classifier_version = module.ROUTE_SIGNAL_CLASSIFIER_VERSION
@@ -7483,12 +7657,17 @@ def test_episode_dense_projection_exact_cosine_and_semantic_refresh_invalidation
     dense_vector_count = conn.execute(
         "SELECT COUNT(*) FROM episode_dense_vectors WHERE session_id = 'dense-session-1'"
     ).fetchone()[0]
+    representation_vector_count = conn.execute(
+        "SELECT COUNT(*) FROM episode_dense_representation_vectors "
+        "WHERE session_id = 'dense-session-1'"
+    ).fetchone()[0]
     dense_state_count = conn.execute(
         "SELECT COUNT(*) FROM episode_dense_session_state WHERE session_id = 'dense-session-1'"
     ).fetchone()[0]
     conn.close()
     assert removed == 1
     assert dense_vector_count == 0
+    assert representation_vector_count == 0
     assert dense_state_count == 0
 
 
@@ -7532,7 +7711,17 @@ def test_episode_dense_rebuild_is_semantically_deterministic_and_failed_store_pr
         "episode_id": "task-0001",
         "representations": {
             "outcomes": [
-                {"text": "dense atomic projection evidence"}
+                {
+                    "text": "dense atomic projection evidence",
+                    "refs": {
+                        "raw": "raw:line:7",
+                        "session": (
+                            "sessions/dense-atomic-session/session.json"
+                        ),
+                    },
+                    "source_lane": "assistant",
+                    "admission_basis": "assistant_observation",
+                }
             ]
         },
     }
@@ -7609,12 +7798,24 @@ def test_episode_dense_rebuild_is_semantically_deterministic_and_failed_store_pr
         ).fetchone()
         state = snapshot_conn.execute(
             "SELECT status, episode_document_count, vector_count, "
+            "representation_document_count, representation_vector_count, "
             "generation_id FROM episode_dense_session_state "
             "WHERE session_id = ?",
             (session_id,),
         ).fetchone()
+        representations = snapshot_conn.execute(
+            "SELECT representation_id, doc_id, role, raw_ref, "
+            "document_sha256, hex(vector_f32), generation_id "
+            "FROM episode_dense_representation_vectors "
+            "WHERE session_id = ? ORDER BY representation_id",
+            (session_id,),
+        ).fetchall()
         snapshot_conn.close()
-        return tuple(row) + tuple(state)
+        return (
+            tuple(row)
+            + tuple(state)
+            + tuple(tuple(item) for item in representations)
+        )
 
     first = module.episode_dense_index_sessions(
         aoa_root=aoa_root,
@@ -8932,6 +9133,178 @@ def test_episode_dense_document_keeps_several_recent_evidence_items() -> None:
     assert len(document) <= module.EPISODE_DENSE_DOCUMENT_MAX_CHARS
 
 
+def test_episode_dense_representation_documents_are_stable_bounded_and_raw_ref_backed() -> None:
+    entries = [
+        {
+            "text": f"verification evidence {index}",
+            "refs": {
+                "raw": f"raw:line:{index}",
+                "segment": f"sessions/representation/segments/{index}.json",
+                "session": "sessions/representation/session.json",
+            },
+            "source_lane": "assistant",
+            "admission_basis": "verification_observation",
+            "outcome": "success",
+        }
+        for index in range(1, 7)
+    ]
+    entries.insert(
+        0,
+        {
+            "text": "projection text without a raw ref must not be embedded",
+            "refs": {"segment": "sessions/representation/segments/0.json"},
+        },
+    )
+    episode = {"representations": {"verification": entries}}
+
+    first = module.episode_dense_representation_documents(
+        episode,
+        doc_id="episode_semantic:representation:task-0001",
+        session_id="representation",
+        episode_id="task-0001",
+    )
+    second = module.episode_dense_representation_documents(
+        copy.deepcopy(episode),
+        doc_id="episode_semantic:representation:task-0001",
+        session_id="representation",
+        episode_id="task-0001",
+    )
+
+    assert first == second
+    assert len(first) == module.EPISODE_DENSE_REPRESENTATION_PER_ROLE_LIMIT
+    assert [item["raw_ref"] for item in first] == [
+        "raw:line:3",
+        "raw:line:4",
+        "raw:line:5",
+        "raw:line:6",
+    ]
+    assert all(
+        len(item["document"])
+        <= module.EPISODE_DENSE_REPRESENTATION_TEXT_MAX_CHARS + 160
+        for item in first
+    )
+
+
+def test_episode_dense_representation_match_selection_preserves_primary_and_adds_distinct_roles() -> None:
+    candidates = [
+        {
+            "representation_id": f"rep-{index}",
+            "role": role,
+            "raw_ref": f"raw:line:{40 + index}",
+            "score": round(0.99 - index / 100, 2),
+            "rank_within_episode": index,
+        }
+        for index, role in enumerate(
+            (
+                "actions",
+                "actions",
+                "outcomes",
+                "outcomes",
+                "failures",
+                "verification",
+            ),
+            start=1,
+        )
+    ]
+
+    selected = module.episode_dense_select_representation_matches(
+        candidates
+    )
+
+    assert [item["representation_id"] for item in selected] == [
+        "rep-1",
+        "rep-2",
+        "rep-3",
+        "rep-5",
+    ]
+    assert [item["selection_basis"] for item in selected] == [
+        "primary_similarity",
+        "primary_similarity",
+        "role_diversity",
+        "role_diversity",
+    ]
+    assert [item["rank_within_episode"] for item in selected] == [
+        1,
+        2,
+        3,
+        5,
+    ]
+    assert len(selected) == (
+        module.EPISODE_DENSE_REPRESENTATION_MATCH_LIMIT
+    )
+
+
+def test_episode_dense_representation_support_hydrates_distinct_raw_refs_only() -> None:
+    raw_one = "raw:line:40"
+    raw_two = "raw:line:41"
+    episode = {
+        "representations": {
+            "actions": [
+                {
+                    "text": "ran the bounded command",
+                    "refs": {"raw": raw_one},
+                    "admission_basis": "structured_operational_action",
+                }
+            ],
+            "verification": [
+                {
+                    "text": "verified the bounded outcome",
+                    "refs": {"raw": raw_two},
+                    "admission_basis": "verification_observation",
+                }
+            ],
+        }
+    }
+    matches = [
+        {
+            "representation_id": "rep-one",
+            "role": "actions",
+            "raw_ref": raw_one,
+            "score": 0.91,
+            "rank_within_episode": 1,
+        },
+        {
+            "representation_id": "rep-one-duplicate",
+            "role": "actions",
+            "raw_ref": raw_one,
+            "score": 0.90,
+            "rank_within_episode": 2,
+        },
+        {
+            "representation_id": "rep-two",
+            "role": "verification",
+            "raw_ref": raw_two,
+            "score": 0.89,
+            "rank_within_episode": 3,
+        },
+    ]
+
+    result = module.episode_dense_hydrate_result_support(
+        {
+            "supporting_evidence": [
+                {
+                    "role": "outcomes",
+                    "text": "duplicate existing evidence",
+                    "refs": {"raw": raw_one},
+                }
+            ]
+        },
+        episode,
+        matches,
+    )
+
+    returned_raw_refs = [
+        str(item.get("refs", {}).get("raw") or "")
+        for item in result["supporting_evidence"]
+    ]
+    assert returned_raw_refs == [raw_one, raw_two]
+    assert all(
+        item["dense_representation"]["truth_status"]
+        == "dense_representation_navigation_not_claim_truth"
+        for item in result["supporting_evidence"]
+    )
+
+
 def test_episode_dense_projection_state_remains_readable_during_search_writer(tmp_path: Path) -> None:
     aoa_root = tmp_path / ".aoa"
     db_path = module.search_db_path(aoa_root)
@@ -9472,11 +9845,12 @@ def test_episode_selective_rerank_is_bounded_and_only_promotes_decisive_winner(
             for document in payload["documents"]
         )
         calls["count"] += 1
-        scores = (
-            [0.20, 0.95, 0.10]
-            if calls["count"] in {1, 3}
-            else [0.91, 0.95, 0.90]
-        )
+        if calls["count"] in {1, 3}:
+            scores = [0.20, 0.95, 0.10]
+        elif calls["count"] in {4, 5}:
+            scores = [0.002, 0.69, 0.02]
+        else:
+            scores = [0.91, 0.95, 0.90]
         ranked = sorted(range(3), key=lambda index: -scores[index])
         return {
             "ok": True,
@@ -9546,6 +9920,97 @@ def test_episode_selective_rerank_is_bounded_and_only_promotes_decisive_winner(
             "still requires source evidence"
         ),
     }
+
+    consensus_results = copy.deepcopy(results)
+    consensus_results[0].update(
+        {
+            "dense_rank": 2,
+            "sparse_rank": 1,
+            "fusion_score": 0.032522475,
+        }
+    )
+    consensus_results[1].update(
+        {
+            "dense_rank": 1,
+            "sparse_rank": 2,
+            "fusion_score": 0.032522475,
+        }
+    )
+    consensus_results[2].update(
+        {
+            "dense_rank": 3,
+            "sparse_rank": 3,
+            "fusion_score": 0.031746032,
+        }
+    )
+    consensus = module.episode_selective_local_rerank(
+        aoa_root=aoa_root,
+        query="which pre-publication review found a partial index",
+        results=consensus_results,
+        candidate_limit=24,
+    )
+    assert (
+        consensus["status"]
+        == "dense_reranker_consensus_promoted"
+    )
+    assert (
+        consensus["results"][0]["task_episode_id"]
+        == "task-0002"
+    )
+    assert consensus["promotion_min_score"] == 0.80
+    assert consensus["promotion_min_margin"] == 0.10
+    assert consensus["dense_reranker_consensus"] == {
+        "active": True,
+        "winner_doc_id": (
+            "episode_semantic:rerank-session:task-0002"
+        ),
+        "winner_dense_rank": 1,
+        "fusion_tied": True,
+        "reranker_margin_admitted": True,
+        "typed_sparse_anchor_protected": False,
+        "policy": (
+            "an unprotected exact RRF tie may be broken only when "
+            "dense rank 1 and the reranker winner independently agree "
+            "under the existing margin floor; model-only score and "
+            "claim-admission thresholds remain unchanged"
+        ),
+    }
+
+    protected_consensus_results = copy.deepcopy(
+        consensus_results
+    )
+    protected_consensus_results[0]["explain"] = {
+        "fusion": {
+            "sparse_anchor": True,
+            "sparse_anchor_reasons": [
+                "decisive_typed_sparse_evidence",
+            ],
+        },
+    }
+    protected_consensus = module.episode_selective_local_rerank(
+        aoa_root=aoa_root,
+        query="which pre-publication review found a partial index",
+        results=protected_consensus_results,
+        candidate_limit=24,
+    )
+    assert (
+        protected_consensus["status"]
+        == "ambiguous_preserved_fusion_order"
+    )
+    assert (
+        protected_consensus["results"][0]["task_episode_id"]
+        == "task-0001"
+    )
+    assert (
+        protected_consensus["dense_reranker_consensus"]["active"]
+        is False
+    )
+    assert (
+        protected_consensus["dense_reranker_consensus"][
+            "typed_sparse_anchor_protected"
+        ]
+        is True
+    )
 
 
 def test_episode_auto_rerank_trigger_does_not_confuse_kakoi_with_kak() -> None:
@@ -11028,6 +11493,72 @@ def test_causal_attribution_scope_gate_rejects_repeated_unanchored_command() -> 
     } == {"task-0012", "task-0006"}
 
 
+def test_causal_attribution_scope_gate_rejects_generic_plural_result_window() -> None:
+    query = "Что показали MCP-команды?"
+    terms = module.episode_semantic_query_terms(query)
+    profile = module.episode_causal_attribution_query_profile(
+        terms,
+        query_text=query,
+    )
+    assert profile["open_result_query"] is True
+    assert profile["plural_operation_query"] is True
+    assert profile["generic_plural_open_result_query"] is True
+    intent = module.memory_query_intent(query)
+    assert intent["primary"] == "causal_chain"
+    assert intent["claim_shape"]["kind"] == "causal"
+
+    result = {
+        "doc_id": "episode_semantic:session:task-0042",
+        "session_id": "session",
+        "task_episode_id": "task-0042",
+        "causal_attribution": {
+            "active": True,
+            "profile": profile,
+            "status": "ordered_action_result_attribution_chain",
+            "chain": {
+                "action": {
+                    "line": 201,
+                    "refs": {"raw": "raw:line:201"},
+                },
+                "result": {
+                    "line": 202,
+                    "refs": {"raw": "raw:line:202"},
+                },
+                "correlation_id": "call_one_of_several",
+            },
+        },
+        "explain": {},
+    }
+    gated_results, scope = module.episode_causal_attribution_scope_gate(
+        [result]
+    )
+
+    assert scope["status"] == "ambiguous_causal_attribution_chains"
+    assert scope["ambiguity_scope"] == "generic_plural_query_scope"
+    assert scope["qualified_chain_count"] == 1
+    attribution = gated_results[0]["causal_attribution"]
+    assert attribution["ambiguous"] is True
+    assert attribution["chain"] == {}
+    assert attribution["candidate_chains"][0]["correlation_id"] == (
+        "call_one_of_several"
+    )
+
+    exact_query = (
+        "Что показала MCP-команда с correlation "
+        "call_q82ZhpGgtOKHx3paoHS0zSBM?"
+    )
+    exact_profile = module.episode_causal_attribution_query_profile(
+        module.episode_semantic_query_terms(exact_query),
+        query_text=exact_query,
+    )
+    assert exact_profile["open_result_query"] is True
+    assert exact_profile["generic_plural_open_result_query"] is False
+    assert exact_profile["required_operation_specific_terms"]
+    assert module.memory_query_intent(exact_query)["primary"] == (
+        "exact_literal"
+    )
+
+
 def test_answer_admission_cannot_override_unresolved_causal_attribution_with_reranker() -> None:
     query = "какие сессии были подтверждены завершёнными этим поиском?"
     terms = module.episode_semantic_query_terms(query)
@@ -11725,6 +12256,7 @@ def test_episode_sparse_ranking_prefers_coherent_raw_support_over_scattered_term
 
 def test_episode_search_explicit_time_window_requires_in_window_support(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Synthetic regression derived from a manual long-episode temporal false-support case."""
     aoa_root = tmp_path / ".aoa"
@@ -11999,6 +12531,38 @@ def test_episode_search_explicit_time_window_requires_in_window_support(
         f"evidence-window {session_id} raw:line:3 "
     )
     assert result["retrieval"]["answer_admission"]["admitted"] is True
+
+    with monkeypatch.context() as truncated_scope:
+        truncated_scope.setattr(
+            module,
+            "EPISODE_EXPLICIT_TIME_SUPPORT_MAX_EVENTS",
+            1,
+        )
+        truncated_result = module.episode_semantic_search(
+            aoa_root=aoa_root,
+            query=query,
+            session=session_id,
+            time_from="2026-07-14T00:00:30Z",
+            time_to="2026-07-14T00:01:30Z",
+            mode="sparse",
+            limit=5,
+            explain=True,
+        )
+    truncated_evidence_scope = truncated_result["retrieval"][
+        "explicit_time_evidence_scope"
+    ]
+    truncated_admission = truncated_result["retrieval"]["answer_admission"]
+    assert truncated_result["result_count"] == 1
+    assert truncated_evidence_scope["status"] == "applied_truncated"
+    assert truncated_evidence_scope["truncated"] is True
+    assert truncated_evidence_scope["admission_ready"] is False
+    assert truncated_admission["admitted"] is False
+    assert truncated_admission["status"] == "explicit_time_evidence_scope_unresolved"
+    assert (
+        truncated_admission["basis"]
+        == "critical_explicit_time_scope_truncation"
+    )
+    assert truncated_admission["explicit_time_evidence_gate"]["admitted"] is False
 
     out_of_window_causal = dict(result["results"][0])
     out_of_window_causal["causal_attribution"] = {
@@ -15329,6 +15893,183 @@ def test_episode_quantitative_comparison_requires_correlated_count_result(
     )["active"] is False
 
 
+def test_quantitative_length_comparison_requires_successful_measurement_chain(
+    tmp_path: Path,
+) -> None:
+    query_text = "Какие AGENTS.md были длиннее?"
+    query = module.episode_quantitative_comparison_query(query_text)
+    intent = module.memory_query_intent(query_text)
+
+    assert query["active"] is True
+    assert query["operation"] == "line_count"
+    assert query["relation_basis"] == (
+        "line_count_comparison_requires_correlated_numeric_result"
+    )
+    assert [term["token"] for term in query["subject_terms"]] == [
+        "agents",
+        "md",
+    ]
+    assert intent["primary"] == "quantitative_comparison"
+    assert intent["claim_shape"]["kind"] == "quantitative_comparison"
+
+    raw_path = tmp_path / "rollout-length-comparison.jsonl"
+    write_jsonl(
+        raw_path,
+        [
+            {
+                "timestamp": "2026-07-17T06:23:00Z",
+                "type": "session_meta",
+                "payload": {"id": "length-session"},
+            },
+            {
+                "timestamp": "2026-07-17T06:23:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": "call_lengths",
+                    "arguments": json.dumps(
+                        {
+                            "cmd": (
+                                "wc -l /workspace/one/AGENTS.md "
+                                "/workspace/two/AGENTS.md"
+                            )
+                        }
+                    ),
+                },
+            },
+            {
+                "timestamp": "2026-07-17T06:23:02Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call_lengths",
+                    "output": (
+                        "Process exited with code 1\n"
+                        "Final output:\n"
+                        "196 /workspace/one/AGENTS.md\n"
+                        "wc: /workspace/two/AGENTS.md: No such file\n"
+                    ),
+                },
+            },
+        ],
+    )
+    candidates = [
+        {
+            "doc_id": "episode_semantic:length-session:task-0001",
+            "session_id": "length-session",
+            "task_episode_id": "task-0001",
+            "event_range": {"from_line": 1, "to_line": 3},
+            "supporting_evidence": [],
+        }
+    ]
+    hydrated, hydration = (
+        module.episode_quantitative_comparison_scoped_raw_hydration(
+            raw_path=raw_path,
+            segments=[],
+            results=candidates,
+            comparison_query=query,
+            max_raw_bytes=1024 * 1024,
+            max_lines=100,
+        )
+    )
+    qualified, gate = module.episode_quantitative_comparison_relation_gate(
+        hydrated,
+        query,
+    )
+
+    assert hydration["candidate_action_count"] == 1
+    assert hydration["rejected_action_count"] == 1
+    assert hydration["qualified_candidate_count"] == 0
+    assert qualified == []
+    assert gate["status"] == "no_qualified_quantitative_comparison"
+
+    successful_path = tmp_path / "rollout-length-comparison-success.jsonl"
+    write_jsonl(
+        successful_path,
+        [
+            {
+                "timestamp": "2026-07-17T06:23:00Z",
+                "type": "session_meta",
+                "payload": {"id": "length-session"},
+            },
+            {
+                "timestamp": "2026-07-17T06:23:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": "call_lengths",
+                    "arguments": json.dumps(
+                        {
+                            "cmd": (
+                                "wc -l /workspace/one/AGENTS.md "
+                                "/workspace/two/AGENTS.md"
+                            )
+                        }
+                    ),
+                },
+            },
+            {
+                "timestamp": "2026-07-17T06:23:02Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call_lengths",
+                    "output": (
+                        "Process exited with code 0\n"
+                        "Final output:\n"
+                        "196 /workspace/one/AGENTS.md\n"
+                        "246 /workspace/two/AGENTS.md\n"
+                        "442 total\n"
+                    ),
+                },
+            },
+        ],
+    )
+    successful_hydrated, successful_hydration = (
+        module.episode_quantitative_comparison_scoped_raw_hydration(
+            raw_path=successful_path,
+            segments=[],
+            results=candidates,
+            comparison_query=query,
+            max_raw_bytes=1024 * 1024,
+            max_lines=100,
+        )
+    )
+    successful_qualified, successful_gate = (
+        module.episode_quantitative_comparison_relation_gate(
+            successful_hydrated,
+            query,
+        )
+    )
+    assert successful_hydration["qualified_candidate_count"] == 1
+    assert successful_gate["status"] == (
+        "qualified_quantitative_comparison_available"
+    )
+    successful_evidence = successful_qualified[0][
+        "quantitative_comparison"
+    ]
+    assert successful_evidence["numeric_row_count"] == 2
+    assert [
+        row["label"]
+        for row in successful_evidence["numeric_rows"]
+    ] == [
+        "/workspace/one/AGENTS.md",
+        "/workspace/two/AGENTS.md",
+    ]
+    successful_admission = module.episode_answer_admission(
+        successful_qualified[0],
+        query_term_count=3,
+        quantitative_comparison_gate=successful_gate,
+    )
+    assert successful_admission["admitted"] is True
+    assert successful_admission["basis"] == (
+        "typed_quantitative_comparison_evidence"
+    )
+    assert successful_admission["policy_version"] == 10
+
+
 def test_episode_search_quantitative_comparison_is_wired_to_raw_relation_gate(
     tmp_path: Path,
 ) -> None:
@@ -17972,17 +18713,23 @@ def test_episode_claim_shape_override_blocks_negative_and_current_projection_cla
     )
 
 
-def test_memory_query_intent_keeps_short_ru_paraphrase_and_completion_question_out_of_closeout_literal_lane() -> None:
-    semantic_queries = [
-        "искали поля состояния и завершённости сессии через rg",
-        "какие сессии были подтверждены завершёнными этим поиском?",
-    ]
+def test_memory_query_intent_keeps_short_ru_queries_out_of_closeout_literal_lane() -> None:
+    expected_intents = {
+        "искали поля состояния и завершённости сессии через rg": (
+            "semantic_episode"
+        ),
+        "какие сессии были подтверждены завершёнными этим поиском?": (
+            "causal_chain"
+        ),
+    }
 
-    for query in semantic_queries:
+    for query, expected_primary in expected_intents.items():
         intent = module.memory_query_intent(query)
-        assert intent["primary"] == "semantic_episode", (query, intent)
+        assert intent["primary"] == expected_primary, (query, intent)
         assert "exact_literal" not in intent["secondary"]
         assert intent["literal_shape"]["inferred_agent_event"] == ""
+        if expected_primary == "causal_chain":
+            assert intent["claim_shape"]["kind"] == "causal"
 
     explicit_closeout = module.memory_query_intent("финальный ответ ассистента")
     assert explicit_closeout["primary"] == "exact_literal"
@@ -27722,7 +28469,11 @@ def test_skill_usage_chain_rejects_parallel_foreign_correlation(tmp_path: Path) 
         aoa_root=aoa_root,
     )
     record = module.resolve_session_record(aoa_root, fixture["session_id"])
-    indexed = module.search_index_sessions(aoa_root=aoa_root, target="all")
+    indexed = module.search_index_sessions(
+        aoa_root=aoa_root,
+        target="all",
+        include_entity_registry=False,
+    )
     assert indexed["ok"] is True
 
     expected = fixture["expected"]
@@ -30797,6 +31548,236 @@ def test_entity_usage_lifecycle_requires_correlation_owned_terminal_evidence() -
         is True
     )
     assert lifecycle["answer_admission"]["umbrella_used_claim_admitted"] is False
+
+
+def test_hook_command_admission_requires_exact_session_memory_subcommand() -> None:
+    """Regression derived from UAP-HOOK-FAILED-001 raw refs 2944/2948."""
+    exact = (
+        "python3 /workspace/AbyssOS/.aoa/scripts/aoa_session_memory.py "
+        "codex-hooks-status --workspace-root /workspace/AbyssOS"
+    )
+    assert module.entity_usage_hook_command_proves_invocation(
+        exact,
+        anchor="codex-hooks-status",
+    )
+    assert not module.entity_usage_hook_command_proves_invocation(
+        "python3 scripts/aoa_session_memory.py doctor "
+        "--note codex-hooks-status",
+        anchor="codex-hooks-status",
+    )
+    assert not module.entity_usage_hook_command_proves_invocation(
+        "apply_patch docs/codex-hooks-status.md",
+        anchor="codex-hooks-status",
+    )
+
+
+def test_exact_source_hit_infers_task_episode_and_bounds_scan_generation() -> None:
+    scan = {
+        "session_id": "session-1",
+        "session_label": "session-label",
+        "session_manifest": "/archive/session.manifest.json",
+        "_session_dir": Path("/archive/session-label"),
+        "_record": {"date": "2026-07-29"},
+        "_task_episode_ranges": [
+            ("task-0043", 13796, 13853),
+        ],
+        "generation_identities": {
+            "expected": {"segment_index": {"generation_id": "gen-1"}},
+            "observed": {
+                "session_index": {"generation_id": "session-gen"},
+                "segment_indexes": {
+                    "065": {"generation_id": "gen-1"},
+                    "066": {"generation_id": "gen-1"},
+                },
+            },
+            "compatible": True,
+        },
+        "status": "complete",
+        "source_fingerprint": "raw-sha",
+    }
+    entry = {
+        "event": {
+            "event_id": "013803",
+            "type": "FILE_READ",
+            "raw_ref": "raw:line:13803",
+            "correlation_id": "call-skill-read",
+            "facets": {},
+        },
+        "segment": {
+            "segment_id": "066",
+            "markdown": "segments/066.md",
+        },
+        "segment_index": {"segment_id": "066"},
+        "index_path": Path("/archive/session-label/segments/066.index.json"),
+        "raw_block_ref": "raw/blocks/066.raw.jsonl",
+    }
+
+    hit = module.session_query_source_hit(
+        scan,
+        entry,
+        source="session_scoped_query_time_exact_correlation_probe",
+    )
+    summary = module.session_query_source_scan_summary(scan)
+
+    assert hit["task_episode_id"] == "task-0043"
+    assert hit["task_episode_ref"] == (
+        "task_episode:session-1:task-0043"
+    )
+    assert hit["refs"]["task_episode"] == (
+        "task_episode:session-1:task-0043"
+    )
+    assert summary["generation_identities"]["observed"] == {
+        "session_index": {"generation_id": "session-gen"},
+        "segment_index_generation_ids": ["gen-1"],
+        "segment_index_count": 2,
+    }
+    assert "segment_indexes" not in summary[
+        "generation_identities"
+    ]["observed"]
+
+
+def test_usage_chain_exact_correlation_selects_failed_hook_cli_instance(
+    tmp_path: Path,
+) -> None:
+    """Real-transcript invariant derived from the sealed failed-hook specimen."""
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-exact-hook-correlation.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-07-29T00:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "exact-hook-correlation",
+                    "cwd": str(workspace),
+                },
+            },
+            {
+                "timestamp": "2026-07-29T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": "call-hook-status-failed",
+                    "arguments": json.dumps(
+                        {
+                            "cmd": (
+                                "python3 scripts/aoa_session_memory.py "
+                                "codex-hooks-status --json"
+                            )
+                        }
+                    ),
+                },
+            },
+            {
+                "timestamp": "2026-07-29T00:00:02Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call-hook-status-failed",
+                    "output": (
+                        "Process exited with code 2\n"
+                        "error: unrecognized arguments: --json\n"
+                    ),
+                },
+            },
+            {
+                "timestamp": "2026-07-29T00:00:03Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "name": "apply_patch",
+                    "call_id": "call-unrelated-hook-patch",
+                    "input": (
+                        "*** Begin Patch\n"
+                        "*** Update File: docs/hooks.md\n"
+                        "@@\n"
+                        "+codex-hooks-status is documented here\n"
+                        "*** End Patch\n"
+                    ),
+                },
+            },
+            {
+                "timestamp": "2026-07-29T00:00:04Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call-unrelated-hook-patch",
+                    "output": "Done!",
+                },
+            },
+        ],
+    )
+    receipt = module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "exact-hook-correlation",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    assert receipt["ok"] is True
+
+    chain = module.entity_usage_chain(
+        aoa_root=aoa_root,
+        anchor="codex-hooks-status",
+        kind="hook",
+        session="exact-hook-correlation",
+        correlation_id="call-hook-status-failed",
+        limit=8,
+        consequence_window=8,
+    )
+
+    assert chain["ok"] is True
+    assert chain["selection_scope"] == {
+        "mode": "exact_session_correlation",
+        "session": "exact-hook-correlation",
+        "correlation_id": "call-hook-status-failed",
+        "source_probe_status": "resolved",
+        "candidate_count_exhaustive": True,
+        "absence_claim_allowed": False,
+    }
+    assert chain["counts"]["chain_count"] == 1
+    usage = chain["usage_chain"]["chains"][0]["usage_event"]
+    assert usage["correlation_id"] == "call-hook-status-failed"
+    assert usage["hook_usage_admission"] == (
+        "structured_hook_command_invocation_proven"
+    )
+    assert usage["refs"]["raw"] == "raw:line:2"
+    result = chain["usage_chain"]["chains"][0][
+        "result_or_consequence_events"
+    ][0]
+    assert result["correlation_id"] == "call-hook-status-failed"
+    assert result["refs"]["raw"] == "raw:line:3"
+    states = chain["usage_lifecycle"]["states"]
+    assert states["invoked"]["present"] is True
+    assert states["failed"]["present"] is True
+    assert states["completed"]["present"] is False
+    assert states["verified"]["present"] is False
+    assert states["consequence-producing"]["present"] is False
+    assert all(
+        event.get("correlation_id") != "call-unrelated-hook-patch"
+        for event in [
+            chain_item["usage_event"]
+            for chain_item in chain["usage_chain"]["chains"]
+        ]
+    )
+
+    missing_session = module.entity_usage_chain(
+        aoa_root=aoa_root,
+        anchor="codex-hooks-status",
+        kind="hook",
+        correlation_id="call-hook-status-failed",
+    )
+    assert missing_session["ok"] is False
+    assert missing_session["diagnostics"] == [
+        "exact correlation selection requires an explicit session"
+    ]
 
 
 def test_entity_usage_lifecycle_does_not_promote_selection_to_load_or_invocation() -> None:
@@ -38989,6 +39970,116 @@ def test_session_stage_cleanup_preserves_last_good_and_allows_reindex(
     ] == 0
 
 
+def test_session_projection_semantic_digest_matches_materialized_reference_without_bulk_normalizer(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    projection_dir = tmp_path / "session-projection"
+    raw_dir = projection_dir / "raw"
+    segments_dir = projection_dir / "segments"
+    raw_dir.mkdir(parents=True)
+    segments_dir.mkdir(parents=True)
+    payloads = {
+        "manifest": {
+            "session_id": "streamed-digest",
+            "updated_at": "volatile",
+            "segments": ["001", "002"],
+        },
+        "session_index": {
+            "session_id": "streamed-digest",
+            "generated_at": "volatile",
+            "task_episodes": [{"episode_id": "episode-1"}],
+        },
+        "raw_block_index": {
+            "blocks": [{"block_id": "block-1"}],
+            "generated_at": "volatile",
+        },
+        "raw_source": {"source_path": "/source/session.jsonl"},
+        "raw_capture_state": {
+            "status": "indexed_with_projection",
+            "captured_at": "volatile",
+        },
+        "segment_indexes": {
+            "001.index.json": {
+                "segment_id": "001",
+                "updated_at": "volatile",
+                "events": [1, 2],
+            },
+            "002.index.json": {
+                "segment_id": "002",
+                "events": [3],
+            },
+        },
+    }
+    write_json(
+        projection_dir / "session.manifest.json",
+        payloads["manifest"],
+    )
+    write_json(
+        projection_dir / module.SESSION_INDEX_JSON,
+        payloads["session_index"],
+    )
+    write_json(
+        raw_dir / module.RAW_BLOCK_INDEX_JSON,
+        payloads["raw_block_index"],
+    )
+    write_json(
+        raw_dir / module.RAW_SOURCE_JSON,
+        payloads["raw_source"],
+    )
+    write_json(
+        raw_dir / module.RAW_CAPTURE_STATE_JSON,
+        payloads["raw_capture_state"],
+    )
+    for name, payload in payloads["segment_indexes"].items():
+        write_json(segments_dir / name, payload)
+    (segments_dir / "001.md").write_text(
+        "first segment\n",
+        encoding="utf-8",
+    )
+    (segments_dir / "002.md").write_text(
+        "second segment\n",
+        encoding="utf-8",
+    )
+    materialized = module.session_projection_semantic_digest_value(
+        {
+            "manifest": payloads["manifest"],
+            "session_index": payloads["session_index"],
+            "raw_block_index": payloads["raw_block_index"],
+            "raw_source": payloads["raw_source"],
+            "raw_capture_state": payloads["raw_capture_state"],
+            "segment_indexes": payloads["segment_indexes"],
+            "segment_markdown_sha256": {
+                name: module.sha256_file(segments_dir / name)
+                for name in ("001.md", "002.md")
+            },
+        }
+    )
+    expected_sha256 = hashlib.sha256(
+        json.dumps(
+            materialized,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+    monkeypatch.setattr(
+        module,
+        "session_projection_semantic_digest_value",
+        lambda _value: (_ for _ in ()).throw(
+            AssertionError("bulk semantic normalization is forbidden")
+        ),
+    )
+    actual = module.session_projection_semantic_digest(
+        projection_dir
+    )
+
+    assert actual["sha256"] == expected_sha256
+    assert actual["segment_index_count"] == 2
+    assert actual["segment_markdown_count"] == 2
+
+
 def test_maintenance_cleanup_clears_stale_active_job_and_orphaned_graph_tmp(tmp_path: Path, monkeypatch: Any) -> None:
     aoa_root = tmp_path / ".aoa"
     graph_root = aoa_root / module.GRAPH_ROOT
@@ -42717,6 +43808,120 @@ def test_graph_projection_links_only_same_correlation_agent_activity_status(tmp_
     )
     assert status_node["event_type"] == "CONTEXT_STATE"
     assert status_node["refs"]["raw"] == status_event["raw_ref"]
+
+
+def test_graph_projection_keeps_ambiguous_work_context_as_navigation_candidate(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    transcript = (
+        tmp_path
+        / "rollout-2026-07-29T00-00-00-ambiguous-work-context.jsonl"
+    )
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-07-29T00:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "ambiguous-work-context",
+                    "cwd": str(repo),
+                    "model": "gpt-5",
+                },
+            },
+            {
+                "timestamp": "2026-07-29T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Inspect the current work context.",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "ambiguous-work-context",
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    record = module.resolve_session_record(
+        aoa_root,
+        "ambiguous-work-context",
+    )
+    session_dir = Path(record["path"])
+    ambiguous_work_context = {
+        "schema_version": module.WORK_CONTEXT_SCHEMA_VERSION,
+        "status": "ambiguous",
+        "work_root": str(repo),
+        "work_name": "aoa-session-memory",
+        "work_family": "aoa-session-memory",
+        "confidence": "low",
+        "score": 40,
+        "evidence": [],
+        "alternates": [
+            {
+                "work_root": str(workspace),
+                "work_name": "AbyssOS",
+                "work_family": "abyssos-workspace",
+                "score": 38,
+            }
+        ],
+    }
+    for path in (
+        session_dir / "session.manifest.json",
+        session_dir / "session.index.json",
+    ):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["work_context"] = ambiguous_work_context
+        path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    contributions, diagnostics = module.graph_contributions_for_record(
+        record
+    )
+
+    assert diagnostics == []
+    session_contribution = next(
+        contribution
+        for contribution in contributions
+        if contribution["source"]["source_type"] == "session"
+    )
+    edge = next(
+        edge
+        for edge in session_contribution["edges"]
+        if edge["type"] == "has_work_context"
+    )
+    node = next(
+        node
+        for node in session_contribution["nodes"]
+        if node["id"] == edge["target"]
+    )
+    assert edge["source_projection_status"] == "ambiguous"
+    assert edge["source_projection_confidence"] == "low"
+    assert edge["source_projection_candidate"] is True
+    assert edge["relation_state"] == "inferred_candidate"
+    assert edge["navigation_admissible"] is True
+    assert edge["answer_admissible"] is False
+    assert node["status"] == "ambiguous"
+    assert node["source_projection_candidate"] is True
 
 
 def test_graph_relation_contract_keeps_route_signals_out_of_usage_and_consequence() -> None:
@@ -63744,6 +64949,580 @@ def test_index_maintenance_plans_declared_search_schema_transition_incrementally
     assert search_action["selection_count"] == 1
 
 
+def test_atlas_clean_rebuild_policy_separates_structural_drift_from_session_drift() -> None:
+    assert module.atlas_clean_rebuild_reasons_for_state(
+        {
+            "status": "stale",
+            "reasons": [
+                "atlas_generation_identity_changed",
+                "session_projection_dirty",
+            ],
+        }
+    ) == ["atlas_generation_identity_changed"]
+    assert module.atlas_clean_rebuild_reasons_for_state(
+        {
+            "status": "stale",
+            "reasons": [
+                "atlas_publish_epoch_incomplete",
+                "atlas_axis_publish_epoch_mismatch",
+            ],
+        }
+    ) == [
+        "atlas_axis_publish_epoch_mismatch",
+        "atlas_publish_epoch_incomplete",
+    ]
+    assert module.atlas_clean_rebuild_reasons_for_state(
+        {
+            "status": "stale",
+            "reasons": ["session_projection_dirty"],
+        }
+    ) == []
+
+
+def test_index_maintenance_defers_incompatible_atlas_to_deep_and_deep_plans_clean(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "atlas-incompatible-generation.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-07-18T02:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "atlas-incompatible-generation",
+                    "cwd": str(workspace),
+                },
+            },
+            {
+                "timestamp": "2026-07-18T02:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Find the Atlas migration evidence.",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "atlas-incompatible-generation",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    assert module.search_index_sessions(
+        aoa_root=aoa_root,
+        target="all",
+    )["ok"] is True
+    assert module.build_agent_atlas(
+        aoa_root=aoa_root,
+        target="all",
+        clean=True,
+    )["ok"] is True
+    root_path = aoa_root / "maps" / "index.json"
+    root_payload = module.read_json(root_path, {})
+    root_payload["generation_identity"]["generation_id"] = (
+        "legacy-incompatible-atlas-generation"
+    )
+    module.write_json(root_path, root_payload)
+    records = module.chronological_session_records(aoa_root)
+
+    producer_calls: list[dict[str, Any]] = []
+
+    def forbidden_incremental_atlas(**kwargs: Any) -> dict[str, Any]:
+        producer_calls.append(kwargs)
+        raise AssertionError(
+            "bounded catchup must defer incompatible Atlas before producer invocation"
+        )
+
+    monkeypatch.setattr(
+        module,
+        "build_agent_atlas",
+        forbidden_incremental_atlas,
+    )
+    catchup = module.maintain_indexes(
+        aoa_root=aoa_root,
+        target="all",
+        apply=True,
+        repair_token_accounting=False,
+        repair_graph=False,
+        selected_records=records,
+        selection_scope={
+            "profile": "catchup",
+            "global_scope_complete": False,
+        },
+        budget_seconds=30.0,
+    )
+    catchup_atlas = next(
+        action
+        for action in catchup["actions"]
+        if action["id"] == "rebuild_agent_atlas"
+    )
+    assert producer_calls == []
+    assert catchup_atlas["status"] == "deferred"
+    assert catchup_atlas["action_kind"] == "full_rebuild"
+    assert catchup_atlas["result"]["status"] == (
+        "deferred_clean_rebuild_to_deep"
+    )
+    assert catchup_atlas["result"]["processed_count"] == 0
+    assert catchup_atlas["result"]["remaining_count"] == 1
+    assert catchup_atlas["command"][2:5] == [
+        "auto-maintenance",
+        "deep",
+        "all",
+    ]
+    assert "--no-clean" not in catchup_atlas["command"]
+    assert "<workspace>" not in catchup_atlas["command"]
+    assert str(workspace.resolve()) in catchup_atlas["command"]
+    assert catchup["atlas_rebuild_deferred_to_deep"] is True
+    assert catchup["atlas_repair_remaining_count"] == 1
+
+    deep = module.maintain_indexes(
+        aoa_root=aoa_root,
+        target="all",
+        apply=False,
+        repair_token_accounting=False,
+        repair_graph=False,
+        selected_records=records,
+        selection_scope={
+            "profile": "deep",
+            "global_scope_complete": False,
+        },
+        budget_seconds=30.0,
+    )
+    deep_atlas = next(
+        action
+        for action in deep["actions"]
+        if action["id"] == "rebuild_agent_atlas"
+    )
+    assert deep["atlas_clean_rebuild_required"] is True
+    assert deep["atlas_rebuild_deferred_to_deep"] is False
+    assert deep_atlas["status"] == "planned"
+    assert deep_atlas["action_kind"] == "full_rebuild"
+    assert deep_atlas["command"][2:5] == ["atlas", "build", "all"]
+    assert "--no-clean" not in deep_atlas["command"]
+
+
+def test_projection_source_set_retirement_fails_closed_and_deep_rebuilds_without_raw_loss(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    sessions = (
+        (
+            "lifecycle-keep",
+            "KEEP-LIFECYCLE-7A91",
+            "2026-07-18T03:00:00Z",
+        ),
+        (
+            "lifecycle-retire",
+            "RETIRE-LIFECYCLE-9F3B",
+            "2026-07-18T04:00:00Z",
+        ),
+    )
+    for session_id, marker, timestamp in sessions:
+        transcript = tmp_path / f"{session_id}.jsonl"
+        write_jsonl(
+            transcript,
+            [
+                {
+                    "timestamp": timestamp,
+                    "type": "session_meta",
+                    "payload": {
+                        "id": session_id,
+                        "cwd": str(repo),
+                    },
+                },
+                {
+                    "timestamp": timestamp,
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": f"Investigate {marker} and preserve evidence.",
+                            }
+                        ],
+                    },
+                },
+                {
+                    "timestamp": timestamp,
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": f"Verified {marker} in the owner source.",
+                            }
+                        ],
+                    },
+                },
+            ],
+        )
+        module.handle_hook_event(
+            "Stop",
+            {
+                "session_id": session_id,
+                "transcript_path": str(transcript),
+                "cwd": str(repo),
+                "hook_event_name": "Stop",
+            },
+            workspace_root=workspace,
+            aoa_root=aoa_root,
+        )
+
+    indexed = module.search_index_sessions(aoa_root=aoa_root, target="all")
+    assert indexed["ok"] is True
+    assert indexed["source_scope_complete"] is True
+    assert indexed["source_set_identity"]["session_count"] == 2
+    assert module.build_agent_atlas(
+        aoa_root=aoa_root,
+        target="all",
+        clean=True,
+    )["ok"] is True
+    assert module.build_session_graph(
+        aoa_root=aoa_root,
+        target="all",
+        write=True,
+        include_rows=False,
+    )["ok"] is True
+    sharded = module.materialize_search_shards(
+        aoa_root=aoa_root,
+        target="all",
+        rebuild_shards=True,
+        dirty_only=False,
+        structured_only=True,
+    )
+    assert sharded["ok"] is True
+
+    registry_path = aoa_root / module.REGISTRY_NAME
+    registry = module.read_json(registry_path, {})
+    retired_record = next(
+        item
+        for item in registry["sessions"]
+        if item.get("session_id") == "lifecycle-retire"
+    )
+    retired_raw = (
+        Path(str(retired_record["path"]))
+        / "raw"
+        / "session.raw.jsonl"
+    )
+    raw_sha_before = module.sha256_file(retired_raw)
+    registry["sessions"] = [
+        item
+        for item in registry["sessions"]
+        if item.get("session_id") != "lifecycle-retire"
+    ]
+    module.write_json(registry_path, registry)
+    current_records = module.chronological_session_records(aoa_root)
+    latest_source_mtime, _ = module.latest_index_source_mtime(
+        aoa_root,
+        current_records,
+    )
+
+    bounded_state = module.sqlite_search_index_state(
+        aoa_root,
+        latest_source_mtime,
+        current_records,
+        source_scope_complete=False,
+    )
+    assert bounded_state["status"] == "stale"
+    assert bounded_state["orphaned_session_ids"] == [
+        "lifecycle-retire"
+    ]
+    assert module.SEARCH_SOURCE_SET_REMOVED_REASON in bounded_state["reasons"]
+    atlas_state = module.atlas_index_state(
+        aoa_root,
+        latest_source_mtime,
+        current_records,
+        source_scope_complete=False,
+    )
+    assert atlas_state["orphaned_session_ids"] == ["lifecycle-retire"]
+    assert "atlas_source_set_removed" in atlas_state["reasons"]
+
+    withheld = module.search_sessions(
+        aoa_root=aoa_root,
+        query="RETIRE-LIFECYCLE-9F3B",
+        limit=5,
+    )
+    assert withheld["result_count"] == 0
+    assert withheld["answer_admission"]["admitted"] is False
+    assert withheld["search_projection"]["source_set_state"][
+        "removed_session_ids"
+    ] == ["lifecycle-retire"]
+    episode_withheld = module.episode_semantic_search(
+        aoa_root=aoa_root,
+        query="RETIRE-LIFECYCLE-9F3B",
+        limit=5,
+    )
+    assert episode_withheld["result_count"] == 0
+    assert episode_withheld["answer_admission"]["admitted"] is False
+
+    original_search_index_sessions = module.search_index_sessions
+    producer_calls: list[dict[str, Any]] = []
+
+    def forbidden_bounded_replacement(**kwargs: Any) -> dict[str, Any]:
+        producer_calls.append(kwargs)
+        raise AssertionError(
+            "bounded catchup must defer source-set replacement"
+        )
+
+    monkeypatch.setattr(
+        module,
+        "search_index_sessions",
+        forbidden_bounded_replacement,
+    )
+    catchup = module.maintain_indexes(
+        aoa_root=aoa_root,
+        target="all",
+        apply=True,
+        repair_token_accounting=False,
+        repair_graph=False,
+        selected_records=current_records,
+        selection_scope={
+            "profile": "catchup",
+            "global_scope_complete": False,
+        },
+        budget_seconds=30.0,
+    )
+    catchup_search = next(
+        action
+        for action in catchup["actions"]
+        if action["id"] == "rebuild_search_index"
+    )
+    assert producer_calls == []
+    assert catchup_search["status"] == "deferred"
+    assert catchup_search["result"]["status"] == (
+        "deferred_clean_rebuild_to_deep"
+    )
+    assert catchup_search["result"][
+        "source_set_tombstone_session_ids"
+    ] == ["lifecycle-retire"]
+    assert catchup_search["command"][2:5] == [
+        "auto-maintenance",
+        "deep",
+        "all",
+    ]
+    monkeypatch.setattr(
+        module,
+        "search_index_sessions",
+        original_search_index_sessions,
+    )
+
+    deep = module.maintain_indexes(
+        aoa_root=aoa_root,
+        target="all",
+        apply=True,
+        repair_token_accounting=False,
+        repair_graph=True,
+        selected_records=current_records,
+        selection_scope={
+            "profile": "deep",
+            "global_scope_complete": False,
+        },
+        graph_batch_limit=20,
+        budget_seconds=60.0,
+    )
+    deep_search = next(
+        action
+        for action in deep["actions"]
+        if action["id"] == "rebuild_search_index"
+    )
+    deep_atlas = next(
+        action
+        for action in deep["actions"]
+        if action["id"] == "rebuild_agent_atlas"
+    )
+    deep_graph = next(
+        action
+        for action in deep["actions"]
+        if action["id"] == "graph_maintenance"
+    )
+    deep_shards = next(
+        action
+        for action in deep["actions"]
+        if action["id"] == "refresh_search_shards"
+    )
+    assert deep_search["status"] == "applied"
+    assert deep_search["result"]["source_set_tombstone_count"] == 1
+    assert deep_search["result"]["source_set_tombstones"][0][
+        "session_id"
+    ] == "lifecycle-retire"
+    assert deep_atlas["status"] == "applied"
+    assert deep_atlas["action_kind"] == "full_rebuild"
+    assert deep_graph["status"] == "applied"
+    assert deep_shards["status"] == "applied"
+    assert module.sha256_file(retired_raw) == raw_sha_before
+
+    conn = module.connect_existing_search_db(
+        module.search_db_path(aoa_root)
+    )
+    for table in (
+        "session_index_state",
+        "exact_literal_session_state",
+        "episode_semantic_session_state",
+    ):
+        assert conn.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE session_id = ?",
+            ("lifecycle-retire",),
+        ).fetchone()[0] == 0
+    first_digest = module.search_projection_semantic_digest(conn)
+    conn.close()
+    graph_conn = sqlite3.connect(str(aoa_root / "graph" / "graph.sqlite3"))
+    assert graph_conn.execute(
+        "SELECT COUNT(*) FROM graph_sources WHERE session_id = ?",
+        ("lifecycle-retire",),
+    ).fetchone()[0] == 0
+    graph_conn.close()
+    catalog = module.build_search_catalog(aoa_root, write=False)
+    assert "lifecycle-retire" not in {
+        str(item.get("session_id") or "")
+        for item in catalog["sessions"]
+    }
+    assert catalog["retired_projection_session_count"] == 0
+
+    repeated = module.search_index_sessions(
+        aoa_root=aoa_root,
+        target="all",
+    )
+    assert repeated["ok"] is True
+    assert repeated["source_set_tombstone_count"] == 0
+    conn = module.connect_existing_search_db(
+        module.search_db_path(aoa_root)
+    )
+    second_digest = module.search_projection_semantic_digest(conn)
+    conn.close()
+    assert second_digest == first_digest
+
+    restored_registry = module.read_json(registry_path, {})
+    restored_registry["sessions"].append(retired_record)
+    module.write_json(registry_path, restored_registry)
+    added_state = module.search_source_set_change_state(aoa_root=aoa_root)
+    assert added_state["status"] == "stale_readable_added_sources"
+    assert added_state["added_session_ids"] == ["lifecycle-retire"]
+    corrected = module.search_index_sessions(
+        aoa_root=aoa_root,
+        target="all",
+        rebuild=False,
+        selected_records=[retired_record],
+    )
+    assert corrected["ok"] is True
+    assert corrected["source_set_identity"]["session_count"] == 2
+    restored = module.search_sessions(
+        aoa_root=aoa_root,
+        query="RETIRE-LIFECYCLE-9F3B",
+        limit=5,
+    )
+    assert any(
+        item.get("session_id") == "lifecycle-retire"
+        for item in restored["results"]
+    )
+    assert module.sha256_file(retired_raw) == raw_sha_before
+
+
+def test_search_source_set_can_rebuild_to_authoritative_empty_registry(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "last-source.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-07-18T05:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "last-source",
+                    "cwd": str(repo),
+                },
+            },
+            {
+                "timestamp": "2026-07-18T05:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Find LAST-SOURCE-31D7.",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "last-source",
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    indexed = module.search_index_sessions(aoa_root=aoa_root, target="all")
+    assert indexed["ok"] is True
+    record = module.registry_sessions(aoa_root)[0]
+    raw_path = Path(str(record["path"])) / "raw" / "session.raw.jsonl"
+    raw_sha_before = module.sha256_file(raw_path)
+    registry_path = aoa_root / module.REGISTRY_NAME
+    registry = module.read_json(registry_path, {})
+    registry["sessions"] = []
+    module.write_json(registry_path, registry)
+
+    rebuilt = module.search_index_sessions(
+        aoa_root=aoa_root,
+        target="all",
+        include_entity_registry=False,
+    )
+
+    assert rebuilt["ok"] is True
+    assert rebuilt["selected_count"] == 0
+    assert rebuilt["document_count"] == 0
+    assert rebuilt["source_set_identity"]["session_count"] == 0
+    assert rebuilt["source_set_tombstone_count"] == 1
+    assert rebuilt["source_set_tombstones"][0]["session_id"] == "last-source"
+    assert rebuilt["search_catalog"]["status"] == "current"
+    source_set_state = module.search_source_set_change_state(
+        aoa_root=aoa_root
+    )
+    assert source_set_state["status"] == "current"
+    assert source_set_state["current"]["session_count"] == 0
+    assert module.search_sessions(
+        aoa_root=aoa_root,
+        query="LAST-SOURCE-31D7",
+        limit=5,
+    )["result_count"] == 0
+    assert module.sha256_file(raw_path) == raw_sha_before
+
+
 def test_search_schema_transition_unknown_or_structural_drift_still_requires_deep() -> None:
     unknown_transition = {
         "search_index": {
@@ -76005,7 +77784,213 @@ def test_search_provider_status_keeps_host_backends_optional(tmp_path: Path) -> 
     assert status["freshness_mode"] == "hot"
     assert status["providers"]["portable_sqlite"]["freshness"]["source_scan"] is False
     assert status["providers"]["abyss_machine_nervous"]["status"] == "disabled_by_default"
+    served = status["providers"]["abyss_machine_nervous"]["served_request_health"]
+    assert served["status"] == "unobserved"
+    assert served["observed"] is False
+    assert served["ok"] is None
     assert "Host providers are optional accelerators" in status["authority_law"]
+
+
+@pytest.mark.parametrize(
+    ("preflight", "expected_status", "expected_provider_ok"),
+    [
+        (
+            {
+                "ok": True,
+                "status": "available",
+                "provider_status": "embedded",
+                "model": module.EPISODE_DENSE_DEFAULT_MODEL,
+                "dimension": module.EPISODE_DENSE_DEFAULT_DIMENSION,
+                "elapsed_ms": 7,
+                "diagnostics": [],
+            },
+            "served",
+            True,
+        ),
+        (
+            {
+                "ok": False,
+                "status": "provider_unavailable",
+                "provider_status": "error",
+                "model": "",
+                "dimension": 0,
+                "elapsed_ms": 8,
+                "diagnostics": [
+                    "private response body "
+                    + "/"
+                    + "srv/private/provider payload"
+                ],
+            },
+            "failed",
+            False,
+        ),
+        (
+            {
+                "ok": False,
+                "status": "provider_contract_drift",
+                "provider_status": "embedded",
+                "model": "wrong-model",
+                "expected_model": module.EPISODE_DENSE_DEFAULT_MODEL,
+                "dimension": 3,
+                "expected_dimension": module.EPISODE_DENSE_DEFAULT_DIMENSION,
+                "elapsed_ms": 9,
+                "diagnostics": [
+                    "private response body "
+                    + "/"
+                    + "srv/private/provider payload"
+                ],
+            },
+            "contract_drift",
+            False,
+        ),
+    ],
+)
+def test_host_provider_status_separates_real_served_request_health_from_availability(
+    monkeypatch: Any,
+    preflight: dict[str, Any],
+    expected_status: str,
+    expected_provider_ok: bool,
+) -> None:
+    config = module.default_search_provider_config()
+
+    def fake_command(command: list[str], **_kwargs: Any) -> dict[str, Any]:
+        if "semantic-status" in command:
+            return {
+                "ok": True,
+                "status": "ok",
+                "command": command,
+                "payload": {
+                    "schema": "semantic-status-v1",
+                    "generated_at": "2026-08-01T03:00:00Z",
+                    "ok": True,
+                    "embedding": {
+                        "status": "ready",
+                        "model_exists": True,
+                        "dimension": module.EPISODE_DENSE_DEFAULT_DIMENSION,
+                    },
+                    "counts": {"vectors": 1},
+                    "freshness": {"stale": False},
+                },
+            }
+        return {
+            "ok": True,
+            "status": "ok",
+            "command": command,
+            "payload": {
+                "schema": "gate-v1",
+                "generated_at": "2026-08-01T03:00:00Z",
+                "summary": {"fails": 0, "warnings": 0, "checks": 1},
+            },
+        }
+
+    monkeypatch.setattr(module, "run_json_command", fake_command)
+    monkeypatch.setattr(
+        module,
+        "run_json_url",
+        lambda url, **_kwargs: {
+            "ok": True,
+            "status": "ok",
+            "url": url,
+            "payload": {"ok": True, "loaded": True},
+        },
+    )
+    calls: list[dict[str, Any]] = []
+
+    def fake_preflight(provider: dict[str, Any]) -> dict[str, Any]:
+        calls.append(provider)
+        return dict(preflight)
+
+    monkeypatch.setattr(module, "episode_dense_provider_preflight", fake_preflight)
+
+    provider = module.host_provider_status(
+        config=config,
+        provider_name="abyss_machine_nervous",
+        force_probe=True,
+        probe_served_request=True,
+    )
+
+    assert len(calls) == 1
+    assert provider["ok"] is expected_provider_ok
+    health = provider["served_request_health"]
+    assert health["status"] == expected_status
+    assert health["observed"] is True
+    assert health["ok"] is expected_provider_ok
+    assert health["freshness"] == {
+        "status": "current",
+        "scope": "single_status_invocation",
+        "reuse_allowed": False,
+    }
+    assert health["truth_status"] == (
+        "bounded_served_request_observation_not_semantic_quality_proof"
+    )
+    compact = module.compact_search_provider_status_for_route(
+        {
+            "schema_version": 1,
+            "artifact_type": "search_provider_status",
+            "provider_schema_version": module.SEARCH_PROVIDER_SCHEMA_VERSION,
+            "generated_at": "2026-08-01T03:00:00Z",
+            "served_request_probe": True,
+            "providers": {"abyss_machine_nervous": provider},
+        },
+        provider_name="abyss_machine_nervous",
+    )
+    compact_health = compact["providers"]["abyss_machine_nervous"][
+        "served_request_health"
+    ]
+    assert compact_health["status"] == expected_status
+    rendered = json.dumps(compact_health, ensure_ascii=False)
+    assert module.EPISODE_DENSE_PROVIDER_PROBE_TEXT not in rendered
+    assert "private response body" not in rendered
+    assert "/" + "srv/private" not in rendered
+
+
+def test_host_provider_status_does_not_conflate_unrequested_probe_with_health(
+    monkeypatch: Any,
+) -> None:
+    config = module.default_search_provider_config()
+    monkeypatch.setattr(
+        module,
+        "episode_dense_provider_preflight",
+        lambda _provider: (_ for _ in ()).throw(
+            AssertionError("unrequested served-request probe must not run")
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "run_json_command",
+        lambda command, **_kwargs: {
+            "ok": True,
+            "status": "ok",
+            "command": command,
+            "payload": {
+                "schema": "gate-v1",
+                "generated_at": "2026-08-01T03:00:00Z",
+                "summary": {"fails": 0, "warnings": 0, "checks": 1},
+            },
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "run_json_url",
+        lambda url, **_kwargs: {
+            "ok": True,
+            "status": "ok",
+            "url": url,
+            "payload": {"ok": True},
+        },
+    )
+
+    provider = module.host_provider_status(
+        config=config,
+        provider_name="abyss_machine_nervous",
+        force_probe=True,
+        probe_served_request=False,
+    )
+
+    assert provider["ok"] is True
+    assert provider["served_request_health"]["status"] == "unobserved"
+    assert provider["served_request_health"]["observed"] is False
+    assert provider["served_request_health"]["ok"] is None
 
 
 def test_search_provider_status_hot_route_uses_persisted_state_without_archive_scan(tmp_path: Path, monkeypatch: Any) -> None:
@@ -86709,6 +88694,114 @@ def test_derived_text_redaction_is_idempotent_and_preserves_benign_identity() ->
     )
 
 
+def test_session_sensitive_literal_policy_redacts_detached_values_without_persisting_them() -> None:
+    bearer_secret = "".join(
+        ["bearer", "abcdefghijklmnop", "qrstuvwxyz0123456789"]
+    )
+    assignment_secret = "".join(
+        ["assignment", "abcdefghijklmnop", "qrstuvwxyz0123456789"]
+    )
+    encrypted_content = "".join(
+        ["ciphertext", "abcdefghijklmnop", "qrstuvwxyz0123456789"]
+    )
+    weak_word = "navigation"
+    raw = json.dumps(
+        {
+            "command": f"Authorization: Bearer {bearer_secret}",
+            "".join(["api_", "key"]): assignment_secret,
+            "password": "placeholder",
+            "_".join(("weak", "password")): weak_word,
+            "encrypted_content": encrypted_content,
+            "examples": (
+                "Authorization: Bearer "
+                + "credential; "
+                + "".join(["pass", "word=passwords; "])
+                + "".join(["api_", "key=contract; "])
+                + "".join(["pass", "word=contracts"])
+            ),
+        }
+    )
+    event = module.RawEvent(
+        event_id="privacy:1",
+        line_no=1,
+        raw=raw,
+        parsed=json.loads(raw),
+        event_type="message",
+        source_type="response_item",
+        title="Synthetic privacy context",
+        timestamp="2026-07-18T00:00:00Z",
+        tags=[],
+        importance="normal",
+        compaction_boundary=False,
+    )
+
+    policy = module.derived_session_sensitive_literal_policy([event])
+    detached = dict(
+        [
+            (bearer_secret, [f"detached {bearer_secret}"]),
+            (assignment_secret, [f"detached {assignment_secret}"]),
+            (
+                "safe",
+                [
+                    "placeholder",
+                    encrypted_content,
+                    weak_word,
+                    "credential",
+                    "credentials",
+                    "contract",
+                    "contracts",
+                    "password",
+                    "passwords",
+                ],
+            ),
+        ]
+    )
+    rendered = json.dumps(
+        module.redact_derived_value(
+            detached,
+            literal_policy=policy,
+        ),
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    report_text = json.dumps(
+        policy.report(),
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    repr_text = repr(policy)
+
+    assert bearer_secret not in rendered
+    assert assignment_secret not in rendered
+    assert encrypted_content in rendered
+    assert "placeholder" in rendered
+    assert weak_word in rendered
+    contextual_weak = module.redact_derived_text(
+        "_".join(("weak", "password")) + f"={weak_word}"
+    )
+    assert weak_word not in contextual_weak
+    assert "<redacted:password>" in contextual_weak
+    for safe_literal in (
+        "credential",
+        "credentials",
+        "contract",
+        "contracts",
+        "password",
+        "passwords",
+    ):
+        assert safe_literal in rendered
+    assert policy.report()["literal_count"] == 2
+    assert policy.report()["values_persisted"] is False
+    assert policy.report()["reversible_digests_persisted"] is False
+    for sensitive_value in (
+        bearer_secret,
+        assignment_secret,
+        encrypted_content,
+    ):
+        assert sensitive_value not in report_text
+        assert sensitive_value not in repr_text
+
+
 def test_generated_session_search_and_graph_views_do_not_duplicate_credentials(
     tmp_path: Path,
     monkeypatch,
@@ -86811,6 +88904,23 @@ def test_generated_session_search_and_graph_views_do_not_duplicate_credentials(
                     "type": "function_call_output",
                     "call_id": "call-oversized",
                     "output": oversized_secret + ("x" * 40_000),
+                },
+            },
+            {
+                "timestamp": "2026-07-18T00:00:04.500000Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": (
+                                "Detached values must remain private: "
+                                f"{bearer_secret} {json_secret}"
+                            ),
+                        }
+                    ],
                 },
             },
             {
@@ -86930,7 +89040,12 @@ def test_generated_session_search_and_graph_views_do_not_duplicate_credentials(
         write=True,
         include_rows=False,
     )
-    assert graph["ok"] is True
+    assert graph["ok"] is True, json.dumps(
+        graph,
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+    )
 
     def decoded_sqlite_text(path: Path) -> str:
         conn = sqlite3.connect(str(path))

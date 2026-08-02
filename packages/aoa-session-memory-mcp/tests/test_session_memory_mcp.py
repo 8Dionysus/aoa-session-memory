@@ -3509,6 +3509,114 @@ def test_episode_search_compaction_selects_the_admitted_relation_candidate() -> 
     assert len(json.dumps(compact)) < 30_000
 
 
+def test_compact_episode_search_preserves_temporal_interval_read_state() -> None:
+    from aoa_session_memory_mcp import core as core_module
+
+    relation = {
+        "active": True,
+        "accepted": True,
+        "status": "ordered_span_found",
+        "answer_scope": "interval_contents",
+        "interval_contents_status": (
+            "bounded_interval_contents_truncated"
+        ),
+        "left": {
+            "line": 22644,
+            "refs": {"raw": "raw:line:22644"},
+        },
+        "right": {
+            "line": 22731,
+            "refs": {"raw": "raw:line:22731"},
+        },
+        "interval_contents": {
+            "status": "bounded_interval_contents_truncated",
+            "from_raw_ref": "raw:line:22644",
+            "to_raw_ref": "raw:line:22731",
+            "readable_event_count": 46,
+            "returned_event_count": 46,
+            "omitted_event_count": 0,
+            "event_limit": 48,
+            "truncated": True,
+            "retention_truncated": False,
+            "output_truncated": False,
+            "source_read_truncated": True,
+            "event_raw_refs": [
+                f"raw:line:{line}"
+                for line in range(22645, 22691)
+            ],
+            "events": [
+                {
+                    "line": line,
+                    "text": "private bounded event body",
+                    "refs": {"raw": f"raw:line:{line}"},
+                }
+                for line in range(22645, 22691)
+            ],
+            "evidence_time_scope": {
+                "status": "not_requested",
+                "timestamp_coverage_complete": True,
+            },
+            "authority": "raw_session_transcript",
+        },
+    }
+
+    compact = core_module._compact_episode_search_relation(relation)
+
+    assert compact["interval_contents_status"] == (
+        "bounded_interval_contents_truncated"
+    )
+    contents = compact["interval_contents"]
+    assert contents["status"] == (
+        "bounded_interval_contents_truncated"
+    )
+    assert contents["from_raw_ref"] == "raw:line:22644"
+    assert contents["to_raw_ref"] == "raw:line:22731"
+    assert contents["truncated"] is True
+    assert contents["source_read_truncated"] is True
+    assert contents["event_bodies_included"] is False
+    assert contents["event_body_route"] == "full_evidence_route"
+    assert contents["event_raw_ref_count"] == 46
+    assert contents["omitted_event_raw_ref_count"] > 0
+    assert "events" not in contents
+    assert "private bounded event body" not in json.dumps(compact)
+
+
+def test_compact_episode_search_preserves_causal_ambiguity_scope() -> None:
+    from aoa_session_memory_mcp import core as core_module
+
+    relation = {
+        "active": True,
+        "status": "ambiguous_causal_attribution_chains",
+        "ambiguous": True,
+        "ambiguity_scope": "generic_plural_query_scope",
+        "qualified_chain_count": 1,
+        "candidate_chains": [
+            {
+                "correlation_id": "call_one_of_several",
+                "action": {
+                    "line": 201,
+                    "refs": {"raw": "raw:line:201"},
+                },
+                "result": {
+                    "line": 202,
+                    "refs": {"raw": "raw:line:202"},
+                },
+            }
+        ],
+    }
+
+    compact = core_module._compact_episode_search_relation(relation)
+
+    assert compact["status"] == (
+        "ambiguous_causal_attribution_chains"
+    )
+    assert compact["ambiguous"] is True
+    assert compact["ambiguity_scope"] == "generic_plural_query_scope"
+    assert compact["candidate_chains"][0]["correlation_id"] == (
+        "call_one_of_several"
+    )
+
+
 def test_retrieve_unsupported_recipe_returns_structured_diagnostic(tmp_path: Path) -> None:
     runner = FakeRunner()
     state = state_with_fixture(tmp_path, runner)
@@ -5403,6 +5511,9 @@ def test_published_tool_schema_allows_route_only_search_and_usage_neighborhood(t
     assert tools["aoa_session_graph_neighborhood"].inputSchema["properties"]["edge_limit"]["default"] is None
     assert tools["aoa_session_entity_usage_chain"].inputSchema["properties"]["limit"]["default"] == 6
     assert tools["aoa_session_entity_usage_chain"].inputSchema["properties"]["per_route_limit"]["default"] == 12
+    assert tools["aoa_session_entity_usage_chain"].inputSchema[
+        "properties"
+    ]["correlation_id"]["default"] == ""
     assert tools["aoa_session_entity_dossier"].inputSchema["properties"]["usage_limit"]["default"] == 4
     assert tools["aoa_session_entity_dossier"].inputSchema["properties"]["graph_edge_limit"]["default"] == 24
     literal_description = tools["aoa_session_literal_query_plan"].description or ""
@@ -6279,6 +6390,7 @@ def test_entity_usage_chain_routes_to_allowlisted_archive_command(tmp_path: Path
         consequence_window=4,
         document_limit=9,
         session="session-1",
+        correlation_id="call-exact-instance",
     )
 
     assert chain["artifact_type"] == "session_memory_entity_usage_chain"
@@ -6298,7 +6410,23 @@ def test_entity_usage_chain_routes_to_allowlisted_archive_command(tmp_path: Path
     assert args[args.index("--consequence-window") + 1] == "4"
     assert args[args.index("--document-limit") + 1] == "9"
     assert args[args.index("--session") + 1] == "session-1"
+    assert args[args.index("--correlation-id") + 1] == (
+        "call-exact-instance"
+    )
+    assert "--correlation-id call-exact-instance" in chain[
+        "mcp_access"
+    ]["full_evidence_route"]
     assert runner.timeouts[-1] == ("usage-chain", 90.0)
+
+    with pytest.raises(
+        ValueError,
+        match="correlation_id requires an explicit session",
+    ):
+        state.session_entity_usage_chain(
+            "aoa-session-memory-mcp",
+            kind="mcp_service",
+            correlation_id="call-exact-instance",
+        )
 
 
 def test_entity_usage_chain_preserves_mcp_tool_identity_for_archive_admission(
@@ -6322,6 +6450,163 @@ def test_entity_usage_chain_preserves_mcp_tool_identity_for_archive_admission(
     args = usage_calls[0][1]
     assert args[args.index("--kind") + 1] == "mcp_tool"
     assert "--kind mcp_tool" in chain["mcp_access"]["full_evidence_route"]
+
+
+def test_exact_instance_fields_and_admission_survive_compaction() -> None:
+    from aoa_session_memory_mcp import core as core_module
+
+    event = {
+        "doc_id": "event:session:008:000384",
+        "event_id": "000384",
+        "event_type": "TOOL_CALL",
+        "role": "usage",
+        "session_id": "session-1",
+        "task_episode_id": "task-0043",
+        "task_episode_ref": (
+            "task_episode:session-1:task-0043"
+        ),
+        "correlation_id": "call-exact-instance",
+        "mcp_tool_usage_admission": "structured_invocation_proven",
+        "hook_usage_admission": (
+            "structured_hook_command_invocation_proven"
+        ),
+        "refs": {
+            "raw": "raw:line:384",
+            "segment": "008.md#event-000384",
+            "task_episode": (
+                "task_episode:session-1:task-0043"
+            ),
+        },
+    }
+    compact_event = core_module._compact_usage_chain_event(event)
+    assert compact_event["correlation_id"] == "call-exact-instance"
+    assert compact_event["mcp_tool_usage_admission"] == (
+        "structured_invocation_proven"
+    )
+    assert compact_event["hook_usage_admission"] == (
+        "structured_hook_command_invocation_proven"
+    )
+
+    compact = core_module._compact_entity_usage_chain_payload(
+        {
+            "schema_version": 1,
+            "artifact_type": "session_memory_entity_usage_chain",
+            "ok": True,
+            "mutates": False,
+            "anchor": "aoa_session_entity_usage_chain",
+            "kind": "tool",
+            "requested_kind": "mcp_tool",
+            "session": "session-1",
+            "correlation_id": "call-exact-instance",
+            "selection_scope": {
+                "mode": "exact_session_correlation",
+                "session": "session-1",
+                "correlation_id": "call-exact-instance",
+                "candidate_count_exhaustive": True,
+                "absence_claim_allowed": False,
+            },
+            "normalized_entity": {
+                "anchor": "aoa_session_entity_usage_chain",
+                "route_key": (
+                    "mcp_aoa_session_memory_"
+                    "aoa_session_entity_usage_chain"
+                ),
+                "kind": "mcp_tool",
+                "route_signal": (
+                    "tool:mcp_aoa_session_memory_"
+                    "aoa_session_entity_usage_chain"
+                ),
+                "identity": {
+                    "status": "resolved",
+                    "entity_ids": [
+                        "tool:aoa_session_entity_usage_chain"
+                    ],
+                    "observed_instance_status": "resolved",
+                },
+                "registry_entries": [
+                    {
+                        "source_refs": [
+                            {
+                                "path": (
+                                    "/private/runtime/"
+                                    "aoa-search.sqlite3"
+                                )
+                            }
+                        ]
+                    }
+                ],
+            },
+            "quality": {
+                "exact_instance_mode": True,
+                "exact_correlation_id": "call-exact-instance",
+                "exact_correlation_source_hit_count": 3,
+                "candidate_count_exhaustive": True,
+            },
+            "source_episode_refs": [
+                {
+                    "episode_ref": (
+                        "task_episode:session-1:task-0043"
+                    ),
+                    "session_id": "session-1",
+                    "task_episode_id": "task-0043",
+                    "anchor_raw_ref": "raw:line:384",
+                    "task_answer_chain_command": (
+                        "python3 scripts/aoa_session_memory.py "
+                        "task-answer-chain --session session-1 "
+                        "--task-episode-id task-0043"
+                    ),
+                    "authority": (
+                        "generated episode coordinate; raw refs "
+                        "remain authoritative"
+                    ),
+                }
+            ],
+            "usage_chain": {
+                "chains": [
+                    {
+                        "usage_event": event,
+                        "result_or_consequence_events": [],
+                    }
+                ]
+            },
+        },
+        full_route=(
+            "usage-chain aoa_session_entity_usage_chain "
+            "--session session-1 "
+            "--correlation-id call-exact-instance --full"
+        ),
+    )
+    assert compact["correlation_id"] == "call-exact-instance"
+    assert compact["selection_scope"]["mode"] == (
+        "exact_session_correlation"
+    )
+    assert compact["quality"]["exact_instance_mode"] is True
+    assert compact["quality"]["exact_correlation_id"] == (
+        "call-exact-instance"
+    )
+    assert compact["quality"]["exact_correlation_source_hit_count"] == 3
+    compact_event = compact["usage_chain"]["chains"][0][
+        "usage_event"
+    ]
+    assert compact_event["task_episode_id"] == "task-0043"
+    assert compact_event["refs"]["task_episode"] == (
+        "task_episode:session-1:task-0043"
+    )
+    assert compact["source_episode_refs"] == [
+        {
+            "episode_ref": (
+                "task_episode:session-1:task-0043"
+            ),
+            "session_id": "session-1",
+            "task_episode_id": "task-0043",
+        }
+    ]
+    assert compact["source_episode_ref_count"] == 1
+    assert compact["normalized_entity"]["identity"][
+        "observed_instance_status"
+    ] == "resolved"
+    assert "registry_entries" not in compact["normalized_entity"]
+    assert "/private/runtime" not in json.dumps(compact)
 
 
 def test_entity_usage_chain_compact_preserves_evidence_first_admission_contract(

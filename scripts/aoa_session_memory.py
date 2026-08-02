@@ -51,13 +51,19 @@ DERIVED_TEXT_PRIVACY_POLICY_VERSION = 1
 DERIVED_TEXT_PRIVACY_LOOKAHEAD_CHARS = 8192
 SESSION_PROJECTION_PUBLISH_IDENTITY_VERSION = 1
 SESSION_MEMORY_EVIDENCE_PACKET_SCHEMA_VERSION = 1
-DERIVED_TEXT_REDACTION_POLICY_VERSION = 1
+DERIVED_TEXT_REDACTION_POLICY_VERSION = 5
 DERIVED_TEXT_REDACTION_MARKER = "[REDACTED:credential]"
 DERIVED_PRIVATE_KEY_REDACTION_MARKER = "".join(
     ["[REDACTED:", "private-key]"]
 )
 DERIVED_SEGMENT_RAW_VIEW_MAX_CHARS = 32_000
 DERIVED_NESTED_JSON_REDACTION_MAX_CHARS = 1_000_000
+DERIVED_SESSION_SENSITIVE_LITERAL_MIN_CHARS = 8
+DERIVED_SESSION_SENSITIVE_LITERAL_MAX_CHARS = 1024
+DERIVED_SESSION_SENSITIVE_LITERAL_SAFE_RE = re.compile(
+    r"(?:contract|contracts|credential|credentials|password|passwords)",
+    flags=re.IGNORECASE,
+)
 SHA256_FILE_CACHE: dict[tuple[str, int, int], str] = {}
 SEARCH_ROUTE_TERM_CACHE: dict[int, dict[tuple[str, str], int]] = {}
 ENTITY_REGISTRY_INDEX_CACHE: dict[str, tuple[tuple[float, float, int], dict[tuple[str, str], dict[str, Any]]]] = {}
@@ -450,9 +456,12 @@ ATLAS_SCHEMA_VERSION = 2
 ATLAS_PUBLISH_IDENTITY_VERSION = 2
 ATLAS_ENTRY_FILENAME_MAX_BYTES = 220
 SEARCH_SCHEMA_VERSION = 22
+SEARCH_SOURCE_SET_IDENTITY_VERSION = 1
+SEARCH_SOURCE_SET_META_KEY = "search_source_set_identity_json"
+SEARCH_SOURCE_SET_REMOVED_REASON = "search_source_set_removed"
 SEARCH_CATALOG_SCHEMA_VERSION = 1
 EPISODE_SEMANTIC_PROJECTION_VERSION = 18
-EPISODE_ANSWER_ADMISSION_POLICY_VERSION = 8
+EPISODE_ANSWER_ADMISSION_POLICY_VERSION = 10
 EPISODE_QUERY_NORMALIZATION_VERSION = 1
 EPISODE_POSTING_CARDINALITY_METADATA_VERSION = 1
 TASK_EPISODE_SEMANTIC_DIGEST_VERSION = 1
@@ -492,12 +501,21 @@ EPISODE_FAILURE_RECOVERY_WINDOW_AFTER_LINES = 24
 EPISODE_FAILURE_RECOVERY_WINDOW_LIMIT = 8
 EPISODE_FAILURE_RECOVERY_EVENT_MAX_CHARS = 700
 EPISODE_FAILURE_RECOVERY_FOLLOWUP_LIMIT = 12
-EPISODE_DENSE_PROJECTION_VERSION = 1
-EPISODE_DENSE_DOCUMENT_VERSION = 2
+EPISODE_DENSE_PROJECTION_VERSION = 2
+EPISODE_DENSE_DOCUMENT_VERSION = 3
+EPISODE_DENSE_REPRESENTATION_VERSION = 1
 EPISODE_DENSE_DEFAULT_MODEL = "qwen3-embed-0.6b-int8-ov"
 EPISODE_DENSE_DEFAULT_DIMENSION = 1024
 EPISODE_DENSE_EMBED_BATCH_SIZE = 4
 EPISODE_DENSE_DOCUMENT_MAX_CHARS = 3200
+EPISODE_DENSE_REPRESENTATION_TEXT_MAX_CHARS = 1600
+EPISODE_DENSE_REPRESENTATION_PER_ROLE_LIMIT = 4
+EPISODE_DENSE_REPRESENTATION_PRIMARY_MATCH_LIMIT = 2
+EPISODE_DENSE_REPRESENTATION_DIVERSITY_MATCH_LIMIT = 2
+EPISODE_DENSE_REPRESENTATION_MATCH_LIMIT = (
+    EPISODE_DENSE_REPRESENTATION_PRIMARY_MATCH_LIMIT
+    + EPISODE_DENSE_REPRESENTATION_DIVERSITY_MATCH_LIMIT
+)
 EPISODE_DENSE_QUERY_TIMEOUT_SECONDS = 30
 EPISODE_DENSE_INDEX_TIMEOUT_SECONDS = 120
 EPISODE_DENSE_RRF_K = 60
@@ -570,6 +588,7 @@ EPISODE_RERANK_EVIDENCE_CARD_LIMIT = 5
 EPISODE_RERANK_EVIDENCE_TEXT_MAX_CHARS = 140
 EPISODE_RERANK_CONTEXT_MAX_CHARS = 180
 EPISODE_RERANK_DOCUMENT_POLICY = "source_labeled_bounded_evidence_cards_v1"
+EPISODE_RERANK_PROMOTION_POLICY_VERSION = 2
 EPISODE_RERANK_PROMOTION_MIN_SCORE = 0.80
 EPISODE_RERANK_PROMOTION_MIN_MARGIN = 0.10
 EPISODE_AUTO_RERANK_POLICY_VERSION = 1
@@ -604,7 +623,7 @@ INDEX_PROJECTION_STATE_SCHEMA_VERSION = 2
 MAINTENANCE_PLANNING_PHASE_MIN_SECONDS = 1.0
 MAINTENANCE_COMBINED_PROJECTION_MIN_SECONDS = 8.0
 MAINTENANCE_FINAL_FRESHNESS_SNAPSHOT_MIN_SECONDS = 8.0
-SEARCH_PROVIDER_SCHEMA_VERSION = 1
+SEARCH_PROVIDER_SCHEMA_VERSION = 2
 SEARCH_FRESHNESS_STATE_SCHEMA_VERSION = 2
 SEARCH_PROJECTION_FINGERPRINT_MODE = (
     "semantic_projection_sources_without_rendered_markdown_v2"
@@ -10224,6 +10243,12 @@ SESSION_QUERY_SOURCE_SCAN_MAX_EVENTS = 250_000
 MCP_TOOL_SESSION_IDENTITY_PROBE_SCHEMA_VERSION = (
     "mcp_tool_session_identity_probe_v1"
 )
+ENTITY_USAGE_EXACT_CORRELATION_PROBE_SCHEMA_VERSION = (
+    "entity_usage_exact_correlation_probe_v1"
+)
+ENTITY_USAGE_CORRELATION_ID_RE = re.compile(
+    r"^[A-Za-z0-9_.:-]{1,256}$"
+)
 
 
 def session_query_source_event_scan(
@@ -10288,6 +10313,27 @@ def session_query_source_event_scan(
     )
     session_index_path = session_dir / SESSION_INDEX_JSON
     session_index = read_json(session_index_path, {})
+    task_episode_ranges: list[tuple[str, int, int]] = []
+    for episode in (
+        session_index.get("task_episodes", [])
+        if isinstance(session_index, dict)
+        and isinstance(session_index.get("task_episodes"), list)
+        else []
+    ):
+        if not isinstance(episode, dict):
+            continue
+        event_range = (
+            episode.get("event_range")
+            if isinstance(episode.get("event_range"), dict)
+            else {}
+        )
+        episode_id = str(episode.get("episode_id") or "")
+        from_line = int_value(event_range.get("from_line"))
+        to_line = int_value(event_range.get("to_line"))
+        if episode_id and from_line > 0 and to_line >= from_line:
+            task_episode_ranges.append(
+                (episode_id, from_line, to_line)
+            )
     expected_publish_id, expected_raw_sha256 = (
         session_manifest_projection_expectations(manifest)
     )
@@ -10447,9 +10493,11 @@ def session_query_source_event_scan(
     packet["generation_identities"]["observed"][
         "segment_indexes"
     ] = observed_segment_generations
+    packet["task_episode_count"] = len(task_episode_ranges)
     packet["_record"] = record
     packet["_manifest"] = manifest
     packet["_session_dir"] = session_dir
+    packet["_task_episode_ranges"] = task_episode_ranges
     packet["_entries"] = entries
     complete = bool(
         segments
@@ -10472,6 +10520,59 @@ def session_query_source_event_scan(
         packet.get("diagnostics", [])
     )
     return packet
+
+
+def session_query_source_scan_summary(
+    scan: dict[str, Any],
+) -> dict[str, Any]:
+    """Return the bounded public scan proof without per-segment duplication."""
+    public = {
+        key: value
+        for key, value in scan.items()
+        if not str(key).startswith("_")
+        and key != "generation_identities"
+    }
+    generations = (
+        scan.get("generation_identities")
+        if isinstance(scan.get("generation_identities"), dict)
+        else {}
+    )
+    observed = (
+        generations.get("observed")
+        if isinstance(generations.get("observed"), dict)
+        else {}
+    )
+    segment_generations = (
+        observed.get("segment_indexes")
+        if isinstance(observed.get("segment_indexes"), dict)
+        else {}
+    )
+    segment_generation_ids = sorted(
+        {
+            str(identity.get("generation_id") or "")
+            for identity in segment_generations.values()
+            if isinstance(identity, dict)
+            and str(identity.get("generation_id") or "")
+        }
+    )
+    public["generation_identities"] = {
+        "expected": (
+            generations.get("expected", {})
+            if isinstance(generations.get("expected"), dict)
+            else {}
+        ),
+        "observed": {
+            "session_index": (
+                observed.get("session_index", {})
+                if isinstance(observed.get("session_index"), dict)
+                else {}
+            ),
+            "segment_index_generation_ids": segment_generation_ids,
+            "segment_index_count": len(segment_generations),
+        },
+        "compatible": generations.get("compatible"),
+    }
+    return public
 
 
 def session_query_source_hit(
@@ -10516,6 +10617,23 @@ def session_query_source_hit(
         segment.get("segment_id") or segment_index.get("segment_id") or ""
     )
     event_id = str(event.get("event_id") or "")
+    raw_ref = str(event.get("raw_ref") or "")
+    task_episode_id = str(event.get("task_episode_id") or "")
+    if not task_episode_id:
+        raw_line = line_from_raw_ref(raw_ref)
+        for episode_id, from_line, to_line in (
+            scan.get("_task_episode_ranges", [])
+            if isinstance(scan.get("_task_episode_ranges"), list)
+            else []
+        ):
+            if from_line <= raw_line <= to_line:
+                task_episode_id = episode_id
+                break
+    task_episode_ref = (
+        f"task_episode:{scan.get('session_id')}:{task_episode_id}"
+        if task_episode_id
+        else ""
+    )
     return {
         "doc_id": (
             f"event:{scan.get('session_id')}:{segment_id}:{event_id}"
@@ -10537,7 +10655,8 @@ def session_query_source_hit(
         "session_date": session_record_date(scan.get("_record") or {}),
         "segment_id": segment_id,
         "event_id": event_id,
-        "task_episode_id": event.get("task_episode_id"),
+        "task_episode_id": task_episode_id,
+        "task_episode_ref": task_episode_ref,
         "title": event.get("title"),
         "snippet": "",
         "route_signals": route_signals,
@@ -10549,8 +10668,9 @@ def session_query_source_hit(
                 event,
             ),
             "segment_index": str(index_path),
-            "raw": str(event.get("raw_ref") or ""),
+            "raw": raw_ref,
             "raw_block": str(entry.get("raw_block_ref") or ""),
+            "task_episode": task_episode_ref,
         },
         "freshness": {
             "status": "bounded_current",
@@ -10559,6 +10679,142 @@ def session_query_source_hit(
             "reasons": [],
         },
     }
+
+
+def entity_usage_exact_correlation_probe(
+    *,
+    aoa_root: Path,
+    session: str | None,
+    correlation_id: str | None,
+) -> dict[str, Any]:
+    """Resolve one archived invocation identity before entity admission.
+
+    A correlation id is meaningful only inside an explicit session. Segment
+    indexes provide bounded coordinates; downstream entity-specific admission
+    still opens the raw refs before promoting invocation or terminal states.
+    """
+    requested = str(correlation_id or "").strip()
+    packet: dict[str, Any] = {
+        "schema_version": (
+            ENTITY_USAGE_EXACT_CORRELATION_PROBE_SCHEMA_VERSION
+        ),
+        "applied": bool(requested),
+        "status": "not_requested",
+        "mutates": False,
+        "bounded": True,
+        "scope": "one_resolved_archived_session_and_correlation",
+        "session": str(session or ""),
+        "correlation_id": requested,
+        "event_count": 0,
+        "raw_ref_count": 0,
+        "segment_ref_count": 0,
+        "candidate_count_exhaustive": False,
+        "absence_claim_allowed": False,
+        "diagnostics": [],
+        "_hits": [],
+    }
+    if not requested:
+        return packet
+    if not session:
+        packet.update(
+            {
+                "status": "session_required",
+                "diagnostics": [
+                    "exact correlation selection requires an explicit session"
+                ],
+            }
+        )
+        return packet
+    if not ENTITY_USAGE_CORRELATION_ID_RE.fullmatch(requested):
+        packet.update(
+            {
+                "status": "invalid_correlation_id",
+                "diagnostics": [
+                    "correlation id must be 1-256 safe identifier characters"
+                ],
+            }
+        )
+        return packet
+    scan = session_query_source_event_scan(
+        aoa_root=aoa_root,
+        session=session,
+    )
+    entries = (
+        scan.get("_entries")
+        if isinstance(scan.get("_entries"), list)
+        else []
+    )
+    hits: list[dict[str, Any]] = []
+    for entry in entries:
+        event = (
+            entry.get("event")
+            if isinstance(entry.get("event"), dict)
+            else {}
+        )
+        if str(event.get("correlation_id") or "") != requested:
+            continue
+        hits.append(
+            session_query_source_hit(
+                scan,
+                entry,
+                source=(
+                    "session_scoped_query_time_exact_correlation_probe"
+                ),
+            )
+        )
+    scan_complete = str(scan.get("status") or "") == "complete"
+    raw_ref_count = sum(
+        bool(
+            str(
+                (
+                    hit.get("refs")
+                    if isinstance(hit.get("refs"), dict)
+                    else {}
+                ).get("raw")
+                or ""
+            )
+        )
+        for hit in hits
+    )
+    segment_ref_count = sum(
+        bool(
+            str(
+                (
+                    hit.get("refs")
+                    if isinstance(hit.get("refs"), dict)
+                    else {}
+                ).get("segment")
+                or ""
+            )
+        )
+        for hit in hits
+    )
+    packet.update(
+        {
+            "status": (
+                "resolved"
+                if hits and scan_complete
+                else "incomplete"
+                if not scan_complete
+                else "not_observed_in_bounded_session"
+            ),
+            "event_count": len(hits),
+            "raw_ref_count": raw_ref_count,
+            "segment_ref_count": segment_ref_count,
+            "candidate_count_exhaustive": scan_complete,
+            # Even a complete correlation scan proves only this instance. It
+            # must never be widened into an archive-wide non-use claim.
+            "absence_claim_allowed": False,
+            "source_scan": session_query_source_scan_summary(scan),
+            "diagnostics": unique_preserving_order(
+                scan.get("diagnostics", [])
+                if isinstance(scan.get("diagnostics"), list)
+                else []
+            ),
+            "_hits": hits,
+        }
+    )
+    return packet
 
 
 def mcp_tool_session_identity_probe(
@@ -10726,11 +10982,7 @@ def mcp_tool_session_identity_probe(
             "absence_claim_allowed": bool(
                 status == "unresolved" and scan_complete and not raw_failures
             ),
-            "source_scan": {
-                key: value
-                for key, value in scan.items()
-                if not str(key).startswith("_")
-            },
+            "source_scan": session_query_source_scan_summary(scan),
             "diagnostics": unique_preserving_order(
                 [
                     *(
@@ -12340,7 +12592,162 @@ def derived_text_sensitive_value_key(key: Any) -> bool:
     )
 
 
-def redact_derived_text_with_report(text: Any) -> tuple[str, dict[str, Any]]:
+class DerivedSessionSensitiveLiteralPolicy:
+    """Ephemeral exact-value scrubber derived from one raw session.
+
+    Literal bytes remain process-local, are never serialized, and are hidden
+    from repr so diagnostics cannot accidentally become a credential oracle.
+    """
+
+    __slots__ = ("_pattern", "literal_count", "kind_counts")
+
+    def __init__(
+        self,
+        *,
+        values_by_kind: dict[str, set[str]],
+    ) -> None:
+        literals = sorted(
+            {
+                value
+                for values in values_by_kind.values()
+                for value in values
+            },
+            key=lambda value: (-len(value), value),
+        )
+        self._pattern = (
+            re.compile("|".join(re.escape(value) for value in literals))
+            if literals
+            else None
+        )
+        self.literal_count = len(literals)
+        self.kind_counts = {
+            kind: len(values)
+            for kind, values in sorted(values_by_kind.items())
+            if values
+        }
+
+    def __repr__(self) -> str:
+        return (
+            "DerivedSessionSensitiveLiteralPolicy("
+            f"literal_count={self.literal_count}, "
+            f"kinds={sorted(self.kind_counts)})"
+        )
+
+    def redact(self, value: Any) -> tuple[str, int]:
+        text = str(value or "")
+        if self._pattern is None or not text:
+            return text, 0
+        return self._pattern.subn(DERIVED_TEXT_REDACTION_MARKER, text)
+
+    def report(self) -> dict[str, Any]:
+        return {
+            "policy_version": DERIVED_TEXT_REDACTION_POLICY_VERSION,
+            "literal_count": self.literal_count,
+            "kind_counts": dict(self.kind_counts),
+            "values_persisted": False,
+            "reversible_digests_persisted": False,
+            "authority_boundary": (
+                "literal values are process-local rebuild inputs; raw evidence "
+                "remains authoritative"
+            ),
+        }
+
+
+def derived_session_sensitive_literal_is_specific(
+    kind: str,
+    candidate: str,
+) -> bool:
+    """Admit values that are safe to scrub when detached from their label.
+
+    A letters-only value can be a weak secret in a labelled assignment, but
+    replacing that word globally destroys ordinary prose, identifiers, and
+    evidence refs. Contextual redaction still covers its labelled occurrence.
+    Known credential formats remain exact-scrub candidates unconditionally.
+    """
+
+    known_format_kind = "_".join(("known", "credential", "prefix"))
+    if kind == known_format_kind:
+        return True
+    return re.fullmatch(r"[A-Za-z]+", candidate) is None
+
+
+def derived_session_sensitive_literal_policy_from_texts(
+    sources: Iterable[str],
+) -> DerivedSessionSensitiveLiteralPolicy:
+    values_by_kind: dict[str, set[str]] = defaultdict(set)
+
+    def add(kind: str, value: Any, *, label: str = "") -> None:
+        candidate, _quote = derived_text_privacy_unquote(str(value or ""))
+        candidate = candidate.strip()
+        normalized_label = re.sub(
+            r"[^a-z0-9]+",
+            "_",
+            str(label or "").casefold(),
+        ).strip("_")
+        if normalized_label.endswith(("encrypted_content", "ciphertext")):
+            return
+        if label and derived_text_privacy_named_value_is_safe(label, candidate):
+            return
+        if not (
+            DERIVED_SESSION_SENSITIVE_LITERAL_MIN_CHARS
+            <= len(candidate)
+            <= DERIVED_SESSION_SENSITIVE_LITERAL_MAX_CHARS
+        ):
+            return
+        if candidate in {
+            DERIVED_TEXT_REDACTION_MARKER,
+            DERIVED_PRIVATE_KEY_REDACTION_MARKER,
+        } or (
+            DERIVED_TEXT_SAFE_NAMED_VALUE_RE.fullmatch(candidate)
+            or DERIVED_SESSION_SENSITIVE_LITERAL_SAFE_RE.fullmatch(
+                candidate
+            )
+        ):
+            return
+        if not derived_session_sensitive_literal_is_specific(kind, candidate):
+            return
+        values_by_kind[kind].add(candidate)
+
+    for source in sources:
+        for match in DERIVED_BEARER_CREDENTIAL_RE.finditer(source):
+            add("bearer_credential", match.groupdict().get("value"))
+        for match in DERIVED_SENSITIVE_CLI_ARGUMENT_RE.finditer(source):
+            add("sensitive_cli_argument", match.groupdict().get("value"))
+        for match in DERIVED_SENSITIVE_ASSIGNMENT_RE.finditer(source):
+            add(
+                "sensitive_assignment",
+                match.groupdict().get("value"),
+                label=str(match.groupdict().get("key") or ""),
+            )
+        for match in DERIVED_URI_USERINFO_RE.finditer(source):
+            add("uri_userinfo_password", match.groupdict().get("value"))
+        for match in DERIVED_KNOWN_CREDENTIAL_RE.finditer(source):
+            add("known_credential_prefix", match.group(0))
+    return DerivedSessionSensitiveLiteralPolicy(
+        values_by_kind=values_by_kind,
+    )
+
+
+def derived_session_sensitive_literal_policy(
+    events: Iterable[RawEvent],
+) -> DerivedSessionSensitiveLiteralPolicy:
+    return derived_session_sensitive_literal_policy_from_texts(
+        event.raw for event in events
+    )
+
+
+def derived_session_sensitive_literal_policy_from_raw_path(
+    raw_path: Path,
+) -> DerivedSessionSensitiveLiteralPolicy:
+    with raw_path.open("r", encoding="utf-8", errors="replace") as handle:
+        return derived_session_sensitive_literal_policy_from_texts(handle)
+
+
+def redact_derived_text_with_report(
+    text: Any,
+    *,
+    literal_policy: DerivedSessionSensitiveLiteralPolicy | None = None,
+) -> tuple[str, dict[str, Any]]:
     """Redact credential values copied into rebuildable read models.
 
     The raw transcript and raw-block evidence are deliberately outside this
@@ -12350,6 +12757,10 @@ def redact_derived_text_with_report(text: Any) -> tuple[str, dict[str, Any]]:
 
     redacted = str(text or "")
     counts: Counter[str] = Counter()
+
+    if literal_policy is not None:
+        redacted, count = literal_policy.redact(redacted)
+        counts["session_sensitive_literal"] += count
 
     redacted, count = DERIVED_PRIVATE_KEY_BLOCK_RE.subn(
         DERIVED_PRIVATE_KEY_REDACTION_MARKER,
@@ -12411,28 +12822,73 @@ def redact_derived_text_with_report(text: Any) -> tuple[str, dict[str, Any]]:
     }
 
 
-def redact_derived_text(text: Any) -> str:
-    return redact_derived_text_with_report(text)[0]
+def redact_derived_text(
+    text: Any,
+    *,
+    literal_policy: DerivedSessionSensitiveLiteralPolicy | None = None,
+) -> str:
+    return redact_derived_text_with_report(
+        text,
+        literal_policy=literal_policy,
+    )[0]
 
 
 def redact_derived_value(
     value: Any,
     *,
     field_name: str = "",
+    literal_policy: DerivedSessionSensitiveLiteralPolicy | None = None,
 ) -> Any:
     if isinstance(value, dict):
-        return {
-            key: redact_derived_value(item, field_name=str(key))
-            for key, item in value.items()
-        }
+        redacted_mapping: dict[Any, Any] = {}
+        for key, item in value.items():
+            redacted_key = (
+                redact_derived_text(
+                    key,
+                    literal_policy=literal_policy,
+                )
+                if literal_policy is not None and isinstance(key, str)
+                else key
+            )
+            redacted_item = redact_derived_value(
+                item,
+                field_name=str(key),
+                literal_policy=literal_policy,
+            )
+            if redacted_key not in redacted_mapping:
+                redacted_mapping[redacted_key] = redacted_item
+            elif (
+                isinstance(redacted_mapping[redacted_key], list)
+                and isinstance(redacted_item, list)
+            ):
+                redacted_mapping[redacted_key] = [
+                    *redacted_mapping[redacted_key],
+                    *redacted_item,
+                ]
+            elif (
+                isinstance(redacted_mapping[redacted_key], (int, float))
+                and not isinstance(redacted_mapping[redacted_key], bool)
+                and isinstance(redacted_item, (int, float))
+                and not isinstance(redacted_item, bool)
+            ):
+                redacted_mapping[redacted_key] += redacted_item
+        return redacted_mapping
     if isinstance(value, list):
         return [
-            redact_derived_value(item, field_name=field_name)
+            redact_derived_value(
+                item,
+                field_name=field_name,
+                literal_policy=literal_policy,
+            )
             for item in value
         ]
     if isinstance(value, tuple):
         return tuple(
-            redact_derived_value(item, field_name=field_name)
+            redact_derived_value(
+                item,
+                field_name=field_name,
+                literal_policy=literal_policy,
+            )
             for item in value
         )
     if isinstance(value, str):
@@ -12453,16 +12909,26 @@ def redact_derived_value(
                 nested = None
             if isinstance(nested, (dict, list)):
                 return json.dumps(
-                    redact_derived_value(nested),
+                    redact_derived_value(
+                        nested,
+                        literal_policy=literal_policy,
+                    ),
                     ensure_ascii=False,
                     sort_keys=True,
                     separators=(",", ":"),
                 )
-        return redact_derived_text(value)
+        return redact_derived_text(
+            value,
+            literal_policy=literal_policy,
+        )
     return value
 
 
-def derived_segment_event_view(event: RawEvent) -> tuple[str, dict[str, Any]]:
+def derived_segment_event_view(
+    event: RawEvent,
+    *,
+    literal_policy: DerivedSessionSensitiveLiteralPolicy | None = None,
+) -> tuple[str, dict[str, Any]]:
     if len(event.raw) > DERIVED_SEGMENT_RAW_VIEW_MAX_CHARS:
         payload = {
             "derived_view": "omitted_large_raw_event",
@@ -12483,11 +12949,17 @@ def derived_segment_event_view(event: RawEvent) -> tuple[str, dict[str, Any]]:
         }
     if isinstance(event.parsed, dict):
         rendered = json.dumps(
-            redact_derived_value(event.parsed),
+            redact_derived_value(
+                event.parsed,
+                literal_policy=literal_policy,
+            ),
             ensure_ascii=False,
             sort_keys=True,
         )
-        _, report = redact_derived_text_with_report(event.raw)
+        _, report = redact_derived_text_with_report(
+            event.raw,
+            literal_policy=literal_policy,
+        )
         if DERIVED_TEXT_REDACTION_MARKER in rendered:
             report = {
                 **report,
@@ -12498,7 +12970,10 @@ def derived_segment_event_view(event: RawEvent) -> tuple[str, dict[str, Any]]:
                 ),
             }
         return rendered, report
-    return redact_derived_text_with_report(event.raw)
+    return redact_derived_text_with_report(
+        event.raw,
+        literal_policy=literal_policy,
+    )
 
 
 RUNTIME_CONTEXT_ENVELOPE_PREFIX_KINDS = (
@@ -19152,7 +19627,13 @@ def generated_goal_lifecycles_for_events(
     }
 
 
-def event_index_record(event: RawEvent, md_name: str, relationships: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+def event_index_record(
+    event: RawEvent,
+    md_name: str,
+    relationships: list[dict[str, Any]] | None = None,
+    *,
+    literal_policy: DerivedSessionSensitiveLiteralPolicy | None = None,
+) -> dict[str, Any]:
     token_observations = token_accounting_for_event(event)
     record = {
         "event_id": event.event_id,
@@ -19189,7 +19670,10 @@ def event_index_record(event: RawEvent, md_name: str, relationships: list[dict[s
         )
     if relationships:
         record["relationships"] = relationships
-    return redact_derived_value(record)
+    return redact_derived_value(
+        record,
+        literal_policy=literal_policy,
+    )
 
 
 def raw_block_status_for_role(role: str) -> str:
@@ -19314,6 +19798,7 @@ def write_segment(
     *,
     reference_session_dir: Path | None = None,
     publish_identity: dict[str, Any] | None = None,
+    literal_policy: DerivedSessionSensitiveLiteralPolicy | None = None,
 ) -> dict[str, Any]:
     segment_id = f"{segment_no:03d}"
     md_name = f"{segment_id}__{role}.md"
@@ -19330,7 +19815,14 @@ def write_segment(
     first_line = events[0].line_no if events else None
     last_line = events[-1].line_no if events else None
     event_views = [
-        (event, *derived_segment_event_view(event)) for event in events
+        (
+            event,
+            *derived_segment_event_view(
+                event,
+                literal_policy=literal_policy,
+            ),
+        )
+        for event in events
     ]
     redaction_kind_counts: Counter[str] = Counter()
     redacted_event_count = 0
@@ -19348,6 +19840,16 @@ def write_segment(
         "redaction_count": sum(redaction_kind_counts.values()),
         "kind_counts": dict(sorted(redaction_kind_counts.items())),
         "raw_authority_preserved": True,
+        "session_sensitive_literals": (
+            literal_policy.report()
+            if literal_policy is not None
+            else {
+                "policy_version": DERIVED_TEXT_REDACTION_POLICY_VERSION,
+                "literal_count": 0,
+                "values_persisted": False,
+                "reversible_digests_persisted": False,
+            }
+        ),
     }
     lines = [
         "---",
@@ -19410,12 +19912,23 @@ def write_segment(
             ]
         )
     md_path.write_text(
-        redact_derived_text("\n".join(lines)),
+        redact_derived_text(
+            "\n".join(lines),
+            literal_policy=literal_policy,
+        ),
         encoding="utf-8",
     )
 
     relationship_map = event_relationships(events)
-    records = [event_index_record(event, md_name, relationship_map.get(event.event_id, [])) for event in events]
+    records = [
+        event_index_record(
+            event,
+            md_name,
+            relationship_map.get(event.event_id, []),
+            literal_policy=literal_policy,
+        )
+        for event in events
+    ]
     by_type: dict[str, list[str]] = defaultdict(list)
     by_tag: dict[str, list[str]] = defaultdict(list)
     by_source_type: dict[str, list[str]] = defaultdict(list)
@@ -19501,7 +20014,13 @@ def write_segment(
         "by_route_signal": dict(sorted(by_route_signal.items())),
         "token_accounting": token_accounting,
     }
-    write_json(index_path, index)
+    write_json(
+        index_path,
+        redact_derived_value(
+            index,
+            literal_policy=literal_policy,
+        ),
+    )
     return {
         "segment_id": segment_id,
         "role": role,
@@ -19695,6 +20214,7 @@ def write_session_index(
     *,
     reference_session_dir: Path | None = None,
     publish_identity: dict[str, Any] | None = None,
+    literal_policy: DerivedSessionSensitiveLiteralPolicy | None = None,
 ) -> None:
     counts = Counter(event.event_type for event in events)
     by_type = {event_type: counts[event_type] for event_type in EVENT_TYPE_ORDER if counts[event_type]}
@@ -19715,6 +20235,10 @@ def write_session_index(
         task_episodes,
         session_dir=reference_session_dir or session_dir,
         manifest=manifest,
+    )
+    task_episodes = redact_derived_value(
+        task_episodes,
+        literal_policy=literal_policy,
     )
     task_episode_counts = task_episode_counts_for_episodes(task_episodes)
     goal_lifecycle_payload = generated_goal_lifecycles_for_events(
@@ -19822,8 +20346,18 @@ def write_session_index(
             "goal_lifecycle_text",
             "generated_metadata_text",
         ],
+        "session_sensitive_literals": (
+            literal_policy.report()
+            if literal_policy is not None
+            else DerivedSessionSensitiveLiteralPolicy(
+                values_by_kind={},
+            ).report()
+        ),
     }
-    session_index_json = redact_derived_value(session_index_json)
+    session_index_json = redact_derived_value(
+        session_index_json,
+        literal_policy=literal_policy,
+    )
     write_json(session_dir / SESSION_INDEX_JSON, session_index_json)
     legacy_json = session_dir / LEGACY_SESSION_INDEX_JSON
     if legacy_json.exists():
@@ -19951,7 +20485,10 @@ def write_session_index(
                 lines.append(f"  - `{key}`: {count}")
         lines.append("")
     (session_dir / SESSION_INDEX_MARKDOWN).write_text(
-        redact_derived_text("\n".join(lines)),
+        redact_derived_text(
+            "\n".join(lines),
+            literal_policy=literal_policy,
+        ),
         encoding="utf-8",
     )
     legacy_md = session_dir / LEGACY_SESSION_INDEX_MARKDOWN
@@ -20196,71 +20733,197 @@ def projection_semantic_file_fingerprint(
     }
 
 
+def projection_semantic_json_hash_update(
+    digest: Any,
+    value: Any,
+    *,
+    volatile_keys: frozenset[str],
+    logical_root: Path | None = None,
+) -> None:
+    """Feed canonical semantic JSON into a digest without bulk materialization."""
+    if isinstance(value, dict):
+        digest.update(b"{")
+        first = True
+        items = sorted(
+            (
+                (str(key), item)
+                for key, item in value.items()
+                if str(key) not in volatile_keys
+            ),
+            key=lambda pair: pair[0],
+        )
+        for key, item in items:
+            if not first:
+                digest.update(b",")
+            first = False
+            digest.update(
+                json.dumps(
+                    key,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            )
+            digest.update(b":")
+            projection_semantic_json_hash_update(
+                digest,
+                item,
+                volatile_keys=volatile_keys,
+                logical_root=logical_root,
+            )
+        digest.update(b"}")
+        return
+    if isinstance(value, (list, tuple)):
+        digest.update(b"[")
+        for index, item in enumerate(value):
+            if index:
+                digest.update(b",")
+            projection_semantic_json_hash_update(
+                digest,
+                item,
+                volatile_keys=volatile_keys,
+                logical_root=logical_root,
+            )
+        digest.update(b"]")
+        return
+    if isinstance(value, str) and logical_root is not None:
+        root_text = str(logical_root)
+        if root_text:
+            value = value.replace(root_text, "{projection_root}")
+    digest.update(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
+
+
 def session_projection_semantic_digest(
     projection_dir: Path,
 ) -> dict[str, Any]:
-    manifest = read_json(
-        projection_dir / "session.manifest.json",
-        {},
+    volatile_keys = (
+        SESSION_PROJECTION_SEMANTIC_DIGEST_VOLATILE_KEYS
     )
-    session_index = read_json(
-        projection_dir / SESSION_INDEX_JSON,
-        {},
-    )
-    raw_block_index = read_json(
-        projection_dir / "raw" / RAW_BLOCK_INDEX_JSON,
-        {},
-    )
-    raw_source = read_json(
-        projection_dir / "raw" / RAW_SOURCE_JSON,
-        {},
-    )
-    raw_capture_state = read_json(
-        projection_dir / "raw" / RAW_CAPTURE_STATE_JSON,
-        {},
-    )
-    segment_indexes: dict[str, Any] = {}
-    segment_markdown_sha256: dict[str, str] = {}
-    segments_dir = projection_dir / "segments"
-    if segments_dir.is_dir():
-        for index_path in sorted(
-            segments_dir.glob("*.index.json")
-        ):
-            segment_indexes[index_path.name] = read_json(
-                index_path,
-                {},
-            )
-        for markdown_path in sorted(segments_dir.glob("*.md")):
-            segment_markdown_sha256[markdown_path.name] = (
-                sha256_file(markdown_path)
-            )
-    payload = session_projection_semantic_digest_value(
-        {
-            "manifest": manifest,
-            "session_index": session_index,
-            "raw_block_index": raw_block_index,
-            "raw_source": raw_source,
-            "raw_capture_state": raw_capture_state,
-            "segment_indexes": segment_indexes,
-            "segment_markdown_sha256": (
-                segment_markdown_sha256
-            ),
-        }
-    )
-    return {
-        "version": SESSION_PROJECTION_SEMANTIC_DIGEST_VERSION,
-        "sha256": hashlib.sha256(
+    digest = hashlib.sha256()
+    digest.update(b"{")
+    first_top_level = True
+
+    def write_top_level_value(key: str, value: Any) -> None:
+        nonlocal first_top_level
+        if not first_top_level:
+            digest.update(b",")
+        first_top_level = False
+        digest.update(
             json.dumps(
-                payload,
+                key,
                 ensure_ascii=False,
-                sort_keys=True,
                 separators=(",", ":"),
             ).encode("utf-8")
-        ).hexdigest(),
-        "segment_index_count": len(segment_indexes),
-        "segment_markdown_count": len(
-            segment_markdown_sha256
+        )
+        digest.update(b":")
+        projection_semantic_json_hash_update(
+            digest,
+            value,
+            volatile_keys=volatile_keys,
+        )
+
+    write_top_level_value(
+        "manifest",
+        read_json(
+            projection_dir / "session.manifest.json",
+            {},
         ),
+    )
+    write_top_level_value(
+        "raw_block_index",
+        read_json(
+            projection_dir / "raw" / RAW_BLOCK_INDEX_JSON,
+            {},
+        ),
+    )
+    write_top_level_value(
+        "raw_capture_state",
+        read_json(
+            projection_dir / "raw" / RAW_CAPTURE_STATE_JSON,
+            {},
+        ),
+    )
+    write_top_level_value(
+        "raw_source",
+        read_json(
+            projection_dir / "raw" / RAW_SOURCE_JSON,
+            {},
+        ),
+    )
+    segments_dir = projection_dir / "segments"
+    segment_index_paths = (
+        sorted(segments_dir.glob("*.index.json"))
+        if segments_dir.is_dir()
+        else []
+    )
+    segment_markdown_paths = (
+        sorted(segments_dir.glob("*.md"))
+        if segments_dir.is_dir()
+        else []
+    )
+
+    if not first_top_level:
+        digest.update(b",")
+    first_top_level = False
+    digest.update(b'"segment_indexes":{')
+    for index, index_path in enumerate(segment_index_paths):
+        if index:
+            digest.update(b",")
+        digest.update(
+            json.dumps(
+                index_path.name,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
+        digest.update(b":")
+        projection_semantic_json_hash_update(
+            digest,
+            read_json(index_path, {}),
+            volatile_keys=volatile_keys,
+        )
+    digest.update(b"}")
+
+    digest.update(b',"segment_markdown_sha256":{')
+    for index, markdown_path in enumerate(
+        segment_markdown_paths
+    ):
+        if index:
+            digest.update(b",")
+        digest.update(
+            json.dumps(
+                markdown_path.name,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
+        digest.update(b":")
+        projection_semantic_json_hash_update(
+            digest,
+            sha256_file(markdown_path),
+            volatile_keys=volatile_keys,
+        )
+    digest.update(b"}")
+
+    write_top_level_value(
+        "session_index",
+        read_json(
+            projection_dir / SESSION_INDEX_JSON,
+            {},
+        ),
+    )
+    digest.update(b"}")
+    return {
+        "version": SESSION_PROJECTION_SEMANTIC_DIGEST_VERSION,
+        "sha256": digest.hexdigest(),
+        "segment_index_count": len(segment_index_paths),
+        "segment_markdown_count": len(segment_markdown_paths),
         "excluded_keys": sorted(
             SESSION_PROJECTION_SEMANTIC_DIGEST_VOLATILE_KEYS
         ),
@@ -21422,6 +22085,9 @@ def sync_session_from_transcript(
         transcript_path
     )
     events = parse_raw_events(snapshot_path)
+    literal_policy = derived_session_sensitive_literal_policy(
+        events
+    )
     display = session_display(
         aoa_root=aoa_root,
         session_dir=initial_session_dir,
@@ -21493,6 +22159,7 @@ def sync_session_from_transcript(
                 raw_blocks_by_segment.get(segment_id),
                 reference_session_dir=session_dir,
                 publish_identity=publish_identity,
+                literal_policy=literal_policy,
             )
         )
     token_accounting = token_accounting_summary_for_session(events, session_id=session_id)
@@ -21606,6 +22273,7 @@ def sync_session_from_transcript(
         events,
         reference_session_dir=session_dir,
         publish_identity=publish_identity,
+        literal_policy=literal_policy,
     )
     try:
         publish_result = atomic_publish_session_projection(
@@ -28393,6 +29061,9 @@ def reindex_session_from_raw(
     )
     now = utc_now()
     events = parse_raw_events(raw_path)
+    literal_policy = derived_session_sensitive_literal_policy(
+        events
+    )
     publish_identity = session_projection_publish_identity(
         raw_path=raw_path,
         events=events,
@@ -28458,6 +29129,7 @@ def reindex_session_from_raw(
                 ),
                 reference_session_dir=session_dir,
                 publish_identity=publish_identity,
+                literal_policy=literal_policy,
             )
             for segment_no, (start, end, role) in enumerate(
                 ranges
@@ -28658,6 +29330,7 @@ def reindex_session_from_raw(
             events,
             reference_session_dir=session_dir,
             publish_identity=publish_identity,
+            literal_policy=literal_policy,
         )
         publish_result = atomic_publish_session_projection(
             stage_dir=stage_dir,
@@ -30738,6 +31411,97 @@ def projection_generation_from_json(value: Any) -> dict[str, Any] | None:
     return parsed if isinstance(parsed, dict) else None
 
 
+def publish_search_projection_generation_identity(
+    *,
+    aoa_root: Path,
+    projection: str,
+    identity: dict[str, Any],
+    coverage_current: bool,
+) -> dict[str, Any]:
+    """Publish one projection identity only after its complete scope is current."""
+    generation_id = str(identity.get("generation_id") or "")
+    if not coverage_current or not projection or not generation_id:
+        return {
+            "status": "not_published_incomplete_coverage",
+            "projection": projection,
+            "generation_id": generation_id,
+            "changed": False,
+        }
+    db_path = search_db_path(aoa_root)
+    if not db_path.exists():
+        return {
+            "status": "not_published_search_index_missing",
+            "projection": projection,
+            "generation_id": generation_id,
+            "changed": False,
+        }
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = sqlite3.connect(
+            db_path,
+            timeout=5.0,
+            factory=SearchSqliteConnection,
+        )
+        conn.row_factory = sqlite3.Row
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT value FROM meta "
+            "WHERE key = 'generation_identities_json'"
+        ).fetchone()
+        stored = projection_generation_from_json(
+            row["value"] if row else ""
+        )
+        generations = dict(stored) if isinstance(stored, dict) else {}
+        previous = (
+            generations.get(projection)
+            if isinstance(generations.get(projection), dict)
+            else {}
+        )
+        previous_generation_id = str(
+            previous.get("generation_id") or ""
+        )
+        changed = previous != identity
+        if changed:
+            generations[projection] = identity
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value) "
+                "VALUES ('generation_identities_json', ?)",
+                (
+                    json.dumps(
+                        generations,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                ),
+            )
+        conn.commit()
+        return {
+            "status": "published" if changed else "already_current",
+            "projection": projection,
+            "generation_id": generation_id,
+            "previous_generation_id": previous_generation_id,
+            "changed": changed,
+            "authority_boundary": (
+                "generation metadata describes a reproducible projection; "
+                "per-session state and source refs still prove coverage"
+            ),
+        }
+    except sqlite3.Error as exc:
+        if conn is not None:
+            conn.rollback()
+        return {
+            "status": sqlite_error_status(exc),
+            "projection": projection,
+            "generation_id": generation_id,
+            "changed": False,
+            "diagnostics": [sqlite_error_diagnostic(exc)],
+        }
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def search_dirty_projection_states(
     fingerprints: list[dict[str, Any]],
     indexed_states: dict[str, dict[str, Any]],
@@ -30788,11 +31552,307 @@ def search_dirty_projection_states(
     return dirty
 
 
+def search_source_set_session_ids_for_records(
+    records: Iterable[dict[str, Any]],
+) -> list[str]:
+    return sorted(
+        {
+            str(record.get("session_id") or "")
+            for record in records
+            if isinstance(record, dict)
+            and str(record.get("session_id") or "")
+        }
+    )
+
+
+def session_registry_source_set_is_complete(aoa_root: Path) -> bool:
+    registry_path = aoa_root / REGISTRY_NAME
+    if not registry_path.is_file():
+        return False
+    payload = read_json(registry_path, {})
+    return bool(
+        isinstance(payload, dict)
+        and isinstance(payload.get("sessions"), list)
+    )
+
+
+def search_source_set_identity_for_session_ids(
+    session_ids: Iterable[str],
+) -> dict[str, Any]:
+    normalized = sorted({str(item) for item in session_ids if str(item)})
+    semantic = {
+        "identity_version": SEARCH_SOURCE_SET_IDENTITY_VERSION,
+        "session_ids": normalized,
+    }
+    return {
+        **semantic,
+        "session_count": len(normalized),
+        "sha256": hashlib.sha256(
+            json.dumps(
+                semantic,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest(),
+    }
+
+
+def search_source_set_identity_for_records(
+    records: Iterable[dict[str, Any]],
+) -> dict[str, Any]:
+    return search_source_set_identity_for_session_ids(
+        search_source_set_session_ids_for_records(records)
+    )
+
+
+def search_source_set_identity_from_metadata(
+    metadata: dict[str, Any],
+) -> dict[str, Any]:
+    raw = metadata.get(SEARCH_SOURCE_SET_META_KEY)
+    if not raw:
+        return {}
+    try:
+        payload = json.loads(str(raw))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    session_ids = payload.get("session_ids")
+    if not isinstance(session_ids, list):
+        return {}
+    return search_source_set_identity_for_session_ids(
+        str(item) for item in session_ids if item
+    )
+
+
+def search_source_set_change_state_from_metadata(
+    *,
+    aoa_root: Path,
+    metadata: dict[str, Any],
+) -> dict[str, Any]:
+    stored = search_source_set_identity_from_metadata(metadata)
+    current = search_source_set_identity_for_records(
+        registry_sessions(aoa_root)
+    )
+    if not session_registry_source_set_is_complete(aoa_root):
+        return {
+            "status": "unproven_registry_source_set",
+            "compatible": None,
+            "stored": stored,
+            "current": current,
+            "removed_session_ids": [],
+            "added_session_ids": [],
+            "reason": "session_registry_source_set_unavailable",
+            "answer_admission": (
+                "legacy_compatibility_no_source_set_claim"
+            ),
+        }
+    if not stored:
+        return {
+            "status": "legacy_untracked",
+            "compatible": None,
+            "stored": {},
+            "current": current,
+            "removed_session_ids": [],
+            "added_session_ids": [],
+            "reason": "search_source_set_identity_missing",
+            "answer_admission": "legacy_compatibility_no_source_set_claim",
+        }
+    stored_ids = set(stored.get("session_ids", []))
+    current_ids = set(current.get("session_ids", []))
+    removed = sorted(stored_ids - current_ids)
+    added = sorted(current_ids - stored_ids)
+    if removed:
+        status = "blocked_removed_sources"
+        reason = SEARCH_SOURCE_SET_REMOVED_REASON
+        answer_admission = "blocked_until_deep_source_set_replacement"
+    elif added:
+        status = "stale_readable_added_sources"
+        reason = "search_source_set_added"
+        answer_admission = "stored_scope_only_until_incremental_catchup"
+    else:
+        status = "current"
+        reason = ""
+        answer_admission = "current_source_set"
+    return {
+        "status": status,
+        "compatible": not removed,
+        "stored": stored,
+        "current": current,
+        "removed_session_ids": removed,
+        "added_session_ids": added,
+        "reason": reason,
+        "answer_admission": answer_admission,
+    }
+
+
+def search_source_set_change_state(
+    *,
+    aoa_root: Path,
+    db_path: Path | None = None,
+) -> dict[str, Any]:
+    resolved = db_path or search_db_path(aoa_root)
+    if not resolved.exists():
+        return {
+            "status": "missing",
+            "compatible": False,
+            "stored": {},
+            "current": search_source_set_identity_for_records(
+                registry_sessions(aoa_root)
+            ),
+            "removed_session_ids": [],
+            "added_session_ids": [],
+            "reason": "search_index_missing",
+            "answer_admission": "projection_missing",
+        }
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = connect_existing_search_db(resolved)
+        metadata = search_index_metadata(conn)
+        state = search_source_set_change_state_from_metadata(
+            aoa_root=aoa_root,
+            metadata=metadata,
+        )
+        if (
+            state.get("status") == "legacy_untracked"
+            and session_registry_source_set_is_complete(aoa_root)
+        ):
+            orphaned = search_projection_orphaned_session_states(
+                conn,
+                active_session_ids=(
+                    search_source_set_session_ids_for_records(
+                        registry_sessions(aoa_root)
+                    )
+                ),
+            )
+            if orphaned:
+                removed_ids = [
+                    str(item.get("session_id") or "")
+                    for item in orphaned
+                    if item.get("session_id")
+                ]
+                state = {
+                    **state,
+                    "status": "blocked_removed_sources",
+                    "compatible": False,
+                    "removed_session_ids": removed_ids,
+                    "reason": SEARCH_SOURCE_SET_REMOVED_REASON,
+                    "answer_admission": (
+                        "blocked_until_deep_source_set_replacement"
+                    ),
+                    "identity_basis": (
+                        "legacy_projection_state_vs_complete_registry"
+                    ),
+                }
+    except sqlite3.Error as exc:
+        return {
+            "status": sqlite_error_status(exc),
+            "compatible": False,
+            "stored": {},
+            "current": {},
+            "removed_session_ids": [],
+            "added_session_ids": [],
+            "reason": sqlite_error_diagnostic(exc),
+            "answer_admission": "projection_unreadable",
+        }
+    finally:
+        if conn is not None:
+            conn.close()
+    return state
+
+
+def search_projection_stored_session_states(
+    conn: sqlite3.Connection,
+) -> dict[str, dict[str, Any]]:
+    states = sqlite_search_session_states(conn)
+
+    def merge_rows(
+        table: str,
+        *,
+        label_column: str = "session_label",
+        fingerprint_column: str = "source_fingerprint",
+        directory_column: str = "",
+    ) -> None:
+        if not sqlite_table_exists(conn, table):
+            return
+        columns = {
+            str(row[1])
+            for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if "session_id" not in columns:
+            return
+        label_expr = (
+            label_column if label_column in columns else "''"
+        )
+        fingerprint_expr = (
+            fingerprint_column if fingerprint_column in columns else "''"
+        )
+        directory_expr = (
+            directory_column
+            if directory_column and directory_column in columns
+            else "''"
+        )
+        for row in conn.execute(
+            "SELECT session_id, "
+            f"{label_expr} AS session_label, "
+            f"{fingerprint_expr} AS source_fingerprint, "
+            f"{directory_expr} AS session_dir "
+            f"FROM {table} WHERE COALESCE(session_id, '') <> ''"
+        ).fetchall():
+            session_id = str(row["session_id"] or "")
+            if not session_id:
+                continue
+            current = states.setdefault(
+                session_id,
+                {"session_id": session_id},
+            )
+            for key in (
+                "session_label",
+                "source_fingerprint",
+                "session_dir",
+            ):
+                if not current.get(key) and row[key]:
+                    current[key] = str(row[key])
+            current.setdefault("projection_tables", [])
+            if table not in current["projection_tables"]:
+                current["projection_tables"].append(table)
+
+    merge_rows("session_index_state")
+    merge_rows("exact_literal_session_state")
+    merge_rows("episode_semantic_session_state")
+    merge_rows("episode_dense_session_state")
+    merge_rows(
+        "episode_semantic_queue",
+        directory_column="session_dir",
+    )
+    return states
+
+
+def search_projection_orphaned_session_states(
+    conn: sqlite3.Connection,
+    *,
+    active_session_ids: Iterable[str],
+) -> list[dict[str, Any]]:
+    active = {str(item) for item in active_session_ids if str(item)}
+    states = search_projection_stored_session_states(conn)
+    return [
+        {
+            **states[session_id],
+            "lifecycle_status": "source_removed_from_complete_registry",
+            "reasons": [SEARCH_SOURCE_SET_REMOVED_REASON],
+        }
+        for session_id in sorted(set(states) - active)
+    ]
+
+
 def sqlite_search_index_scoped_state(
     aoa_root: Path,
     latest_source_mtime: float,
     records: list[dict[str, Any]],
     projection_fingerprints: list[dict[str, Any]] | None = None,
+    *,
+    source_scope_complete: bool = False,
 ) -> dict[str, Any]:
     db_path = search_db_path(aoa_root)
     if not db_path.exists():
@@ -30807,11 +31867,47 @@ def sqlite_search_index_scoped_state(
     try:
         conn = connect_existing_search_db(db_path)
         metadata = search_index_metadata(conn)
+        source_set_state = search_source_set_change_state_from_metadata(
+            aoa_root=aoa_root,
+            metadata=metadata,
+        )
         schema_diagnostics = search_schema_diagnostics(conn)
         has_documents = bool(conn.execute("SELECT 1 FROM documents LIMIT 1").fetchone()) if sqlite_table_exists(conn, "documents") else False
         has_routes = sqlite_table_exists(conn, "document_routes") and bool(conn.execute("SELECT 1 FROM document_routes LIMIT 1").fetchone())
         has_route_terms = sqlite_table_exists(conn, "route_terms") and bool(conn.execute("SELECT 1 FROM route_terms LIMIT 1").fetchone())
         indexed_session_states = sqlite_search_session_states(conn)
+        removed_source_ids = set(
+            str(item)
+            for item in source_set_state.get("removed_session_ids", [])
+            if item
+        )
+        if removed_source_ids:
+            stored_states = search_projection_stored_session_states(conn)
+            orphaned_sessions = [
+                {
+                    **stored_states.get(session_id, {"session_id": session_id}),
+                    "session_id": session_id,
+                    "lifecycle_status": (
+                        "source_removed_from_complete_registry"
+                    ),
+                    "reasons": [SEARCH_SOURCE_SET_REMOVED_REASON],
+                }
+                for session_id in sorted(removed_source_ids)
+            ]
+        elif (
+            source_set_state.get("status") == "legacy_untracked"
+            and session_registry_source_set_is_complete(aoa_root)
+        ):
+            orphaned_sessions = search_projection_orphaned_session_states(
+                conn,
+                active_session_ids=(
+                    search_source_set_session_ids_for_records(
+                        registry_sessions(aoa_root)
+                    )
+                ),
+            )
+        else:
+            orphaned_sessions = []
         conn.close()
     except sqlite3.Error as exc:
         status = sqlite_error_status(exc)
@@ -30842,6 +31938,7 @@ def sqlite_search_index_scoped_state(
             expected_generations["exact_literal"]["generation_id"]
         ),
     )
+    dirty_sessions.extend(orphaned_sessions)
     reasons: list[str] = list(schema_diagnostics)
     if schema_version != str(SEARCH_SCHEMA_VERSION):
         reasons.append("search_schema_mismatch")
@@ -30853,6 +31950,8 @@ def sqlite_search_index_scoped_state(
         reasons.append("search_route_terms_empty")
     if dirty_sessions:
         reasons.append("session_projection_dirty")
+    if orphaned_sessions:
+        reasons.append(SEARCH_SOURCE_SET_REMOVED_REASON)
     status = "current" if not reasons else ("stale" if reasons != ["search_index_empty"] else "empty")
     return {
         "status": status,
@@ -30876,6 +31975,14 @@ def sqlite_search_index_scoped_state(
         "dirty_session_count": len(dirty_sessions),
         "dirty_session_ids": [str(item.get("session_id") or "") for item in dirty_sessions if item.get("session_id")],
         "dirty_sessions": dirty_sessions[:40],
+        "source_scope_complete": source_scope_complete,
+        "source_set_state": source_set_state,
+        "orphaned_session_count": len(orphaned_sessions),
+        "orphaned_session_ids": [
+            str(item.get("session_id") or "")
+            for item in orphaned_sessions
+            if item.get("session_id")
+        ],
         "reasons": reasons,
         "truth_status": "scoped_search_session_state_no_document_count_scan",
         "source_scan": True,
@@ -36004,6 +37111,8 @@ def sqlite_search_index_state(
     latest_source_mtime: float,
     records: list[dict[str, Any]] | None = None,
     projection_fingerprints: list[dict[str, Any]] | None = None,
+    *,
+    source_scope_complete: bool = False,
 ) -> dict[str, Any]:
     if records is not None:
         return sqlite_search_index_scoped_state(
@@ -36011,6 +37120,7 @@ def sqlite_search_index_state(
             latest_source_mtime,
             records,
             projection_fingerprints=projection_fingerprints,
+            source_scope_complete=source_scope_complete,
         )
     db_path = search_db_path(aoa_root)
     if not db_path.exists():
@@ -36263,6 +37373,8 @@ def atlas_index_state(
     latest_source_mtime: float,
     records: list[dict[str, Any]] | None = None,
     projection_fingerprints: list[dict[str, Any]] | None = None,
+    *,
+    source_scope_complete: bool = False,
 ) -> dict[str, Any]:
     index_path = aoa_root / ATLAS_ROOT / "index.json"
     payload = read_json(index_path, {})
@@ -36296,6 +37408,38 @@ def atlas_index_state(
     )
     selected_fingerprints = projection_fingerprints if projection_fingerprints is not None else projection_fingerprints_for_records(records or [])
     dirty_sessions = atlas_dirty_projection_states(aoa_root, selected_fingerprints) if records is not None else []
+    projection_state = read_atlas_projection_state(aoa_root)
+    projection_sessions = (
+        projection_state.get("sessions")
+        if isinstance(projection_state.get("sessions"), dict)
+        else {}
+    )
+    current_registry_session_ids = {
+        str(record.get("session_id") or "")
+        for record in registry_sessions(aoa_root)
+        if record.get("session_id")
+    }
+    orphaned_sessions = [
+        {
+            **(
+                projection_sessions.get(session_id)
+                if isinstance(
+                    projection_sessions.get(session_id), dict
+                )
+                else {}
+            ),
+            "session_id": session_id,
+            "lifecycle_status": (
+                "source_removed_from_complete_registry"
+            ),
+            "reasons": ["atlas_source_set_removed"],
+        }
+        for session_id in sorted(
+            set(str(item) for item in projection_sessions)
+            - current_registry_session_ids
+        )
+    ] if session_registry_source_set_is_complete(aoa_root) else []
+    dirty_sessions.extend(orphaned_sessions)
     reasons: list[str] = []
     if int_value(payload.get("schema_version")) != ATLAS_SCHEMA_VERSION:
         reasons.append("atlas_schema_mismatch")
@@ -36312,6 +37456,8 @@ def atlas_index_state(
         reasons.append("atlas_index_empty")
     if dirty_sessions:
         reasons.append("session_projection_dirty")
+    if orphaned_sessions:
+        reasons.append("atlas_source_set_removed")
     elif records is None and latest_source_mtime > 0 and index_mtime < latest_source_mtime:
         reasons.append("source_newer_than_atlas_index")
     status = "current" if not reasons else ("stale" if reasons != ["atlas_index_empty"] else "empty")
@@ -36337,6 +37483,13 @@ def atlas_index_state(
         "dirty_session_count": len(dirty_sessions),
         "dirty_session_ids": [str(item.get("session_id") or "") for item in dirty_sessions if item.get("session_id")],
         "dirty_sessions": dirty_sessions[:40],
+        "source_scope_complete": source_scope_complete,
+        "orphaned_session_count": len(orphaned_sessions),
+        "orphaned_session_ids": [
+            str(item.get("session_id") or "")
+            for item in orphaned_sessions
+            if item.get("session_id")
+        ],
         "reasons": reasons,
         "diagnostics": [],
     }
@@ -37413,6 +38566,9 @@ def route_projection_dependency_coherence(
         )
         deferred.update(upstream_capture_deferred)
         if str(action.get("status") or "") in {
+            "deferred",
+            "deferred_clean_rebuild_to_deep",
+            "deferred_dependency_bound",
             "deferred_budget_exhausted",
             "applied_partial_budget_exhausted",
             "deferred_upstream_capture",
@@ -37421,6 +38577,9 @@ def route_projection_dependency_coherence(
         if name == "episode_semantic":
             deferred.update(declared_deferred_ids(projection_actions["search"]))
             if str(projection_actions["search"].get("status") or "") in {
+                "deferred",
+                "deferred_clean_rebuild_to_deep",
+                "deferred_dependency_bound",
                 "deferred_budget_exhausted",
                 "applied_partial_budget_exhausted",
                 "deferred_upstream_capture",
@@ -37637,6 +38796,33 @@ def maintain_indexes(
             "actions": [],
         }
 
+    bounded_discovery = bool(
+        isinstance(selection_scope, dict)
+        and selection_scope.get("global_scope_complete") is False
+    )
+    maintenance_profile = (
+        str(selection_scope.get("profile") or "")
+        if isinstance(selection_scope, dict)
+        else ""
+    )
+    declared_global_scope_complete = bool(
+        isinstance(selection_scope, dict)
+        and selection_scope.get("global_scope_complete") is True
+    )
+    stable_selected_records_global = bool(
+        not bounded_discovery
+        and graph_selection_is_global(
+            target=target,
+            since=since,
+            until=until,
+            limit=limit,
+        )
+        and (
+            selected_records is None
+            or declared_global_scope_complete
+        )
+    )
+
     latest_source_mtime, latest_source_paths = latest_index_source_mtime(aoa_root, records)
     route_drift = route_index_drift_records(records)
     effective_route_max_raw_bytes = (
@@ -37769,7 +38955,18 @@ def maintain_indexes(
             search_projection_records = budgeted_search_projection_records or records
             search_projection_fingerprints = search_projection_fingerprints_for_records(search_projection_records)
         search_state_records = budgeted_search_projection_records or records
-        search_state = sqlite_search_index_state(aoa_root, latest_source_mtime, search_state_records, projection_fingerprints=search_projection_fingerprints)
+        search_state = sqlite_search_index_state(
+            aoa_root,
+            latest_source_mtime,
+            search_state_records,
+            projection_fingerprints=search_projection_fingerprints,
+            **(
+                {"source_scope_complete": True}
+                if stable_selected_records_global
+                and not budgeted_search_projection_records
+                else {}
+            ),
+        )
         if not has_budget():
             planning_budget_exhausted = True
             if "index_maintenance_planning_budget_exhausted" not in diagnostics:
@@ -37806,25 +39003,22 @@ def maintain_indexes(
                         atlas_projection_fingerprints = projection_fingerprints_for_records(atlas_projection_records)
                     else:
                         atlas_projection_records = records
-                    atlas_state = atlas_index_state(aoa_root, latest_source_mtime, atlas_projection_records, projection_fingerprints=atlas_projection_fingerprints)
+                    atlas_state = atlas_index_state(
+                        aoa_root,
+                        latest_source_mtime,
+                        atlas_projection_records,
+                        projection_fingerprints=atlas_projection_fingerprints,
+                        **(
+                            {"source_scope_complete": True}
+                            if stable_selected_records_global
+                            and atlas_projection_records is records
+                            else {}
+                        ),
+                    )
                     if not has_budget():
                         planning_budget_exhausted = True
                         if "index_maintenance_planning_budget_exhausted" not in diagnostics:
                             diagnostics.append("index_maintenance_planning_budget_exhausted")
-    bounded_discovery = bool(
-        isinstance(selection_scope, dict)
-        and selection_scope.get("global_scope_complete") is False
-    )
-    stable_selected_records_global = bool(
-        selected_records is None
-        and not bounded_discovery
-        and graph_selection_is_global(
-            target=target,
-            since=since,
-            until=until,
-            limit=limit,
-        )
-    )
     if planning_budget_exhausted and repair_graph:
         graph_state = {
             "status": "deferred_budget_exhausted",
@@ -37994,17 +39188,63 @@ def maintain_indexes(
         )
 
     def atlas_rebuild_required_for(state: dict[str, Any]) -> bool:
-        reasons = state.get("reasons") if isinstance(state.get("reasons"), list) else []
         return (
             str(state.get("status") or "") in {"missing", "empty", "invalid"}
-            or "atlas_schema_mismatch" in reasons
+            or bool(atlas_clean_rebuild_reasons_for_state(state))
         )
 
     def current_selected_records() -> list[dict[str, Any]]:
         return list(records)
 
-    search_rebuild_required = search_rebuild_required_for(search_state)
+    search_full_rebuild_reasons = (
+        auto_maintenance_search_full_rebuild_reasons(
+            {"search_index": search_state}
+        )
+    )
+    search_rebuild_required = bool(search_full_rebuild_reasons)
+    search_source_set_replacement_required = bool(
+        SEARCH_SOURCE_SET_REMOVED_REASON
+        in search_full_rebuild_reasons
+    )
+    if search_source_set_replacement_required:
+        search_shards_repair_needed = bool(
+            repair_indexes
+            and (
+                int_value(search_shards_state.get("existing_shard_count")) > 0
+                or int_value(search_shards_state.get("shard_db_total_bytes")) > 0
+            )
+        )
+        if repair_graph:
+            graph_repair_needed = True
+    search_rebuild_deferred_to_deep = bool(
+        search_rebuild_required
+        and maintenance_profile != "deep"
+        and bool(maintenance_profile or bounded_discovery)
+    )
+    source_set_dependents_deferred_to_deep = bool(
+        search_source_set_replacement_required
+        and search_rebuild_deferred_to_deep
+    )
     atlas_rebuild_required = atlas_rebuild_required_for(atlas_state)
+    atlas_clean_rebuild_reasons = atlas_clean_rebuild_reasons_for_state(
+        atlas_state
+    )
+    atlas_bounded_bootstrap_eligible = bool(
+        str(atlas_state.get("status") or "") in {"missing", "empty"}
+        and not atlas_clean_rebuild_reasons
+    )
+    atlas_rebuild_deferred_to_deep = bool(
+        atlas_rebuild_required
+        and bool(
+            bounded_discovery
+            or (
+                maintenance_profile
+                and maintenance_profile != "deep"
+            )
+        )
+        and maintenance_profile != "deep"
+        and not atlas_bounded_bootstrap_eligible
+    )
     search_dirty_selector = search_state.get("dirty_session_ids") if isinstance(search_state.get("dirty_session_ids"), list) else search_state.get("dirty_sessions", [])
     atlas_dirty_selector = atlas_state.get("dirty_session_ids") if isinstance(atlas_state.get("dirty_session_ids"), list) else atlas_state.get("dirty_sessions", [])
     episode_semantic_dirty_selector = (
@@ -38013,7 +39253,11 @@ def maintain_indexes(
         else episode_semantic_state.get("dirty_sessions", [])
     )
     search_dirty_records = [] if search_rebuild_required else records_matching_projection_states(records, search_dirty_selector if isinstance(search_dirty_selector, list) else [])
-    if atlas_rebuild_required and bounded_discovery:
+    if (
+        atlas_rebuild_required
+        and bounded_discovery
+        and atlas_bounded_bootstrap_eligible
+    ):
         atlas_rebuild_required = False
         atlas_dirty_records = list(records)
         atlas_state = {
@@ -38035,6 +39279,8 @@ def maintain_indexes(
                 )
             ),
         }
+    elif atlas_rebuild_deferred_to_deep:
+        atlas_dirty_records = list(records)
     else:
         atlas_dirty_records = (
             []
@@ -38155,16 +39401,40 @@ def maintain_indexes(
         < len(search_state_refresh_candidate_records) + len(search_reindex_candidate_records)
     )
     atlas_repair_limited = effective_repair_limit is not None and len(atlas_repair_records) < len(atlas_dirty_records)
+    if atlas_rebuild_deferred_to_deep:
+        atlas_repair_records = []
+        atlas_repair_limited = True
+    if search_rebuild_deferred_to_deep:
+        search_reindex_records = []
+        search_repair_limited = True
     search_update_target = "all" if search_rebuild_required else target
     search_update_selection_args = [] if search_rebuild_required else selection_args
     maintenance_readiness_sample_limit = 0
-    search_command = (
+    deep_maintenance_command = (
         base
-        + ["search-index", search_update_target, *root_args]
-        + search_update_selection_args
-        + (["--max-raw-mb", max_raw_mb_text] if max_raw_mb_text else [])
-        + ([] if search_rebuild_required else ["--no-rebuild"])
-        + ["--write-report"]
+        + [
+            "auto-maintenance",
+            "deep",
+            "all",
+            "--workspace-root",
+            str(workspace_root_for(None, aoa_root)),
+            "--aoa-root",
+            str(aoa_root),
+            "--apply",
+            "--write-report",
+        ]
+    )
+    search_command = (
+        list(deep_maintenance_command)
+        if search_rebuild_deferred_to_deep
+        else (
+            base
+            + ["search-index", search_update_target, *root_args]
+            + search_update_selection_args
+            + (["--max-raw-mb", max_raw_mb_text] if max_raw_mb_text else [])
+            + ([] if search_rebuild_required else ["--no-rebuild"])
+            + ["--write-report"]
+        )
     )
     entity_registry_search_command = (
         base
@@ -38195,10 +39465,16 @@ def maintain_indexes(
         ]
     )
     atlas_command = (
-        base
-        + ["atlas", "build", "all", *root_args]
-        + ([] if atlas_rebuild_required else ["--no-clean"])
-        + ["--write-report"]
+        (
+            list(deep_maintenance_command)
+        )
+        if atlas_rebuild_deferred_to_deep
+        else (
+            base
+            + ["atlas", "build", "all", *root_args]
+            + ([] if atlas_rebuild_required else ["--no-clean"])
+            + ["--write-report"]
+        )
     )
     actions = [
         maintenance_action(
@@ -38228,7 +39504,11 @@ def maintain_indexes(
         ),
         maintenance_action(
             "rebuild_search_index",
-            reason="portable_sqlite_missing_or_stale",
+            reason=(
+                "search_clean_rebuild_requires_deep_profile"
+                if search_rebuild_deferred_to_deep
+                else "portable_sqlite_missing_or_stale"
+            ),
             needed=repair_indexes
             and (
                 search_rebuild_required
@@ -38247,7 +39527,11 @@ def maintain_indexes(
         ),
         maintenance_action(
             "rebuild_agent_atlas",
-            reason="atlas_missing_or_stale",
+            reason=(
+                "atlas_clean_rebuild_requires_deep_profile"
+                if atlas_rebuild_deferred_to_deep
+                else "atlas_missing_or_stale"
+            ),
             needed=repair_indexes and (bool(atlas_repair_records) or atlas_rebuild_required or bool(route_drift) or token_backfill_needed),
             command=atlas_command,
         ),
@@ -38271,12 +39555,16 @@ def maintain_indexes(
         ),
         maintenance_action(
             "graph_maintenance",
-            reason="graph_store_missing_or_dirty",
+            reason=(
+                "graph_store_requires_source_set_replacement"
+                if search_source_set_replacement_required
+                else "graph_store_missing_or_dirty"
+            ),
             needed=repair_graph and graph_repair_needed,
             command=base
             + [
                 "graph-maintenance",
-                target,
+                "all" if search_source_set_replacement_required else target,
                 *root_args,
                 "--apply",
                 "--batch-limit",
@@ -38352,19 +39640,40 @@ def maintain_indexes(
     actions.append(episode_dense_action)
     search_shards_action = maintenance_action(
         "refresh_search_shards",
-        reason="existing_search_shards_missing_current_session_projection",
+        reason=(
+            "existing_search_shards_require_source_set_replacement"
+            if search_source_set_replacement_required
+            else "existing_search_shards_missing_current_session_projection"
+        ),
         needed=search_shards_repair_needed,
         command=(
             base
-            + ["search-shards", target, *root_args]
-            + (["--since", since] if since else [])
-            + (["--until", until] if until else [])
+            + [
+                "search-shards",
+                "all" if search_source_set_replacement_required else target,
+                *root_args,
+            ]
+            + (
+                []
+                if search_source_set_replacement_required
+                else (["--since", since] if since else [])
+            )
+            + (
+                []
+                if search_source_set_replacement_required
+                else (["--until", until] if until else [])
+            )
             + (
                 ["--limit", str(effective_search_shard_repair_limit)]
                 if effective_search_shard_repair_limit is not None
+                and not search_source_set_replacement_required
                 else []
             )
-            + ["--no-rebuild", "--dirty-only"]
+            + (
+                []
+                if search_source_set_replacement_required
+                else ["--no-rebuild", "--dirty-only"]
+            )
             + (["--budget-seconds", budget_seconds_text] if budget_seconds_text else [])
             + ["--write-report"]
         ),
@@ -38381,6 +39690,42 @@ def maintain_indexes(
     readiness_action = actions[8]
     graph_action = actions[9]
     sample_action = actions[10]
+    if atlas_rebuild_deferred_to_deep and atlas_action["needed"]:
+        atlas_action["status"] = "deferred"
+        atlas_action["action_kind"] = "full_rebuild"
+        atlas_action["skip_reason"] = (
+            "atlas_clean_rebuild_requires_deep_profile"
+        )
+        atlas_action["deep_next_command"] = list(atlas_command)
+        atlas_action["clean_rebuild_reasons"] = list(
+            atlas_clean_rebuild_reasons
+        )
+    if search_rebuild_deferred_to_deep and search_action["needed"]:
+        search_action["status"] = "deferred"
+        search_action["action_kind"] = "full_rebuild"
+        search_action["skip_reason"] = (
+            "search_clean_rebuild_requires_deep_profile"
+        )
+        search_action["deep_next_command"] = list(search_command)
+        search_action["clean_rebuild_reasons"] = list(
+            search_full_rebuild_reasons
+        )
+    for dependent_action in (
+        search_shards_action,
+        episode_dense_action,
+        graph_action,
+    ):
+        if (
+            source_set_dependents_deferred_to_deep
+            and dependent_action.get("needed")
+        ):
+            dependent_action["status"] = "deferred"
+            dependent_action["skip_reason"] = (
+                "source_set_replacement_requires_deep_profile"
+            )
+            dependent_action["deep_next_command"] = list(
+                deep_maintenance_command
+            )
     deferred_graph_action: dict[str, Any] | None = None
     if not repair_graph and graph_repair_needed:
         deferred_graph_action = maintenance_action(
@@ -38422,9 +39767,21 @@ def maintain_indexes(
         },
         "rebuild_search_index": {
             "action_kind": "full_rebuild" if search_rebuild_required else "incremental_update",
-            "selection_count": len(records) if search_rebuild_required else len(search_reindex_records),
+            "selection_count": (
+                0
+                if search_rebuild_deferred_to_deep
+                else len(records)
+                if search_rebuild_required
+                else len(search_reindex_records)
+            ),
             "dirty_count": len(search_dirty_records) + (1 if search_non_projection_repair_needed else 0),
-            "deferred_count": 0 if search_rebuild_required else int_value(search_repair_selection_state.get("remaining_count")),
+            "deferred_count": (
+                max(1, len(search_state.get("orphaned_session_ids", [])))
+                if search_rebuild_deferred_to_deep
+                else 0
+                if search_rebuild_required
+                else int_value(search_repair_selection_state.get("remaining_count"))
+            ),
         },
         "refresh_entity_registry": {
             "action_kind": "state_reconcile",
@@ -38433,8 +39790,19 @@ def maintain_indexes(
         },
         "rebuild_agent_atlas": {
             "action_kind": "full_rebuild" if atlas_rebuild_required else "incremental_update",
-            "selection_count": len(records) if atlas_rebuild_required else len(atlas_repair_records),
+            "selection_count": (
+                0
+                if atlas_rebuild_deferred_to_deep
+                else len(records)
+                if atlas_rebuild_required
+                else len(atlas_repair_records)
+            ),
             "dirty_count": len(atlas_dirty_records) + (1 if atlas_rebuild_required else 0),
+            "deferred_count": (
+                max(1, len(atlas_dirty_records))
+                if atlas_rebuild_deferred_to_deep
+                else 0
+            ),
         },
         "refresh_operational_route_rollup": {
             "action_kind": "state_reconcile",
@@ -39000,7 +40368,32 @@ def maintain_indexes(
                 if not result.get("ok") and result.get("diagnostics"):
                     diagnostics.extend(str(item) for item in result.get("diagnostics", []))
         if search_action["needed"] or reindex_ran or token_backfill_ran:
-            if not has_budget():
+            if search_rebuild_deferred_to_deep:
+                search_action["result"] = {
+                    "ok": True,
+                    "status": "deferred_clean_rebuild_to_deep",
+                    "selected_count": 0,
+                    "processed_count": 0,
+                    "completed_session_ids": [],
+                    "remaining_count": max(
+                        1,
+                        len(search_state.get("orphaned_session_ids", [])),
+                    ),
+                    "budget_exhausted": False,
+                    "clean_rebuild_reasons": list(
+                        search_full_rebuild_reasons
+                    ),
+                    "source_set_tombstone_session_ids": list(
+                        search_state.get("orphaned_session_ids", [])
+                    ),
+                    "exact_next_command": list(search_command),
+                    "diagnostics": [],
+                    "truth_status": (
+                        "generated_projection_retirement_deferred_raw_unchanged"
+                    ),
+                }
+                action_results.append(search_action)
+            elif not has_budget():
                 budget_exhausted = True
                 search_action["status"] = "deferred_budget_exhausted"
                 action_results.append(search_action)
@@ -39063,6 +40456,11 @@ def maintain_indexes(
                         selected_records=selected_search_records,
                         budget_seconds=budget_remaining(),
                         progress_every=progress_every,
+                        source_scope_complete=(
+                            True
+                            if search_source_set_replacement_required
+                            else None
+                        ),
                     )
                     note_dense_upstream_changes(result)
                     search_action["status"] = "applied" if result.get("ok") else ("deferred_budget_exhausted" if result.get("budget_exhausted") else "failed")
@@ -39082,6 +40480,12 @@ def maintain_indexes(
                             "updated_entity_registry_document_count",
                             "unchanged_entity_registry_document_count",
                             "removed_entity_registry_document_count",
+                            "source_scope_complete",
+                            "source_set_identity",
+                            "previous_source_set_identity",
+                            "source_set_tombstone_count",
+                            "source_set_tombstones",
+                            "source_set_tombstone_truth_status",
                             "report_json",
                             "report_markdown",
                             "diagnostics",
@@ -39147,7 +40551,23 @@ def maintain_indexes(
                 if not result.get("ok") and result.get("diagnostics"):
                     diagnostics.extend(str(item) for item in result.get("diagnostics", []))
         if atlas_action["needed"] or reindex_ran or token_backfill_ran:
-            if not has_budget():
+            if atlas_rebuild_deferred_to_deep:
+                atlas_action["result"] = {
+                    "ok": True,
+                    "status": "deferred_clean_rebuild_to_deep",
+                    "selected_count": 0,
+                    "processed_count": 0,
+                    "completed_session_ids": [],
+                    "remaining_count": max(1, len(atlas_dirty_records)),
+                    "budget_exhausted": False,
+                    "clean_rebuild_reasons": list(
+                        atlas_clean_rebuild_reasons
+                    ),
+                    "exact_next_command": list(atlas_command),
+                    "diagnostics": [],
+                }
+                action_results.append(atlas_action)
+            elif not has_budget():
                 budget_exhausted = True
                 atlas_action["status"] = "deferred_budget_exhausted"
                 action_results.append(atlas_action)
@@ -39205,26 +40625,61 @@ def maintain_indexes(
                     if not result.get("ok"):
                         diagnostics.extend(str(item) for item in result.get("diagnostics", []))
         if search_shards_action["needed"]:
-            if not has_budget():
+            if source_set_dependents_deferred_to_deep:
+                search_shards_action["result"] = {
+                    "ok": True,
+                    "status": "deferred_clean_rebuild_to_deep",
+                    "selected_count": 0,
+                    "processed_count": 0,
+                    "remaining_count": max(
+                        1,
+                        len(search_state.get("orphaned_session_ids", [])),
+                    ),
+                    "budget_exhausted": False,
+                    "exact_next_command": list(deep_maintenance_command),
+                    "diagnostics": [],
+                }
+                action_results.append(search_shards_action)
+            elif not has_budget():
                 budget_exhausted = True
                 search_shards_action["status"] = "deferred_budget_exhausted"
                 action_results.append(search_shards_action)
             else:
                 result = materialize_search_shards(
                     aoa_root=aoa_root,
-                    target=target,
-                    since=since,
-                    until=until,
-                    limit=effective_search_shard_repair_limit,
+                    target=(
+                        "all"
+                        if search_source_set_replacement_required
+                        else target
+                    ),
+                    since=(
+                        None
+                        if search_source_set_replacement_required
+                        else since
+                    ),
+                    until=(
+                        None
+                        if search_source_set_replacement_required
+                        else until
+                    ),
+                    limit=(
+                        None
+                        if search_source_set_replacement_required
+                        else effective_search_shard_repair_limit
+                    ),
                     max_raw_bytes=max_raw_bytes,
                     write_report=write_report,
                     budget_seconds=budget_remaining(),
                     progress_every=progress_every,
                     structured_only=True,
-                    rebuild_shards=False,
-                    dirty_only=True,
+                    rebuild_shards=search_source_set_replacement_required,
+                    dirty_only=not search_source_set_replacement_required,
                     include_deferred_live=False,
-                    selected_records=records,
+                    selected_records=(
+                        None
+                        if search_source_set_replacement_required
+                        else records
+                    ),
                 )
                 global_remaining_dirty_session_count = int_value(
                     result.get("global_remaining_count"),
@@ -39477,7 +40932,11 @@ def maintain_indexes(
                 refreshed_latest_source_mtime, refreshed_latest_source_paths = latest_index_source_mtime(aoa_root, refreshed_records)
                 refreshed_atlas_state = atlas_index_state(aoa_root, refreshed_latest_source_mtime, refreshed_records)
                 post_maintenance_states["post_projection_atlas_index"] = refreshed_atlas_state
-                if refreshed_atlas_state.get("needs_refresh") and not atlas_repair_limited:
+                if (
+                    refreshed_atlas_state.get("needs_refresh")
+                    and not atlas_repair_limited
+                    and not atlas_rebuild_deferred_to_deep
+                ):
                     refreshed_atlas_rebuild_required = atlas_rebuild_required_for(refreshed_atlas_state)
                     refreshed_atlas_dirty_selector = (
                         refreshed_atlas_state.get("dirty_session_ids")
@@ -39642,7 +41101,22 @@ def maintain_indexes(
                 len(dense_upstream_changed_session_ids),
             )
         if episode_dense_action["needed"]:
-            if not has_budget():
+            if source_set_dependents_deferred_to_deep:
+                episode_dense_action["result"] = {
+                    "ok": True,
+                    "status": "deferred_clean_rebuild_to_deep",
+                    "selected_count": 0,
+                    "processed_count": 0,
+                    "remaining_count": max(
+                        1,
+                        len(search_state.get("orphaned_session_ids", [])),
+                    ),
+                    "budget_exhausted": False,
+                    "exact_next_command": list(deep_maintenance_command),
+                    "diagnostics": [],
+                }
+                action_results.append(episode_dense_action)
+            elif not has_budget():
                 budget_exhausted = True
                 episode_dense_action["status"] = "deferred_budget_exhausted"
                 action_results.append(episode_dense_action)
@@ -39720,17 +41194,48 @@ def maintain_indexes(
                 ):
                     diagnostics.extend(str(item) for item in result.get("diagnostics", []))
         if repair_graph and (graph_action["needed"] or reindex_ran or token_backfill_ran):
-            if not has_budget():
+            if source_set_dependents_deferred_to_deep:
+                graph_action["result"] = {
+                    "ok": True,
+                    "status": "deferred_clean_rebuild_to_deep",
+                    "selected_count": 0,
+                    "processed_count": 0,
+                    "remaining_count": max(
+                        1,
+                        len(search_state.get("orphaned_session_ids", [])),
+                    ),
+                    "budget_exhausted": False,
+                    "exact_next_command": list(deep_maintenance_command),
+                    "diagnostics": [],
+                }
+                action_results.append(graph_action)
+            elif not has_budget():
                 budget_exhausted = True
                 graph_action["status"] = "deferred_budget_exhausted"
                 action_results.append(graph_action)
             else:
                 result = graph_maintenance(
                     aoa_root=aoa_root,
-                    target=target,
-                    since=since,
-                    until=until,
-                    limit=limit,
+                    target=(
+                        "all"
+                        if search_source_set_replacement_required
+                        else target
+                    ),
+                    since=(
+                        None
+                        if search_source_set_replacement_required
+                        else since
+                    ),
+                    until=(
+                        None
+                        if search_source_set_replacement_required
+                        else until
+                    ),
+                    limit=(
+                        None
+                        if search_source_set_replacement_required
+                        else limit
+                    ),
                     apply=True,
                     batch_limit=effective_graph_batch_limit,
                     refresh_chunk_size=effective_graph_refresh_chunk_size,
@@ -39739,8 +41244,16 @@ def maintain_indexes(
                     budget_seconds=budget_remaining(),
                     write_report=write_report,
                     reason="index_maintenance",
-                    selected_records=current_selected_records(),
-                    selected_records_global=stable_selected_records_global,
+                    selected_records=(
+                        None
+                        if search_source_set_replacement_required
+                        else current_selected_records()
+                    ),
+                    selected_records_global=(
+                        True
+                        if search_source_set_replacement_required
+                        else stable_selected_records_global
+                    ),
                     query_demand=query_demand_payload,
                     priority_session_ids=list(
                         dict.fromkeys(
@@ -40199,6 +41712,22 @@ def maintain_indexes(
             - len(search_reindex_records),
         ),
         "search_repair_limited": search_repair_limited,
+        "search_clean_rebuild_required": bool(search_rebuild_required),
+        "search_clean_rebuild_reasons": search_full_rebuild_reasons,
+        "search_source_set_replacement_required": (
+            search_source_set_replacement_required
+        ),
+        "search_rebuild_deferred_to_deep": (
+            search_rebuild_deferred_to_deep
+        ),
+        "search_deep_next_command": (
+            list(search_command)
+            if search_rebuild_deferred_to_deep
+            else []
+        ),
+        "search_source_set_tombstone_session_ids": list(
+            search_state.get("orphaned_session_ids", [])
+        ),
         "search_dirty_sessions": [
             {"session_id": item.get("session_id"), "session_label": item.get("session_label"), "reasons": item.get("reasons", [])}
             for item in (search_state.get("dirty_sessions", []) if isinstance(search_state.get("dirty_sessions"), list) else [])[:20]
@@ -40207,6 +41736,14 @@ def maintain_indexes(
         "atlas_repair_session_count": len(atlas_repair_records),
         "atlas_repair_remaining_count": max(0, len(atlas_dirty_records) - len(atlas_repair_records)),
         "atlas_repair_limited": atlas_repair_limited,
+        "atlas_clean_rebuild_required": bool(atlas_rebuild_required),
+        "atlas_clean_rebuild_reasons": atlas_clean_rebuild_reasons,
+        "atlas_rebuild_deferred_to_deep": atlas_rebuild_deferred_to_deep,
+        "atlas_deep_next_command": (
+            list(atlas_command)
+            if atlas_rebuild_deferred_to_deep
+            else []
+        ),
         "atlas_repair_sessions": [
             {
                 "session_id": record.get("session_id"),
@@ -48161,7 +49698,23 @@ def auto_maintenance_has_budget_remaining_backlog(maintenance: dict[str, Any]) -
 
 
 SEARCH_FULL_REBUILD_STATUSES = {"missing", "empty", "sqlite_error"}
-SEARCH_FULL_REBUILD_REASONS = {"search_schema_mismatch", "search_route_index_empty", "search_route_terms_empty"}
+SEARCH_FULL_REBUILD_REASONS = {
+    "search_schema_mismatch",
+    "search_route_index_empty",
+    "search_route_terms_empty",
+    SEARCH_SOURCE_SET_REMOVED_REASON,
+}
+ATLAS_CLEAN_REBUILD_STATUSES = {"invalid"}
+ATLAS_CLEAN_REBUILD_REASONS = {
+    "atlas_schema_mismatch",
+    "atlas_generation_identity_changed",
+    "atlas_publish_epoch_incomplete",
+    "atlas_axis_publish_epoch_mismatch",
+    "atlas_projection_state_schema_mismatch",
+    "atlas_projection_state_generation_changed",
+    "route_signal_classifier_version_changed",
+    "atlas_source_set_removed",
+}
 SEARCH_INCREMENTAL_SCHEMA_TRANSITIONS = frozenset(
     {
         ("20", "21"),
@@ -48248,6 +49801,26 @@ def auto_maintenance_search_full_rebuild_reasons(freshness: dict[str, Any]) -> l
             and schema_transition.get("incremental_compatible") is True
         )
     )
+    return sorted(set(rebuild_reasons))
+
+
+def atlas_clean_rebuild_reasons_for_state(
+    atlas_state: dict[str, Any],
+) -> list[str]:
+    """Return structural Atlas states that cannot converge with --no-clean."""
+    status = str(atlas_state.get("status") or "")
+    reasons = (
+        atlas_state.get("reasons")
+        if isinstance(atlas_state.get("reasons"), list)
+        else []
+    )
+    rebuild_reasons = [
+        str(reason)
+        for reason in reasons
+        if str(reason) in ATLAS_CLEAN_REBUILD_REASONS
+    ]
+    if status in ATLAS_CLEAN_REBUILD_STATUSES:
+        rebuild_reasons.append(f"atlas_status:{status}")
     return sorted(set(rebuild_reasons))
 
 
@@ -54712,6 +56285,16 @@ def build_search_catalog(
         expected_generations["lexical_search"].get("generation_id") or ""
     )
     diagnostics: list[str] = []
+    active_registry_records = registry_sessions(aoa_root)
+    registry_source_set_complete = session_registry_source_set_is_complete(
+        aoa_root
+    )
+    active_registry_session_ids = {
+        str(record.get("session_id") or "")
+        for record in active_registry_records
+        if record.get("session_id")
+    }
+    retired_projection_session_ids: set[str] = set()
     if not db_path.exists():
         payload = {
             "schema_version": SCHEMA_VERSION,
@@ -54968,6 +56551,13 @@ def build_search_catalog(
     for row in rows:
         session_id = str(row["session_id"] or "")
         session_label = str(row["session_label"] or "")
+        if (
+            registry_source_set_complete
+            and session_id
+            and session_id not in active_registry_session_ids
+        ):
+            retired_projection_session_ids.add(session_id)
+            continue
         live_state = live_state_by_session.get(session_id) or live_state_by_session.get(session_label) or {}
         expected_fingerprint = str(live_state.get("fingerprint") or row["source_fingerprint"] or "")
         expected_latest_mtime = float(live_state.get("latest_source_mtime") or row["source_latest_mtime"] or 0.0)
@@ -55136,6 +56726,12 @@ def build_search_catalog(
             session_label = str(shard_session_state.get("session_label") or "")
             if not session_id or session_id in existing_catalog_keys or (session_label and session_label in existing_catalog_keys):
                 continue
+            if (
+                registry_source_set_complete
+                and session_id not in active_registry_session_ids
+            ):
+                retired_projection_session_ids.add(session_id)
+                continue
             doc = shard_doc_cache[str(shard_path)].get(session_id) or shard_doc_cache[str(shard_path)].get(session_label) or {}
             live_state = live_state_by_session.get(session_id) or live_state_by_session.get(session_label) or {}
             expected_fingerprint = str(live_state.get("fingerprint") or shard_session_state.get("source_fingerprint") or "")
@@ -55231,8 +56827,19 @@ def build_search_catalog(
         "artifact_type": "session_memory_search_catalog",
         "generated_at": now,
         "generation_identity": catalog_generation_identity,
-        "ok": bool(sessions) and not diagnostics,
-        "status": "current" if sessions and not diagnostics else "empty",
+        "ok": bool(
+            not diagnostics
+            and (bool(sessions) or registry_source_set_complete)
+        ),
+        "status": (
+            "current"
+            if not diagnostics
+            and (bool(sessions) or registry_source_set_complete)
+            else "empty"
+        ),
+        "authoritative_empty_source_set": bool(
+            registry_source_set_complete and not sessions
+        ),
         "mutates": bool(write or write_report),
         "aoa_root": str(aoa_root),
         "catalog_path": str(catalog_path),
@@ -55246,6 +56853,15 @@ def build_search_catalog(
             "recovered_shard_only_session_count": recovered_shard_only_count,
             "truth_status": "generated_catalog_navigation_recovery_not_raw_archive_truth",
         },
+        "retired_projection_session_count": len(
+            retired_projection_session_ids
+        ),
+        "retired_projection_session_ids": sorted(
+            retired_projection_session_ids
+        ),
+        "retirement_truth_status": (
+            "generated_catalog_rows_withheld_owner_registry_and_raw_unchanged"
+        ),
         "shard_strategy": SEARCH_SHARD_STRATEGY,
         "active_projection": SEARCH_ACTIVE_PROJECTION_MONOLITH,
         "fallback": {
@@ -57121,6 +58737,105 @@ def search_provider_status_fast(
     }
 
 
+def unobserved_served_request_health(
+    *,
+    provider_name: str,
+    requested: bool = False,
+) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "observation_kind": "real_served_embedding_request",
+        "provider": provider_name,
+        "requested": requested,
+        "observed": False,
+        "ok": None,
+        "status": "unobserved",
+        "observed_at": None,
+        "expected_model": EPISODE_DENSE_DEFAULT_MODEL,
+        "expected_dimension": EPISODE_DENSE_DEFAULT_DIMENSION,
+        "model": "",
+        "dimension": 0,
+        "elapsed_ms": None,
+        "freshness": {
+            "status": "unobserved",
+            "scope": "single_status_invocation",
+            "reuse_allowed": False,
+        },
+        "truth_status": (
+            "availability_only_not_served_request_health_or_semantic_quality"
+        ),
+        "diagnostics": [
+            (
+                "served request probe was requested but not executed because "
+                "the provider route was not admitted"
+                if requested
+                else "served request probe was not requested; capability, model, "
+                "and health gates do not prove request serving"
+            )
+        ],
+    }
+
+
+def host_embedding_served_request_health(
+    *,
+    provider_name: str,
+    provider: dict[str, Any],
+) -> dict[str, Any]:
+    """Return one non-reusable, privacy-bounded real embedding observation."""
+    observed_at = utc_now()
+    preflight = episode_dense_provider_preflight(
+        {
+            "embedding_api_url": str(provider.get("embedding_api_url") or ""),
+            "expected_model": str(
+                provider.get("embedding_model")
+                or EPISODE_DENSE_DEFAULT_MODEL
+            ),
+        }
+    )
+    preflight_status = str(preflight.get("status") or "provider_probe_failed")
+    if preflight.get("ok"):
+        status = "served"
+    elif preflight_status == "provider_contract_drift":
+        status = "contract_drift"
+    else:
+        status = "failed"
+    provider_status = str(preflight.get("provider_status") or "unknown")
+    diagnostics = [] if preflight.get("ok") else [
+        f"served_embedding_request_{status}:{provider_status}"
+    ]
+    return {
+        "schema_version": 1,
+        "observation_kind": "real_served_embedding_request",
+        "provider": provider_name,
+        "requested": True,
+        "observed": True,
+        "ok": bool(preflight.get("ok")),
+        "status": status,
+        "observed_at": observed_at,
+        "expected_model": str(
+            preflight.get("expected_model")
+            or provider.get("embedding_model")
+            or EPISODE_DENSE_DEFAULT_MODEL
+        ),
+        "expected_dimension": int_value(
+            preflight.get("expected_dimension"),
+            EPISODE_DENSE_DEFAULT_DIMENSION,
+        ),
+        "model": str(preflight.get("model") or ""),
+        "dimension": int_value(preflight.get("dimension")),
+        "elapsed_ms": int_value(preflight.get("elapsed_ms")),
+        "freshness": {
+            "status": "current",
+            "scope": "single_status_invocation",
+            "reuse_allowed": False,
+        },
+        "truth_status": (
+            "bounded_served_request_observation_not_semantic_quality_proof"
+        ),
+        "diagnostics": diagnostics,
+    }
+
+
 def host_provider_status(
     *,
     config: dict[str, Any],
@@ -57128,6 +58843,7 @@ def host_provider_status(
     force_probe: bool = False,
     refresh_host: bool = False,
     refresh_host_index: bool = False,
+    probe_served_request: bool = False,
     timeout: int = 45,
 ) -> dict[str, Any]:
     provider = config.get("providers", {}).get(provider_name, {}) if isinstance(config.get("providers"), dict) else {}
@@ -57143,6 +58859,10 @@ def host_provider_status(
             "truth_level": provider.get("truth_level"),
             "write_policy": provider.get("write_policy"),
             "host_write_requires_operator_enablement": bool(provider.get("host_write_requires_operator_enablement")),
+            "served_request_health": unobserved_served_request_health(
+                provider_name=provider_name,
+                requested=probe_served_request,
+            ),
             "diagnostics": ["provider is declared for future runtime integration and is not used by portable search"],
         }
     if not provider.get("enabled") and not force_probe:
@@ -57153,6 +58873,10 @@ def host_provider_status(
             "portable": bool(provider.get("portable")),
             "role": provider.get("role"),
             "truth_level": provider.get("truth_level"),
+            "served_request_health": unobserved_served_request_health(
+                provider_name=provider_name,
+                requested=probe_served_request,
+            ),
             "diagnostics": ["provider disabled in config; use explicit host probing before relying on it"],
         }
     gates: dict[str, Any] = {}
@@ -57191,12 +58915,39 @@ def host_provider_status(
             model_warning_count += 1
             diagnostics.append(f"reranker_status:{models['reranker'].get('status')}")
 
+    served_request_health = (
+        host_embedding_served_request_health(
+            provider_name=provider_name,
+            provider=provider,
+        )
+        if probe_served_request
+        else unobserved_served_request_health(
+            provider_name=provider_name,
+            requested=False,
+        )
+    )
+    request_fail_count = (
+        1
+        if served_request_health.get("observed")
+        and served_request_health.get("ok") is False
+        else 0
+    )
+    if request_fail_count:
+        diagnostics.append(
+            "served_embedding_request:"
+            f"{served_request_health.get('status') or 'failed'}"
+        )
+
     warning_count = (
         int(gates["capability_gate"].get("warnings") or 0)
         + int(gates["quality_gate"].get("warnings") or 0)
         + model_warning_count
     )
-    fail_count = int(gates["capability_gate"].get("fails") or 0) + int(gates["quality_gate"].get("fails") or 0)
+    fail_count = (
+        int(gates["capability_gate"].get("fails") or 0)
+        + int(gates["quality_gate"].get("fails") or 0)
+        + request_fail_count
+    )
     if warning_count:
         diagnostics.append("host_backend_has_warnings")
     status = "ready"
@@ -57216,8 +58967,10 @@ def host_provider_status(
         "host_write_requires_operator_enablement": bool(provider.get("host_write_requires_operator_enablement")),
         "warning_count": warning_count,
         "fail_count": fail_count,
+        "request_fail_count": request_fail_count,
         "gates": gates,
         "models": models,
+        "served_request_health": served_request_health,
         "diagnostics": diagnostics,
     }
 
@@ -57229,6 +58982,7 @@ def search_provider_status(
     include_host: bool = False,
     refresh_host: bool = False,
     refresh_host_index: bool = False,
+    probe_served_request: bool = False,
     freshness_records: list[dict[str, Any]] | None = None,
     projection_fingerprints: list[dict[str, Any]] | None = None,
     timeout: int = 45,
@@ -57260,6 +59014,7 @@ def search_provider_status(
                     force_probe=include_host,
                     refresh_host=refresh_host,
                     refresh_host_index=refresh_host_index,
+                    probe_served_request=probe_served_request,
                     timeout=timeout,
                 )
             else:
@@ -57271,6 +59026,10 @@ def search_provider_status(
                     "portable": bool(provider.get("portable")),
                     "role": provider.get("role"),
                     "truth_level": provider.get("truth_level"),
+                    "served_request_health": unobserved_served_request_health(
+                        provider_name=name,
+                        requested=probe_served_request,
+                    ),
                     "diagnostics": ["host provider not probed; pass --include-host to run host gates"],
                 }
         else:
@@ -57303,6 +59062,7 @@ def search_provider_status(
         "selected_provider": provider_name,
         "freshness_mode": effective_freshness_mode,
         "record_freshness_state": record_freshness_state,
+        "served_request_probe": probe_served_request,
         "providers": results,
         "diagnostics": diagnostics,
     }
@@ -57412,6 +59172,7 @@ def compact_search_provider_status_for_route(
         "selected_provider",
         "freshness_mode",
         "status_mode",
+        "served_request_probe",
         "diagnostics",
     )
     provider_keys = (
@@ -57442,6 +59203,30 @@ def compact_search_provider_status_for_route(
             continue
         compact_provider = {key: value.get(key) for key in provider_keys if key in value}
         compact_provider["freshness"] = compact_search_provider_freshness_for_route(value.get("freshness"))
+        if isinstance(value.get("served_request_health"), dict):
+            served = value["served_request_health"]
+            compact_provider["served_request_health"] = {
+                key: served.get(key)
+                for key in (
+                    "schema_version",
+                    "observation_kind",
+                    "provider",
+                    "requested",
+                    "observed",
+                    "ok",
+                    "status",
+                    "observed_at",
+                    "expected_model",
+                    "expected_dimension",
+                    "model",
+                    "dimension",
+                    "elapsed_ms",
+                    "freshness",
+                    "truth_status",
+                    "diagnostics",
+                )
+                if key in served
+            }
         compact_providers[str(name)] = compact_provider
     compact["providers"] = compact_providers
     compact["full_status_route"] = f"search-provider-status --provider {provider_name}"
@@ -57482,6 +59267,27 @@ def search_provider_status_markdown(payload: dict[str, Any]) -> str:
     if model_rows:
         lines.extend(["", "## Local Model Gates", "", "| provider | model gate | status | ok | model | device |", "| --- | --- | --- | --- | --- | --- |"])
         lines.extend(model_rows)
+    served_rows: list[str] = []
+    for name, item in providers.items():
+        if not isinstance(item, dict) or not isinstance(item.get("served_request_health"), dict):
+            continue
+        served = item["served_request_health"]
+        served_rows.append(
+            f"| `{name}` | `{served.get('status')}` | `{served.get('observed')}` | "
+            f"`{served.get('ok')}` | `{served.get('model') or ''}` | "
+            f"`{served.get('dimension') or ''}` |"
+        )
+    if served_rows:
+        lines.extend(
+            [
+                "",
+                "## Served-Request Health",
+                "",
+                "| provider | status | observed | ok | model | dimension |",
+                "| --- | --- | --- | --- | --- | --- |",
+            ]
+        )
+        lines.extend(served_rows)
     lines.extend(["", "## Authority Law", "", str(payload.get("authority_law") or "")])
     return "\n".join(lines)
 
@@ -58324,6 +60130,34 @@ def init_search_db(
     )
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS episode_dense_representation_vectors (
+            representation_id TEXT PRIMARY KEY,
+            doc_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            episode_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            raw_ref TEXT NOT NULL,
+            segment_ref TEXT NOT NULL DEFAULT '',
+            session_ref TEXT NOT NULL DEFAULT '',
+            source_lane TEXT NOT NULL DEFAULT '',
+            admission_basis TEXT NOT NULL DEFAULT '',
+            outcome TEXT NOT NULL DEFAULT '',
+            source_episode_projection_version INTEGER NOT NULL,
+            source_route_signal_classifier_version INTEGER NOT NULL DEFAULT 0,
+            dense_projection_version INTEGER NOT NULL,
+            dense_document_version INTEGER NOT NULL,
+            representation_version INTEGER NOT NULL,
+            model TEXT NOT NULL,
+            dimension INTEGER NOT NULL,
+            document_sha256 TEXT NOT NULL,
+            vector_f32 BLOB NOT NULL,
+            indexed_at TEXT NOT NULL,
+            generation_id TEXT NOT NULL DEFAULT ''
+        ) WITHOUT ROWID
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS episode_dense_session_state (
             session_id TEXT PRIMARY KEY,
             status TEXT NOT NULL,
@@ -58335,6 +60169,8 @@ def init_search_db(
             dimension INTEGER NOT NULL,
             episode_document_count INTEGER NOT NULL,
             vector_count INTEGER NOT NULL,
+            representation_document_count INTEGER NOT NULL DEFAULT -1,
+            representation_vector_count INTEGER NOT NULL DEFAULT -1,
             indexed_at TEXT NOT NULL,
             last_error TEXT NOT NULL DEFAULT '',
             generation_id TEXT NOT NULL DEFAULT '',
@@ -58372,6 +60208,16 @@ def init_search_db(
         conn.execute(
             "ALTER TABLE episode_dense_session_state "
             "ADD COLUMN generation_identity_json TEXT NOT NULL DEFAULT ''"
+        )
+    if "representation_document_count" not in episode_dense_state_columns:
+        conn.execute(
+            "ALTER TABLE episode_dense_session_state "
+            "ADD COLUMN representation_document_count INTEGER NOT NULL DEFAULT -1"
+        )
+    if "representation_vector_count" not in episode_dense_state_columns:
+        conn.execute(
+            "ALTER TABLE episode_dense_session_state "
+            "ADD COLUMN representation_vector_count INTEGER NOT NULL DEFAULT -1"
         )
     conn.execute(
         """
@@ -58534,6 +60380,19 @@ def init_search_db(
         "CREATE INDEX IF NOT EXISTS idx_episode_dense_vectors_generation "
         "ON episode_dense_vectors(generation_id, session_id, episode_id)"
     )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_episode_dense_representations_doc "
+        "ON episode_dense_representation_vectors(doc_id, role, raw_ref)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_episode_dense_representations_session "
+        "ON episode_dense_representation_vectors(session_id, episode_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_episode_dense_representations_generation "
+        "ON episode_dense_representation_vectors("
+        "generation_id, session_id, episode_id)"
+    )
     if create_indexes:
         if budget_deadline is not None:
             conn.set_progress_handler(lambda: 1 if time.monotonic() >= budget_deadline else 0, 10000)
@@ -58556,6 +60415,7 @@ def reset_search_db(conn: sqlite3.Connection) -> None:
     conn.execute("DELETE FROM episode_semantic_fts")
     conn.execute("DELETE FROM episode_semantic_payloads")
     conn.execute("DELETE FROM episode_dense_vectors")
+    conn.execute("DELETE FROM episode_dense_representation_vectors")
     conn.execute("DELETE FROM episode_dense_session_state")
     conn.execute("DELETE FROM episode_entity_postings")
     conn.execute("DELETE FROM episode_semantic_meta")
@@ -58825,6 +60685,20 @@ def delete_episode_semantic_for_session(
             "DELETE FROM episode_dense_vectors WHERE doc_id IN ("
             "SELECT doc_id FROM episode_semantic_meta "
             "WHERE doc_rowid IN (SELECT rowid FROM episode_semantic_delete_rowids))"
+        )
+    if (
+        count
+        and sqlite_table_exists(
+            conn,
+            "episode_dense_representation_vectors",
+        )
+    ):
+        conn.execute(
+            "DELETE FROM episode_dense_representation_vectors "
+            "WHERE doc_id IN ("
+            "SELECT doc_id FROM episode_semantic_meta "
+            "WHERE doc_rowid IN ("
+            "SELECT rowid FROM episode_semantic_delete_rowids))"
         )
     if count and sqlite_table_exists(conn, "episode_semantic_fts"):
         conn.execute("DELETE FROM episode_semantic_fts WHERE rowid IN (SELECT rowid FROM episode_semantic_delete_rowids)")
@@ -60111,6 +61985,267 @@ def episode_dense_document(episode: dict[str, Any]) -> str:
     return passage[:EPISODE_DENSE_DOCUMENT_MAX_CHARS]
 
 
+EPISODE_DENSE_REPRESENTATION_ROLES = tuple(
+    role for role, _quota in reversed(EPISODE_DENSE_ROLE_QUOTAS)
+)
+
+
+def episode_dense_representation_documents(
+    episode: dict[str, Any],
+    *,
+    doc_id: str,
+    session_id: str,
+    episode_id: str,
+) -> list[dict[str, Any]]:
+    """Build bounded independently attributable passages for one episode."""
+    representations = (
+        episode.get("representations")
+        if isinstance(episode.get("representations"), dict)
+        else {}
+    )
+    documents: list[dict[str, Any]] = []
+    for role in EPISODE_DENSE_REPRESENTATION_ROLES:
+        entries = [
+            item
+            for item in (
+                representations.get(role)
+                if isinstance(representations.get(role), list)
+                else []
+            )
+            if isinstance(item, dict)
+            and str(item.get("text") or "").strip()
+            and isinstance(item.get("refs"), dict)
+            and item["refs"].get("raw")
+        ][-EPISODE_DENSE_REPRESENTATION_PER_ROLE_LIMIT:]
+        for item in entries:
+            refs = item.get("refs") if isinstance(item.get("refs"), dict) else {}
+            raw_ref = str(refs.get("raw") or "")
+            text = str(item.get("text") or "").strip()[
+                :EPISODE_DENSE_REPRESENTATION_TEXT_MAX_CHARS
+            ]
+            identity_payload = {
+                "doc_id": doc_id,
+                "role": role,
+                "raw_ref": raw_ref,
+                "source_lane": str(item.get("source_lane") or ""),
+                "admission_basis": str(item.get("admission_basis") or ""),
+                "outcome": str(item.get("outcome") or ""),
+                "text_sha256": hashlib.sha256(
+                    text.encode("utf-8")
+                ).hexdigest(),
+            }
+            identity_digest = hashlib.sha256(
+                json.dumps(
+                    identity_payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()[:24]
+            document = (
+                "passage: "
+                f"role={role}; "
+                f"source={item.get('source_lane') or 'unknown'}; "
+                f"basis={item.get('admission_basis') or 'unknown'}; "
+                f"outcome={item.get('outcome') or 'unknown'}\n"
+                f"{text}"
+            )
+            documents.append(
+                {
+                    "representation_id": (
+                        f"{doc_id}:representation:{identity_digest}"
+                    ),
+                    "doc_id": doc_id,
+                    "session_id": session_id,
+                    "episode_id": episode_id,
+                    "role": role,
+                    "raw_ref": raw_ref,
+                    "segment_ref": str(refs.get("segment") or ""),
+                    "session_ref": str(refs.get("session") or ""),
+                    "source_lane": str(item.get("source_lane") or ""),
+                    "admission_basis": str(
+                        item.get("admission_basis") or ""
+                    ),
+                    "outcome": str(item.get("outcome") or ""),
+                    "document": document,
+                    "document_sha256": hashlib.sha256(
+                        document.encode("utf-8")
+                    ).hexdigest(),
+                }
+            )
+    documents.sort(
+        key=lambda item: (
+            str(item.get("role") or ""),
+            line_from_raw_ref(item.get("raw_ref")),
+            str(item.get("representation_id") or ""),
+        )
+    )
+    return documents
+
+
+def episode_dense_representation_support(
+    episode: dict[str, Any],
+    matches: Any,
+) -> list[dict[str, Any]]:
+    """Resolve vector matches back to distinct evidence-bearing representations."""
+    representations = (
+        episode.get("representations")
+        if isinstance(episode.get("representations"), dict)
+        else {}
+    )
+    by_role_ref: dict[tuple[str, str], dict[str, Any]] = {}
+    for role, entries in representations.items():
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            refs = (
+                entry.get("refs")
+                if isinstance(entry.get("refs"), dict)
+                else {}
+            )
+            raw_ref = str(refs.get("raw") or "")
+            if raw_ref:
+                by_role_ref.setdefault((str(role), raw_ref), entry)
+    support: list[dict[str, Any]] = []
+    seen_raw_refs: set[str] = set()
+    for match in matches if isinstance(matches, list) else []:
+        if not isinstance(match, dict):
+            continue
+        role = str(match.get("role") or "")
+        raw_ref = str(match.get("raw_ref") or "")
+        if not raw_ref or raw_ref in seen_raw_refs:
+            continue
+        entry = by_role_ref.get((role, raw_ref))
+        if not isinstance(entry, dict):
+            continue
+        refs = (
+            entry.get("refs")
+            if isinstance(entry.get("refs"), dict)
+            else {}
+        )
+        support.append(
+            {
+                "role": role,
+                "text": short_text(
+                    str(entry.get("text") or ""),
+                    max_chars=700,
+                ),
+                "matched_query_terms": [],
+                "source_lane": entry.get("source_lane"),
+                "admission_basis": entry.get("admission_basis"),
+                "correlation_id": str(
+                    entry.get("correlation_id") or ""
+                ),
+                "event_type": entry.get("event_type"),
+                "outcome": entry.get("outcome"),
+                "timestamp": entry.get("timestamp"),
+                "line": entry.get("line")
+                or line_from_raw_ref(raw_ref),
+                "refs": {
+                    "raw": raw_ref,
+                    "segment": str(refs.get("segment") or ""),
+                    "segment_index": str(
+                        refs.get("segment_index") or ""
+                    ),
+                    "session": str(refs.get("session") or ""),
+                },
+                "dense_representation": {
+                    "representation_id": str(
+                        match.get("representation_id") or ""
+                    ),
+                    "score": match.get("score"),
+                    "rank_within_episode": int_value(
+                        match.get("rank_within_episode")
+                    ),
+                    "truth_status": (
+                        "dense_representation_navigation_not_claim_truth"
+                    ),
+                    "selection_basis": str(
+                        match.get("selection_basis") or ""
+                    ),
+                },
+                "reading_score": round(
+                    120.0
+                    - float(
+                        int_value(
+                            match.get("rank_within_episode"),
+                            1,
+                        )
+                    ),
+                    4,
+                ),
+                "reading_signals": [
+                    "dense_representation_match",
+                    "representation_raw_ref_resolved",
+                ],
+            }
+        )
+        seen_raw_refs.add(raw_ref)
+        if (
+            len(support)
+            >= EPISODE_DENSE_REPRESENTATION_MATCH_LIMIT
+        ):
+            break
+    return support
+
+
+def episode_dense_hydrate_result_support(
+    result: dict[str, Any],
+    episode: dict[str, Any],
+    matches: Any,
+) -> dict[str, Any]:
+    clone = dict(result)
+    dense_support = episode_dense_representation_support(
+        episode,
+        matches,
+    )
+    if not dense_support:
+        return clone
+    existing = (
+        clone.get("supporting_evidence")
+        if isinstance(clone.get("supporting_evidence"), list)
+        else []
+    )
+    merged: list[dict[str, Any]] = []
+    seen_raw_refs: set[str] = set()
+    for entry in [*dense_support, *existing]:
+        if not isinstance(entry, dict):
+            continue
+        refs = (
+            entry.get("refs")
+            if isinstance(entry.get("refs"), dict)
+            else {}
+        )
+        raw_ref = str(refs.get("raw") or "")
+        if raw_ref and raw_ref in seen_raw_refs:
+            continue
+        if raw_ref:
+            seen_raw_refs.add(raw_ref)
+        merged.append(entry)
+        if len(merged) >= 12:
+            break
+    clone["supporting_evidence"] = merged
+    clone["dense_representation_matches"] = [
+        {
+            key: match.get(key)
+            for key in (
+                "representation_id",
+                "role",
+                "raw_ref",
+                "score",
+                "rank_within_episode",
+                "selection_basis",
+            )
+        }
+        for match in matches
+        if isinstance(match, dict)
+        and match.get("raw_ref")
+    ][:EPISODE_DENSE_REPRESENTATION_MATCH_LIMIT]
+    return clone
+
+
 def episode_dense_provider(aoa_root: Path) -> dict[str, Any]:
     config = search_provider_config(aoa_root)
     providers = config.get("providers") if isinstance(config.get("providers"), dict) else {}
@@ -60319,6 +62454,7 @@ def episode_dense_projection_state(
             "current_session_count": 0,
             "source_session_count": 0,
             "vector_count": 0,
+            "representation_vector_count": 0,
             "implicit_no_task_session_count": 0,
             "dirty_session_count": 0,
             "dirty_session_ids": [],
@@ -60358,13 +62494,33 @@ def episode_dense_projection_state(
         dirty: list[str] = []
         current_count = 0
         vector_count = 0
+        representation_vector_count = 0
         implicit_no_task_count = 0
         for source in source_rows:
             session_id = str(source["session_id"] or "")
             dense = dense_by_id.get(session_id)
             expected_count = int_value(source["episode_count"])
             stored_vector_count = int_value(dense["vector_count"]) if dense else 0
-            implicit_no_task = expected_count == 0 and stored_vector_count == 0
+            stored_representation_count = (
+                int_value(dense["representation_vector_count"], -1)
+                if dense
+                and "representation_vector_count" in dense.keys()
+                else -1
+            )
+            stored_representation_document_count = (
+                int_value(
+                    dense["representation_document_count"],
+                    -1,
+                )
+                if dense
+                and "representation_document_count" in dense.keys()
+                else -1
+            )
+            implicit_no_task = (
+                expected_count == 0
+                and stored_vector_count == 0
+                and stored_representation_count in {-1, 0}
+            )
             is_current = implicit_no_task or bool(
                 dense
                 and int_value(dense["source_episode_projection_version"]) == EPISODE_SEMANTIC_PROJECTION_VERSION
@@ -60377,11 +62533,18 @@ def episode_dense_projection_state(
                 and str(dense["model"] or "") == EPISODE_DENSE_DEFAULT_MODEL
                 and int_value(dense["episode_document_count"]) == expected_count
                 and int_value(dense["vector_count"]) == expected_count
+                and stored_representation_document_count >= 0
+                and stored_representation_count
+                == stored_representation_document_count
                 and str(dense["status"] or "") in {"current", "no_task_episodes"}
             )
             if is_current:
                 current_count += 1
                 vector_count += stored_vector_count
+                representation_vector_count += max(
+                    0,
+                    stored_representation_count,
+                )
                 implicit_no_task_count += 1 if implicit_no_task else 0
             elif session_id:
                 dirty.append(session_id)
@@ -60403,6 +62566,9 @@ def episode_dense_projection_state(
             "current_session_count": current_count,
             "source_session_count": len(source_rows),
             "vector_count": vector_count,
+            "representation_vector_count": (
+                representation_vector_count
+            ),
             "implicit_no_task_session_count": implicit_no_task_count,
             "dirty_session_count": len(dirty),
             "dirty_session_ids": dirty,
@@ -60423,6 +62589,7 @@ def episode_dense_projection_state(
             "current_session_count": 0,
             "source_session_count": 0,
             "vector_count": 0,
+            "representation_vector_count": 0,
             "implicit_no_task_session_count": 0,
             "dirty_session_count": 0,
             "dirty_session_ids": [],
@@ -60874,6 +63041,12 @@ EPISODE_QUANTITATIVE_COMPARISON_META_TOKENS = frozenset(
         "изменился",
         "изменилась",
         "изменилось",
+        "были",
+        "был",
+        "была",
+        "было",
+        "длиннее",
+        "короче",
         "после",
         "what",
         "which",
@@ -60894,6 +63067,10 @@ EPISODE_QUANTITATIVE_COMPARISON_META_TOKENS = frozenset(
         "changed",
         "changes",
         "change",
+        "were",
+        "was",
+        "longer",
+        "shorter",
         "after",
         "since",
         "in",
@@ -60918,7 +63095,7 @@ def episode_quantitative_comparison_query(query: str) -> dict[str, Any]:
         token in {"какие", "какой", "какая", "какое", "what", "which"}
         for token in tokens
     )
-    comparison = any(
+    ranked_change_comparison = any(
         token in {
             "сильнее",
             "больше",
@@ -60933,6 +63110,11 @@ def episode_quantitative_comparison_query(query: str) -> dict[str, Any]:
             "top",
         }
         or token.startswith(("наибольш", "максим", "миним"))
+        for token in tokens
+    )
+    length_comparison = any(
+        token in {"longer", "shorter"}
+        or token.startswith(("длин", "короч"))
         for token in tokens
     )
     change_intent = any(
@@ -60962,7 +63144,22 @@ def episode_quantitative_comparison_query(query: str) -> dict[str, Any]:
         }
         for token in tokens
     )
-    if not (question and comparison and change_intent and measured_object):
+    named_file_subject = bool(
+        re.search(
+            r"(?<![\w.-])[\w.+-]+\.[A-Za-z0-9]{1,12}(?![\w.-])",
+            text,
+        )
+    )
+    ranked_change_query = bool(
+        ranked_change_comparison
+        and change_intent
+        and measured_object
+    )
+    length_query = bool(
+        length_comparison
+        and (measured_object or named_file_subject)
+    )
+    if not (question and (ranked_change_query or length_query)):
         return {
             "active": False,
             "status": "not_a_quantitative_comparison_query",
@@ -60970,46 +63167,66 @@ def episode_quantitative_comparison_query(query: str) -> dict[str, Any]:
 
     subject_text = ""
     context_text = ""
-    english_prefix_match = re.search(
-        r"\b(?P<subject>[A-Za-z0-9_.:/+-]+)\s+"
-        r"(?:parts|sections|components|modules)"
-        r"(?:\s+in\s+(?P<context>.+?))?"
-        r"(?=\s+(?:changed|changes|change)\s+"
-        r"(?:most|least|highest|lowest|largest|smallest|top)\b)",
-        text,
-        flags=re.IGNORECASE,
-    )
-    subject_context_match = re.search(
-        r"\b(?:части|разделы|компоненты|модули|parts|sections|components|modules)"
-        r"(?:\s+of)?\s+(?P<subject>.+?)\s+(?:в|in)\s+(?P<context>.+?)"
-        r"(?=\s+(?:(?:changed|changes|change)\s+)?"
-        r"(?:сильнее|больше|чаще|меньше|most|least|highest|lowest|"
-        r"largest|smallest|top)\b)",
-        text,
-        flags=re.IGNORECASE,
-    )
-    if english_prefix_match:
-        subject_text = english_prefix_match.group("subject").strip(
-            " `\"'.,;:"
-        )
-        context_text = str(
-            english_prefix_match.group("context") or ""
-        ).strip(" `\"'.,;:")
-    elif subject_context_match:
-        subject_text = subject_context_match.group("subject").strip(" `\"'.,;:")
-        context_text = subject_context_match.group("context").strip(" `\"'.,;:")
-    else:
-        subject_match = re.search(
-            r"\b(?:части|разделы|компоненты|модули|parts|sections|components|modules)"
-            r"(?:\s+of)?\s+(?P<subject>.+?)"
-            r"(?=\s+(?:(?:changed|changes|change)\s+)?"
-            r"(?:сильнее|больше|чаще|меньше|most|least|highest|lowest|"
-            r"largest|smallest|top|после|after|since)\b)",
+    if length_query:
+        length_subject_match = re.search(
+            r"\b(?:какие|какой|какая|какое|which|what)\s+"
+            r"(?P<subject>.+?)\s+"
+            r"(?:(?:были|был|была|было|were|was)\s+)?"
+            r"(?:длиннее|короче|longer|shorter)\b",
             text,
             flags=re.IGNORECASE,
         )
-        if subject_match:
-            subject_text = subject_match.group("subject").strip(" `\"'.,;:")
+        if length_subject_match:
+            subject_text = length_subject_match.group("subject").strip(
+                " `\"'.,;:"
+            )
+    else:
+        english_prefix_match = re.search(
+            r"\b(?P<subject>[A-Za-z0-9_.:/+-]+)\s+"
+            r"(?:parts|sections|components|modules)"
+            r"(?:\s+in\s+(?P<context>.+?))?"
+            r"(?=\s+(?:changed|changes|change)\s+"
+            r"(?:most|least|highest|lowest|largest|smallest|top)\b)",
+            text,
+            flags=re.IGNORECASE,
+        )
+        subject_context_match = re.search(
+            r"\b(?:части|разделы|компоненты|модули|parts|sections|components|modules)"
+            r"(?:\s+of)?\s+(?P<subject>.+?)\s+(?:в|in)\s+(?P<context>.+?)"
+            r"(?=\s+(?:(?:changed|changes|change)\s+)?"
+            r"(?:сильнее|больше|чаще|меньше|most|least|highest|lowest|"
+            r"largest|smallest|top)\b)",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if english_prefix_match:
+            subject_text = english_prefix_match.group("subject").strip(
+                " `\"'.,;:"
+            )
+            context_text = str(
+                english_prefix_match.group("context") or ""
+            ).strip(" `\"'.,;:")
+        elif subject_context_match:
+            subject_text = subject_context_match.group("subject").strip(
+                " `\"'.,;:"
+            )
+            context_text = subject_context_match.group("context").strip(
+                " `\"'.,;:"
+            )
+        else:
+            subject_match = re.search(
+                r"\b(?:части|разделы|компоненты|модули|parts|sections|components|modules)"
+                r"(?:\s+of)?\s+(?P<subject>.+?)"
+                r"(?=\s+(?:(?:changed|changes|change)\s+)?"
+                r"(?:сильнее|больше|чаще|меньше|most|least|highest|lowest|"
+                r"largest|smallest|top|после|after|since)\b)",
+                text,
+                flags=re.IGNORECASE,
+            )
+            if subject_match:
+                subject_text = subject_match.group("subject").strip(
+                    " `\"'.,;:"
+                )
 
     baseline_match = re.search(
         r"\b(?:после|after|since)\s+(?P<baseline>.+?)\s*[?!.]*$",
@@ -61041,13 +63258,27 @@ def episode_quantitative_comparison_query(query: str) -> dict[str, Any]:
     return {
         "active": True,
         "status": "quantitative_comparison_parsed",
-        "relation_basis": "ranked_change_count_requires_correlated_numeric_result",
-        "operation": "change_count",
+        "relation_basis": (
+            "line_count_comparison_requires_correlated_numeric_result"
+            if length_query
+            else "ranked_change_count_requires_correlated_numeric_result"
+        ),
+        "operation": (
+            "line_count"
+            if length_query
+            else "change_count"
+        ),
         "direction": (
             "ascending"
             if any(
-                token in {"меньше", "least", "lowest", "smallest"}
-                or token.startswith("миним")
+                token in {
+                    "меньше",
+                    "least",
+                    "lowest",
+                    "smallest",
+                    "shorter",
+                }
+                or token.startswith(("миним", "короч"))
                 for token in tokens
             )
             else "descending"
@@ -67139,15 +69370,31 @@ def episode_quantitative_comparison_command_profile(command: str) -> dict[str, A
     ascending_rank = bool(
         re.search(r"(?<![a-z0-9_])sort\s+-[a-z]*n[a-z]*", folded)
     )
+    line_count_scope = bool(
+        re.search(r"(?<![a-z0-9_])wc\s+-[a-z]*l", folded)
+        and not change_scope
+    )
+    measurement_kind = (
+        "ranked_change_count"
+        if change_scope
+        else "line_count"
+        if line_count_scope
+        else "unknown"
+    )
     return {
         "change_scope": change_scope,
         "count_scope": count_scope,
         "descending_rank": descending_rank,
         "ascending_rank": ascending_rank,
+        "line_count_scope": line_count_scope,
+        "measurement_kind": measurement_kind,
         "accepted_shape": bool(
-            change_scope
-            and count_scope
-            and (descending_rank or ascending_rank)
+            (
+                change_scope
+                and count_scope
+                and (descending_rank or ascending_rank)
+            )
+            or line_count_scope
         ),
     }
 
@@ -67428,9 +69675,21 @@ def episode_quantitative_comparison_scoped_raw_hydration(
         ):
             rejected_action_count += 1
             continue
+        numeric_rows = [
+            row
+            for row in result.get("numeric_rows") or []
+            if isinstance(row, dict)
+        ]
+        if comparison_query.get("operation") == "line_count":
+            numeric_rows = [
+                row
+                for row in numeric_rows
+                if str(row.get("label") or "").strip().casefold()
+                not in {"total", "итого"}
+            ]
         if (
             str(result.get("status") or "") != "succeeded"
-            or len(result.get("numeric_rows") or []) < 2
+            or len(numeric_rows) < 2
         ):
             rejected_action_count += 1
             continue
@@ -67439,8 +69698,10 @@ def episode_quantitative_comparison_scoped_raw_hydration(
             if isinstance(action.get("profile"), dict)
             else {}
         )
-        if requested_direction == "descending" and not profile.get(
-            "descending_rank"
+        if (
+            comparison_query.get("operation") == "change_count"
+            and requested_direction == "descending"
+            and not profile.get("descending_rank")
         ):
             rejected_action_count += 1
             continue
@@ -67548,15 +69809,15 @@ def episode_quantitative_comparison_scoped_raw_hydration(
             "accepted": True,
             "status": "correlation_owned_ranked_count_available",
             "relation_basis": (
-                "structured_change_count_action_plus_"
+                "structured_measurement_action_plus_"
                 "correlation_owned_successful_numeric_result"
             ),
             "correlation_id": str(action.get("correlation_id") or ""),
             "action": action_entry,
             "result": result_entry,
             "result_status": str(result.get("status") or ""),
-            "numeric_rows": list(result.get("numeric_rows") or []),
-            "numeric_row_count": len(result.get("numeric_rows") or []),
+            "numeric_rows": numeric_rows,
+            "numeric_row_count": len(numeric_rows),
             "matched_subject_terms": matched_subject_terms,
             "matched_context_terms": matched_context_terms,
             "matched_baseline_terms": matched_baseline_terms,
@@ -69380,6 +71641,22 @@ def episode_causal_attribution_query_profile(
         for token in operation_identity_tokens
         if bool(re.search(r"[_./:@-]", token)) or len(token) >= 16
     ]
+    plural_operation_query = bool(
+        {
+            "команды",
+            "инструменты",
+            "вызовы",
+            "commands",
+            "tools",
+            "calls",
+        }
+        & set(raw_tokens)
+    )
+    generic_plural_open_result_query = bool(
+        open_result_query
+        and plural_operation_query
+        and not required_operation_specific_terms
+    )
     return {
         "active": active,
         "operation_kinds": operation_kinds,
@@ -69388,6 +71665,10 @@ def episode_causal_attribution_query_profile(
         "subject_relation_shape": subject_relation_shape,
         "explicit_named_operation_shape": explicit_named_operation_shape,
         "open_result_query": open_result_query,
+        "plural_operation_query": plural_operation_query,
+        "generic_plural_open_result_query": (
+            generic_plural_open_result_query
+        ),
         "shape_signals": list(dict.fromkeys(shape_signals)),
         "target_terms": target_tokens,
         "operation_identity_terms": operation_identity_tokens,
@@ -70031,7 +72312,14 @@ def episode_causal_attribution_scope_gate(
         source_candidate_truncated
         or len(candidates) > len(bounded_candidates)
     )
-    if len(candidates) <= 1:
+    generic_plural_query = bool(
+        candidates
+        and any(
+            profile.get("generic_plural_open_result_query")
+            for profile in open_result_profiles
+        )
+    )
+    if len(candidates) <= 1 and not generic_plural_query:
         return results, {
             "status": (
                 "single_causal_attribution_chain"
@@ -70064,8 +72352,18 @@ def episode_causal_attribution_scope_gate(
         "qualified_chain_count": len(candidates),
         "candidate_chains": bounded_candidates,
         "candidate_chains_truncated": candidate_truncated,
-        "ambiguity_scope": "cross_episode_query_scope",
-        "policy": "multiple distinct correlation-owned operations satisfy the open result query across candidate episodes; require a correlation id, time bound, task, or other unique action anchor",
+        "ambiguity_scope": (
+            "generic_plural_query_scope"
+            if generic_plural_query
+            else "cross_episode_query_scope"
+        ),
+        "policy": (
+            "a generic plural open-result query cannot admit one ranked "
+            "operation from a bounded candidate window; require a correlation "
+            "id, time bound, task, or other unique action anchor"
+            if generic_plural_query
+            else "multiple distinct correlation-owned operations satisfy the open result query across candidate episodes; require a correlation id, time bound, task, or other unique action anchor"
+        ),
     }
     top["causal_attribution"] = ambiguous_attribution
     explain = top.get("explain") if isinstance(top.get("explain"), dict) else {}
@@ -70081,7 +72379,11 @@ def episode_causal_attribution_scope_gate(
         "qualified_chain_count": len(candidates),
         "candidate_chains": bounded_candidates,
         "candidate_chains_truncated": candidate_truncated,
-        "ambiguity_scope": "cross_episode_query_scope",
+        "ambiguity_scope": (
+            "generic_plural_query_scope"
+            if generic_plural_query
+            else "cross_episode_query_scope"
+        ),
     }
 
 
@@ -77510,7 +79812,8 @@ def episode_explicit_time_evidence_scope(
         "raw_fallback": explicit_time_raw_fallback,
         "correction_followup": correction_followup,
         "admission_ready": bool(
-            any(
+            not truncated
+            and any(
                 isinstance(result.get("explicit_time_evidence"), dict)
                 and result["explicit_time_evidence"].get(
                     "anchor_coverage_admitted"
@@ -78136,6 +80439,56 @@ def episode_semantic_result_from_row(
     return result
 
 
+def episode_dense_select_representation_matches(
+    candidates: Any,
+) -> list[dict[str, Any]]:
+    """Preserve top semantic refs, then add bounded role-diverse evidence."""
+    ordered = [
+        match
+        for match in (
+            candidates if isinstance(candidates, list) else []
+        )
+        if isinstance(match, dict)
+        and match.get("raw_ref")
+    ]
+    primary = ordered[
+        :EPISODE_DENSE_REPRESENTATION_PRIMARY_MATCH_LIMIT
+    ]
+    selected: list[dict[str, Any]] = [
+        {
+            **match,
+            "selection_basis": "primary_similarity",
+        }
+        for match in primary
+    ]
+    selected_roles = {
+        str(match.get("role") or "")
+        for match in primary
+        if match.get("role")
+    }
+    diversity_count = 0
+    for match in ordered[
+        EPISODE_DENSE_REPRESENTATION_PRIMARY_MATCH_LIMIT:
+    ]:
+        role = str(match.get("role") or "")
+        if (
+            not role
+            or role in selected_roles
+            or diversity_count
+            >= EPISODE_DENSE_REPRESENTATION_DIVERSITY_MATCH_LIMIT
+        ):
+            continue
+        selected.append(
+            {
+                **match,
+                "selection_basis": "role_diversity",
+            }
+        )
+        selected_roles.add(role)
+        diversity_count += 1
+    return selected[:EPISODE_DENSE_REPRESENTATION_MATCH_LIMIT]
+
+
 def episode_dense_search_ranking(
     *,
     aoa_root: Path,
@@ -78146,6 +80499,23 @@ def episode_dense_search_ranking(
 ) -> dict[str, Any]:
     started = time.monotonic()
     db_path = search_db_path(aoa_root)
+    source_set_state = search_source_set_change_state(
+        aoa_root=aoa_root,
+        db_path=db_path,
+    )
+    if source_set_state.get("removed_session_ids"):
+        return {
+            "ok": False,
+            "status": "source_set_removed_requires_deep_rebuild",
+            "ranking": [],
+            "source_set_state": source_set_state,
+            "elapsed_ms": int(
+                (time.monotonic() - started) * 1000
+            ),
+            "diagnostics": [
+                "episode_dense_source_set_removed_candidates_withheld"
+            ],
+        }
     provider = episode_dense_provider(aoa_root)
     expected_generations = session_memory_expected_generation_identities(
         aoa_root
@@ -78159,30 +80529,29 @@ def episode_dense_search_ranking(
     conn: sqlite3.Connection | None = None
     try:
         conn = connect_existing_search_db(db_path)
-        if not sqlite_table_exists(conn, "episode_dense_vectors"):
+        aggregate_table_available = sqlite_table_exists(
+            conn,
+            "episode_dense_vectors",
+        )
+        representation_table_available = sqlite_table_exists(
+            conn,
+            "episode_dense_representation_vectors",
+        )
+        if (
+            not aggregate_table_available
+            and not representation_table_available
+        ):
             return {
                 "ok": False,
                 "status": "dense_schema_missing",
                 "ranking": [],
                 "elapsed_ms": int((time.monotonic() - started) * 1000),
-                "diagnostics": ["episode_dense_vectors_missing"],
+                "diagnostics": [
+                    "episode_dense_vector_tables_missing"
+                ],
             }
         where = " AND ".join(filters)
-        vector_filters = [
-            "episode_dense_vectors.source_episode_projection_version = ?",
-            "episode_dense_vectors.source_route_signal_classifier_version = ?",
-            "episode_dense_vectors.dense_projection_version = ?",
-            "episode_dense_vectors.dense_document_version = ?",
-            "episode_dense_vectors.model = ?",
-            "episode_dense_vectors.dimension = ?",
-            "episode_dense_vectors.generation_id = ?",
-            "episode_semantic_meta.generation_id = ?",
-            "episode_semantic_state.projection_version = ?",
-            "episode_semantic_state.route_signal_classifier_version = ?",
-            "episode_semantic_state.generation_id = ?",
-            "episode_semantic_state.status IN ('current', 'no_task_episodes', 'no_admitted_episode_text')",
-        ]
-        vector_params: list[Any] = [
+        common_params: list[Any] = [
             EPISODE_SEMANTIC_PROJECTION_VERSION,
             ROUTE_SIGNAL_CLASSIFIER_VERSION,
             EPISODE_DENSE_PROJECTION_VERSION,
@@ -78195,19 +80564,137 @@ def episode_dense_search_ranking(
             ROUTE_SIGNAL_CLASSIFIER_VERSION,
             expected_episode_generation_id,
         ]
-        sql = (
-            "SELECT episode_dense_vectors.doc_id, episode_dense_vectors.vector_f32 "
-            "FROM episode_dense_vectors JOIN episode_semantic_meta "
-            "ON episode_semantic_meta.doc_id = episode_dense_vectors.doc_id "
-            "JOIN episode_semantic_session_state AS episode_semantic_state "
-            "ON episode_semantic_state.session_id = episode_semantic_meta.session_id "
-            f"WHERE {' AND '.join(vector_filters)}"
-        )
-        if where:
-            sql += " AND " + where
-            vector_params.extend(params)
-        sql += " ORDER BY episode_dense_vectors.doc_id"
-        vector_rows = conn.execute(sql, vector_params).fetchall()
+        vector_rows: list[dict[str, Any]] = []
+        if representation_table_available:
+            representation_filters = [
+                "dense_rep.source_episode_projection_version = ?",
+                "dense_rep.source_route_signal_classifier_version = ?",
+                "dense_rep.dense_projection_version = ?",
+                "dense_rep.dense_document_version = ?",
+                "dense_rep.model = ?",
+                "dense_rep.dimension = ?",
+                "dense_rep.generation_id = ?",
+                "episode_semantic_meta.generation_id = ?",
+                "episode_semantic_state.projection_version = ?",
+                "episode_semantic_state.route_signal_classifier_version = ?",
+                "episode_semantic_state.generation_id = ?",
+                (
+                    "episode_semantic_state.status IN "
+                    "('current', 'no_task_episodes', "
+                    "'no_admitted_episode_text')"
+                ),
+                "dense_rep.representation_version = ?",
+            ]
+            representation_params = [
+                *common_params,
+                EPISODE_DENSE_REPRESENTATION_VERSION,
+            ]
+            representation_sql = (
+                "SELECT dense_rep.doc_id, dense_rep.vector_f32, "
+                "dense_rep.representation_id, dense_rep.role, "
+                "dense_rep.raw_ref, dense_rep.segment_ref, "
+                "dense_rep.session_ref, dense_rep.source_lane, "
+                "dense_rep.admission_basis, dense_rep.outcome "
+                "FROM episode_dense_representation_vectors AS dense_rep "
+                "JOIN episode_semantic_meta "
+                "ON episode_semantic_meta.doc_id = dense_rep.doc_id "
+                "JOIN episode_semantic_session_state "
+                "AS episode_semantic_state "
+                "ON episode_semantic_state.session_id = "
+                "episode_semantic_meta.session_id "
+                f"WHERE {' AND '.join(representation_filters)}"
+            )
+            if where:
+                representation_sql += " AND " + where
+                representation_params.extend(params)
+            representation_sql += (
+                " ORDER BY dense_rep.doc_id, "
+                "dense_rep.representation_id"
+            )
+            vector_rows.extend(
+                {
+                    **dict(row),
+                    "vector_kind": "representation",
+                }
+                for row in conn.execute(
+                    representation_sql,
+                    representation_params,
+                ).fetchall()
+            )
+        if aggregate_table_available:
+            aggregate_filters = [
+                "dense_episode.source_episode_projection_version = ?",
+                "dense_episode.source_route_signal_classifier_version = ?",
+                "dense_episode.dense_projection_version = ?",
+                "dense_episode.dense_document_version = ?",
+                "dense_episode.model = ?",
+                "dense_episode.dimension = ?",
+                "dense_episode.generation_id = ?",
+                "episode_semantic_meta.generation_id = ?",
+                "episode_semantic_state.projection_version = ?",
+                "episode_semantic_state.route_signal_classifier_version = ?",
+                "episode_semantic_state.generation_id = ?",
+                (
+                    "episode_semantic_state.status IN "
+                    "('current', 'no_task_episodes', "
+                    "'no_admitted_episode_text')"
+                ),
+            ]
+            aggregate_params = list(common_params)
+            if representation_table_available:
+                aggregate_filters.append(
+                    "NOT EXISTS ("
+                    "SELECT 1 FROM "
+                    "episode_dense_representation_vectors AS rep_guard "
+                    "WHERE rep_guard.doc_id = dense_episode.doc_id "
+                    "AND rep_guard.representation_version = ? "
+                    "AND rep_guard.dense_projection_version = ? "
+                    "AND rep_guard.dense_document_version = ? "
+                    "AND rep_guard.generation_id = ?)"
+                )
+                aggregate_params.extend(
+                    [
+                        EPISODE_DENSE_REPRESENTATION_VERSION,
+                        EPISODE_DENSE_PROJECTION_VERSION,
+                        EPISODE_DENSE_DOCUMENT_VERSION,
+                        expected_dense_generation_id,
+                    ]
+                )
+            aggregate_sql = (
+                "SELECT dense_episode.doc_id, "
+                "dense_episode.vector_f32 "
+                "FROM episode_dense_vectors AS dense_episode "
+                "JOIN episode_semantic_meta "
+                "ON episode_semantic_meta.doc_id = "
+                "dense_episode.doc_id "
+                "JOIN episode_semantic_session_state "
+                "AS episode_semantic_state "
+                "ON episode_semantic_state.session_id = "
+                "episode_semantic_meta.session_id "
+                f"WHERE {' AND '.join(aggregate_filters)}"
+            )
+            if where:
+                aggregate_sql += " AND " + where
+                aggregate_params.extend(params)
+            aggregate_sql += " ORDER BY dense_episode.doc_id"
+            vector_rows.extend(
+                {
+                    **dict(row),
+                    "representation_id": "",
+                    "role": "",
+                    "raw_ref": "",
+                    "segment_ref": "",
+                    "session_ref": "",
+                    "source_lane": "",
+                    "admission_basis": "",
+                    "outcome": "",
+                    "vector_kind": "episode_fallback",
+                }
+                for row in conn.execute(
+                    aggregate_sql,
+                    aggregate_params,
+                ).fetchall()
+            )
     except sqlite3.Error as exc:
         return {
             "ok": False,
@@ -78256,7 +80743,7 @@ def episode_dense_search_ranking(
             "diagnostics": list(embedding.get("diagnostics") or []),
         }
     query_vector = query_vectors[0]
-    valid_rows: list[sqlite3.Row] = []
+    valid_rows: list[dict[str, Any]] = []
     blobs: list[bytes] = []
     expected_bytes = EPISODE_DENSE_DEFAULT_DIMENSION * 4
     for row in vector_rows:
@@ -78277,24 +80764,127 @@ def episode_dense_search_ranking(
         for blob in blobs:
             vector = episode_dense_vector_values(blob, EPISODE_DENSE_DEFAULT_DIMENSION)
             scores.append(sum(left * right for left, right in zip(vector, query_vector, strict=True)))
-    order = sorted(
+    representation_order = sorted(
         range(len(valid_rows)),
-        key=lambda index: (-scores[index], str(valid_rows[index]["doc_id"] or "")),
+        key=lambda index: (
+            -scores[index],
+            str(valid_rows[index]["doc_id"] or ""),
+            str(
+                valid_rows[index].get("representation_id")
+                or ""
+            ),
+        ),
     )
     requested = max(1, min(int_value(limit, 100), 300))
-    ranking = [
-        {
-            "doc_id": str(valid_rows[index]["doc_id"] or ""),
-            "score": round(scores[index], 7),
-            "rank": rank,
-        }
-        for rank, index in enumerate(order[:requested], start=1)
-    ]
+    episode_candidates: dict[str, dict[str, Any]] = {}
+    for representation_index in representation_order:
+        row = valid_rows[representation_index]
+        doc_id = str(row.get("doc_id") or "")
+        if not doc_id:
+            continue
+        candidate = episode_candidates.setdefault(
+            doc_id,
+            {
+                "doc_id": doc_id,
+                "score": round(
+                    scores[representation_index],
+                    7,
+                ),
+                "_representation_candidates": [],
+                "_seen_raw_refs": set(),
+                "vector_kind": str(
+                    row.get("vector_kind")
+                    or "episode_fallback"
+                ),
+            },
+        )
+        if (
+            str(row.get("vector_kind") or "")
+            != "representation"
+        ):
+            continue
+        raw_ref = str(row.get("raw_ref") or "")
+        if (
+            not raw_ref
+            or raw_ref in candidate["_seen_raw_refs"]
+            or len(candidate["_representation_candidates"])
+            >= (
+                EPISODE_DENSE_REPRESENTATION_PER_ROLE_LIMIT
+                * len(EPISODE_DENSE_REPRESENTATION_ROLES)
+            )
+        ):
+            continue
+        candidate["_seen_raw_refs"].add(raw_ref)
+        candidate["_representation_candidates"].append(
+            {
+                "representation_id": str(
+                    row.get("representation_id") or ""
+                ),
+                "role": str(row.get("role") or ""),
+                "raw_ref": raw_ref,
+                "segment_ref": str(
+                    row.get("segment_ref") or ""
+                ),
+                "session_ref": str(
+                    row.get("session_ref") or ""
+                ),
+                "source_lane": str(
+                    row.get("source_lane") or ""
+                ),
+                "admission_basis": str(
+                    row.get("admission_basis") or ""
+                ),
+                "outcome": str(row.get("outcome") or ""),
+                "score": round(
+                    scores[representation_index],
+                    7,
+                ),
+                "rank_within_episode": (
+                    len(
+                        candidate["_representation_candidates"]
+                    )
+                    + 1
+                ),
+            }
+        )
+    for candidate in episode_candidates.values():
+        candidate["representation_matches"] = (
+            episode_dense_select_representation_matches(
+                candidate.pop("_representation_candidates", [])
+            )
+        )
+    ranked_episodes = sorted(
+        episode_candidates.values(),
+        key=lambda item: (
+            -float(item.get("score") or 0.0),
+            str(item.get("doc_id") or ""),
+        ),
+    )[:requested]
+    ranking: list[dict[str, Any]] = []
+    for rank, candidate in enumerate(ranked_episodes, start=1):
+        candidate.pop("_seen_raw_refs", None)
+        candidate["rank"] = rank
+        ranking.append(candidate)
+    representation_vector_count = sum(
+        str(row.get("vector_kind") or "")
+        == "representation"
+        for row in valid_rows
+    )
+    episode_fallback_vector_count = (
+        len(valid_rows) - representation_vector_count
+    )
     return {
         "ok": True,
         "status": "available",
         "ranking": ranking,
         "vector_count": len(valid_rows),
+        "representation_vector_count": (
+            representation_vector_count
+        ),
+        "episode_fallback_vector_count": (
+            episode_fallback_vector_count
+        ),
+        "candidate_episode_count": len(episode_candidates),
         "scanned_vector_bytes": len(valid_rows) * expected_bytes,
         "candidate_limit": requested,
         "model": EPISODE_DENSE_DEFAULT_MODEL,
@@ -78303,7 +80893,32 @@ def episode_dense_search_ranking(
         "embedding_elapsed_ms": int_value(embedding.get("elapsed_ms")),
         "elapsed_ms": int((time.monotonic() - started) * 1000),
         "provider": provider,
-        "truth_status": "dense_episode_navigation_not_raw_truth",
+        "representation_policy": {
+            "version": EPISODE_DENSE_REPRESENTATION_VERSION,
+            "episode_score": (
+                "maximum_cosine_over_representation_vectors"
+            ),
+            "match_limit": (
+                EPISODE_DENSE_REPRESENTATION_MATCH_LIMIT
+            ),
+            "primary_similarity_match_limit": (
+                EPISODE_DENSE_REPRESENTATION_PRIMARY_MATCH_LIMIT
+            ),
+            "role_diversity_supplement_limit": (
+                EPISODE_DENSE_REPRESENTATION_DIVERSITY_MATCH_LIMIT
+            ),
+            "match_selection": (
+                "primary_similarity_then_distinct_role_supplements"
+            ),
+            "distinct_raw_refs": True,
+            "fallback": (
+                "episode_vector_only_when_no_current_"
+                "representation_vector_exists"
+            ),
+        },
+        "truth_status": (
+            "dense_representation_navigation_not_raw_truth"
+        ),
         "diagnostics": [],
     }
 
@@ -78452,6 +81067,28 @@ def episode_selective_local_rerank(
         original_top_fusion.get("sparse_anchor")
         and typed_sparse_anchor_reasons
     )
+    winner = annotated_candidates[winner_index]
+    current_fusion_score = annotated_candidates[0].get(
+        "fusion_score"
+    )
+    winner_fusion_score = winner.get("fusion_score")
+    fusion_tied = bool(
+        isinstance(current_fusion_score, (int, float))
+        and isinstance(winner_fusion_score, (int, float))
+        and math.isclose(
+            float(current_fusion_score),
+            float(winner_fusion_score),
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        )
+    )
+    dense_reranker_consensus = bool(
+        winner_index != 0
+        and int_value(winner.get("dense_rank")) == 1
+        and fusion_tied
+        and margin >= EPISODE_RERANK_PROMOTION_MIN_MARGIN
+        and not typed_sparse_anchor_protected
+    )
     if (
         decisive
         and winner_index != 0
@@ -78464,6 +81101,13 @@ def episode_selective_local_rerank(
             item for index, item in enumerate(annotated_candidates) if index != winner_index
         ]
         status = "decisive_winner_promoted"
+    elif dense_reranker_consensus:
+        final_candidates = [annotated_candidates[winner_index]] + [
+            item
+            for index, item in enumerate(annotated_candidates)
+            if index != winner_index
+        ]
+        status = "dense_reranker_consensus_promoted"
     else:
         final_candidates = annotated_candidates
         status = "decisive_winner_already_first" if decisive else "ambiguous_preserved_fusion_order"
@@ -78488,6 +81132,34 @@ def episode_selective_local_rerank(
         "margin": round(margin, 7),
         "promotion_min_score": EPISODE_RERANK_PROMOTION_MIN_SCORE,
         "promotion_min_margin": EPISODE_RERANK_PROMOTION_MIN_MARGIN,
+        "promotion_policy_version": (
+            EPISODE_RERANK_PROMOTION_POLICY_VERSION
+        ),
+        "dense_reranker_consensus": {
+            "active": dense_reranker_consensus,
+            "winner_doc_id": (
+                str(winner.get("doc_id") or "")
+                if winner_index != 0
+                else ""
+            ),
+            "winner_dense_rank": int_value(
+                winner.get("dense_rank")
+            )
+            or None,
+            "fusion_tied": fusion_tied,
+            "reranker_margin_admitted": (
+                margin >= EPISODE_RERANK_PROMOTION_MIN_MARGIN
+            ),
+            "typed_sparse_anchor_protected": (
+                typed_sparse_anchor_protected
+            ),
+            "policy": (
+                "an unprotected exact RRF tie may be broken only when "
+                "dense rank 1 and the reranker winner independently agree "
+                "under the existing margin floor; model-only score and "
+                "claim-admission thresholds remain unchanged"
+            ),
+        },
         "typed_sparse_anchor_protection": {
             "active": typed_sparse_anchor_protected,
             "doc_id": (
@@ -82060,6 +84732,41 @@ def episode_semantic_search(
             "results": [],
             "diagnostics": ["search_index_missing"],
         }
+    source_set_state = search_source_set_change_state(
+        aoa_root=aoa_root,
+        db_path=db_path,
+    )
+    if source_set_state.get("removed_session_ids"):
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "artifact_type": "episode_semantic_search_results",
+            "generated_at": now,
+            "ok": True,
+            "query": query,
+            "db_path": str(db_path),
+            "result_count": 0,
+            "results": [],
+            "source_set_state": source_set_state,
+            "answer_admission": {
+                "admitted": False,
+                "status": (
+                    "source_set_removed_requires_deep_rebuild"
+                ),
+                "reason": SEARCH_SOURCE_SET_REMOVED_REASON,
+            },
+            "exact_next_command": (
+                "python3 scripts/aoa_session_memory.py "
+                "auto-maintenance deep all --aoa-root "
+                f"{shlex.quote(str(aoa_root))} --apply "
+                "--write-report"
+            ),
+            "diagnostics": [
+                "episode_semantic_source_set_removed_candidates_withheld"
+            ],
+            "truth_status": (
+                "generated_projection_withheld_raw_evidence_unchanged"
+            ),
+        }
     projection_state = episode_semantic_route_state(aoa_root, session=session)
     expected_episode_generation_identity = (
         session_memory_expected_generation_identities(aoa_root)[
@@ -82594,32 +85301,39 @@ def episode_semantic_search(
         if dense_payload.get("ok") and dense_ranking:
             sparse_by_id = {str(item.get("doc_id") or ""): item for item in ranked}
             dense_doc_ids = [str(item.get("doc_id") or "") for item in dense_ranking if item.get("doc_id")]
-            missing_doc_ids = [doc_id for doc_id in dense_doc_ids if doc_id not in sparse_by_id]
-            if missing_doc_ids:
+            dense_episodes_by_id: dict[str, dict[str, Any]] = {}
+            if dense_doc_ids:
                 dense_conn: sqlite3.Connection | None = None
                 try:
                     dense_conn = connect_existing_search_db(db_path)
-                    placeholders = ",".join("?" for _ in missing_doc_ids)
+                    placeholders = ",".join("?" for _ in dense_doc_ids)
                     dense_rows = dense_conn.execute(
                         "SELECT episode_semantic_meta.*, episode_semantic_payloads.payload_zlib "
                         "FROM episode_semantic_meta JOIN episode_semantic_payloads "
                         "ON episode_semantic_payloads.doc_rowid = episode_semantic_meta.doc_rowid "
                         f"WHERE episode_semantic_meta.doc_id IN ({placeholders}) "
                         "AND episode_semantic_meta.generation_id = ?",
-                        [*missing_doc_ids, expected_generation_id],
+                        [*dense_doc_ids, expected_generation_id],
                     ).fetchall()
                     for dense_row in dense_rows:
-                        result = episode_semantic_result_from_row(
-                            dense_row,
-                            terms=terms,
-                            temporal_span=temporal_span,
-                            query_text=query,
-                            normalized_query=fts_query,
-                            explain=explain,
-                            bm25_rank=0.0,
-                            match_channel="episode_dense_cosine",
+                        doc_id = str(dense_row["doc_id"] or "")
+                        dense_episode = episode_semantic_payload_from_blob(
+                            dense_row["payload_zlib"]
                         )
-                        sparse_by_id[str(result.get("doc_id") or "")] = result
+                        if dense_episode:
+                            dense_episodes_by_id[doc_id] = dense_episode
+                        if doc_id not in sparse_by_id:
+                            result = episode_semantic_result_from_row(
+                                dense_row,
+                                terms=terms,
+                                temporal_span=temporal_span,
+                                query_text=query,
+                                normalized_query=fts_query,
+                                explain=explain,
+                                bm25_rank=0.0,
+                                match_channel="episode_dense_cosine",
+                            )
+                            sparse_by_id[doc_id] = result
                 except sqlite3.Error as exc:
                     diagnostics.append(sqlite_error_diagnostic(exc))
                 finally:
@@ -82659,9 +85373,21 @@ def episode_semantic_search(
                 item = sparse_by_id.get(doc_id)
                 if not isinstance(item, dict):
                     continue
-                clone = dict(item)
                 sparse_rank = sparse_rank_by_id.get(doc_id)
                 dense_item = dense_by_id.get(doc_id, {})
+                representation_matches = (
+                    dense_item.get("representation_matches")
+                    if isinstance(
+                        dense_item.get("representation_matches"),
+                        list,
+                    )
+                    else []
+                )
+                clone = episode_dense_hydrate_result_support(
+                    dict(item),
+                    dense_episodes_by_id.get(doc_id, {}),
+                    representation_matches,
+                )
                 dense_rank = int_value(dense_item.get("rank")) or None
                 dense_score = dense_item.get("score")
                 is_sparse_anchor = bool(
@@ -82722,6 +85448,10 @@ def episode_semantic_search(
                     for channel, present in (
                         ("episode_contextual_bm25", bool(sparse_rank)),
                         ("episode_dense_cosine", bool(dense_rank)),
+                        (
+                            "episode_dense_representation_cosine",
+                            bool(representation_matches),
+                        ),
                     )
                     if present
                 ]
@@ -82733,6 +85463,21 @@ def episode_semantic_search(
                         "k": EPISODE_DENSE_RRF_K,
                         "sparse_rank": sparse_rank,
                         "dense_rank": dense_rank,
+                        "dense_representation_matches": [
+                            {
+                                key: match.get(key)
+                                for key in (
+                                    "representation_id",
+                                    "role",
+                                    "raw_ref",
+                                    "score",
+                                    "rank_within_episode",
+                                    "selection_basis",
+                                )
+                            }
+                            for match in representation_matches
+                            if isinstance(match, dict)
+                        ],
                         "sparse_anchor": is_sparse_anchor,
                         "sparse_anchor_reasons": sparse_anchor_reasons,
                         "sparse_anchor_bonus": clone["sparse_anchor_bonus"],
@@ -83605,28 +86350,39 @@ def episode_semantic_search(
             and live_tail_fallback["answer_admission"].get("admitted")
         )
         explicit_time_admission_ready = bool(
-            (
-                top_time_scope.get("status") == "in_window_support_available"
-                and not top_time_scope.get("ambiguous")
-                and top_time_scope.get("anchor_coverage_admitted") is not False
+            not explicit_time_evidence_scope.get("truncated")
+            and (
+                (
+                    top_time_scope.get("status") == "in_window_support_available"
+                    and not top_time_scope.get("ambiguous")
+                    and top_time_scope.get("anchor_coverage_admitted") is not False
+                )
+                or temporal_time_scope_admitted
+                or live_time_scope_admitted
             )
-            or temporal_time_scope_admitted
-            or live_time_scope_admitted
         )
         if not explicit_time_admission_ready:
             answer_admission = {
                 "admitted": False,
                 "status": "explicit_time_evidence_scope_unresolved",
                 "basis": str(
-                    "ambiguous_full_coverage_time_scoped_clusters"
+                    "critical_explicit_time_scope_truncation"
+                    if explicit_time_evidence_scope.get("truncated")
+                    else "ambiguous_full_coverage_time_scoped_clusters"
                     if top_time_scope.get("ambiguous")
                     else "explicit_time_structured_anchor_coverage_incomplete"
                     if top_time_scope.get("anchor_coverage_admitted") is False
                     else explicit_time_evidence_scope.get("status")
                     or "in_window_support_missing"
                 ),
-                "explicit_time_evidence_gate": explicit_time_evidence_scope,
-                "policy": "explicit time bounds require supporting refs inside the requested window",
+                "explicit_time_evidence_gate": {
+                    **explicit_time_evidence_scope,
+                    "admitted": False,
+                },
+                "policy": (
+                    "explicit time bounds require non-truncated supporting refs "
+                    "inside the requested window"
+                ),
             }
         else:
             answer_admission["explicit_time_evidence_gate"] = {
@@ -84384,9 +87140,13 @@ def episode_semantic_search(
             "dense": {
                 key: dense_payload.get(key)
                 for key in (
-                    "ok", "status", "vector_count", "scanned_vector_bytes", "candidate_limit",
+                    "ok", "status", "vector_count",
+                    "representation_vector_count",
+                    "episode_fallback_vector_count",
+                    "candidate_episode_count",
+                    "scanned_vector_bytes", "candidate_limit",
                     "model", "dimension", "accelerator", "embedding_elapsed_ms", "elapsed_ms",
-                    "truth_status", "diagnostics",
+                    "representation_policy", "truth_status", "diagnostics",
                 )
             },
             "fusion": "reciprocal_rank_fusion" if effective_mode == "hybrid" else "not_applied",
@@ -84446,6 +87206,8 @@ def episode_semantic_search(
                     "evidence_text_max_chars", "context_max_chars",
                     "lineage_consolidation_before_rerank", "top_score",
                     "second_score", "margin", "promotion_min_score", "promotion_min_margin",
+                    "promotion_policy_version",
+                    "dense_reranker_consensus",
                     "typed_sparse_anchor_protection",
                     "model", "meta", "elapsed_ms", "truth_level", "diagnostics",
                     "trigger", "auto_reasons", "observed_signals",
@@ -92915,6 +95677,11 @@ def search_documents_for_record(
     source = manifest.get("source") if isinstance(manifest.get("source"), dict) else {}
     raw = manifest.get("raw") if isinstance(manifest.get("raw"), dict) else {}
     raw_path = Path(str(raw.get("path"))) if raw.get("path") else None
+    literal_policy = (
+        derived_session_sensitive_literal_policy_from_raw_path(raw_path)
+        if raw_path is not None and raw_path.is_file()
+        else DerivedSessionSensitiveLiteralPolicy(values_by_kind={})
+    )
     raw_sha = str(raw.get("sha256") or "")
     session_label = str(display.get("label") or manifest.get("session_label") or record.get("session_label") or session_dir.name)
     session_title = str(display.get("title") or manifest.get("session_title") or record.get("session_title") or "")
@@ -93380,6 +96147,10 @@ def search_documents_for_record(
                     "exact_literal_source_lane": exact_literal_source_lane,
                 }
             )
+    documents = redact_derived_value(
+        documents,
+        literal_policy=literal_policy,
+    )
     return documents, {
         "status": "indexed",
         "session_label": session_label,
@@ -93402,6 +96173,10 @@ def search_documents_for_record(
         "raw_bytes": raw_bytes,
         "max_raw_bytes": max_raw_bytes,
         "diagnostics": [],
+        "derived_text_redaction": {
+            "policy_version": DERIVED_TEXT_REDACTION_POLICY_VERSION,
+            "session_sensitive_literals": literal_policy.report(),
+        },
     }
 
 
@@ -93464,6 +96239,7 @@ def search_index_sessions(
     store_raw_text: bool = True,
     projection_storage_mode: str | None = None,
     context_tail_omission_policy: str = SEARCH_CONTEXT_TAIL_OMISSION_POLICY_AUTO,
+    source_scope_complete: bool | None = None,
 ) -> dict[str, Any]:
     now = utc_now()
     started = time.monotonic()
@@ -93530,7 +96306,97 @@ def search_index_sessions(
             "diagnostics": [str(exc)],
             "sessions": [],
         }
-    if not records:
+    inferred_source_scope_complete = bool(
+        selected_records is None
+        and target == "all"
+        and since is None
+        and until is None
+        and limit is None
+        and db_path_override is None
+    )
+    requested_source_scope_complete = (
+        inferred_source_scope_complete
+        if source_scope_complete is None
+        else bool(source_scope_complete)
+    )
+    effective_source_scope_complete = bool(
+        requested_source_scope_complete
+        and session_registry_source_set_is_complete(aoa_root)
+    )
+    previous_source_set_identity: dict[str, Any] = {}
+    source_set_tombstones: list[dict[str, Any]] = []
+    if db_path.exists():
+        previous_conn: sqlite3.Connection | None = None
+        try:
+            previous_conn = connect_existing_search_db(db_path)
+            previous_metadata = search_index_metadata(previous_conn)
+            previous_source_set_identity = (
+                search_source_set_identity_from_metadata(
+                    previous_metadata
+                )
+            )
+            if effective_source_scope_complete:
+                source_set_tombstones = (
+                    search_projection_orphaned_session_states(
+                        previous_conn,
+                        active_session_ids=(
+                            search_source_set_session_ids_for_records(
+                                records
+                            )
+                        ),
+                    )
+                )
+        except sqlite3.Error:
+            previous_source_set_identity = {}
+            source_set_tombstones = []
+        finally:
+            if previous_conn is not None:
+                previous_conn.close()
+    if source_set_tombstones and not rebuild:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "artifact_type": "search_index",
+            "search_schema_version": SEARCH_SCHEMA_VERSION,
+            "generated_at": now,
+            "ok": False,
+            "status": "deferred_source_set_replacement_to_deep",
+            "target": target,
+            "selected_count": len(records),
+            "processed_count": 0,
+            "remaining_count": len(source_set_tombstones),
+            "document_count": 0,
+            "removed_document_count": 0,
+            "source_scope_complete": effective_source_scope_complete,
+            "source_set_tombstone_count": len(
+                source_set_tombstones
+            ),
+            "source_set_tombstones": source_set_tombstones,
+            "exact_next_command": [
+                "python3",
+                "scripts/aoa_session_memory.py",
+                "auto-maintenance",
+                "deep",
+                "all",
+                "--aoa-root",
+                str(aoa_root),
+                "--apply",
+                "--write-report",
+            ],
+            "diagnostics": [
+                "search_source_set_removed_clean_replacement_required"
+            ],
+            "truth_status": (
+                "generated_projection_retirement_not_raw_deletion"
+            ),
+            "sessions": [],
+        }
+    authoritative_empty_rebuild = bool(
+        not records
+        and rebuild
+        and effective_source_scope_complete
+        and previous_source_set_identity
+    )
+    if not records and not authoritative_empty_rebuild:
         return {
             "schema_version": SCHEMA_VERSION,
             "artifact_type": "search_index",
@@ -93660,6 +96526,38 @@ def search_index_sessions(
                 ),
             ),
         )
+        if effective_source_scope_complete:
+            published_source_set_identity = (
+                search_source_set_identity_for_records(records)
+            )
+        elif previous_source_set_identity:
+            published_source_set_identity = (
+                search_source_set_identity_for_session_ids(
+                    [
+                        *previous_source_set_identity.get(
+                            "session_ids", []
+                        ),
+                        *search_source_set_session_ids_for_records(
+                            records
+                        ),
+                    ]
+                )
+            )
+        else:
+            published_source_set_identity = {}
+        if published_source_set_identity:
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+                (
+                    SEARCH_SOURCE_SET_META_KEY,
+                    json.dumps(
+                        published_source_set_identity,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                ),
+            )
         conn.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
             ("search_body_storage_mode", effective_body_storage_mode if rebuild else f"{effective_body_storage_mode}_mixed"),
@@ -94207,7 +97105,21 @@ def search_index_sessions(
         "search_tags_preview_chars": storage_profile.get("tags_preview_chars"),
         "search_tags_storage_policy": storage_profile.get("tags_storage_policy"),
         "generated_at": now,
-        "ok": document_count > 0 and not diagnostics and not (rebuild and budget_exhausted),
+        "source_scope_complete": effective_source_scope_complete,
+        "source_set_identity": published_source_set_identity,
+        "previous_source_set_identity": (
+            previous_source_set_identity
+        ),
+        "source_set_tombstone_count": len(source_set_tombstones),
+        "source_set_tombstones": source_set_tombstones,
+        "source_set_tombstone_truth_status": (
+            "generated_projection_retirement_not_raw_deletion"
+        ),
+        "ok": bool(
+            (document_count > 0 or authoritative_empty_rebuild)
+            and not diagnostics
+            and not (rebuild and budget_exhausted)
+        ),
         "target": target,
         "since": since,
         "until": until,
@@ -94994,6 +97906,23 @@ def episode_dense_index_sessions(
             selection["selected_session_ids"] = [str(row["session_id"] or "") for row in selected]
         selected_count = len(selected)
         if not selected:
+            generation_publish = (
+                publish_search_projection_generation_identity(
+                    aoa_root=aoa_root,
+                    projection="episode_dense",
+                    identity=dense_generation_identity,
+                    coverage_current=bool(
+                        dense_state.get("status") == "current"
+                        and not dense_state.get("projection_dirty")
+                        and int_value(
+                            dense_state.get("current_session_count")
+                        )
+                        == int_value(
+                            dense_state.get("source_session_count")
+                        )
+                    ),
+                )
+            )
             return {
                 "schema_version": SCHEMA_VERSION,
                 "artifact_type": "episode_dense_index",
@@ -95009,6 +97938,7 @@ def episode_dense_index_sessions(
                 "selection": selection,
                 "coverage": dense_state,
                 "provider": {**provider, "embedding_api_url": provider.get("embedding_api_url")},
+                "generation_publish": generation_publish,
                 "elapsed_ms": int((time.monotonic() - started) * 1000),
                 "diagnostics": [],
             }
@@ -95060,13 +97990,17 @@ def episode_dense_index_sessions(
                 "provider": provider,
                 "provider_preflight": provider_preflight,
                 "coverage": dense_state,
-                "storage_mode": "normalized_float32_exact_cosine_sidecar_v1",
+                "storage_mode": (
+                    "normalized_float32_exact_cosine_"
+                    "episode_and_representation_sidecars_v2"
+                ),
                 "index_choice": (
                     "exact vector scan is lossless and bounded at the current episode cardinality; "
                     "ANN is deferred until measured scale requires it"
                 ),
                 "authority_boundary": (
-                    "dense scores navigate generated episode documents; raw transcript refs remain authority"
+                    "dense scores navigate generated episode representations; "
+                    "only resolved raw transcript refs remain authority"
                 ),
                 "elapsed_ms": int((time.monotonic() - started) * 1000),
                 "db_path": str(db_path),
@@ -95119,6 +98053,7 @@ def episode_dense_index_sessions(
                 continue
             documents: list[str] = []
             document_hashes: list[str] = []
+            representation_documents: list[dict[str, Any]] = []
             payload_ok = True
             for episode_row in episode_rows:
                 episode = episode_semantic_payload_from_blob(episode_row["payload_zlib"])
@@ -95128,6 +98063,16 @@ def episode_dense_index_sessions(
                     break
                 documents.append(document)
                 document_hashes.append(hashlib.sha256(document.encode("utf-8")).hexdigest())
+                representation_documents.extend(
+                    episode_dense_representation_documents(
+                        episode,
+                        doc_id=str(episode_row["doc_id"] or ""),
+                        session_id=session_id,
+                        episode_id=str(
+                            episode_row["episode_id"] or ""
+                        ),
+                    )
+                )
             if not payload_ok:
                 diagnostic = f"episode_dense_payload_unreadable:{session_id}"
                 diagnostics.append(diagnostic)
@@ -95143,9 +98088,15 @@ def episode_dense_index_sessions(
                 continue
             embedding = episode_dense_embed_texts(
                 url=str(provider.get("embedding_api_url") or ""),
-                texts=documents,
+                texts=[
+                    *documents,
+                    *[
+                        str(item.get("document") or "")
+                        for item in representation_documents
+                    ],
+                ],
                 timeout=EPISODE_DENSE_INDEX_TIMEOUT_SECONDS,
-            ) if documents else {
+            ) if documents or representation_documents else {
                 "ok": True,
                 "status": "no_task_episodes",
                 "vectors": [],
@@ -95158,15 +98109,20 @@ def episode_dense_index_sessions(
             model = str(embedding.get("model") or EPISODE_DENSE_DEFAULT_MODEL)
             dimension = int_value(embedding.get("dimension"), EPISODE_DENSE_DEFAULT_DIMENSION)
             vectors = embedding.get("vectors") if isinstance(embedding.get("vectors"), list) else []
+            expected_vector_count = (
+                len(episode_rows)
+                + len(representation_documents)
+            )
             if (
                 not embedding.get("ok")
-                or len(vectors) != len(episode_rows)
+                or len(vectors) != expected_vector_count
                 or model != EPISODE_DENSE_DEFAULT_MODEL
                 or (episode_rows and dimension != EPISODE_DENSE_DEFAULT_DIMENSION)
             ):
                 diagnostic = (
                     f"episode_dense_embedding_failed:{session_id}:status={embedding.get('status')}:"
-                    f"model={model}:dimension={dimension}:vectors={len(vectors)}/{len(episode_rows)}"
+                    f"model={model}:dimension={dimension}:"
+                    f"vectors={len(vectors)}/{expected_vector_count}"
                 )
                 diagnostics.append(diagnostic)
                 results.append(
@@ -95183,10 +98139,22 @@ def episode_dense_index_sessions(
                     }
                 )
                 continue
+            episode_vectors = vectors[: len(episode_rows)]
+            representation_vectors = vectors[len(episode_rows) :]
             conn.execute("BEGIN")
             try:
                 conn.execute("DELETE FROM episode_dense_vectors WHERE session_id = ?", (session_id,))
-                for episode_row, document_hash, vector in zip(episode_rows, document_hashes, vectors, strict=True):
+                conn.execute(
+                    "DELETE FROM episode_dense_representation_vectors "
+                    "WHERE session_id = ?",
+                    (session_id,),
+                )
+                for episode_row, document_hash, vector in zip(
+                    episode_rows,
+                    document_hashes,
+                    episode_vectors,
+                    strict=True,
+                ):
                     conn.execute(
                         """
                         INSERT INTO episode_dense_vectors (
@@ -95214,6 +98182,87 @@ def episode_dense_index_sessions(
                             dense_generation_id,
                         ),
                     )
+                for representation, vector in zip(
+                    representation_documents,
+                    representation_vectors,
+                    strict=True,
+                ):
+                    conn.execute(
+                        """
+                        INSERT INTO episode_dense_representation_vectors (
+                            representation_id, doc_id, session_id,
+                            episode_id, role, raw_ref, segment_ref,
+                            session_ref, source_lane, admission_basis,
+                            outcome, source_episode_projection_version,
+                            source_route_signal_classifier_version,
+                            dense_projection_version,
+                            dense_document_version,
+                            representation_version, model, dimension,
+                            document_sha256, vector_f32, indexed_at,
+                            generation_id
+                        )
+                        VALUES (
+                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                            ?, ?, ?, ?, ?, ?, ?, ?, ?
+                        )
+                        """,
+                        (
+                            str(
+                                representation.get(
+                                    "representation_id"
+                                )
+                                or ""
+                            ),
+                            str(representation.get("doc_id") or ""),
+                            session_id,
+                            str(
+                                representation.get("episode_id")
+                                or ""
+                            ),
+                            str(representation.get("role") or ""),
+                            str(representation.get("raw_ref") or ""),
+                            str(
+                                representation.get("segment_ref")
+                                or ""
+                            ),
+                            str(
+                                representation.get("session_ref")
+                                or ""
+                            ),
+                            str(
+                                representation.get("source_lane")
+                                or ""
+                            ),
+                            str(
+                                representation.get(
+                                    "admission_basis"
+                                )
+                                or ""
+                            ),
+                            str(
+                                representation.get("outcome")
+                                or ""
+                            ),
+                            EPISODE_SEMANTIC_PROJECTION_VERSION,
+                            ROUTE_SIGNAL_CLASSIFIER_VERSION,
+                            EPISODE_DENSE_PROJECTION_VERSION,
+                            EPISODE_DENSE_DOCUMENT_VERSION,
+                            EPISODE_DENSE_REPRESENTATION_VERSION,
+                            model,
+                            dimension,
+                            str(
+                                representation.get(
+                                    "document_sha256"
+                                )
+                                or ""
+                            ),
+                            sqlite3.Binary(
+                                episode_dense_vector_blob(vector)
+                            ),
+                            now,
+                            dense_generation_id,
+                        ),
+                    )
                 status = "current" if episode_rows else "no_task_episodes"
                 conn.execute(
                     """
@@ -95221,10 +98270,15 @@ def episode_dense_index_sessions(
                         session_id, status, source_episode_projection_version,
                         source_route_signal_classifier_version,
                         dense_projection_version, dense_document_version, model,
-                        dimension, episode_document_count, vector_count, indexed_at,
+                        dimension, episode_document_count, vector_count,
+                        representation_document_count,
+                        representation_vector_count, indexed_at,
                         last_error, generation_id, generation_identity_json
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?)
+                    VALUES (
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '',
+                        ?, ?
+                    )
                     """,
                     (
                         session_id,
@@ -95236,7 +98290,9 @@ def episode_dense_index_sessions(
                         model,
                         dimension,
                         len(episode_rows),
-                        len(vectors),
+                        len(episode_vectors),
+                        len(representation_documents),
+                        len(representation_vectors),
                         now,
                         dense_generation_id,
                         dense_generation_identity_json,
@@ -95262,10 +98318,22 @@ def episode_dense_index_sessions(
                     "session_id": session_id,
                     "status": status,
                     "episode_document_count": len(episode_rows),
-                    "vector_count": len(vectors),
+                    "vector_count": len(episode_vectors),
+                    "representation_document_count": len(
+                        representation_documents
+                    ),
+                    "representation_vector_count": len(
+                        representation_vectors
+                    ),
                     "model": model,
                     "dimension": dimension,
-                    "document_chars": sum(len(item) for item in documents),
+                    "document_chars": sum(
+                        len(item) for item in documents
+                    ),
+                    "representation_document_chars": sum(
+                        len(str(item.get("document") or ""))
+                        for item in representation_documents
+                    ),
                     "embedding_elapsed_ms": int_value(embedding.get("elapsed_ms")),
                     "prompt_tokens": int_value(embedding.get("prompt_tokens")),
                     "elapsed_ms": int((time.monotonic() - session_started) * 1000),
@@ -95275,6 +98343,19 @@ def episode_dense_index_sessions(
     finally:
         conn.close()
     coverage = episode_dense_projection_state(aoa_root, records=selected_records)
+    generation_publish = (
+        publish_search_projection_generation_identity(
+            aoa_root=aoa_root,
+            projection="episode_dense",
+            identity=dense_generation_identity,
+            coverage_current=bool(
+                coverage.get("status") == "current"
+                and not coverage.get("projection_dirty")
+                and int_value(coverage.get("current_session_count"))
+                == int_value(coverage.get("source_session_count"))
+            ),
+        )
+    )
     processed_count = len(results)
     successful_count = sum(1 for item in results if item.get("status") in {"current", "no_task_episodes"})
     completed_session_ids = [
@@ -95306,9 +98387,16 @@ def episode_dense_index_sessions(
         "source_episode_projection_version": EPISODE_SEMANTIC_PROJECTION_VERSION,
         "provider": provider,
         "coverage": coverage,
-        "storage_mode": "normalized_float32_exact_cosine_sidecar_v1",
+        "generation_publish": generation_publish,
+        "storage_mode": (
+            "normalized_float32_exact_cosine_"
+            "episode_and_representation_sidecars_v2"
+        ),
         "index_choice": "exact vector scan is lossless and bounded at the current episode cardinality; ANN is deferred until measured scale requires it",
-        "authority_boundary": "dense scores navigate generated episode documents; raw transcript refs remain authority",
+        "authority_boundary": (
+            "dense scores navigate generated episode representations; "
+            "only resolved raw transcript refs remain authority"
+        ),
         "elapsed_ms": int((time.monotonic() - started) * 1000),
         "db_path": str(db_path),
         "diagnostics": diagnostics,
@@ -96411,6 +99499,53 @@ def search_sessions_shard_fanout(
         payload.setdefault("search_projection", {})[
             "catalog_generation"
         ] = catalog_generation
+        return payload
+    source_set_state = search_source_set_change_state(
+        aoa_root=aoa_root,
+    )
+    if source_set_state.get("removed_session_ids"):
+        payload = search_shard_fanout_unavailable_payload(
+            reason="search_source_set_removed_fallback_monolith",
+            aoa_root=aoa_root,
+            query=query,
+            limit=limit,
+            provider=provider,
+            include_host_context=include_host_context,
+            include_semantic_context=include_semantic_context,
+            rerank_local=rerank_local,
+            rerank_candidate_limit=rerank_candidate_limit,
+            allow_host_warnings=allow_host_warnings,
+            host_timeout=host_timeout,
+            session=session,
+            event_id_before=event_id_before,
+            doc_type=doc_type,
+            event_type=event_type,
+            family=family,
+            outcome=outcome,
+            conversation_act=conversation_act,
+            session_act=session_act,
+            agent_event=agent_event,
+            usage_role=usage_role,
+            task_episode_id=task_episode_id,
+            route_layer=route_layer,
+            route_signal=route_signal,
+            archive_status=archive_status,
+            freshness_status=freshness_status,
+            date_from=date_from,
+            date_to=date_to,
+            explain=explain,
+            semantic_preview=semantic_preview,
+            hydrate_body=hydrate_body,
+            raw_ref_preview=raw_ref_preview,
+            exclude_agent_event_stream_copies=(
+                exclude_agent_event_stream_copies
+            ),
+            include_archived_raw_fallback=False,
+            query_timeout_ms=query_timeout_ms,
+        )
+        payload.setdefault("search_projection", {})[
+            "source_set_state"
+        ] = source_set_state
         return payload
     shards = catalog.get("shards") if isinstance(catalog.get("shards"), list) else []
     session_filter_column, session_filter_value = exact_session_filter_for_search(aoa_root, session)
@@ -98164,6 +101299,63 @@ def search_sessions(
                 query_timeout_ms=query_timeout_ms,
             )
         stored_metadata = search_index_metadata(conn)
+        source_set_state = search_source_set_change_state(
+            aoa_root=aoa_root,
+            db_path=db_path,
+        )
+        if (
+            db_path_override is None
+            and source_set_state.get("removed_session_ids")
+        ):
+            return {
+                "schema_version": SCHEMA_VERSION,
+                "artifact_type": "search_results",
+                "search_schema_version": SEARCH_SCHEMA_VERSION,
+                "generated_at": now,
+                "ok": True,
+                "mutates": False,
+                "query": query,
+                "normalized_query": fts_query_from_user(query),
+                "db_path": str(db_path),
+                "aoa_root": str(aoa_root),
+                "result_count": 0,
+                "results": [],
+                "search_projection": {
+                    "mode": effective_projection_mode,
+                    "db_path": str(db_path),
+                    "status": "stale",
+                    "source_set_state": source_set_state,
+                },
+                "answer_admission": {
+                    "admitted": False,
+                    "status": (
+                        "source_set_removed_requires_deep_rebuild"
+                    ),
+                    "reason": SEARCH_SOURCE_SET_REMOVED_REASON,
+                },
+                "abstention": {
+                    "status": (
+                        "source_set_removed_requires_deep_rebuild"
+                    ),
+                    "reason": (
+                        "indexed sessions were removed from the complete "
+                        "current registry; generated candidates remain "
+                        "navigation-only until clean replacement"
+                    ),
+                },
+                "exact_next_command": (
+                    "python3 scripts/aoa_session_memory.py "
+                    "auto-maintenance deep all --aoa-root "
+                    f"{shlex.quote(str(aoa_root))} --apply "
+                    "--write-report"
+                ),
+                "diagnostics": [
+                    "search_source_set_removed_candidates_withheld"
+                ],
+                "truth_status": (
+                    "generated_projection_withheld_raw_evidence_unchanged"
+                ),
+            }
         stored_generations = projection_generation_from_json(
             stored_metadata.get("generation_identities_json")
         )
@@ -104517,6 +107709,10 @@ def memory_query_intent(query: str) -> dict[str, Any]:
     tokens = {token.casefold() for token in search_tokenize(text)}
     quantitative_comparison = episode_quantitative_comparison_query(text)
     delegated_lifecycle = episode_delegated_lifecycle_query(text)
+    causal_attribution = episode_causal_attribution_query_profile(
+        episode_semantic_query_terms(text),
+        query_text=text,
+    )
     negative_claim_requested = memory_query_has_negative_claim_intent(text)
     causal_action_role = bool(
         tokens
@@ -104715,6 +107911,10 @@ def memory_query_intent(query: str) -> dict[str, Any]:
             for token in tokens
         )
         or structured_causal_chain_requested
+        or (
+            causal_attribution.get("active")
+            and not shape.get("identifier_anchor")
+        )
         or (
             not delegated_lifecycle.get("active")
             and (
@@ -105769,7 +108969,38 @@ def session_memory_expected_generation_identities(
                 or EPISODE_DENSE_DEFAULT_MODEL
             ),
             "dimensions": EPISODE_DENSE_DEFAULT_DIMENSION,
-            "normalization": "l2_normalized_float32_v1",
+            "normalization": (
+                "episode_aggregate_plus_representation_"
+                "l2_normalized_float32_v1"
+            ),
+            "representation_policy": {
+                "version": EPISODE_DENSE_REPRESENTATION_VERSION,
+                "roles": list(
+                    EPISODE_DENSE_REPRESENTATION_ROLES
+                ),
+                "per_role_tail_limit": (
+                    EPISODE_DENSE_REPRESENTATION_PER_ROLE_LIMIT
+                ),
+                "text_max_chars": (
+                    EPISODE_DENSE_REPRESENTATION_TEXT_MAX_CHARS
+                ),
+                "episode_score": (
+                    "maximum_cosine_over_representation_vectors"
+                ),
+                "evidence_match_limit": (
+                    EPISODE_DENSE_REPRESENTATION_MATCH_LIMIT
+                ),
+                "primary_similarity_match_limit": (
+                    EPISODE_DENSE_REPRESENTATION_PRIMARY_MATCH_LIMIT
+                ),
+                "role_diversity_supplement_limit": (
+                    EPISODE_DENSE_REPRESENTATION_DIVERSITY_MATCH_LIMIT
+                ),
+                "evidence_match_selection": (
+                    "primary_similarity_then_distinct_role_"
+                    "supplements"
+                ),
+            },
             "dependency_generations": {
                 "episode_semantic": episode_semantic["generation_id"],
             },
@@ -110066,6 +113297,24 @@ def graph_work_context_node_id(work_root: str, work_name: str = "") -> str:
     return f"work_context:{route_key_slug(value, fallback='work', max_chars=120)}"
 
 
+def graph_work_context_projection_fields(
+    work_context: dict[str, Any],
+) -> dict[str, Any]:
+    status = str(work_context.get("status") or "unresolved")
+    confidence = str(work_context.get("confidence") or "none")
+    observed = status == "resolved" and confidence == "high"
+    return {
+        "source_projection_status": status,
+        "source_projection_confidence": confidence,
+        "source_projection_candidate": not observed,
+        "source_projection_admission": (
+            "observed_resolved_high_confidence"
+            if observed
+            else "candidate_not_resolved_high_confidence"
+        ),
+    }
+
+
 def graph_edge_id(source: str, target: str, edge_type: str) -> str:
     digest = hashlib.sha1(f"{source}\x00{edge_type}\x00{target}".encode("utf-8")).hexdigest()[:20]
     return f"edge:{digest}"
@@ -110178,8 +113427,23 @@ def graph_compact_refs_map(refs: Any) -> dict[str, str]:
     if not isinstance(refs, dict):
         return {}
     compact: dict[str, str] = {}
-    for key in ("session", "segment", "raw", "raw_block"):
-        value = graph_compact_ref_value(refs.get(key))
+    aliases = {
+        "session": ("session",),
+        "segment": ("segment", "segment_ref"),
+        "raw": ("raw", "raw_ref"),
+        "raw_block": ("raw_block",),
+    }
+    for key, source_keys in aliases.items():
+        value = graph_compact_ref_value(
+            next(
+                (
+                    refs.get(source_key)
+                    for source_key in source_keys
+                    if refs.get(source_key)
+                ),
+                "",
+            )
+        )
         if value:
             if key == "segment" and "#" in value:
                 value = value.split("#", 1)[0]
@@ -110659,6 +113923,9 @@ def graph_relation_contract_payload(
         normalized,
         contract,
     )
+    source_projection_candidate = (
+        normalized.get("source_projection_candidate") is True
+    )
     known_relation = contract is not None
     rejected = bool(
         domain_range_status == "invalid"
@@ -110672,6 +113939,7 @@ def graph_relation_contract_payload(
         and correlation_status
         in {"not_required", "matched_identity"}
         and evidence["status"] == "present"
+        and not source_projection_candidate
     )
     relation_state = (
         "rejected"
@@ -111901,6 +115169,9 @@ def graph_contributions_for_record(
 
         if isinstance(work_context, dict) and (work_context.get("work_root") or work_context.get("work_name")):
             work_node_id = graph_work_context_node_id(str(work_context.get("work_root") or ""), str(work_context.get("work_name") or ""))
+            work_projection_fields = graph_work_context_projection_fields(
+                work_context
+            )
             add_session_node(
                 {
                     "id": work_node_id,
@@ -111908,7 +115179,9 @@ def graph_contributions_for_record(
                     "label": work_context.get("work_name") or work_context.get("work_root"),
                     "work_root": work_context.get("work_root"),
                     "work_family": work_context.get("work_family"),
+                    "status": work_context.get("status"),
                     "confidence": work_context.get("confidence"),
+                    **work_projection_fields,
                     "evidence_refs": [{"session_id": session_id, "refs": session_refs}],
                 }
             )
@@ -111918,6 +115191,7 @@ def graph_contributions_for_record(
                     "target": work_node_id,
                     "type": "has_work_context",
                     "session_id": session_id,
+                    **work_projection_fields,
                     "evidence_refs": [{"session_id": session_id, "refs": session_refs}],
                 }
             )
@@ -118062,6 +121336,9 @@ def build_session_graph_legacy(
             work_context = manifest.get("work_context") if isinstance(manifest.get("work_context"), dict) else session_index.get("work_context")
             if isinstance(work_context, dict) and (work_context.get("work_root") or work_context.get("work_name")):
                 work_node_id = graph_work_context_node_id(str(work_context.get("work_root") or ""), str(work_context.get("work_name") or ""))
+                work_projection_fields = graph_work_context_projection_fields(
+                    work_context
+                )
                 add_node(
                     {
                         "id": work_node_id,
@@ -118069,7 +121346,9 @@ def build_session_graph_legacy(
                         "label": work_context.get("work_name") or work_context.get("work_root"),
                         "work_root": work_context.get("work_root"),
                         "work_family": work_context.get("work_family"),
+                        "status": work_context.get("status"),
                         "confidence": work_context.get("confidence"),
+                        **work_projection_fields,
                         "evidence_refs": [{"session_id": session_id, "refs": session_refs}],
                     }
                 )
@@ -118079,6 +121358,7 @@ def build_session_graph_legacy(
                         "target": work_node_id,
                         "type": "has_work_context",
                         "session_id": session_id,
+                        **work_projection_fields,
                         "evidence_refs": [{"session_id": session_id, "refs": session_refs}],
                     }
                 )
@@ -138501,19 +141781,43 @@ def graph_freshness_gates(
     latest_source_mtime, latest_source_paths = latest_index_source_mtime(aoa_root, gate_records)
     latest_graph_mtime, latest_graph_paths = latest_graph_source_mtime(aoa_root, gate_records)
     route_drift = route_index_drift_records(gate_records)
-    search_gate_projection_fingerprints = search_projection_fingerprints_for_records(gate_records) if stable_mode else None
-    search_state = sqlite_search_index_state(aoa_root, latest_source_mtime, gate_records, projection_fingerprints=search_gate_projection_fingerprints)
-    atlas_state = atlas_index_state(aoa_root, latest_source_mtime, gate_records, projection_fingerprints=gate_projection_fingerprints)
+    declared_global_scope_complete = bool(
+        isinstance(selection_scope, dict)
+        and selection_scope.get("global_scope_complete") is True
+    )
     global_selection = bool(
-        selected_records is None
-        and graph_selection_is_global(
+        graph_selection_is_global(
             target=target,
             since=since,
             until=until,
             limit=limit,
         )
+        and (selected_records is None or declared_global_scope_complete)
     )
     graph_selection_global = global_selection and not deferred_live_sessions
+    search_gate_projection_fingerprints = search_projection_fingerprints_for_records(gate_records) if stable_mode else None
+    search_state = sqlite_search_index_state(
+        aoa_root,
+        latest_source_mtime,
+        gate_records,
+        projection_fingerprints=search_gate_projection_fingerprints,
+        **(
+            {"source_scope_complete": True}
+            if graph_selection_global
+            else {}
+        ),
+    )
+    atlas_state = atlas_index_state(
+        aoa_root,
+        latest_source_mtime,
+        gate_records,
+        projection_fingerprints=gate_projection_fingerprints,
+        **(
+            {"source_scope_complete": True}
+            if graph_selection_global
+            else {}
+        ),
+    )
     store_state = graph_store_state(
         aoa_root=aoa_root,
         target=target,
@@ -138746,13 +142050,42 @@ def route_cache_freshness_gates(
             }
         latest_source_mtime, latest_source_paths = latest_index_source_mtime(aoa_root, records)
         route_drift = route_index_drift_records(records)
+        source_scope_complete = bool(
+            graph_selection_is_global(
+                target=target,
+                since=since,
+                until=until,
+                limit=limit,
+            )
+            and (
+                selected_records is None
+                or (
+                    isinstance(selection_scope, dict)
+                    and selection_scope.get("global_scope_complete") is True
+                )
+            )
+        )
         search_state = sqlite_search_index_state(
             aoa_root,
             latest_source_mtime,
             records,
             projection_fingerprints=search_projection_fingerprints_for_records(records),
+            **(
+                {"source_scope_complete": True}
+                if source_scope_complete
+                else {}
+            ),
         )
-        atlas_state = atlas_index_state(aoa_root, latest_source_mtime, records)
+        atlas_state = atlas_index_state(
+            aoa_root,
+            latest_source_mtime,
+            records,
+            **(
+                {"source_scope_complete": True}
+                if source_scope_complete
+                else {}
+            ),
+        )
         truth_status = "hot_route_cache_bounded_projection_scan"
         selection_source = "provided_records" if selected_records is not None else "target_filters"
         selected_count = len(records)
@@ -155061,6 +158394,70 @@ def entity_usage_execution_command_candidates(payload: dict[str, Any]) -> list[s
     ]
 
 
+def entity_usage_hook_command_proves_invocation(
+    command: str,
+    *,
+    anchor: str,
+) -> bool:
+    """Admit an exact hook CLI operation, not hook vocabulary in a command.
+
+    Hook lifecycle receipts remain the authority for whether a runtime hook
+    fired. This route only proves that the requested hook-facing CLI operation
+    itself was invoked (for example ``codex-hooks-status``).
+    """
+    anchor_key = route_key_slug(anchor, fallback="", max_chars=120)
+    if not anchor_key:
+        return False
+    for tokens in session_memory_query_demand_shell_segments(command):
+        executable, arguments = entity_usage_shell_segment_executable(tokens)
+        if not executable:
+            continue
+        subcommand_arguments = list(arguments)
+        executable_key = entity_usage_execution_anchor_key(executable)
+        if executable in {
+            "python",
+            "python3",
+            "pypy",
+            "pypy3",
+        } or re.fullmatch(r"python3(?:\.\d+)+", executable):
+            target_kind, target = entity_usage_python_target(arguments)
+            if target_kind != "script":
+                continue
+            target_key = entity_usage_execution_anchor_key(
+                Path(str(target).replace("\\", "/")).name
+            )
+            if target_key != "aoa_session_memory_py":
+                continue
+            try:
+                target_index = arguments.index(target)
+            except ValueError:
+                continue
+            subcommand_arguments = arguments[target_index + 1 :]
+        elif executable_key not in {
+            "aoa_session_memory",
+            "aoa_session_memory_py",
+        }:
+            continue
+        subcommand = next(
+            (
+                str(argument)
+                for argument in subcommand_arguments
+                if str(argument) and not str(argument).startswith("-")
+            ),
+            "",
+        )
+        if (
+            route_key_slug(
+                subcommand,
+                fallback="",
+                max_chars=120,
+            )
+            == anchor_key
+        ):
+            return True
+    return False
+
+
 def entity_usage_execution_anchor_key(value: Any) -> str:
     return "_".join(re.findall(r"[a-z0-9]+", str(value or "").casefold()))
 
@@ -156383,11 +159780,7 @@ def skill_session_evidence_probe(
                 or result_failures
                 else "not_present"
             ),
-            "source_scan": {
-                key: value
-                for key, value in scan.items()
-                if not str(key).startswith("_")
-            },
+            "source_scan": session_query_source_scan_summary(scan),
             "diagnostics": unique_preserving_order(
                 [
                     *(
@@ -159899,12 +163292,14 @@ def entity_usage_audit(
     document_limit: int = 60,
     provider: str = "portable_sqlite",
     session: str | None = None,
+    correlation_id: str | None = None,
     before_event_id: str | None = None,
     write_report: bool = False,
 ) -> dict[str, Any]:
     now = utc_now()
     requested_kind = str(kind or "auto").strip().lower() or "auto"
     normalized_kind = normalize_trace_route_kind(kind)
+    normalized_correlation_id = str(correlation_id or "").strip()
     if normalized_kind not in TRACE_ROUTE_KINDS:
         return {
             "schema_version": SCHEMA_VERSION,
@@ -159916,6 +163311,40 @@ def entity_usage_audit(
             **trace_kind_payload_fields(kind, normalized_kind),
             "diagnostics": [f"unknown trace kind: {kind}"],
         }
+    if normalized_correlation_id and not session:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "artifact_type": "session_memory_entity_usage_audit",
+            "generated_at": now,
+            "ok": False,
+            "mutates": False,
+            "anchor": anchor,
+            **trace_kind_payload_fields(kind, normalized_kind),
+            "correlation_id": normalized_correlation_id,
+            "diagnostics": [
+                "exact correlation selection requires an explicit session"
+            ],
+        }
+    if (
+        normalized_correlation_id
+        and not ENTITY_USAGE_CORRELATION_ID_RE.fullmatch(
+            normalized_correlation_id
+        )
+    ):
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "artifact_type": "session_memory_entity_usage_audit",
+            "generated_at": now,
+            "ok": False,
+            "mutates": False,
+            "anchor": anchor,
+            **trace_kind_payload_fields(kind, normalized_kind),
+            "correlation_id": normalized_correlation_id,
+            "diagnostics": [
+                "invalid exact correlation identifier"
+            ],
+        }
+    exact_instance_mode = bool(normalized_correlation_id)
     limit = max(1, min(int_value(limit, 20), 200))
     per_route_limit = max(1, min(int_value(per_route_limit, 20), 100))
     # Global audits keep the advertised fetch limit as the hard upstream budget
@@ -159955,6 +163384,19 @@ def entity_usage_audit(
         for hit in skill_query_time_source_probe.pop("_hits", [])
         if isinstance(hit, dict)
     ] if normalized_kind == "skill" else []
+    if exact_instance_mode:
+        mcp_tool_query_time_source_hits = [
+            hit
+            for hit in mcp_tool_query_time_source_hits
+            if str(hit.get("correlation_id") or "")
+            == normalized_correlation_id
+        ]
+        skill_query_time_source_hits = [
+            hit
+            for hit in skill_query_time_source_hits
+            if str(hit.get("correlation_id") or "")
+            == normalized_correlation_id
+        ]
     candidates = (
         list(mcp_tool_resolution.get("route_candidates", []))
         if requested_kind == "mcp_tool"
@@ -159986,6 +163428,11 @@ def entity_usage_audit(
                 *exact_skill_candidates,
                 *exact_entity_dispatch_candidates,
             ]
+    if exact_instance_mode:
+        # Exact instance selection is source-coordinate first. Do not pay for
+        # or admit unrelated aggregate route candidates from the same session.
+        query_candidates = []
+        skill_dispatch_query_candidates = []
     merged: dict[str, dict[str, Any]] = {}
     for source_hit in mcp_tool_query_time_source_hits:
         merge_usage_hit(
@@ -159999,9 +163446,26 @@ def entity_usage_audit(
             source_hit,
             "session_scoped_query_time_raw_skill_probe",
         )
+    exact_correlation_probe = entity_usage_exact_correlation_probe(
+        aoa_root=aoa_root,
+        session=session,
+        correlation_id=normalized_correlation_id,
+    )
+    exact_correlation_hits = [
+        hit
+        for hit in exact_correlation_probe.pop("_hits", [])
+        if isinstance(hit, dict)
+    ]
+    for source_hit in exact_correlation_hits:
+        merge_usage_hit(
+            merged,
+            source_hit,
+            "session_scoped_query_time_exact_correlation_probe",
+        )
     route_result_summaries: list[dict[str, Any]] = []
     usage_role_fast_path_supported = bool(
         lookup_candidates
+        and not exact_instance_mode
         and normalized_kind in ENTITY_USAGE_DIRECT_TRACE_KINDS
         and search_usage_role_filter_supported(aoa_root, provider=provider)
     )
@@ -160022,6 +163486,16 @@ def entity_usage_audit(
     upstream_candidate_window_incomplete = False
     upstream_query_failure_count = 0
     upstream_query_failure_diagnostics: list[str] = []
+    if exact_instance_mode:
+        diagnostics.extend(
+            str(item)
+            for item in exact_correlation_probe.get("diagnostics", [])
+            if item
+        )
+        if not exact_correlation_probe.get(
+            "candidate_count_exhaustive"
+        ):
+            upstream_candidate_window_incomplete = True
     mcp_usage_admission_checked_doc_ids: set[str] = set()
     mcp_usage_admission_segment_cache: dict[str, list[dict[str, Any]]] = {}
     mcp_usage_invocation_admitted_count = 0
@@ -160047,7 +163521,13 @@ def entity_usage_audit(
     mcp_tool_invocation_unverifiable_count = 0
     hook_usage_admission_checked_doc_ids: set[str] = set()
     hook_usage_admission_segment_cache: dict[str, list[dict[str, Any]]] = {}
+    hook_usage_admission_manifest_cache: dict[str, dict[str, Any]] = {}
+    hook_usage_admission_raw_preview_cache: dict[
+        tuple[str, str, str, int],
+        dict[str, Any],
+    ] = {}
     hook_usage_invocation_admitted_count = 0
+    hook_usage_command_invocation_admitted_count = 0
     hook_usage_session_activity_rejected_count = 0
     hook_usage_invocation_unverifiable_count = 0
     execution_usage_admission_checked_doc_ids: set[str] = set()
@@ -160398,9 +163878,10 @@ def entity_usage_audit(
 
     def apply_hook_usage_invocation_admission() -> None:
         nonlocal hook_usage_invocation_admitted_count
+        nonlocal hook_usage_command_invocation_admitted_count
         nonlocal hook_usage_session_activity_rejected_count
         nonlocal hook_usage_invocation_unverifiable_count
-        if normalized_kind != "hook" or not requested_hook_route_keys:
+        if normalized_kind != "hook":
             return
         for hit in merged.values():
             doc_id = str(hit.get("doc_id") or "")
@@ -160438,14 +163919,48 @@ def entity_usage_audit(
             if invocation_proven:
                 hit["hook_usage_admission"] = "structured_hook_event_proven"
                 hook_usage_invocation_admitted_count += 1
+                hook_usage_admission_checked_doc_ids.add(doc_id)
+                continue
+            payload, payload_status = raw_payload_for_usage_segment_event(
+                source_event,
+                hit=hit,
+                distance=0,
+                manifest_cache=hook_usage_admission_manifest_cache,
+                raw_preview_cache=hook_usage_admission_raw_preview_cache,
+            )
+            commands = (
+                entity_usage_execution_command_candidates(payload)
+                if payload
+                else []
+            )
+            command_invocation_proven = any(
+                entity_usage_hook_command_proves_invocation(
+                    command,
+                    anchor=anchor,
+                )
+                for command in commands
+            )
+            if command_invocation_proven:
+                hit["hook_usage_admission"] = (
+                    "structured_hook_command_invocation_proven"
+                )
+                hook_usage_invocation_admitted_count += 1
+                hook_usage_command_invocation_admitted_count += 1
             else:
                 # Commands that inspect processes, mutate hook files, or quote
-                # lifecycle names are session activity around hooks.  They do
-                # not prove that this requested hook fired; the receipt route
-                # remains the invocation evidence authority.
+                # lifecycle names are session activity around hooks. They do
+                # not prove that this requested operation or hook fired; the
+                # exact command and receipt routes remain the authorities.
                 hit["entity_usage_role_override"] = "context"
-                hit["hook_usage_admission"] = "session_activity_not_hook_invocation"
-                hook_usage_session_activity_rejected_count += 1
+                hit["hook_usage_admission"] = (
+                    "session_activity_not_hook_invocation"
+                    if payload
+                    else f"hook_invocation_source_unverifiable:{payload_status}"
+                )
+                if payload:
+                    hook_usage_session_activity_rejected_count += 1
+                else:
+                    hook_usage_invocation_unverifiable_count += 1
             hook_usage_admission_checked_doc_ids.add(doc_id)
 
     def apply_execution_usage_invocation_admission() -> None:
@@ -161051,6 +164566,7 @@ def entity_usage_audit(
     route_usage_retry_fetch_limit = 0
     if (
         lookup_candidates
+        and not exact_instance_mode
         and route_hit_count > 0
         and route_usage_hit_count == 0
         and normalized_kind != "skill"
@@ -161117,9 +164633,15 @@ def entity_usage_audit(
             )
     text_search_skipped = False
     text_search_skip_reason = ""
-    skip_text_search = bool(diagnostics) and not lookup_candidates
+    skip_text_search = exact_instance_mode or (
+        bool(diagnostics) and not lookup_candidates
+    )
     if skip_text_search:
-        text_search_skip_reason = "identity_diagnostic_without_route_candidates"
+        text_search_skip_reason = (
+            "exact_correlation_source_probe_selected"
+            if exact_instance_mode
+            else "identity_diagnostic_without_route_candidates"
+        )
     route_evidence_satisfies_kind = route_usage_hit_count > 0 or (
         normalized_kind not in ENTITY_USAGE_DIRECT_TRACE_KINDS and route_evidence_hit_count > 0
     )
@@ -161138,7 +164660,7 @@ def entity_usage_audit(
         for state in SKILL_DISPATCH_CANDIDATE_STATES
     )
     skill_prompt_visibility = {}
-    if normalized_kind == "skill" and session:
+    if normalized_kind == "skill" and session and not exact_instance_mode:
         skill_prompt_visibility = skill_prompt_visibility_probe(
             aoa_root=aoa_root,
             anchor=anchor,
@@ -161156,7 +164678,7 @@ def entity_usage_audit(
                     prompt_visibility_hit,
                     "prompt_visibility_probe",
                 )
-    elif normalized_kind == "skill":
+    elif normalized_kind == "skill" and not exact_instance_mode:
         skill_prompt_visibility = skill_prompt_visibility_probe(
             aoa_root=aoa_root,
             anchor=anchor,
@@ -161590,6 +165112,12 @@ def entity_usage_audit(
             and not upstream_candidate_window_incomplete
         ),
         "candidate_count_basis": (
+            "exact_session_correlation_source_scan"
+            if exact_instance_mode
+            and exact_correlation_probe.get(
+                "candidate_count_exhaustive"
+            )
+            else
             "incomplete_upstream_query"
             if upstream_candidate_window_incomplete
             else "lower_bound_upstream_probe"
@@ -161608,6 +165136,12 @@ def entity_usage_audit(
         "omitted_usage_event_count": omitted_usage_event_count,
         "before_event_id": str(before_event_id or ""),
         "next_before_event_id": next_before_event_id,
+        "exact_instance_mode": exact_instance_mode,
+        "exact_correlation_id": normalized_correlation_id,
+        "exact_correlation_probe": exact_correlation_probe,
+        "exact_correlation_source_hit_count": len(
+            exact_correlation_hits
+        ),
         "text_result_count": text_result_count,
         "text_search_skipped": text_search_skipped,
         "text_search_skip_reason": text_search_skip_reason,
@@ -161718,6 +165252,9 @@ def entity_usage_audit(
         ),
         "hook_usage_invocation_admission_applied": normalized_kind == "hook",
         "hook_usage_invocation_admitted_count": hook_usage_invocation_admitted_count,
+        "hook_usage_command_invocation_admitted_count": (
+            hook_usage_command_invocation_admitted_count
+        ),
         "hook_usage_session_activity_rejected_count": hook_usage_session_activity_rejected_count,
         "hook_usage_invocation_unverifiable_count": hook_usage_invocation_unverifiable_count,
         "execution_usage_invocation_admission_applied": (
@@ -161779,6 +165316,7 @@ def entity_usage_audit(
             kind=normalized_kind,
             aoa_root=aoa_root,
             session=session,
+            correlation_id=normalized_correlation_id,
             before_event_id=next_before_event_id,
             limit=limit,
             per_route_limit=per_route_limit,
@@ -161812,6 +165350,29 @@ def entity_usage_audit(
         "inferred_kinds": infer_trace_route_kinds(anchor, normalized_kind),
         "aliases": trace_anchor_aliases(anchor),
         "session": session or "",
+        "correlation_id": normalized_correlation_id,
+        "selection_scope": (
+            {
+                "mode": "exact_session_correlation",
+                "session": session or "",
+                "correlation_id": normalized_correlation_id,
+                "source_probe_status": exact_correlation_probe.get(
+                    "status"
+                ),
+                "candidate_count_exhaustive": bool(
+                    exact_correlation_probe.get(
+                        "candidate_count_exhaustive"
+                    )
+                ),
+                "absence_claim_allowed": False,
+            }
+            if exact_instance_mode
+            else {
+                "mode": "bounded_entity_aggregate",
+                "session": session or "",
+                "absence_claim_allowed": False,
+            }
+        ),
         "route_candidates": lookup_candidates,
         "route_result_summaries": route_result_summaries,
         "event_count": len(events),
@@ -162124,6 +165685,16 @@ def entity_usage_event_action_semantics(event: dict[str, Any]) -> list[str]:
 
 def entity_usage_chain_event(event: dict[str, Any]) -> dict[str, Any]:
     refs = event.get("refs") if isinstance(event.get("refs"), dict) else {}
+    task_episode_id = str(event.get("task_episode_id") or "")
+    task_episode_ref = str(
+        event.get("task_episode_ref")
+        or refs.get("task_episode")
+        or (
+            f"task_episode:{event.get('session_id')}:{task_episode_id}"
+            if event.get("session_id") and task_episode_id
+            else ""
+        )
+    )
     route_signals, route_signal_count = compact_usage_route_signals(event.get("route_signals"), limit=8)
     matched_routes = event.get("matched_routes") if isinstance(event.get("matched_routes"), list) else []
     usage_actions = entity_usage_event_action_semantics(event)
@@ -162141,7 +165712,8 @@ def entity_usage_chain_event(event: dict[str, Any]) -> dict[str, Any]:
         "segment_id": event.get("segment_id"),
         "event_id": event.get("event_id"),
         "event_type": event.get("event_type"),
-        "task_episode_id": event.get("task_episode_id"),
+        "task_episode_id": task_episode_id,
+        "task_episode_ref": task_episode_ref,
         "correlation_id": event.get("correlation_id"),
         "source_correlation_id": event.get("source_correlation_id"),
         "rejected_correlation_id": event.get("rejected_correlation_id"),
@@ -162283,6 +165855,7 @@ def entity_usage_chain_event(event: dict[str, Any]) -> dict[str, Any]:
             "segment_index": refs.get("segment_index", ""),
             "raw": refs.get("raw", ""),
             "raw_block": refs.get("raw_block", ""),
+            "task_episode": task_episode_ref,
         },
         "freshness": {
             "status": freshness.get("status"),
@@ -162329,6 +165902,12 @@ def entity_usage_chain_refs(events: list[dict[str, Any]], document_refs: list[di
         add("segment_index", refs_payload.get("segment_index"), event)
         add("raw_line", refs_payload.get("raw"), event)
         add("raw_block", refs_payload.get("raw_block"), event)
+        add(
+            "task_episode",
+            refs_payload.get("task_episode")
+            or event.get("task_episode_ref"),
+            event,
+        )
         parent_refs = (
             event.get("execution_parent_refs")
             if isinstance(event.get("execution_parent_refs"), dict)
@@ -162481,6 +166060,7 @@ def entity_usage_chain_command(
     kind: str,
     aoa_root: Path,
     session: str | None = None,
+    correlation_id: str | None = None,
     before_event_id: str | None = None,
     limit: int | None = None,
     per_route_limit: int | None = None,
@@ -162498,6 +166078,8 @@ def entity_usage_chain_command(
     ]
     if session:
         command.extend(["--session", session])
+    if correlation_id:
+        command.extend(["--correlation-id", correlation_id])
     if before_event_id:
         command.extend(["--before-event-id", str(before_event_id)])
     if limit is not None:
@@ -162554,6 +166136,7 @@ def entity_usage_event_is_structured_invocation(
         "structured_invocation_proven",
         "structured_nested_invocation_proven",
         "structured_hook_event_proven",
+        "structured_hook_command_invocation_proven",
         "structured_command_invocation_proven",
         "structured_result_invocation_proven",
     }
@@ -163595,6 +167178,7 @@ def entity_usage_chain(
     document_limit: int = 24,
     provider: str = "portable_sqlite",
     session: str | None = None,
+    correlation_id: str | None = None,
     before_event_id: str | None = None,
     include_source_audit: bool = False,
     write_report: bool = False,
@@ -163632,6 +167216,7 @@ def entity_usage_chain(
         document_limit=document_limit,
         provider=provider,
         session=session,
+        correlation_id=correlation_id,
         before_event_id=before_event_id,
         write_report=False,
     )
@@ -163774,6 +167359,95 @@ def entity_usage_chain(
                 )
     evidence_refs = entity_usage_chain_refs(all_chain_events, document_refs, limit=max(12, document_limit or 12))
     first_ref = entity_usage_chain_first_ref(all_chain_events, evidence_refs)
+    source_episode_refs: list[dict[str, Any]] = []
+    seen_source_episodes: set[tuple[str, str]] = set()
+    for event in unique_entity_usage_events(all_chain_events):
+        if not isinstance(event, dict):
+            continue
+        session_id = str(event.get("session_id") or "")
+        task_episode_id = str(event.get("task_episode_id") or "")
+        if not session_id or not task_episode_id:
+            continue
+        episode_key = (session_id, task_episode_id)
+        if episode_key in seen_source_episodes:
+            continue
+        seen_source_episodes.add(episode_key)
+        refs = (
+            event.get("refs")
+            if isinstance(event.get("refs"), dict)
+            else {}
+        )
+        raw_ref = str(refs.get("raw") or "")
+        task_episode_command = shlex.join(
+            [
+                "python3",
+                "scripts/aoa_session_memory.py",
+                "task-episodes",
+                "all",
+                "--aoa-root",
+                str(aoa_root),
+                "--session",
+                session_id,
+                "--task-episode-id",
+                task_episode_id,
+                "--limit",
+                "1",
+            ]
+        )
+        task_answer_command = shlex.join(
+            [
+                "python3",
+                "scripts/aoa_session_memory.py",
+                "task-answer-chain",
+                "--aoa-root",
+                str(aoa_root),
+                "--session",
+                session_id,
+                "--task-episode-id",
+                task_episode_id,
+                "--allow-missing-reasoning",
+                "--allow-missing-answer",
+            ]
+        )
+        evidence_window_command = (
+            shlex.join(
+                [
+                    "python3",
+                    "scripts/aoa_session_memory.py",
+                    "evidence-window",
+                    "--aoa-root",
+                    str(aoa_root),
+                    session_id,
+                    raw_ref,
+                    "--before",
+                    "3",
+                    "--after",
+                    "12",
+                ]
+            )
+            if raw_ref
+            else ""
+        )
+        source_episode_refs.append(
+            {
+                "episode_ref": (
+                    str(refs.get("task_episode") or "")
+                    or f"task_episode:{session_id}:{task_episode_id}"
+                ),
+                "session_id": session_id,
+                "task_episode_id": task_episode_id,
+                "anchor_raw_ref": raw_ref,
+                "task_episode_command": task_episode_command,
+                "task_answer_chain_command": task_answer_command,
+                "evidence_window_command": evidence_window_command,
+                "authority": (
+                    "generated episode coordinate; raw and segment refs "
+                    "remain authoritative evidence"
+                ),
+            }
+        )
+        if len(source_episode_refs) >= 8:
+            break
     raw_or_segment_ref_present = any(
         item.get("kind") in {"raw_line", "raw_block", "segment_markdown", "segment_index"}
         for item in evidence_refs
@@ -163828,6 +167502,7 @@ def entity_usage_chain(
         kind=requested_kind,
         aoa_root=aoa_root,
         session=session,
+        correlation_id=correlation_id,
         before_event_id=before_event_id,
         limit=source_audit_expansion_limit,
         per_route_limit=max(per_route_limit, 12),
@@ -163840,6 +167515,7 @@ def entity_usage_chain(
             kind=requested_kind,
             aoa_root=aoa_root,
             session=session,
+            correlation_id=correlation_id,
             before_event_id=next_before_event_id,
             limit=limit,
             per_route_limit=per_route_limit,
@@ -163992,7 +167668,11 @@ def entity_usage_chain(
         aoa_root
     )
     query_source_probe: dict[str, Any] = {}
-    if normalized_kind == "skill" and isinstance(
+    if correlation_id and isinstance(
+        quality.get("exact_correlation_probe"), dict
+    ):
+        query_source_probe = quality["exact_correlation_probe"]
+    elif normalized_kind == "skill" and isinstance(
         quality.get("skill_query_time_source_probe"), dict
     ):
         query_source_probe = quality["skill_query_time_source_probe"]
@@ -164159,6 +167839,17 @@ def entity_usage_chain(
         "generation_identities": generation_identities,
         "anchor": anchor,
         **trace_kind_payload_fields(kind, normalized_kind),
+        "session": session or "",
+        "correlation_id": str(correlation_id or ""),
+        "selection_scope": (
+            audit.get("selection_scope")
+            if isinstance(audit.get("selection_scope"), dict)
+            else {
+                "mode": "bounded_entity_aggregate",
+                "session": session or "",
+                "absence_claim_allowed": False,
+            }
+        ),
         "normalized_entity": {
             "anchor": anchor,
             "route_key": (
@@ -164274,6 +167965,7 @@ def entity_usage_chain(
         "answer_admission": usage_lifecycle["answer_admission"],
         "document_refs": document_refs,
         "evidence_refs": evidence_refs,
+        "source_episode_refs": source_episode_refs,
         "first_ref": first_ref,
         "sessions": audit.get("sessions", []) if isinstance(audit.get("sessions"), list) else [],
         "skill_evidence": skill_evidence,
@@ -164424,6 +168116,22 @@ def entity_usage_chain(
             "queried_route_candidate_count": quality.get("queried_route_candidate_count"),
             "candidate_event_count": quality.get("candidate_event_count"),
             "candidate_usage_event_count": quality.get("candidate_usage_event_count"),
+            "exact_instance_mode": quality.get(
+                "exact_instance_mode"
+            ),
+            "exact_correlation_id": quality.get(
+                "exact_correlation_id"
+            ),
+            "exact_correlation_source_hit_count": quality.get(
+                "exact_correlation_source_hit_count"
+            ),
+            "exact_correlation_probe": (
+                quality.get("exact_correlation_probe", {})
+                if isinstance(
+                    quality.get("exact_correlation_probe"), dict
+                )
+                else {}
+            ),
             "text_search_skipped": quality.get("text_search_skipped"),
             "text_search_skip_reason": quality.get("text_search_skip_reason"),
             "text_result_count": quality.get("text_result_count"),
@@ -164534,6 +168242,9 @@ def entity_usage_chain(
             ),
             "hook_usage_invocation_admission_applied": quality.get("hook_usage_invocation_admission_applied"),
             "hook_usage_invocation_admitted_count": quality.get("hook_usage_invocation_admitted_count"),
+            "hook_usage_command_invocation_admitted_count": quality.get(
+                "hook_usage_command_invocation_admitted_count"
+            ),
             "hook_usage_session_activity_rejected_count": quality.get("hook_usage_session_activity_rejected_count"),
             "hook_usage_invocation_unverifiable_count": quality.get("hook_usage_invocation_unverifiable_count"),
             "execution_usage_invocation_admission_applied": quality.get("execution_usage_invocation_admission_applied"),
@@ -164633,6 +168344,50 @@ def entity_usage_chain(
         "diagnostics": diagnostics,
         "authority_boundary": "usage-chain routes session evidence only; owner source files, decisions, evals, skills, and reviewed memory remain stronger.",
     }
+    for episode in reversed(source_episode_refs[:3]):
+        payload["next_expansion"].insert(
+            0,
+            {
+                "id": (
+                    "source_episode:"
+                    f"{episode.get('session_id')}:"
+                    f"{episode.get('task_episode_id')}"
+                ),
+                "command": episode.get("task_answer_chain_command"),
+                "use_when": (
+                    "evaluate the surrounding work episode, including "
+                    "failures, recovery, verification, and answer evidence"
+                ),
+                "episode_ref": episode.get("episode_ref"),
+            },
+        )
+        if episode.get("evidence_window_command"):
+            payload["next_expansion"].insert(
+                1,
+                {
+                    "id": (
+                        "source_episode_evidence_window:"
+                        f"{episode.get('session_id')}:"
+                        f"{episode.get('task_episode_id')}"
+                    ),
+                    "command": episode.get(
+                        "evidence_window_command"
+                    ),
+                    "use_when": (
+                        "open bounded hash-verified raw context around "
+                        "the selected usage instance"
+                    ),
+                    "episode_ref": episode.get("episode_ref"),
+                },
+            )
+    if source_episode_refs:
+        payload["next_expansion_command"] = str(
+            source_episode_refs[0].get(
+                "task_answer_chain_command"
+            )
+            or payload.get("next_expansion_command")
+            or ""
+        )
     if usage_chain_next_page_command:
         payload["next_expansion"].insert(
             0,
@@ -171916,6 +175671,7 @@ def command_entity_usage_audit(args: argparse.Namespace) -> int:
         document_limit=args.document_limit,
         provider=args.provider,
         session=args.session_filter,
+        correlation_id=args.correlation_id,
         before_event_id=args.before_event_id,
         write_report=args.write_report,
     )
@@ -171944,6 +175700,7 @@ def command_entity_usage_chain(args: argparse.Namespace) -> int:
         document_limit=args.document_limit,
         provider=args.provider,
         session=args.session_filter,
+        correlation_id=args.correlation_id,
         before_event_id=args.before_event_id,
         include_source_audit=args.full,
         write_report=args.write_report,
@@ -173374,6 +177131,7 @@ def command_search_provider_status(args: argparse.Namespace) -> int:
         include_host=args.include_host,
         refresh_host=args.refresh_host,
         refresh_host_index=args.refresh_host_index,
+        probe_served_request=args.probe_served_request,
         freshness_mode=freshness_mode,
         record_freshness_state=args.refresh_state,
         freshness_records=freshness_records,
@@ -183086,6 +186844,14 @@ def build_parser() -> argparse.ArgumentParser:
     provider_status.add_argument("--include-host", action="store_true", help="Run optional host provider gates such as abyss-machine quality audit.")
     provider_status.add_argument("--refresh-host", action="store_true", help="Use the host deterministic refresh quality gate where configured.")
     provider_status.add_argument("--refresh-host-index", action="store_true", help="Use the host refresh-index quality gate where configured.")
+    provider_status.add_argument(
+        "--probe-served-request",
+        action="store_true",
+        help=(
+            "With --include-host, make one bounded real embedding request and "
+            "report served-request health separately from process/model availability."
+        ),
+    )
     provider_status.add_argument("--session", help="Limit portable SQLite freshness to one session id, label, semantic name, or latest.")
     provider_status.add_argument("--deep", action="store_true", help="Run archive projection freshness scan instead of the hot persisted state route.")
     provider_status.add_argument("--refresh-state", action="store_true", help="With --deep or --session, persist the scanned freshness state into the hot provider queue.")
@@ -184472,6 +188238,7 @@ def build_parser() -> argparse.ArgumentParser:
     entity_usage_parser.add_argument("--document-limit", type=int, default=60, help="Maximum evidence and mentioned document refs.")
     entity_usage_parser.add_argument("--provider", default="portable_sqlite", help="Search provider. portable_sqlite remains authoritative.")
     entity_usage_parser.add_argument("--session", dest="session_filter", help="Filter by session id, label, or title fragment.")
+    entity_usage_parser.add_argument("--correlation-id", help="Select one exact correlation inside the explicit session; never widens to an archive-wide absence claim.")
     entity_usage_parser.add_argument("--before-event-id", help="Continue a bounded session-local candidate window before this event id.")
     entity_usage_parser.add_argument("--write-report", action="store_true", help="Write JSON and Markdown entity usage audit reports under .aoa/diagnostics.")
     entity_usage_parser.add_argument("--full", action="store_true", help="Print complete event buckets.")
@@ -184492,6 +188259,7 @@ def build_parser() -> argparse.ArgumentParser:
     entity_usage_chain_parser.add_argument("--document-limit", type=int, default=24, help="Maximum evidence and mentioned document refs.")
     entity_usage_chain_parser.add_argument("--provider", default="portable_sqlite", help="Search provider. portable_sqlite remains authoritative.")
     entity_usage_chain_parser.add_argument("--session", dest="session_filter", help="Filter by session id, label, or title fragment.")
+    entity_usage_chain_parser.add_argument("--correlation-id", help="Select one exact correlation inside the explicit session so full and compact packets preserve the same invocation instance.")
     entity_usage_chain_parser.add_argument("--before-event-id", help="Continue a bounded session-local usage window before this event id.")
     entity_usage_chain_parser.add_argument("--write-report", action="store_true", help="Write JSON and Markdown entity usage chain reports under .aoa/diagnostics.")
     entity_usage_chain_parser.add_argument("--full", action="store_true", help="Include the source entity-usage-audit packet.")

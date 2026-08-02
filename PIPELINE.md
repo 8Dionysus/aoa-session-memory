@@ -149,6 +149,19 @@ Every projection reports freshness and retains a route back to session,
 segment, raw, or receipt evidence. Generated rows may be rebuilt after
 classifier or schema changes.
 
+Projection lifecycle uses a complete owner source set, not the current bounded
+batch, to distinguish omission from retirement. A full all-session search
+build persists a versioned deterministic registry-set identity; bounded
+updates may add current sources but cannot infer deletion. When a previously
+projected ID is absent from a valid complete registry, search and episode
+readers withhold generated candidates until a clean replacement succeeds.
+The replacement removes monolith-owned exact, episode, dense, posting, and
+queue rows, rebuilds existing shards, cleans Atlas, and removes orphaned graph
+contributions. Its tombstone list is a generated projection-retirement receipt;
+the preserved session directory, raw bytes, hashes, and refs remain evidence
+authority. A missing or malformed registry cannot make a complete-source-set
+claim, and an authoritative empty registry may publish an empty projection.
+
 The graph has an additional generated dependency: one verified persisted
 entity-registry snapshot is pinned for the complete build or maintenance
 operation. Every source contribution uses the immutable index from that
@@ -316,6 +329,24 @@ All generated writers share a maintenance lease and coordinator packet. Hot,
 backlog, catch-up, deep, and manual-bulk profiles represent different resource
 and mutation envelopes. Timer-driven work yields to active owners and records
 resource-pressure deferrals.
+
+Atlas maintenance separates compatible session drift from structural
+generation migration. Missing or empty state may bootstrap incrementally, and
+current-generation source-fingerprint changes remain bounded. An invalid
+schema, incompatible producer generation, incomplete root/state publish epoch,
+or mismatched axis epoch requires a clean build. Non-deep automatic profiles
+defer that work with the exact deep next route instead of invoking
+`--no-clean`; the deep profile owns the budgeted all-session rebuild. Readers
+remain stale until root, projection state, and every axis share the expected
+generation and publish identity.
+
+Confirmed source retirement is likewise structural work. Non-deep bounded
+profiles defer the search, episode/dense, shard, Atlas, and graph clean
+producers together and expose the exact deep next route. The deep profile uses
+the complete current registry for atomic monolith replacement and global
+orphan cleanup. Candidate admission stays closed between detection and
+publication; a successful process or partial cleanup cannot promote the old
+source set to current.
 
 Each writer pins its generation identities to the producer bytes loaded by the
 current process. It rechecks the resolved producer source before atomic
