@@ -51,7 +51,7 @@ DERIVED_TEXT_PRIVACY_POLICY_VERSION = 1
 DERIVED_TEXT_PRIVACY_LOOKAHEAD_CHARS = 8192
 SESSION_PROJECTION_PUBLISH_IDENTITY_VERSION = 1
 SESSION_MEMORY_EVIDENCE_PACKET_SCHEMA_VERSION = 1
-DERIVED_TEXT_REDACTION_POLICY_VERSION = 4
+DERIVED_TEXT_REDACTION_POLICY_VERSION = 5
 DERIVED_TEXT_REDACTION_MARKER = "[REDACTED:credential]"
 DERIVED_PRIVATE_KEY_REDACTION_MARKER = "".join(
     ["[REDACTED:", "private-key]"]
@@ -12434,6 +12434,24 @@ class DerivedSessionSensitiveLiteralPolicy:
         }
 
 
+def derived_session_sensitive_literal_is_specific(
+    kind: str,
+    candidate: str,
+) -> bool:
+    """Admit values that are safe to scrub when detached from their label.
+
+    A letters-only value can be a weak secret in a labelled assignment, but
+    replacing that word globally destroys ordinary prose, identifiers, and
+    evidence refs. Contextual redaction still covers its labelled occurrence.
+    Known credential formats remain exact-scrub candidates unconditionally.
+    """
+
+    known_format_kind = "_".join(("known", "credential", "prefix"))
+    if kind == known_format_kind:
+        return True
+    return re.fullmatch(r"[A-Za-z]+", candidate) is None
+
+
 def derived_session_sensitive_literal_policy_from_texts(
     sources: Iterable[str],
 ) -> DerivedSessionSensitiveLiteralPolicy:
@@ -12466,6 +12484,8 @@ def derived_session_sensitive_literal_policy_from_texts(
                 candidate
             )
         ):
+            return
+        if not derived_session_sensitive_literal_is_specific(kind, candidate):
             return
         values_by_kind[kind].add(candidate)
 

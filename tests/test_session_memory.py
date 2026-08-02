@@ -87793,11 +87793,13 @@ def test_session_sensitive_literal_policy_redacts_detached_values_without_persis
     encrypted_content = "".join(
         ["ciphertext", "abcdefghijklmnop", "qrstuvwxyz0123456789"]
     )
+    weak_word = "navigation"
     raw = json.dumps(
         {
             "command": f"Authorization: Bearer {bearer_secret}",
             "".join(["api_", "key"]): assignment_secret,
             "password": "placeholder",
+            "_".join(("weak", "password")): weak_word,
             "encrypted_content": encrypted_content,
             "examples": (
                 "Authorization: Bearer "
@@ -87832,6 +87834,7 @@ def test_session_sensitive_literal_policy_redacts_detached_values_without_persis
                 [
                     "placeholder",
                     encrypted_content,
+                    weak_word,
                     "credential",
                     "credentials",
                     "contract",
@@ -87861,6 +87864,12 @@ def test_session_sensitive_literal_policy_redacts_detached_values_without_persis
     assert assignment_secret not in rendered
     assert encrypted_content in rendered
     assert "placeholder" in rendered
+    assert weak_word in rendered
+    contextual_weak = module.redact_derived_text(
+        "_".join(("weak", "password")) + f"={weak_word}"
+    )
+    assert weak_word not in contextual_weak
+    assert "<redacted:password>" in contextual_weak
     for safe_literal in (
         "credential",
         "credentials",
