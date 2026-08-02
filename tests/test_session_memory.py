@@ -79259,6 +79259,41 @@ def test_entity_registry_route_terms_use_stable_projection_ref_and_documents_are
     ) < 1000
 
 
+def test_entity_registry_search_documents_do_not_apply_cli_display_limit(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    captured: dict[str, Any] = {}
+    entries = [
+        {
+            "entity_id": f"tool:fixture_{index}",
+            "kind": "tool",
+            "canonical_key": f"fixture_{index}",
+            "aliases": [],
+            "status": "observed",
+            "source_refs": [],
+        }
+        for index in range(5001)
+    ]
+
+    def fake_build_entity_registry(**kwargs: Any) -> dict[str, Any]:
+        captured["limit"] = kwargs.get("limit", "missing")
+        return {
+            "generated_at": "2026-08-02T00:00:00Z",
+            "truth_status": "generated_entity_registry_navigation_not_source_truth",
+            "entries": entries,
+        }
+
+    monkeypatch.setattr(module, "build_entity_registry", fake_build_entity_registry)
+
+    documents = module.search_documents_for_entity_registry(aoa_root)
+
+    assert captured["limit"] is None
+    assert len(documents) == len(entries)
+    assert documents[-1]["id"] == "entity_registry:tool:fixture_5000"
+
+
 def test_entity_registry_identity_history_does_not_retain_generated_staging_refs_or_counters(
     tmp_path: Path,
     monkeypatch: Any,

@@ -9244,7 +9244,7 @@ def build_entity_registry(
     ),
     query: str = "",
     kind: str = "all",
-    limit: int = 5000,
+    limit: int | None = 5000,
 ) -> dict[str, Any]:
     entries_by_id: dict[str, dict[str, Any]] = {}
     source_surfaces: list[str] = []
@@ -9414,7 +9414,8 @@ def build_entity_registry(
             if query_key in str(entry.get("canonical_key") or "")
             or any(query_key in route_key_slug(alias, fallback="") for alias in entry.get("aliases", []) if alias)
         ]
-    entries = entries[: max(1, int_value(limit, 5000))]
+    if limit is not None:
+        entries = entries[: max(1, int_value(limit, 5000))]
     generated_at_epoch = time.time()
     generation_metadata = entity_registry_generation_metadata(
         aoa_root,
@@ -95216,6 +95217,7 @@ def search_documents_for_entity_registry(
         route_terms_source_ref_path=route_terms_source_ref_path,
         observed_source=observed_source,
         history_policy=history_policy,
+        limit=None,
     )
     registry_path = aoa_root / ENTITY_REGISTRY_PATH
     documents: list[dict[str, Any]] = []
