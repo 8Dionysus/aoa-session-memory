@@ -681,6 +681,16 @@ ARCHIVED_SESSION_EXACT_SEARCH_HARD_MAX_LINES = 250_000
 ARCHIVED_SESSION_EXACT_SEARCH_SCAN_BUDGET_MS = 2000
 ARCHIVED_SESSION_EXACT_SEARCH_HARD_SCAN_BUDGET_MS = 5000
 ARCHIVED_SESSION_EXACT_SEARCH_MAX_CANDIDATES = 256
+GLOBAL_RECENT_EXACT_FALLBACK_SCHEMA_VERSION = 1
+GLOBAL_RECENT_EXACT_FALLBACK_MAX_DEFERRED_SESSIONS = 4
+GLOBAL_RECENT_EXACT_FALLBACK_MAX_ACTIONABLE_SESSIONS = 2
+GLOBAL_RECENT_EXACT_FALLBACK_MAX_REGISTRY_PROBES = 8
+GLOBAL_RECENT_EXACT_FALLBACK_MAX_REGISTRY_CANDIDATES = 2
+GLOBAL_RECENT_EXACT_FALLBACK_MAX_SESSIONS = 8
+GLOBAL_RECENT_EXACT_FALLBACK_TOTAL_BUDGET_MS = 4500
+GLOBAL_RECENT_EXACT_FALLBACK_MAX_BYTES_PER_SESSION = 128 * 1024 * 1024
+GLOBAL_RECENT_EXACT_FALLBACK_MAX_LINES_PER_SESSION = 50_000
+GLOBAL_RECENT_EXACT_FALLBACK_ARCHIVED_SCAN_BUDGET_MS = 1000
 SEARCH_BODY_PREVIEW_CHARS = 420
 SEARCH_STRUCTURED_SHARD_BODY_PREVIEW_CHARS = 240
 SEARCH_PAYLOAD_STORAGE_MODE = "compact_column_delta"
@@ -15435,6 +15445,10 @@ def sweep_archive_session_dirs(
             if not session_root.exists():
                 continue
             for manifest_path in session_root.glob("*/session.manifest.json"):
+                if session_projection_stage_identity(
+                    manifest_path.parent
+                ):
+                    continue
                 manifest = read_json(manifest_path, {})
                 session_id = str(manifest.get("session_id") or "") if isinstance(manifest, dict) else ""
                 if session_id in unresolved:
@@ -16972,6 +16986,12 @@ def task_episode_raw_transcript_retrieval_control(semantic: str) -> str:
 
 def task_episode_retrieval_control_semantic(semantic: str) -> str:
     semantic = str(semantic or "").casefold()
+    mcp_wrapper = re.search(
+        r"\bmcp__aoa_session_memory__(aoa_session_[a-z0-9_]+)\s*\(",
+        semantic,
+    )
+    if mcp_wrapper:
+        return str(mcp_wrapper.group(1) or "search")
     for match in re.finditer(r"\baoa_session_memory\.py\b", semantic):
         # Shell strings and argv arrays differ only in punctuation after the script
         # token.  Tokenize one bounded suffix instead of requiring whitespace so a
@@ -40756,8 +40776,7 @@ def auto_maintenance_live_tail_resource_route(
     live_tail = status.get("live_tail") if isinstance(status.get("live_tail"), dict) else {}
     command = live_tail.get("catchup_command") if isinstance(live_tail.get("catchup_command"), list) else []
     command_kind = str(live_tail.get("catchup_command_kind") or "")
-    if status.get("recommendation") != "run_live_catchup":
-        return {"used": False, "reason": "recommendation_not_live_catchup", "recommendation": status.get("recommendation")}
+    top_level_recommendation = str(status.get("recommendation") or "")
     if not live_tail.get("catchup_ready_to_run"):
         return {"used": False, "reason": "live_tail_not_ready", "live_tail_status": live_tail.get("status")}
     if command_kind in {"targeted_index_maintenance_without_graph", "bounded_index_maintenance_without_graph"} and repair_graph is True:
@@ -40780,6 +40799,10 @@ def auto_maintenance_live_tail_resource_route(
         "target": live_tail.get("catchup_target"),
         "target_session_id": live_tail.get("catchup_target_session_id"),
         "target_session_label": live_tail.get("catchup_target_session_label"),
+        "top_level_recommendation": top_level_recommendation,
+        "independent_of_top_level_recommendation": (
+            top_level_recommendation != "run_live_catchup"
+        ),
         "child_command": child_command,
         "exact_child_command": shlex.join(child_command),
         "graph_followup": live_tail.get("graph_followup"),
@@ -46677,6 +46700,310 @@ def session_projection_stage_identity(path: Path) -> dict[str, Any]:
         "producer_identified": bool(pid_match),
         "legacy_unowned": not bool(pid_match),
     }
+
+
+def regular_file_is_prefix(
+    prefix_path: Path,
+    stronger_path: Path,
+    *,
+    chunk_size: int = 1024 * 1024,
+) -> dict[str, Any]:
+    payload = {
+        "verified": False,
+        "prefix_path": str(prefix_path),
+        "stronger_path": str(stronger_path),
+        "prefix_bytes": 0,
+        "stronger_bytes": 0,
+        "diagnostics": [],
+    }
+    if (
+        prefix_path.is_symlink()
+        or stronger_path.is_symlink()
+        or not prefix_path.is_file()
+        or not stronger_path.is_file()
+    ):
+        payload["diagnostics"] = ["prefix_authority_not_regular_file"]
+        return payload
+    try:
+        prefix_before = file_snapshot(prefix_path)
+        stronger_before = file_snapshot(stronger_path)
+        prefix_bytes = prefix_path.stat().st_size
+        stronger_bytes = stronger_path.stat().st_size
+    except OSError as exc:
+        payload["diagnostics"] = [
+            f"prefix_authority_snapshot_failed:{type(exc).__name__}"
+        ]
+        return payload
+    payload["prefix_bytes"] = prefix_bytes
+    payload["stronger_bytes"] = stronger_bytes
+    if stronger_bytes < prefix_bytes:
+        payload["diagnostics"] = ["stronger_authority_shorter_than_prefix"]
+        return payload
+    matches = True
+    try:
+        with prefix_path.open("rb") as prefix_handle, stronger_path.open("rb") as stronger_handle:
+            while True:
+                expected = prefix_handle.read(chunk_size)
+                if not expected:
+                    break
+                if stronger_handle.read(len(expected)) != expected:
+                    matches = False
+                    break
+        prefix_after = file_snapshot(prefix_path)
+        stronger_after = file_snapshot(stronger_path)
+    except OSError as exc:
+        payload["diagnostics"] = [
+            f"prefix_authority_read_failed:{type(exc).__name__}"
+        ]
+        return payload
+    if prefix_before != prefix_after:
+        payload["diagnostics"] = ["prefix_changed_during_prefix_check"]
+    elif stronger_before != stronger_after:
+        payload["diagnostics"] = ["stronger_authority_changed_during_prefix_check"]
+    elif not matches:
+        payload["diagnostics"] = ["raw_prefix_mismatch"]
+    else:
+        payload["verified"] = True
+    return payload
+
+
+def session_projection_stage_promotion(
+    *,
+    aoa_root: Path,
+    stage_path: Path,
+    confirmed_content_digest: str = "",
+    apply: bool = False,
+    write_report: bool = False,
+) -> dict[str, Any]:
+    """Validate and atomically promote one complete dead orphan stage."""
+    sessions_root = (aoa_root / SESSION_ROOT).resolve()
+    stage_path = stage_path.expanduser()
+    if not stage_path.is_absolute():
+        stage_path = sessions_root / stage_path
+    identity = session_projection_stage_identity(stage_path)
+    diagnostics: list[str] = []
+    try:
+        direct_child = stage_path.resolve().parent == sessions_root
+    except OSError:
+        direct_child = False
+    if not direct_child or not identity:
+        diagnostics.append("stage_not_direct_session_projection_child")
+    if stage_path.is_symlink() or not stage_path.is_dir():
+        diagnostics.append("stage_not_regular_directory")
+    stage_shape_valid = bool(
+        direct_child
+        and identity
+        and stage_path.is_dir()
+        and not stage_path.is_symlink()
+    )
+    producer_pid = int_value(identity.get("producer_pid"))
+    if not identity.get("producer_identified"):
+        diagnostics.append("stage_producer_identity_required")
+    elif process_is_alive(producer_pid):
+        diagnostics.append("stage_producer_pid_alive")
+    owner_session_dir = sessions_root / str(identity.get("session_name") or "")
+    if not owner_session_dir.is_dir() or owner_session_dir.is_symlink():
+        diagnostics.append("published_owner_session_missing")
+    owner_valid = bool(
+        owner_session_dir.is_dir()
+        and not owner_session_dir.is_symlink()
+    )
+    if session_projection_publish_journal_path(owner_session_dir).is_file():
+        diagnostics.append("session_projection_publish_journal_present")
+
+    content_digest = ""
+    if stage_shape_valid:
+        try:
+            content_digest = generated_directory_content_digest(stage_path)
+        except OSError as exc:
+            diagnostics.append(f"stage_content_digest_failed:{type(exc).__name__}")
+    confirmation = str(confirmed_content_digest or "").strip().lower()
+    if apply and not confirmation:
+        diagnostics.append("stage_content_digest_confirmation_required")
+    elif confirmation and confirmation != content_digest:
+        diagnostics.append("stage_content_digest_confirmation_mismatch")
+
+    manifest = (
+        read_json(stage_path / "session.manifest.json", {})
+        if stage_shape_valid
+        else {}
+    )
+    owner_manifest = (
+        read_json(owner_session_dir / "session.manifest.json", {})
+        if owner_valid
+        else {}
+    )
+    if not isinstance(manifest, dict) or not manifest:
+        diagnostics.append("staged_session_manifest_missing")
+        manifest = {}
+    if not isinstance(owner_manifest, dict) or not owner_manifest:
+        diagnostics.append("published_owner_manifest_missing")
+        owner_manifest = {}
+    if (
+        manifest.get("session_id")
+        and owner_manifest.get("session_id")
+        and manifest.get("session_id") != owner_manifest.get("session_id")
+    ):
+        diagnostics.append("stage_owner_session_id_mismatch")
+    index_schema = manifest.get("index_schema") if isinstance(manifest.get("index_schema"), dict) else {}
+    publish_identity = index_schema.get("projection_publish") if isinstance(index_schema.get("projection_publish"), dict) else {}
+    if not projection_publish_id(publish_identity):
+        diagnostics.append("stage_projection_publish_identity_missing")
+
+    stage_raw = stage_path / "raw" / "session.raw.jsonl"
+    owner_raw = owner_session_dir / "raw" / "session.raw.jsonl"
+    raw_source = (
+        read_json(stage_path / "raw" / RAW_SOURCE_JSON, {})
+        if stage_shape_valid
+        else {}
+    )
+    source_path = Path(str(raw_source.get("source_path") or "")) if isinstance(raw_source, dict) else Path()
+    owner_prefix = (
+        regular_file_is_prefix(owner_raw, stage_raw)
+        if stage_shape_valid and owner_valid
+        else {"verified": False, "diagnostics": ["stage_or_owner_shape_invalid"]}
+    )
+    source_prefix = (
+        regular_file_is_prefix(stage_raw, source_path)
+        if stage_shape_valid
+        else {"verified": False, "diagnostics": ["stage_shape_invalid"]}
+    )
+    if not owner_prefix.get("verified"):
+        diagnostics.extend(
+            f"owner_to_stage:{item}"
+            for item in owner_prefix.get("diagnostics", [])
+        )
+    if not source_prefix.get("verified"):
+        diagnostics.extend(
+            f"stage_to_source:{item}"
+            for item in source_prefix.get("diagnostics", [])
+        )
+
+    staged_validation = (
+        validate_staged_session_projection(
+            stage_dir=stage_path,
+            session_dir=owner_session_dir,
+            publish_identity=publish_identity,
+        )
+        if publish_identity and stage_shape_valid and owner_valid
+        else {"ok": False, "diagnostics": ["stage_validation_not_run"]}
+    )
+    diagnostics.extend(
+        f"stage_validation:{item}"
+        for item in staged_validation.get("diagnostics", [])
+    )
+    ready = not diagnostics and bool(staged_validation.get("ok"))
+    publish_result: dict[str, Any] = {}
+    registry_updated = False
+    dirty_propagation: dict[str, Any] = {}
+    if apply and ready:
+        # Rebind every volatile authority immediately before the destructive rename.
+        revalidated_owner_prefix = regular_file_is_prefix(
+            owner_raw, stage_raw
+        )
+        revalidated_source_prefix = regular_file_is_prefix(
+            stage_raw, source_path
+        )
+        content_unchanged = (
+            generated_directory_content_digest(stage_path)
+            == content_digest
+        )
+        producer_still_dead = not process_is_alive(producer_pid)
+        journal_absent = not session_projection_publish_journal_path(
+            owner_session_dir
+        ).is_file()
+        if not content_unchanged:
+            diagnostics.append("stage_content_changed_before_promotion")
+        if not producer_still_dead:
+            diagnostics.append("stage_producer_revived_before_promotion")
+        if not journal_absent:
+            diagnostics.append("publish_journal_appeared_before_promotion")
+        if not revalidated_owner_prefix.get("verified"):
+            diagnostics.append("owner_to_stage_prefix_changed_before_promotion")
+        if not revalidated_source_prefix.get("verified"):
+            diagnostics.append("stage_to_source_prefix_changed_before_promotion")
+        ready = not diagnostics
+        if ready:
+            try:
+                publish_result = atomic_publish_session_projection(
+                    stage_dir=stage_path,
+                    session_dir=owner_session_dir,
+                    publish_identity=publish_identity,
+                )
+            except (OSError, ValueError) as exc:
+                diagnostics.extend(
+                    [
+                        "stage_promotion_failed_last_good_preserved",
+                        f"{type(exc).__name__}:{exc}",
+                    ]
+                )
+                ready = False
+            else:
+                write_session_agents(owner_session_dir)
+                published_manifest = read_json(
+                    owner_session_dir / "session.manifest.json", {}
+                )
+                registry_updated = update_registry(
+                    aoa_root,
+                    published_manifest,
+                    owner_session_dir,
+                )
+                dirty_propagation = propagate_session_projection_dirty(
+                    aoa_root=aoa_root,
+                    session_dir=owner_session_dir,
+                    manifest=published_manifest,
+                    reason="complete_orphan_stage_promoted",
+                )
+    status = (
+        "promoted"
+        if apply and publish_result.get("status") == "published"
+        else "ready_to_promote"
+        if ready
+        else "blocked"
+    )
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_session_projection_stage_promotion",
+        "generated_at": utc_now(),
+        "ok": status in {"ready_to_promote", "promoted"},
+        "status": status,
+        "apply": apply,
+        "mutates": status == "promoted",
+        "semantic_progress": status == "promoted",
+        "aoa_root": str(aoa_root),
+        "stage_path": str(stage_path),
+        "owner_session_dir": str(owner_session_dir),
+        "producer_pid": producer_pid,
+        "content_digest": content_digest,
+        "confirmation_required": not apply,
+        "owner_to_stage_prefix": owner_prefix,
+        "stage_to_source_prefix": source_prefix,
+        "staged_validation": staged_validation,
+        "publish_result": publish_result,
+        "registry_updated": registry_updated,
+        "dirty_propagation": dirty_propagation,
+        "diagnostics": sorted(set(diagnostics)),
+        "truth_status": (
+            "session_projection_promoted_search_and_graph_remain_derived_dirty"
+            if status == "promoted"
+            else "promotion_not_applied"
+        ),
+        "stop_line": (
+            "Only one exact complete dead orphan stage may replace its matching "
+            "published session projection. Published raw must be a prefix of the "
+            "stage and the stage a prefix of its live source. Search and graph are "
+            "marked dirty; this route never claims they are fresh."
+        ),
+    }
+    if write_report:
+        diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        report_path = diagnostics_dir / (
+            f"{compact_stamp()}__session-stage-promotion.json"
+        )
+        write_json(report_path, payload)
+        payload["report_json"] = str(report_path)
+    return payload
 
 
 def session_projection_stage_entries(
@@ -89250,6 +89577,11 @@ def exact_raw_event_is_completion_message_echo(event: RawEvent) -> bool:
     )
 
 
+def exact_raw_event_is_generated_context_summary(event: RawEvent) -> bool:
+    """Exclude compaction copies from exact occurrence candidates."""
+    return task_episode_source_lane(event) == "generated_context_summary"
+
+
 def exact_raw_ordered_token_phrase_pattern(
     query: str,
 ) -> re.Pattern[str] | None:
@@ -89697,6 +90029,7 @@ def live_tail_exact_search(
     structured_filter_rejection_counts: dict[str, int] = {}
     retrieval_control_suppressed_count = 0
     completion_message_echo_suppressed_count = 0
+    generated_context_summary_suppressed_count = 0
     ordered_token_phrase_match_count = 0
     retrieval_control_by_correlation: dict[str, str] = {}
     candidates: list[dict[str, Any]] = []
@@ -89752,6 +90085,9 @@ def live_tail_exact_search(
                 continue
             raw_occurrence_count += 1
             event = classify_raw_event(raw_line, parsed, line_no)
+            if exact_raw_event_is_generated_context_summary(event):
+                generated_context_summary_suppressed_count += 1
+                continue
             exact_evidence_text = exact_raw_event_evidence_text(
                 event,
                 raw_line,
@@ -89922,6 +90258,11 @@ def live_tail_exact_search(
             "live_tail_exact_completion_message_echo_suppressed:"
             f"{completion_message_echo_suppressed_count}"
         )
+    if generated_context_summary_suppressed_count:
+        diagnostics.append(
+            "live_tail_exact_generated_context_summary_suppressed:"
+            f"{generated_context_summary_suppressed_count}"
+        )
     if ordered_token_phrase_match_count:
         diagnostics.append(
             "live_tail_exact_ordered_token_phrase_match:"
@@ -90000,6 +90341,9 @@ def live_tail_exact_search(
             "tail_scan_time_budget_exhausted": bool(finalized_scan.get("time_budget_exhausted")),
             "retrieval_control_query_echo_suppressed_count": retrieval_control_suppressed_count,
             "completion_message_echo_suppressed_count": completion_message_echo_suppressed_count,
+            "generated_context_summary_suppressed_count": (
+                generated_context_summary_suppressed_count
+            ),
             "ordered_token_phrase_match_count": ordered_token_phrase_match_count,
             "ranking_query_class": query_class,
             "ranked_candidate_count": ranked_candidate_count,
@@ -90183,6 +90527,7 @@ def archived_session_exact_search(
     structured_filter_rejection_counts: dict[str, int] = {}
     retrieval_control_suppressed_count = 0
     completion_message_echo_suppressed_count = 0
+    generated_context_summary_suppressed_count = 0
     ordered_token_phrase_match_count = 0
     retrieval_control_by_correlation: dict[str, str] = {}
     candidates: list[dict[str, Any]] = []
@@ -90234,6 +90579,9 @@ def archived_session_exact_search(
                 except json.JSONDecodeError:
                     parsed = None
                 event = classify_raw_event(raw_line, parsed, complete_line_count)
+                if exact_raw_event_is_generated_context_summary(event):
+                    generated_context_summary_suppressed_count += 1
+                    continue
                 exact_evidence_text = exact_raw_event_evidence_text(
                     event,
                     raw_line,
@@ -90458,6 +90806,11 @@ def archived_session_exact_search(
             "archived_session_exact_completion_message_echo_suppressed:"
             f"{completion_message_echo_suppressed_count}"
         )
+    if generated_context_summary_suppressed_count:
+        diagnostics.append(
+            "archived_session_exact_generated_context_summary_suppressed:"
+            f"{generated_context_summary_suppressed_count}"
+        )
     if ordered_token_phrase_match_count:
         diagnostics.append(
             "archived_session_exact_ordered_token_phrase_match:"
@@ -90584,6 +90937,9 @@ def archived_session_exact_search(
             "archive_scan_elapsed_ms": scan_elapsed_ms,
             "retrieval_control_query_echo_suppressed_count": retrieval_control_suppressed_count,
             "completion_message_echo_suppressed_count": completion_message_echo_suppressed_count,
+            "generated_context_summary_suppressed_count": (
+                generated_context_summary_suppressed_count
+            ),
             "ordered_token_phrase_match_count": ordered_token_phrase_match_count,
             "ranking_query_class": query_class,
             "ranked_candidate_count": ranked_candidate_count,
@@ -96697,6 +97053,599 @@ def merge_archived_and_live_exact_results(
     }
 
 
+def global_recent_exact_fallback_filter_blockers(
+    *,
+    query: str,
+    doc_type: str | None,
+    conversation_act: str | None,
+    session_act: str | None,
+    agent_event: str | None,
+    usage_role: str | None,
+    task_episode_id: str | None,
+    route_layer: str | None,
+    route_signal: str | None,
+) -> list[str]:
+    """Return filters that one bounded raw-event pass cannot prove."""
+    blockers: list[str] = []
+    if not str(query or "").strip():
+        blockers.append("literal_query_required")
+    if doc_type and doc_type != "event":
+        blockers.append(f"unsupported_doc_type:{doc_type}")
+    for key, value in (
+        ("conversation_act", conversation_act),
+        ("session_act", session_act),
+        ("agent_event", agent_event),
+        ("usage_role", usage_role),
+        ("task_episode_id", task_episode_id),
+        ("route_layer", route_layer),
+        ("route_signal", route_signal),
+    ):
+        if value:
+            blockers.append(
+                f"unsupported_global_recent_raw_filter:{key}"
+            )
+    return blockers
+
+
+def global_recent_exact_fallback_candidates(
+    aoa_root: Path,
+) -> dict[str, Any]:
+    """Select a small recent dirty/live set without scanning session sources."""
+    db_path = search_db_path(aoa_root)
+    if not db_path.exists():
+        return {
+            "ok": False,
+            "candidates": [],
+            "diagnostics": ["search_index_missing"],
+        }
+    diagnostics: list[str] = []
+    states: dict[str, dict[str, Any]] = {}
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = connect_existing_search_db(db_path)
+        states = sqlite_search_freshness_states(conn)
+    except sqlite3.Error as exc:
+        diagnostics.append(sqlite_error_diagnostic(exc))
+    finally:
+        if conn is not None:
+            conn.close()
+    if diagnostics:
+        return {
+            "ok": False,
+            "candidates": [],
+            "diagnostics": diagnostics,
+        }
+
+    def activity_key(item: dict[str, Any]) -> tuple[float, str, str]:
+        return (
+            max(
+                float(item.get("live_transcript_mtime") or 0.0),
+                float(item.get("source_latest_mtime") or 0.0),
+                float(item.get("observed_transcript_mtime") or 0.0),
+            ),
+            str(item.get("activity_at") or item.get("updated_at") or ""),
+            str(item.get("session_id") or ""),
+        )
+
+    deferred = sorted(
+        (
+            {
+                **state,
+                "scan_mode": "live_tail",
+                "selection_reason": "persisted_deferred_live_state",
+                "activity_at": str(
+                    state.get("updated_at")
+                    or state.get("last_checked")
+                    or ""
+                ),
+            }
+            for state in states.values()
+            if str(state.get("status") or "") == "deferred_live"
+            and state.get("session_id")
+        ),
+        key=activity_key,
+        reverse=True,
+    )[:GLOBAL_RECENT_EXACT_FALLBACK_MAX_DEFERRED_SESSIONS]
+    actionable = sorted(
+        (
+            {
+                **state,
+                "scan_mode": "archived_raw",
+                "selection_reason": "persisted_actionable_dirty_state",
+                "activity_at": str(
+                    state.get("updated_at")
+                    or state.get("last_checked")
+                    or ""
+                ),
+            }
+            for state in states.values()
+            if str(state.get("status") or "")
+            not in {"", "current", "deferred_live"}
+            and state.get("session_id")
+        ),
+        key=lambda item: (
+            int_value(item.get("document_count")) == 0,
+            activity_key(item),
+        ),
+        reverse=True,
+    )[:GLOBAL_RECENT_EXACT_FALLBACK_MAX_ACTIONABLE_SESSIONS]
+
+    registry_candidates: list[dict[str, Any]] = []
+    registry_probe_count = 0
+    for record in registry_sessions(aoa_root)[
+        :GLOBAL_RECENT_EXACT_FALLBACK_MAX_REGISTRY_PROBES
+    ]:
+        session_id = str(record.get("session_id") or "")
+        transcript_path = str(record.get("transcript_path") or "")
+        if not session_id or not transcript_path:
+            continue
+        registry_probe_count += 1
+        observed_mtime = 0.0
+        try:
+            path = Path(transcript_path).expanduser()
+            if path.is_file():
+                observed_mtime = path.stat().st_mtime
+        except OSError:
+            observed_mtime = 0.0
+        if observed_mtime <= 0.0:
+            continue
+        state = states.get(session_id, {})
+        state_status = str(state.get("status") or "")
+        state_mtime = max(
+            float(state.get("live_transcript_mtime") or 0.0),
+            float(state.get("source_latest_mtime") or 0.0),
+        )
+        registry_updated_at = str(record.get("updated_at") or "")
+        state_updated_at = str(
+            state.get("updated_at") or state.get("last_checked") or ""
+        )
+        selection_reason = ""
+        if not state:
+            selection_reason = "recent_registry_session_missing_freshness_state"
+        elif observed_mtime > state_mtime + 0.000001:
+            selection_reason = "recent_registry_transcript_ahead_of_freshness_state"
+        elif (
+            state_status == "current"
+            and registry_updated_at
+            and registry_updated_at > state_updated_at
+        ):
+            selection_reason = "recent_registry_update_ahead_of_freshness_state"
+        if not selection_reason:
+            continue
+        registry_candidates.append(
+            {
+                **state,
+                "session_id": session_id,
+                "session_label": str(record.get("session_label") or ""),
+                "status": state_status or "missing",
+                "document_count": int_value(state.get("document_count")),
+                "scan_mode": "live_tail_then_archived",
+                "selection_reason": selection_reason,
+                "observed_transcript_mtime": observed_mtime,
+                "activity_at": registry_updated_at,
+            }
+        )
+    registry_candidates.sort(key=activity_key, reverse=True)
+    registry_candidates = registry_candidates[
+        :GLOBAL_RECENT_EXACT_FALLBACK_MAX_REGISTRY_CANDIDATES
+    ]
+
+    selected: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for candidate in sorted(
+        [*deferred, *actionable, *registry_candidates],
+        key=activity_key,
+        reverse=True,
+    ):
+        session_id = str(candidate.get("session_id") or "")
+        if not session_id or session_id in seen:
+            continue
+        selected.append(candidate)
+        seen.add(session_id)
+        if len(selected) >= GLOBAL_RECENT_EXACT_FALLBACK_MAX_SESSIONS:
+            break
+    return {
+        "ok": True,
+        "candidate_source": (
+            "persisted_search_freshness_state_plus_bounded_recent_registry_probe"
+        ),
+        "freshness_state_count": len(states),
+        "deferred_candidate_count": len(deferred),
+        "actionable_candidate_count": len(actionable),
+        "registry_probe_count": registry_probe_count,
+        "registry_candidate_count": len(registry_candidates),
+        "selected_candidate_count": len(selected),
+        "candidates": selected,
+        "diagnostics": diagnostics,
+    }
+
+
+def apply_global_recent_exact_fallback(
+    payload: dict[str, Any],
+    *,
+    aoa_root: Path,
+    query: str,
+    limit: int,
+    session: str | None,
+    event_id_before: str | None,
+    doc_type: str | None,
+    event_type: str | None,
+    family: str | None,
+    outcome: str | None,
+    conversation_act: str | None,
+    session_act: str | None,
+    agent_event: str | None,
+    usage_role: str | None,
+    task_episode_id: str | None,
+    route_layer: str | None,
+    route_signal: str | None,
+    archive_status: str | None,
+    freshness_status: str | None,
+    date_from: str | None,
+    date_to: str | None,
+    explain: bool,
+    exclude_agent_event_stream_copies: bool,
+    enabled: bool,
+) -> dict[str, Any]:
+    """Enrich one global exact query with bounded recent raw evidence."""
+    if session or "global_recent_fallback" in payload:
+        return payload
+    base = {
+        "schema_version": GLOBAL_RECENT_EXACT_FALLBACK_SCHEMA_VERSION,
+        "attempted": False,
+        "mutates": False,
+        "global_scope_complete": False,
+        "negative_result_exhaustive": False,
+        "persistent_index_written": False,
+        "result_count": 0,
+    }
+    if not enabled:
+        payload["global_recent_fallback"] = {
+            **base,
+            "status": "disabled",
+            "reason": "caller disabled raw exact fallbacks",
+        }
+        return payload
+    if not exact_literal_postings_query_eligible(query):
+        payload["global_recent_fallback"] = {
+            **base,
+            "status": "not_applicable",
+            "reason": "query is not eligible for the bounded exact-literal route",
+        }
+        return payload
+    blockers = global_recent_exact_fallback_filter_blockers(
+        query=query,
+        doc_type=doc_type,
+        conversation_act=conversation_act,
+        session_act=session_act,
+        agent_event=agent_event,
+        usage_role=usage_role,
+        task_episode_id=task_episode_id,
+        route_layer=route_layer,
+        route_signal=route_signal,
+    )
+    if blockers:
+        payload["global_recent_fallback"] = {
+            **base,
+            "status": "not_applicable",
+            "reason": (
+                "bounded recent raw fallback cannot prove all requested filters"
+            ),
+            "blockers": blockers,
+        }
+        return payload
+
+    started = time.monotonic()
+    candidate_packet = global_recent_exact_fallback_candidates(aoa_root)
+    candidates = (
+        candidate_packet.get("candidates")
+        if isinstance(candidate_packet.get("candidates"), list)
+        else []
+    )
+    if not candidate_packet.get("ok"):
+        payload["global_recent_fallback"] = {
+            **base,
+            "status": "unavailable",
+            "reason": "persisted recent-session candidate state is unavailable",
+            "candidate_selection": candidate_packet,
+        }
+        return payload
+    if not candidates:
+        payload["global_recent_fallback"] = {
+            **base,
+            "status": "not_needed",
+            "reason": "no recent dirty, deferred-live, or registry-ahead session was selected",
+            "candidate_selection": {
+                key: value
+                for key, value in candidate_packet.items()
+                if key != "candidates"
+            },
+        }
+        return payload
+
+    deadline = started + (
+        GLOBAL_RECENT_EXACT_FALLBACK_TOTAL_BUDGET_MS / 1000.0
+    )
+    recovered: list[dict[str, Any]] = []
+    attempts: list[dict[str, Any]] = []
+    diagnostics: list[str] = []
+    budget_exhausted = False
+    stopped_after_first_matching_session = False
+    effective_limit = max(1, min(100, int_value(limit, 20)))
+    projected_result_count = int_value(payload.get("result_count"))
+    normalized_event_id_before = normalize_exact_event_id_before(
+        event_id_before
+    )
+
+    def filtered_results(source_payload: dict[str, Any]) -> list[dict[str, Any]]:
+        return [
+            item
+            for item in (
+                source_payload.get("results")
+                if isinstance(source_payload.get("results"), list)
+                else []
+            )
+            if isinstance(item, dict)
+            and live_tail_exact_result_matches_search_filters(
+                item,
+                event_type=event_type,
+                family=family,
+                outcome=outcome,
+                archive_status=archive_status,
+                freshness_status=freshness_status,
+            )
+        ]
+
+    for candidate in candidates:
+        if time.monotonic() >= deadline:
+            budget_exhausted = True
+            break
+        session_id = str(candidate.get("session_id") or "")
+        scan_mode = str(candidate.get("scan_mode") or "")
+        attempt_started = time.monotonic()
+        attempted_routes: list[dict[str, Any]] = []
+        candidate_results: list[dict[str, Any]] = []
+        live_payload: dict[str, Any] = {}
+        if scan_mode in {"live_tail", "live_tail_then_archived"}:
+            live_payload = live_tail_exact_search(
+                aoa_root=aoa_root,
+                session=session_id,
+                query=query,
+                limit=max(effective_limit, 20),
+                event_id_before=normalized_event_id_before,
+                event_type=event_type,
+                family=family,
+                outcome=outcome,
+                date_from=date_from,
+                date_to=date_to,
+                exclude_agent_event_stream_copies=(
+                    exclude_agent_event_stream_copies
+                ),
+                max_delta_bytes=(
+                    GLOBAL_RECENT_EXACT_FALLBACK_MAX_BYTES_PER_SESSION
+                ),
+                max_lines=(
+                    GLOBAL_RECENT_EXACT_FALLBACK_MAX_LINES_PER_SESSION
+                ),
+                explain=explain,
+            )
+            candidate_results = filtered_results(live_payload)
+            attempted_routes.append(
+                {
+                    "route": "live_tail_exact",
+                    "ok": bool(live_payload.get("ok")),
+                    "status": str(
+                        (live_payload.get("scan") or {}).get("status")
+                        or (live_payload.get("snapshot") or {}).get("status")
+                        or "unresolved"
+                    ),
+                    "result_count": len(candidate_results),
+                    "elapsed_ms": int_value(live_payload.get("elapsed_ms")),
+                    "diagnostics": list(
+                        live_payload.get("diagnostics") or []
+                    ),
+                }
+            )
+        archived_needed = bool(
+            not candidate_results
+            and (
+                scan_mode == "archived_raw"
+                or int_value(candidate.get("document_count")) == 0
+                or projected_result_count == 0
+            )
+            and time.monotonic() < deadline
+        )
+        if archived_needed:
+            archived_payload = archived_session_exact_search(
+                aoa_root=aoa_root,
+                session=session_id,
+                query=query,
+                limit=max(effective_limit, 20),
+                event_id_before=normalized_event_id_before,
+                event_type=event_type,
+                family=family,
+                outcome=outcome,
+                date_from=date_from,
+                date_to=date_to,
+                exclude_agent_event_stream_copies=(
+                    exclude_agent_event_stream_copies
+                ),
+                max_bytes=(
+                    GLOBAL_RECENT_EXACT_FALLBACK_MAX_BYTES_PER_SESSION
+                ),
+                max_lines=(
+                    GLOBAL_RECENT_EXACT_FALLBACK_MAX_LINES_PER_SESSION
+                ),
+                scan_budget_ms=(
+                    GLOBAL_RECENT_EXACT_FALLBACK_ARCHIVED_SCAN_BUDGET_MS
+                ),
+                explain=explain,
+            )
+            archived_results = filtered_results(archived_payload)
+            candidate_results.extend(archived_results)
+            attempted_routes.append(
+                {
+                    "route": "archived_session_exact",
+                    "ok": bool(archived_payload.get("ok")),
+                    "status": str(
+                        (archived_payload.get("scan") or {}).get("status")
+                        or "unresolved"
+                    ),
+                    "result_count": len(archived_results),
+                    "elapsed_ms": int_value(
+                        archived_payload.get("elapsed_ms")
+                    ),
+                    "diagnostics": list(
+                        archived_payload.get("diagnostics") or []
+                    ),
+                }
+            )
+        recovered.extend(candidate_results)
+        attempts.append(
+            {
+                "session_id": session_id,
+                "session_label": str(candidate.get("session_label") or ""),
+                "selection_reason": str(
+                    candidate.get("selection_reason") or ""
+                ),
+                "freshness_state": str(candidate.get("status") or ""),
+                "document_count": int_value(candidate.get("document_count")),
+                "requested_scan_mode": scan_mode,
+                "attempted_routes": attempted_routes,
+                "result_count": len(candidate_results),
+                "elapsed_ms": int(
+                    (time.monotonic() - attempt_started) * 1000
+                ),
+            }
+        )
+        for route in attempted_routes:
+            diagnostics.extend(
+                str(item)
+                for item in route.get("diagnostics", [])
+                if item
+            )
+        if candidate_results:
+            stopped_after_first_matching_session = True
+            break
+
+    existing_results = (
+        payload.get("results")
+        if isinstance(payload.get("results"), list)
+        else []
+    )
+    merged_results, merge_summary = merge_archived_and_live_exact_results(
+        existing_results,
+        recovered,
+        query=query,
+        limit=effective_limit,
+        explain=explain,
+        fallback_partition="global_recent_raw_fallback",
+    )
+    payload["results"] = merged_results
+    payload["result_count"] = len(merged_results)
+    scanned_count = len(attempts)
+    omitted_count = max(0, len(candidates) - scanned_count)
+    status = (
+        "applied"
+        if recovered
+        else "budget_exhausted_without_match"
+        if budget_exhausted
+        else "bounded_no_match"
+    )
+    payload["global_recent_fallback"] = {
+        **base,
+        "status": status,
+        "attempted": True,
+        "reason": (
+            "bounded recent raw evidence supplemented the generated global search"
+            if recovered
+            else "the bounded recent candidate window found no exact evidence; this is not a global absence claim"
+        ),
+        "candidate_selection": {
+            key: value
+            for key, value in candidate_packet.items()
+            if key != "candidates"
+        },
+        "budgets": {
+            "total_budget_ms": GLOBAL_RECENT_EXACT_FALLBACK_TOTAL_BUDGET_MS,
+            "max_sessions": GLOBAL_RECENT_EXACT_FALLBACK_MAX_SESSIONS,
+            "max_bytes_per_session": (
+                GLOBAL_RECENT_EXACT_FALLBACK_MAX_BYTES_PER_SESSION
+            ),
+            "max_lines_per_session": (
+                GLOBAL_RECENT_EXACT_FALLBACK_MAX_LINES_PER_SESSION
+            ),
+            "archived_scan_budget_ms": (
+                GLOBAL_RECENT_EXACT_FALLBACK_ARCHIVED_SCAN_BUDGET_MS
+            ),
+        },
+        "selected_session_count": len(candidates),
+        "scanned_session_count": scanned_count,
+        "omitted_session_count": omitted_count,
+        "budget_exhausted": budget_exhausted,
+        "stopped_after_first_matching_session": (
+            stopped_after_first_matching_session
+        ),
+        "attempts": attempts,
+        "result_count": len(recovered),
+        "merge": merge_summary,
+        "diagnostics": list(dict.fromkeys(diagnostics)),
+        "elapsed_ms": int((time.monotonic() - started) * 1000),
+        "truth_status": (
+            "bounded_recent_raw_candidate_navigation_not_global_freshness"
+        ),
+    }
+    payload_diagnostics = (
+        payload.get("diagnostics")
+        if isinstance(payload.get("diagnostics"), list)
+        else []
+    )
+    payload["diagnostics"] = list(
+        dict.fromkeys(
+            [
+                *payload_diagnostics,
+                f"global_recent_exact_fallback_{status}:{len(recovered)}",
+                *diagnostics,
+            ]
+        )
+    )
+    if recovered:
+        route_selection = (
+            payload.get("route_selection")
+            if isinstance(payload.get("route_selection"), dict)
+            else {}
+        )
+        payload["route_selection"] = {
+            **route_selection,
+            "selected_route": (
+                "bounded_global_recent_raw_exact_fallback"
+                if str(route_selection.get("selected_route") or "")
+                in {"", "unresolved"}
+                else route_selection.get("selected_route")
+            ),
+            "fallback_reason": (
+                "generated_global_search_missed_bounded_recent_raw_evidence"
+                if str(route_selection.get("selected_route") or "")
+                in {"", "unresolved"}
+                else route_selection.get("fallback_reason")
+            ),
+            "global_recent_fallback_used": True,
+            "global_recent_fallback_result_count": len(recovered),
+        }
+        cost_profile = (
+            payload.get("cost_profile")
+            if isinstance(payload.get("cost_profile"), dict)
+            else {}
+        )
+        payload["cost_profile"] = {
+            **cost_profile,
+            "global_recent_fallback_attempted": True,
+            "global_recent_fallback_result_count": len(recovered),
+            "persistent_global_recent_index_written": False,
+        }
+    return payload
+
+
 def search_structured_route_document_order_index(
     *,
     doc_type: str | None,
@@ -96805,6 +97754,44 @@ def search_sessions(
             ),
         }
     normalized_agent_event = normalize_agent_event_route_class(agent_event) if agent_event else None
+
+    def with_global_recent_exact_fallback(
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        return apply_global_recent_exact_fallback(
+            payload,
+            aoa_root=aoa_root,
+            query=query,
+            limit=limit,
+            session=session,
+            event_id_before=event_id_before,
+            doc_type=doc_type,
+            event_type=event_type,
+            family=family,
+            outcome=outcome,
+            conversation_act=conversation_act,
+            session_act=session_act,
+            agent_event=normalized_agent_event,
+            usage_role=usage_role,
+            task_episode_id=task_episode_id,
+            route_layer=route_layer,
+            route_signal=route_signal,
+            archive_status=archive_status,
+            freshness_status=freshness_status,
+            date_from=date_from,
+            date_to=date_to,
+            explain=explain,
+            exclude_agent_event_stream_copies=(
+                exclude_agent_event_stream_copies
+            ),
+            enabled=bool(
+                include_archived_raw_fallback
+                and not literal_postings_only
+                and db_path_override is None
+                and provider == "portable_sqlite"
+            ),
+        )
+
     provider_config = search_provider_config(aoa_root)
     configured_providers = provider_config.get("providers") if isinstance(provider_config.get("providers"), dict) else {}
     if provider not in configured_providers:
@@ -96901,7 +97888,7 @@ def search_sessions(
         if session_segment_route is not None:
             return session_segment_route
     if use_shards and db_path_override is None and not literal_postings_only:
-        return search_sessions_shard_fanout(
+        return with_global_recent_exact_fallback(search_sessions_shard_fanout(
             aoa_root=aoa_root,
             query=query,
             limit=limit,
@@ -96937,7 +97924,7 @@ def search_sessions(
             include_archived_raw_fallback=include_archived_raw_fallback,
             max_shards=max_shards,
             query_timeout_ms=query_timeout_ms,
-        )
+        ))
     db_path = db_path_override or search_db_path(aoa_root)
     expected_generations = session_memory_expected_generation_identities(
         aoa_root
@@ -98262,7 +99249,7 @@ def search_sessions(
                 local_rerank = rerank_payload
             else:
                 diagnostics.append(f"local rerank unavailable: {rerank_payload.get('status')}")
-    return {
+    return with_global_recent_exact_fallback({
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "search_results",
         "search_schema_version": SEARCH_SCHEMA_VERSION,
@@ -98396,7 +99383,7 @@ def search_sessions(
         "result_count": len(results),
         "results": results,
         "diagnostics": diagnostics,
-    }
+    })
 
 
 AGENT_RESPONSE_ROUTE_CLASSES = [
@@ -148491,6 +149478,21 @@ def session_memory_live_tail_status(
         latest_activity_mtime = float(item.get("latest_activity_mtime") or 0.0)
         if latest_activity_mtime <= 0:
             latest_activity_mtime = max(source_mtime, live_mtime)
+        observed_live_transcript_mtime = 0.0
+        live_transcript_path = str(item.get("live_transcript_path") or "")
+        if live_transcript_path:
+            try:
+                observed_path = Path(live_transcript_path).expanduser()
+                if observed_path.is_file():
+                    observed_live_transcript_mtime = (
+                        observed_path.stat().st_mtime
+                    )
+            except OSError:
+                observed_live_transcript_mtime = 0.0
+        latest_activity_mtime = max(
+            latest_activity_mtime,
+            observed_live_transcript_mtime,
+        )
         if latest_activity_mtime > 0:
             age_seconds = max(0.0, now_value - latest_activity_mtime)
             remaining = max(0.0, quiet - age_seconds)
@@ -148516,6 +149518,11 @@ def session_memory_live_tail_status(
                 "reason": item.get("deferred_live_reason") or item.get("reason"),
                 "latest_activity_mtime": latest_activity_mtime,
                 "latest_activity_mtime_iso": iso_from_epoch(latest_activity_mtime),
+                "persisted_live_transcript_mtime": live_mtime,
+                "observed_live_transcript_mtime": (
+                    observed_live_transcript_mtime
+                ),
+                "live_transcript_rechecked": bool(live_transcript_path),
                 "latest_activity_age_seconds": round(age_seconds, 3) if age_seconds is not None else None,
                 "quiet_seconds": quiet,
                 "quiet_remaining_seconds": round(remaining, 3) if remaining is not None else None,
@@ -148563,7 +149570,7 @@ def session_memory_live_tail_status(
         "max_quiet_remaining_seconds": round(max_remaining, 3),
         "next_ready_at": iso_from_epoch(next_ready_epoch),
         "samples": samples,
-        "truth_status": "diagnostic_live_tail_projection_from_persisted_freshness_state",
+        "truth_status": "diagnostic_live_tail_projection_from_persisted_freshness_state_plus_bounded_live_path_recheck",
     }
 
 
@@ -173261,6 +174268,46 @@ def command_maintenance_cleanup(args: argparse.Namespace) -> int:
     return 0 if payload.get("ok") else 1
 
 
+def command_session_stage_promote(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(
+        explicit_workspace,
+        Path(args.aoa_root) if args.aoa_root else None,
+    )
+
+    def run_promotion() -> dict[str, Any]:
+        return session_projection_stage_promotion(
+            aoa_root=root,
+            stage_path=Path(args.stage),
+            confirmed_content_digest=(
+                args.confirm_stage_content_digest or ""
+            ),
+            apply=args.apply,
+            write_report=args.write_report,
+        )
+
+    payload = (
+        run_with_maintenance_lock(
+            root,
+            run_promotion,
+            owner_job="session-stage-promote",
+            mode="manual-hot",
+            target=args.stage,
+            reason="operator_confirmed_complete_orphan_stage",
+            touched_surfaces=[
+                "session_projection",
+                "session_registry",
+                "search_freshness",
+                "graph_maintenance_queue",
+            ],
+        )
+        if args.apply
+        else run_promotion()
+    )
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
 def command_graph_sqlite_compact(args: argparse.Namespace) -> int:
     explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
     root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
@@ -181026,10 +182073,19 @@ def command_doctor(args: argparse.Namespace) -> int:
         problems.append(f"legacy session root is not empty: {legacy_root}")
     session_root = root / SESSION_ROOT
     session_dirs = [path for path in session_root.iterdir() if path.is_dir()] if session_root.exists() else []
-    archive_dirs = [path for path in session_dirs if (path / "session.manifest.json").exists()]
+    projection_stage_dirs = [
+        path for path in session_dirs if session_projection_stage_identity(path)
+    ]
+    archive_dirs = [
+        path
+        for path in session_dirs
+        if path not in projection_stage_dirs
+        and (path / "session.manifest.json").exists()
+    ]
     hook_only_dirs = [
         path for path in session_dirs
         if path not in archive_dirs
+        and path not in projection_stage_dirs
         and (path / "hooks").is_dir()
         and (
             (path / "hooks" / "events.jsonl").exists()
@@ -181038,8 +182094,16 @@ def command_doctor(args: argparse.Namespace) -> int:
     ]
     unexpected_session_dirs = [
         path for path in session_dirs
-        if path not in archive_dirs and path not in hook_only_dirs
+        if path not in archive_dirs
+        and path not in hook_only_dirs
+        and path not in projection_stage_dirs
     ]
+    if projection_stage_dirs:
+        warnings.append(
+            "session projection stages are excluded from archive health counts; "
+            "use maintenance-cleanup for authority-aware cleanup status: "
+            + ", ".join(path.name for path in projection_stage_dirs[:8])
+        )
     if hook_only_dirs:
         warnings.append(
             "hook-only receipt dirs are not counted as archive sessions: "
@@ -181227,6 +182291,7 @@ def command_doctor(args: argparse.Namespace) -> int:
         "session_count": len(sessions) if isinstance(sessions, list) else 0,
         "archive_dir_count": len(archive_dirs),
         "session_dir_count": len(session_dirs),
+        "projection_stage_dir_count": len(projection_stage_dirs),
         "hook_only_dir_count": len(hook_only_dirs),
         "runtime_optional_absent_root_files": (
             runtime_optional_absent_root_files
@@ -182832,6 +183897,41 @@ def build_parser() -> argparse.ArgumentParser:
     )
     maintenance_cleanup_parser.add_argument("--write-report", action="store_true", help="Write JSON and Markdown maintenance cleanup reports under .aoa/diagnostics.")
     maintenance_cleanup_parser.set_defaults(func=command_maintenance_cleanup)
+
+    session_stage_promote_parser = sub.add_parser(
+        "session-stage-promote",
+        help=(
+            "Validate or atomically promote one complete dead orphan session "
+            "projection stage without rebuilding the session."
+        ),
+    )
+    session_stage_promote_parser.add_argument(
+        "stage",
+        help=(
+            "Exact stage path or direct child name under <aoa-root>/sessions."
+        ),
+    )
+    session_stage_promote_parser.add_argument("--workspace-root")
+    session_stage_promote_parser.add_argument("--aoa-root")
+    session_stage_promote_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Promote after all fail-closed checks. Default is read-only.",
+    )
+    session_stage_promote_parser.add_argument(
+        "--confirm-stage-content-digest",
+        help=(
+            "Exact content_digest from the dry-run plan; required with --apply."
+        ),
+    )
+    session_stage_promote_parser.add_argument(
+        "--write-report",
+        action="store_true",
+        help="Write a JSON report under .aoa/diagnostics.",
+    )
+    session_stage_promote_parser.set_defaults(
+        func=command_session_stage_promote
+    )
 
     graph_sqlite_compact_parser = sub.add_parser(
         "graph-sqlite-compact",

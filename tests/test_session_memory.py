@@ -488,6 +488,39 @@ def test_doctor_deep_segment_indexes_validates_event_records(tmp_path: Path) -> 
     assert any("event missing raw_ref or md_anchor" in item for item in payload["problems"])
 
 
+def test_doctor_excludes_projection_stages_from_archive_health_counts(
+    tmp_path: Path,
+) -> None:
+    workspace, root = build_doctor_root_with_missing_generated_segment(
+        tmp_path,
+        recent_live=False,
+    )
+    session_dir, _index_path = complete_doctor_segment_fixture(root)
+    sessions_root = root / module.SESSION_ROOT
+    complete_stage = sessions_root / (
+        f".{session_dir.name}.projection-stage-987654-complete"
+    )
+    incomplete_stage = sessions_root / (
+        f".{session_dir.name}.projection-stage-987654-incomplete"
+    )
+    shutil.copytree(session_dir, complete_stage)
+    incomplete_stage.mkdir()
+
+    code, payload = run_doctor_payload(workspace, root)
+
+    assert code == 0
+    assert payload["ok"] is True
+    assert payload["archive_dir_count"] == 1
+    assert payload["session_dir_count"] == 3
+    assert payload["projection_stage_dir_count"] == 2
+    assert payload["problems"] == []
+    assert any(
+        "session projection stages are excluded from archive health counts"
+        in warning
+        for warning in payload["warnings"]
+    )
+
+
 def test_graph_compact_node_hydrates_refs_from_evidence_refs() -> None:
     compact = module.graph_compact_node_for_packet(
         {
@@ -38280,6 +38313,158 @@ def test_maintenance_cleanup_removes_dead_session_stage_but_keeps_live_stage(
     module.remove_projection_publish_path(live_stage)
 
 
+def test_sweep_archive_resolution_never_selects_projection_stage(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    sessions_root = aoa_root / "sessions"
+    stage = sessions_root / (
+        ".canonical.projection-stage-987654-complete"
+    )
+    canonical = sessions_root / "canonical"
+    stage.mkdir(parents=True)
+    canonical.mkdir()
+    module.write_json(
+        stage / "session.manifest.json",
+        {"session_id": "same-session"},
+    )
+    module.write_json(
+        canonical / "session.manifest.json",
+        {"session_id": "same-session"},
+    )
+
+    resolved = module.sweep_archive_session_dirs(
+        aoa_root,
+        [{"session_id": "same-session"}],
+    )
+
+    assert resolved["same-session"] == canonical
+
+
+def test_complete_dead_session_stage_can_be_promoted_without_reindex(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "complete-orphan-stage.jsonl"
+    initial_rows = [
+        {
+            "timestamp": "2026-08-01T00:00:00Z",
+            "type": "session_meta",
+            "payload": {
+                "id": "complete-orphan-stage",
+                "cwd": str(workspace),
+            },
+        },
+        {
+            "timestamp": "2026-08-01T00:00:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "initial"}
+                ],
+            },
+        },
+    ]
+    write_jsonl(transcript, initial_rows)
+    first = module.sync_session_from_transcript(
+        aoa_root=aoa_root,
+        event={
+            "session_id": "complete-orphan-stage",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+        },
+        transcript_path=transcript,
+        hook_event_name="Stop",
+    )
+    session_dir = Path(first["session_dir"])
+    old_projection = tmp_path / "old-projection"
+    shutil.copytree(session_dir, old_projection)
+    write_jsonl(
+        transcript,
+        initial_rows
+        + [
+            {
+                "timestamp": "2026-08-01T00:00:02Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {"type": "output_text", "text": "new event"}
+                    ],
+                },
+            }
+        ],
+    )
+    second = module.sync_session_from_transcript(
+        aoa_root=aoa_root,
+        event={
+            "session_id": "complete-orphan-stage",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+        },
+        transcript_path=transcript,
+        hook_event_name="Stop",
+    )
+    assert second["event_count"] == 3
+    stage = session_dir.parent / (
+        f".{session_dir.name}.projection-stage-987654-complete"
+    )
+    session_dir.rename(stage)
+    shutil.copytree(old_projection, session_dir)
+    monkeypatch.setattr(
+        module,
+        "process_is_alive",
+        lambda _pid: False,
+    )
+
+    plan = module.session_projection_stage_promotion(
+        aoa_root=aoa_root,
+        stage_path=stage,
+    )
+
+    assert plan["ok"] is True
+    assert plan["status"] == "ready_to_promote"
+    assert plan["owner_to_stage_prefix"]["verified"] is True
+    assert plan["stage_to_source_prefix"]["verified"] is True
+    assert stage.exists()
+
+    unconfirmed = module.session_projection_stage_promotion(
+        aoa_root=aoa_root,
+        stage_path=stage,
+        apply=True,
+    )
+    assert unconfirmed["ok"] is False
+    assert unconfirmed["status"] == "blocked"
+    assert "stage_content_digest_confirmation_required" in unconfirmed[
+        "diagnostics"
+    ]
+    assert stage.exists()
+
+    applied = module.session_projection_stage_promotion(
+        aoa_root=aoa_root,
+        stage_path=stage,
+        confirmed_content_digest=plan["content_digest"],
+        apply=True,
+    )
+
+    assert applied["ok"] is True
+    assert applied["status"] == "promoted"
+    assert applied["registry_updated"] is True
+    assert not stage.exists()
+    manifest = module.read_json(
+        session_dir / "session.manifest.json", {}
+    )
+    assert manifest["latest_event_count"] == 3
+    assert module.sha256_file(
+        session_dir / "raw" / "session.raw.jsonl"
+    ) == module.sha256_file(transcript)
+
+
 def test_unowned_session_stage_requires_exact_digest_confirmation(
     tmp_path: Path,
 ) -> None:
@@ -52007,8 +52192,8 @@ def test_auto_maintenance_resource_launch_uses_live_tail_fast_path_for_catchup(t
 
     def fake_maintenance_status(**_kwargs: Any) -> dict[str, Any]:
         return {
-            "ok": True,
-            "recommendation": "run_live_catchup",
+            "ok": False,
+            "recommendation": "review_maintenance_cleanup",
             "live_tail": {
                 "status": "ready_for_catchup",
                 "catchup_ready_to_run": True,
@@ -52072,6 +52257,8 @@ def test_auto_maintenance_resource_launch_uses_live_tail_fast_path_for_catchup(t
     assert payload["live_tail_fast_path"]["used"] is True
     assert payload["live_tail_fast_path"]["command_kind"] == "targeted_index_maintenance_without_graph"
     assert payload["live_tail_fast_path"]["target"] == session_label
+    assert payload["live_tail_fast_path"]["top_level_recommendation"] == "review_maintenance_cleanup"
+    assert payload["live_tail_fast_path"]["independent_of_top_level_recommendation"] is True
     assert calls["command"][:3] == ["abyss-machine", "resource", "launch"]
     assert "--force" in calls["command"]
     assert calls["command"][calls["command"].index("--demand-key") + 1] == (
@@ -56257,6 +56444,50 @@ def test_live_tail_status_reports_ready_after_quiet_window() -> None:
     assert status["waiting_count"] == 0
     assert status["max_quiet_remaining_seconds"] == 0
     assert status["samples"][0]["ready_for_catchup"] is True
+
+
+def test_live_tail_status_rechecks_recent_transcript_before_catchup(
+    tmp_path: Path,
+) -> None:
+    now = time.time()
+    transcript = tmp_path / "live.jsonl"
+    transcript.write_text('{"type":"event_msg"}\n', encoding="utf-8")
+    os.utime(transcript, (now - 30, now - 30))
+
+    status = module.session_memory_live_tail_status(
+        search={
+            "deferred_live_session_count": 1,
+            "deferred_live_sessions": [
+                {
+                    "session_id": "persisted-quiet-but-live-now",
+                    "session_label": (
+                        "2026-06-18__001__persisted-quiet-but-live-now"
+                    ),
+                    "source_latest_mtime": now - 900,
+                    "live_transcript_mtime": now - 900,
+                    "live_transcript_path": str(transcript),
+                    "deferred_live_reason": (
+                        "recent_live_codex_transcript_update"
+                    ),
+                }
+            ],
+        },
+        graph={"deferred_live_source_count": 0},
+        quiet_seconds=600,
+        now_ts=now,
+    )
+
+    assert status["status"] == "waiting_for_quiet_window"
+    assert status["ready_count"] == 0
+    assert status["waiting_count"] == 1
+    assert status["samples"][0]["live_transcript_rechecked"] is True
+    assert status["samples"][0]["persisted_live_transcript_mtime"] == (
+        now - 900
+    )
+    assert status["samples"][0]["observed_live_transcript_mtime"] == (
+        now - 30
+    )
+    assert status["samples"][0]["quiet_remaining_seconds"] == 570
 
 
 def test_live_tail_status_runs_catchup_when_any_session_is_ready() -> None:
@@ -69759,6 +69990,9 @@ def test_exact_literal_postings_recover_successful_command_output_without_semant
     mirrored_message_anchor = "MIRRORED_ASSISTANT_MESSAGE_ANCHOR_C31D9E"
     security_classified_echo_anchor = "ABSENT_SECURITY_CLASSIFIED_QUERY_ECHO_8E2C71"
     mcp_query_echo_anchor = "ABSENT_MCP_QUERY_ECHO_6A9D42"
+    wrapped_mcp_query_echo_anchor = (
+        "ABSENT_WRAPPED_MCP_QUERY_ECHO_3D947A"
+    )
     python_raw_read_echo_anchor = "ABSENT_PYTHON_RAW_READ_ECHO_2C7F91"
     with transcript.open("a", encoding="utf-8") as handle:
         for row in (
@@ -69940,6 +70174,42 @@ def test_exact_literal_postings_recover_successful_command_output_without_semant
                     "output": python_raw_read_echo_anchor,
                 },
             },
+            {
+                "timestamp": "2026-06-11T00:00:18Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "name": "exec",
+                    "call_id": "call-live-wrapped-mcp-query-echo",
+                    "input": (
+                        "const r = await "
+                        "tools.mcp__aoa_session_memory__aoa_session_search("
+                        f'{{query:"{wrapped_mcp_query_echo_anchor}",limit:5}});'
+                    ),
+                },
+            },
+            {
+                "timestamp": "2026-06-11T00:00:19Z",
+                "type": "compacted",
+                "payload": {
+                    "message": "context compacted",
+                    "replacement_history": [
+                        {
+                            "type": "message",
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "input_text",
+                                    "text": (
+                                        "copied historical context containing "
+                                        f"{live_only_anchor}"
+                                    ),
+                                }
+                            ],
+                        }
+                    ],
+                },
+            },
         ):
             handle.write(json.dumps(row) + "\n")
     stale_exact = module.search_sessions(
@@ -69970,6 +70240,19 @@ def test_exact_literal_postings_recover_successful_command_output_without_semant
         explain=True,
         literal_postings_only=True,
     )
+    global_live_exact = module.search_sessions(
+        aoa_root=aoa_root,
+        query=live_only_anchor,
+        limit=5,
+        explain=True,
+    )
+    global_live_exact_shards = module.search_sessions(
+        aoa_root=aoa_root,
+        query=live_only_anchor,
+        limit=5,
+        explain=True,
+        use_shards=True,
+    )
     absent_echo = module.live_tail_exact_search(
         aoa_root=aoa_root,
         session=session_id,
@@ -69995,6 +70278,13 @@ def test_exact_literal_postings_recover_successful_command_output_without_semant
         aoa_root=aoa_root,
         session=session_id,
         query=mcp_query_echo_anchor,
+        limit=5,
+        explain=True,
+    )
+    wrapped_mcp_query_echo = module.live_tail_exact_search(
+        aoa_root=aoa_root,
+        session=session_id,
+        query=wrapped_mcp_query_echo_anchor,
         limit=5,
         explain=True,
     )
@@ -70109,16 +70399,48 @@ def test_exact_literal_postings_recover_successful_command_output_without_semant
     assert stale_plan["ordered_routes"][1]["route_id"] == "freshness_diagnostic"
     assert stale_plan["ordered_routes"][2]["route_id"] == "exact_literal_postings_search"
     assert stale_plan["search_projection"]["exact_literal_postings"]["scope_status"] == "scope_deferred_live"
-    assert live_exact["raw_occurrence_count"] == 4
+    assert live_exact["raw_occurrence_count"] == 5
     assert live_exact["candidate_count"] == 1
     assert live_exact["result_count"] == 1
     assert live_exact["results"][0]["raw_ref"] == "raw:line:7"
     assert "live_tail_exact_retrieval_control_query_echo_suppressed:3" in live_exact["diagnostics"]
+    assert (
+        "live_tail_exact_generated_context_summary_suppressed:1"
+        in live_exact["diagnostics"]
+    )
     assert automatic_live_exact["result_count"] == 1
     assert automatic_live_exact["results"][0]["raw_ref"] == "raw:line:7"
     assert automatic_live_exact["results"][0]["retrieval_partition"] == "live_raw_fallback"
     assert automatic_live_exact["live_tail_fallback"]["status"] == "applied"
     assert automatic_live_exact["live_tail_fallback"]["mutates"] is False
+    for global_exact in (global_live_exact, global_live_exact_shards):
+        assert global_exact["result_count"] == 1
+        assert global_exact["results"][0]["raw_ref"] == "raw:line:7"
+        assert global_exact["results"][0]["retrieval_partition"] == (
+            "global_recent_raw_fallback"
+        )
+        assert global_exact["global_recent_fallback"]["status"] == "applied"
+        assert global_exact["global_recent_fallback"]["attempted"] is True
+        assert global_exact["global_recent_fallback"]["mutates"] is False
+        assert global_exact["route_selection"]["selected_route"] == (
+            "bounded_global_recent_raw_exact_fallback"
+        )
+        assert (
+            global_exact["global_recent_fallback"]["global_scope_complete"]
+            is False
+        )
+        assert (
+            global_exact["global_recent_fallback"][
+                "negative_result_exhaustive"
+            ]
+            is False
+        )
+        assert (
+            global_exact["cost_profile"][
+                "persistent_global_recent_index_written"
+            ]
+            is False
+        )
     assert absent_echo["raw_occurrence_count"] == 1
     assert absent_echo["candidate_count"] == 0
     assert absent_echo["result_count"] == 0
@@ -70136,6 +70458,13 @@ def test_exact_literal_postings_recover_successful_command_output_without_semant
     assert (
         "live_tail_exact_retrieval_control_query_echo_suppressed:3"
         in mcp_query_echo["diagnostics"]
+    )
+    assert wrapped_mcp_query_echo["raw_occurrence_count"] == 1
+    assert wrapped_mcp_query_echo["candidate_count"] == 0
+    assert wrapped_mcp_query_echo["result_count"] == 0
+    assert (
+        "live_tail_exact_retrieval_control_query_echo_suppressed:1"
+        in wrapped_mcp_query_echo["diagnostics"]
     )
     assert python_raw_read_echo["raw_occurrence_count"] == 2
     assert python_raw_read_echo["candidate_count"] == 0

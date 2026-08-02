@@ -110,6 +110,15 @@ not guessed away: its reported content digest and quiet-age guard require
 explicit operator confirmation in addition to the raw-authority proof. Any
 journal-bearing stage remains owned by journal recovery.
 
+A complete PID-owned orphan may instead be recovered without a full reindex
+through `session-stage-promote`. The dry-run binds one exact direct-child stage
+and reports its content digest. Apply requires that digest, a still-absent
+producer and journal, full projection-generation validation, and monotonic raw
+proof: published owner raw is a byte prefix of staged raw, which is a byte
+prefix of the resolvable live source. Publication uses the normal atomic
+last-good boundary, refreshes the registry, and marks search and graph dirty;
+it does not claim either derived projection is fresh.
+
 ## 6. Count-only accounting
 
 Token observations are separated by basis:
@@ -192,6 +201,15 @@ the manifest digest while scanning. Only a complete digest-verified pass can
 prove absence; partial or unverifiable scans must expose that state. The live
 append-only tail remains a separate freshness route.
 
+For an unscoped supported exact query, the read path may also supplement the
+generated global result from a bounded recent-session window selected from
+persisted search freshness state plus a small newest-registry mtime probe. Live
+and actionable-dirty candidates have separate quotas; source scans share one
+strict time/session/byte envelope and stop after the first matching session.
+This route writes no index, suppresses generated compaction-history copies, and
+always reports `global_scope_complete=false`: a bounded miss is never a global
+absence claim or a freshness upgrade.
+
 Episode query normalization retains the exact token. A bounded Russian
 instrumental-form expansion may use an FTS prefix to obtain candidates, but a
 sparse candidate receives semantic term credit only when the query and source
@@ -260,6 +278,12 @@ watermarks and the operational route rollup are current.
 Deferred live state is not silently green and is not stable corruption. The
 next route is either to wait for quiet, run a targeted catch-up, or inspect raw
 evidence directly when authorized.
+
+Before a sampled live-tail candidate is declared quiet enough for automatic
+catch-up, the status route rechecks its declared transcript path with one
+bounded filesystem stat. A newer live mtime overrides the persisted scheduling
+clock, so an active session remains read-only-fallback accessible without
+starting a full projection pass from a stale quiet-window observation.
 
 A session-scoped skill or MCP usage probe may preserve a verified archived-raw
 source contribution even when the selected global search provider is missing,
@@ -334,6 +358,12 @@ pending intent. Manual operator launches do not silently create background
 work. A host scheduler may invoke the portable dispatcher, but the queue and
 retry semantics remain owned by this organ; scheduled retry is not semantic
 maintenance success.
+
+The catch-up resource route consumes an explicitly ready live-tail command
+independently of the packet's global recommendation. An unrelated cleanup or
+historical projection recommendation must not displace a ready recent-session
+catch-up; the shared lease, resource gate, and command-local guards still
+decide whether that bounded writer may run.
 
 Due retry items are ordered by a versioned profile-aware dispatch deadline,
 not by retry-ready time alone. Short hot and catch-up wait targets bound urgent
