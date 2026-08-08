@@ -124791,6 +124791,7 @@ def graph_maintenance(
     queue_seed_update: dict[str, Any] = {}
     queue_priority_top_up: dict[str, Any] = {}
     queue_selected_source_keys: list[str] = []
+    queue_candidate_window_limit = 0
     if seed_queue_from_ledger and not requested_source_keys and selected_records is None:
         effective_queue_seed_limit = (
             max(batch_limit * 10, batch_limit)
@@ -124827,9 +124828,14 @@ def graph_maintenance(
             [item for item in queue_items.values() if isinstance(item, dict) and item.get("source_key")],
             key=lambda item: graph_maintenance_priority_sort_key(item, priority_rank),
         )
+        queue_candidate_window_limit = (
+            max(batch_limit, int_value(candidate_pool_limit))
+            if candidate_pool_limit is not None and int_value(candidate_pool_limit) > 0
+            else max(batch_limit * 10, batch_limit)
+        )
         queue_selected_source_keys = [
             str(item.get("source_key") or "")
-            for item in queue_candidates[: max(batch_limit * 10, batch_limit)]
+            for item in queue_candidates[:queue_candidate_window_limit]
             if item.get("source_key")
         ]
         if queue_selected_source_keys:
@@ -125151,6 +125157,7 @@ def graph_maintenance(
         "queue_seed_update": queue_seed_update,
         "queue_priority_top_up": queue_priority_top_up,
         "queue_selected_source_count": len(queue_selected_source_keys),
+        "queue_candidate_window_limit": queue_candidate_window_limit,
         "queue_path": str(graph_paths(aoa_root)["maintenance_queue"]),
         "candidate_pool_policy": candidate_pool_policy,
         "explicit_candidate_pool_limit": explicit_candidate_pool_limit,

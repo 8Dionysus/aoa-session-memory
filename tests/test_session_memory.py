@@ -47463,6 +47463,56 @@ def test_graph_maintenance_seed_queue_then_uses_queue_source_filters(tmp_path: P
     assert payload["maintenance_detail"]["matched_source_keys"] == observed["source_key_filters"]
 
 
+def test_graph_maintenance_queue_candidate_window_honors_explicit_pool_limit(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    source_items = {
+        f"segment:bounded-window:{index:03d}": {
+            "source_key": f"segment:bounded-window:{index:03d}",
+            "source_type": "segment",
+            "session_id": "bounded-window",
+            "segment_id": f"{index:03d}",
+            "status": "dirty",
+            "stored_node_count": index,
+            "stored_edge_count": index,
+        }
+        for index in range(12)
+    }
+    module.write_graph_maintenance_queue(aoa_root, {"items": source_items})
+    observed: dict[str, Any] = {}
+
+    monkeypatch.setattr(
+        module,
+        "graph_queue_source_records",
+        lambda *_args, **_kwargs: [],
+    )
+
+    def fake_graph_source_states(**kwargs: Any) -> dict[str, Any]:
+        source_key_filters = list(kwargs.get("source_key_filters") or [])
+        observed["source_key_filters"] = source_key_filters
+        return {
+            "states": [dict(source_items[source_key]) for source_key in source_key_filters],
+            "diagnostics": [],
+            "existing_source_count": len(source_key_filters),
+        }
+
+    monkeypatch.setattr(module, "graph_source_states", fake_graph_source_states)
+
+    payload = module.graph_maintenance(
+        aoa_root=aoa_root,
+        use_queue=True,
+        batch_limit=2,
+        candidate_pool_limit=4,
+    )
+
+    assert payload["selected_count"] == 2
+    assert payload["maintenance_detail"]["queue_candidate_window_limit"] == 4
+    assert payload["maintenance_detail"]["queue_selected_source_count"] == 4
+    assert len(observed["source_key_filters"]) == 4
+
+
 def test_graph_maintenance_hot_noop_all_is_cached_without_source_scan(tmp_path: Path, monkeypatch: Any) -> None:
     aoa_root = tmp_path / ".aoa"
     (aoa_root / "graph").mkdir(parents=True)
