@@ -55823,6 +55823,13 @@ def test_hook_worker_automatic_maintenance_jobs_observe_query_demand(
     assert payload["processed"] == 2
     assert calls["index"]["observe_query_demand"] is True
     assert calls["graph"]["observe_query_demand"] is True
+    assert calls["graph"]["use_queue"] is True
+    assert calls["graph"]["seed_queue_from_ledger"] is True
+    assert calls["graph"]["write_queue"] is True
+    assert calls["graph"]["write_ledger"] is True
+    assert calls["graph"]["candidate_pool_limit"] == 30
+    assert calls["graph"]["queue_seed_limit"] == 30
+    assert calls["graph"]["priority_session_ids"] is None
 
 
 def test_hook_worker_defers_graph_job_until_drip_circuit_closes(
@@ -55913,6 +55920,9 @@ def test_hook_worker_defers_graph_job_until_drip_circuit_closes(
     )
     assert resumed["results"][0]["status"] == "maintained_graph"
     assert len(maintenance_calls) == 1
+    assert maintenance_calls[0]["use_queue"] is True
+    assert maintenance_calls[0]["seed_queue_from_ledger"] is True
+    assert maintenance_calls[0]["candidate_pool_limit"] == 30
     assert not list(dirs["deferred"].glob("*.json"))
 
 

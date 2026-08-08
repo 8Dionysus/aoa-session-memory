@@ -483,6 +483,14 @@ advancing any actionable source while work remains reports a retryable
 `resource_blocked_graph_drip_no_progress`, not completion. Reports expose the
 existing queue count, reserve, requested top-up, progress, and remaining work.
 
+Queued graph follow-up from a hook worker is likewise a bounded graph-queue
+consumer, never an all-source discovery pass. It seeds only one bounded
+candidate window from the persisted source ledger, prioritizes an explicitly
+targeted session, and publishes queue and ledger state after each portion. The
+job's cooperative budget therefore begins around a bounded source window; an
+old queued graph intent cannot monopolize the shared maintenance lease merely
+because the archive continued to grow before that job was resumed.
+
 Conversely, a child may commit bounded mutations and then return deferred or
 budget-exhausted. Explicit allowlisted mutation counters in the action result
 admit only that bounded progress; generic processed, current, attempted,

@@ -23123,16 +23123,42 @@ def run_hook_worker(*, workspace_root: Path | None, aoa_root: Path, limit: int =
                             }
                         else:
                             budget_seconds_value = job.get("budget_seconds")
+                            graph_batch_limit = int_value(
+                                job.get("batch_limit"),
+                                GRAPH_MAINTENANCE_AUTO_BATCH_LIMIT,
+                            )
+                            graph_candidate_pool_limit = max(
+                                graph_batch_limit * 10,
+                                graph_batch_limit,
+                            )
+                            graph_target = str(
+                                job.get("target") or "all"
+                            )
                             maintained = graph_maintenance(
                                 aoa_root=aoa_root,
-                                target=str(job.get("target") or "all"),
+                                target=graph_target,
                                 observe_query_demand=True,
                                 apply=True,
-                                batch_limit=int_value(job.get("batch_limit"), GRAPH_MAINTENANCE_AUTO_BATCH_LIMIT),
+                                batch_limit=graph_batch_limit,
                                 refresh_chunk_size=int_value(job.get("refresh_chunk_size"), GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE),
                                 max_refresh_nodes=job.get("max_refresh_nodes") if job.get("max_refresh_nodes") is not None else None,
                                 max_refresh_edges=job.get("max_refresh_edges") if job.get("max_refresh_edges") is not None else None,
+                                candidate_pool_limit=(
+                                    graph_candidate_pool_limit
+                                ),
                                 budget_seconds=float(budget_seconds_value) if budget_seconds_value is not None else None,
+                                use_queue=True,
+                                seed_queue_from_ledger=True,
+                                queue_seed_limit=(
+                                    graph_candidate_pool_limit
+                                ),
+                                write_queue=True,
+                                write_ledger=True,
+                                priority_session_ids=(
+                                    None
+                                    if graph_target == "all"
+                                    else [graph_target]
+                                ),
                                 write_report=True,
                                 reason=str(job.get("reason") or "queued_graph_maintenance"),
                             )
