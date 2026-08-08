@@ -3284,6 +3284,34 @@ def clear_export_target_for_force(target: Path) -> None:
             child.unlink()
 
 
+def export_force_runtime_target_markers(target: Path) -> list[str]:
+    """Detect an installed/runtime root before destructive export cleanup."""
+    if not target.exists() or not target.is_dir():
+        return []
+    markers: list[str] = []
+    if (target / INSTALL_PROFILE_PATH).is_file():
+        markers.append("runtime_install_profile")
+    registry = read_json(target / REGISTRY_NAME, {})
+    if (
+        isinstance(registry, dict)
+        and isinstance(registry.get("sessions"), list)
+        and registry.get("sessions")
+    ):
+        markers.append("nonempty_session_registry")
+    session_root = target / SESSION_ROOT
+    if session_root.is_dir() and any(
+        child.is_dir() for child in session_root.iterdir()
+    ):
+        markers.append("session_archive_directories")
+    for relative in (DIAGNOSTICS_ROOT, SEARCH_ROOT, GRAPH_ROOT):
+        runtime_root = target / relative
+        if runtime_root.is_dir() and any(runtime_root.iterdir()):
+            markers.append(
+                f"runtime_{Path(relative).name}_surface"
+            )
+    return sorted(set(markers))
+
+
 def install_portable_bundle(
     *,
     source_aoa_root: Path,
@@ -184747,6 +184775,31 @@ def command_export_bundle(args: argparse.Namespace) -> int:
         )
         return 1
     if target.exists() and args.force:
+        runtime_markers = export_force_runtime_target_markers(target)
+        if runtime_markers:
+            print(
+                json.dumps(
+                    {
+                        "schema_version": SCHEMA_VERSION,
+                        "ok": False,
+                        "status": (
+                            "rejected_runtime_target_before_mutation"
+                        ),
+                        "target": str(target),
+                        "runtime_markers": runtime_markers,
+                        "error": (
+                            "export-bundle --force accepts a clean portable "
+                            "target, not an installed runtime root"
+                        ),
+                        "next_route": (
+                            "use install --force for a runtime kernel upgrade"
+                        ),
+                    },
+                    indent=2,
+                    ensure_ascii=False,
+                )
+            )
+            return 1
         clear_export_target_for_force(target)
     payload = copy_portable_bundle(
         source_aoa_root=source,

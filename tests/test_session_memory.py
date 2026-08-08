@@ -84757,6 +84757,47 @@ def test_export_bundle_rejects_session_flag_before_force_clear(
     assert sentinel.read_text(encoding="utf-8") == "preserve\n"
 
 
+def test_export_bundle_force_rejects_runtime_install_before_clear(
+    tmp_path: Path,
+    capsys: Any,
+) -> None:
+    target = tmp_path / "runtime-workspace" / ".aoa"
+    session_dir = target / "sessions" / "existing-session"
+    session_dir.mkdir(parents=True)
+    sentinel = session_dir / "raw.jsonl"
+    sentinel.write_text('{"type":"session_meta"}\n', encoding="utf-8")
+    install_profile = target / module.INSTALL_PROFILE_PATH
+    install_profile.parent.mkdir(parents=True, exist_ok=True)
+    install_profile.write_text(
+        '{"artifact_type":"runtime_install_profile"}\n',
+        encoding="utf-8",
+    )
+
+    code = module.command_export_bundle(
+        SimpleNamespace(
+            source_aoa_root=str(SCRIPT.parents[1]),
+            target_dir=str(target),
+            with_sessions=False,
+            no_tests=False,
+            force=True,
+        )
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == 1
+    assert payload["status"] == (
+        "rejected_runtime_target_before_mutation"
+    )
+    assert "runtime_install_profile" in payload["runtime_markers"]
+    assert "session_archive_directories" in payload["runtime_markers"]
+    assert payload["next_route"] == (
+        "use install --force for a runtime kernel upgrade"
+    )
+    assert sentinel.read_text(encoding="utf-8") == (
+        '{"type":"session_meta"}\n'
+    )
+
+
 def test_install_portable_bundle_preserves_existing_sessions(tmp_path: Path) -> None:
     source_aoa = SCRIPT.parents[1]
     workspace = tmp_path / "ExistingWorkspace"

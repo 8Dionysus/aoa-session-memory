@@ -46,7 +46,10 @@ prints matched credential or host values.
 Kernel upgrades preserve existing session directories and rebuild the
 registry/index views from those archives. Forced export may replace portable
 files while preserving repository-owned `.git`, `.github`, and `kag` surfaces.
-It must not silently delete runtime evidence.
+It must not silently delete runtime evidence. `export-bundle --force` therefore
+fails closed before mutation when its target contains a runtime install
+profile, archived sessions, or generated runtime stores. Upgrade an installed
+root with `install --force`; reserve forced export for a clean portable target.
 
 Runtime install upgrades replace authored map templates but transactionally
 overlay the existing generated atlas indexes, entry files, projection state,
