@@ -39651,6 +39651,55 @@ def test_session_stage_cleanup_requires_verified_stronger_raw_authority(
         external_source
     ) == external_source_sha
 
+    capture_verified = sessions_root / (
+        ".raw-authority.projection-stage-987654-capture"
+    )
+    (capture_verified / "raw").mkdir(parents=True)
+    capture_payload = b"preserved captured authority\n"
+    (
+        capture_verified / "raw" / "session.raw.jsonl"
+    ).write_bytes(capture_payload)
+    capture_sha = hashlib.sha256(capture_payload).hexdigest()
+    capture_path = (
+        session_dir
+        / "raw"
+        / "captures"
+        / f"{capture_sha}.raw.jsonl"
+    )
+    capture_path.parent.mkdir(parents=True)
+    capture_path.write_bytes(capture_payload)
+    module.write_json(
+        session_dir / "raw" / "capture.latest.json",
+        {
+            "status": "preserved_unindexed",
+            "capture_path": str(capture_path),
+            "raw_sha256": capture_sha,
+        },
+    )
+
+    capture_plan = module.maintenance_cleanup(
+        aoa_root=aoa_root,
+        apply=False,
+    )
+    capture_entry = capture_plan[
+        "session_projection_stages"
+    ]["entries"][0]
+    assert capture_entry["status"] == "orphaned"
+    assert capture_entry["safe_to_remove"] is True
+    assert capture_entry["raw_authority"]["verified"] is True
+    assert capture_entry["raw_authority"]["status"] == (
+        "preserved_owner_capture_digest_match"
+    )
+
+    capture_apply = module.maintenance_cleanup(
+        aoa_root=aoa_root,
+        apply=True,
+    )
+    assert capture_apply["status"] == "applied"
+    assert capture_apply["operational_progress"] is True
+    assert not capture_verified.exists()
+    assert module.sha256_file(capture_path) == capture_sha
+
     unresolved_marked = sessions_root / (
         ".raw-authority.projection-stage-987654-unresolved"
     )

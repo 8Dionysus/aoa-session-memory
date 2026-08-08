@@ -48210,6 +48210,8 @@ def session_projection_stage_raw_authority(
             owner_raw.exists() or owner_raw.is_symlink()
         ),
         "owner_raw_sha256": "",
+        "preserved_capture_path": "",
+        "preserved_capture_sha256": "",
         "source_candidate_count": 0,
         "source_candidate_refs": [],
         "diagnostics": [],
@@ -48269,6 +48271,61 @@ def session_projection_stage_raw_authority(
                 }
             )
             return payload
+
+    capture_state_path = (
+        owner_session_dir / "raw" / "capture.latest.json"
+    )
+    capture_state = read_json(capture_state_path, {})
+    capture_path_value = str(
+        capture_state.get("capture_path") or ""
+    )
+    capture_sha = str(
+        capture_state.get("raw_sha256") or ""
+    ).lower()
+    if capture_path_value and capture_sha == stage_raw_sha:
+        capture_path = Path(capture_path_value)
+        captures_root = (
+            owner_session_dir / "raw" / "captures"
+        ).resolve()
+        try:
+            capture_resolved = capture_path.resolve()
+        except OSError:
+            capture_resolved = Path()
+        if (
+            capture_path.is_absolute()
+            and capture_resolved.parent == captures_root
+            and capture_path.is_file()
+            and not capture_path.is_symlink()
+        ):
+            capture_identity = stable_file_content_identity(
+                capture_path
+            )
+            actual_capture_sha = str(
+                capture_identity.get("sha256") or ""
+            )
+            payload["preserved_capture_path"] = str(
+                capture_path
+            )
+            payload["preserved_capture_sha256"] = (
+                actual_capture_sha
+            )
+            if (
+                capture_identity.get("ok")
+                and actual_capture_sha == stage_raw_sha
+            ):
+                payload.update(
+                    {
+                        "verified": True,
+                        "status": (
+                            "preserved_owner_capture_digest_match"
+                        ),
+                        "authority_kind": (
+                            "preserved_owner_raw_capture"
+                        ),
+                        "authority_ref": str(capture_path),
+                    }
+                )
+                return payload
 
     raw_source = read_json(
         stage_path / "raw" / RAW_SOURCE_JSON,

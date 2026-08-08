@@ -408,6 +408,11 @@ oversized live-tail target is deferred to an explicit heavy or resumable route,
 while ordinary bounded maintenance continues across the rest of the backlog;
 one large session must not monopolize recurring catch-up attempts.
 
+Interrupted projection stages are removable only after a stronger raw authority
+is verified again at deletion time. A content-addressed owner capture qualifies
+when its declared and actual SHA-256 both exactly match the staged raw; the
+published last-good projection remains untouched.
+
 Due retry items are ordered by a versioned profile-aware dispatch deadline,
 not by retry-ready time alone. Short hot and catch-up wait targets bound urgent
 latency. Once a backlog or deep target is breached, one earliest breached
