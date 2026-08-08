@@ -125402,6 +125402,24 @@ def graph_maintenance(
                             diagnostics.append(missing_diagnostic)
                             results.append({"source_key": source_key, "status": "blocked", "diagnostics": [missing_diagnostic]})
                             continue
+                        contribution_source = (
+                            contribution.get("source")
+                            if isinstance(contribution.get("source"), dict)
+                            else {}
+                        )
+                        if contribution_source.get("status") == "blocked":
+                            results.append(
+                                {
+                                    "source_key": source_key,
+                                    "status": "blocked",
+                                    "diagnostics": [
+                                        str(item)
+                                        for item in contribution_source.get("diagnostics", [])
+                                        if item
+                                    ],
+                                }
+                            )
+                            continue
                         phase_started = graph_phase_timer_start()
                         old_node_ids, old_edge_ids = store.source_contribution_ids(source_key)
                         graph_add_phase_timing(phase_timings, "source_id_lookup_ms", phase_started)

@@ -47513,6 +47513,113 @@ def test_graph_maintenance_queue_candidate_window_honors_explicit_pool_limit(
     assert len(observed["source_key_filters"]) == 4
 
 
+def test_graph_maintenance_preserves_last_good_contribution_when_reindex_is_required(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    source_key = "segment:last-good-blocked:000"
+    seed_current_graph_store(aoa_root, [source_key])
+    old_node_ids: set[str]
+    old_edge_ids: set[str]
+    store = module.GraphSqliteStore(aoa_root)
+    try:
+        old_node_ids, old_edge_ids = store.source_contribution_ids(source_key)
+    finally:
+        store.close()
+    assert old_node_ids
+    assert old_edge_ids
+
+    session_dir = aoa_root / "sessions" / "2026-06-22__004__last-good-blocked"
+    source_path = session_dir / "segments" / "000.index.json"
+    source_path.parent.mkdir(parents=True)
+    source_path.write_text("{}", encoding="utf-8")
+    dirty_state = {
+        "source_key": source_key,
+        "source_type": "segment",
+        "session_id": "last-good-blocked",
+        "session_label": session_dir.name,
+        "segment_id": "000",
+        "session_dir": str(session_dir),
+        "source_path": str(source_path),
+        "status": "dirty",
+        "stored_node_count": len(old_node_ids),
+        "stored_edge_count": len(old_edge_ids),
+    }
+    module.write_graph_maintenance_queue(
+        aoa_root,
+        {"items": {source_key: dirty_state}},
+    )
+
+    monkeypatch.setattr(
+        module,
+        "graph_queue_source_records",
+        lambda *_args, **_kwargs: [
+            {"session_id": "last-good-blocked", "path": str(session_dir)}
+        ],
+    )
+    monkeypatch.setattr(
+        module,
+        "graph_source_states",
+        lambda **_kwargs: {
+            "states": [dict(dirty_state)],
+            "diagnostics": [],
+            "existing_source_count": 1,
+        },
+    )
+    blocked_diagnostic = "graph_source_generation_incompatible:last-good-blocked:reindex-required"
+    monkeypatch.setattr(
+        module,
+        "graph_contributions_for_record",
+        lambda *_args, **_kwargs: (
+            [
+                {
+                    "source": {
+                        **dirty_state,
+                        "status": "blocked",
+                        "diagnostics": [blocked_diagnostic],
+                    },
+                    "nodes": [],
+                    "edges": [],
+                }
+            ],
+            [],
+        ),
+    )
+
+    payload = module.graph_maintenance(
+        aoa_root=aoa_root,
+        apply=True,
+        use_queue=True,
+        batch_limit=1,
+        candidate_pool_limit=1,
+    )
+
+    assert payload["ok"] is False
+    assert payload["semantic_progress"] is False
+    assert payload["selected_count"] == 0
+    assert payload["results"] == [
+        {
+            "source_key": source_key,
+            "status": "blocked",
+            "diagnostics": [blocked_diagnostic],
+        }
+    ]
+    store = module.GraphSqliteStore(aoa_root)
+    try:
+        current_node_ids, current_edge_ids = store.source_contribution_ids(source_key)
+        source_row = store.conn.execute(
+            "SELECT status FROM graph_sources WHERE source_key = ?",
+            (source_key,),
+        ).fetchone()
+    finally:
+        store.close()
+    assert current_node_ids == old_node_ids
+    assert current_edge_ids == old_edge_ids
+    assert source_row is not None
+    assert source_row["status"] == "current"
+
+
 def test_graph_maintenance_hot_noop_all_is_cached_without_source_scan(tmp_path: Path, monkeypatch: Any) -> None:
     aoa_root = tmp_path / ".aoa"
     (aoa_root / "graph").mkdir(parents=True)
