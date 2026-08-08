@@ -53524,6 +53524,14 @@ def test_auto_maintenance_resource_launch_uses_live_tail_fast_path_for_catchup(t
         return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
 
     monkeypatch.setattr(module, "session_memory_maintenance_status", fake_maintenance_status)
+    monkeypatch.setattr(
+        module,
+        "resolve_session_record",
+        lambda _aoa_root, _target: {
+            "session_id": "live-1",
+            "raw": {"bytes": 32 * 1024 * 1024},
+        },
+    )
     monkeypatch.setattr(module.subprocess, "run", fake_run)
 
     payload = module.auto_maintenance_resource_launch(
@@ -53547,6 +53555,8 @@ def test_auto_maintenance_resource_launch_uses_live_tail_fast_path_for_catchup(t
     assert payload["live_tail_fast_path"]["target"] == session_label
     assert payload["live_tail_fast_path"]["top_level_recommendation"] == "review_maintenance_cleanup"
     assert payload["live_tail_fast_path"]["independent_of_top_level_recommendation"] is True
+    assert payload["live_tail_fast_path"]["target_raw_bytes"] == 32 * 1024 * 1024
+    assert payload["live_tail_fast_path"]["route_max_raw_bytes"] == 512 * 1024 * 1024
     assert calls["command"][:3] == ["abyss-machine", "resource", "launch"]
     assert "--force" in calls["command"]
     assert calls["command"][calls["command"].index("--demand-key") + 1] == (
@@ -53702,11 +53712,88 @@ def test_auto_maintenance_resource_live_tail_fast_path_respects_explicit_graph_s
         repair_graph=False,
         reason="timer_catchup",
         budget_seconds=None,
+        route_max_raw_bytes=512 * 1024 * 1024,
     )
 
     assert payload["used"] is False
     assert payload["reason"] == "graph_repair_disabled_for_graph_live_tail"
     assert payload["command_kind"] == "graph_queue_maintenance"
+
+
+def test_auto_maintenance_resource_live_tail_fast_path_defers_oversized_session(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    session_label = "2026-07-23__060__oversized-live-session"
+
+    monkeypatch.setattr(
+        module,
+        "session_memory_maintenance_status",
+        lambda **_kwargs: {
+            "ok": False,
+            "recommendation": "run_live_catchup",
+            "live_tail": {
+                "status": "ready_for_catchup",
+                "catchup_ready_to_run": True,
+                "catchup_command_kind": (
+                    "targeted_index_maintenance_without_graph"
+                ),
+                "catchup_scope": "single_search_deferred_session",
+                "catchup_target": session_label,
+                "catchup_target_session_id": "oversized-1",
+                "catchup_target_session_label": session_label,
+                "catchup_command": [
+                    "python3",
+                    "scripts/aoa_session_memory.py",
+                    "index-maintenance",
+                    session_label,
+                    "--apply",
+                ],
+            },
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "resolve_session_record",
+        lambda _aoa_root, _target: {
+            "session_id": "oversized-1",
+            "raw": {"bytes": 708 * 1024 * 1024},
+        },
+    )
+
+    payload = module.auto_maintenance_live_tail_resource_route(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        profile="catchup",
+        target="all",
+        apply=True,
+        since=None,
+        since_days=None,
+        until=None,
+        limit=None,
+        repair_indexes=None,
+        repair_graph=None,
+        reason="timer_catchup",
+        budget_seconds=900,
+        route_max_raw_bytes=512 * 1024 * 1024,
+    )
+
+    assert payload["used"] is False
+    assert payload["reason"] == (
+        "live_tail_target_exceeds_route_raw_limit"
+    )
+    assert payload["target"] == session_label
+    assert payload["target_raw_bytes"] == 708 * 1024 * 1024
+    assert payload["route_max_raw_bytes"] == 512 * 1024 * 1024
+    assert payload["fallback_route"] == (
+        "bounded_profile_auto_maintenance"
+    )
+    assert payload["oversized_target_next_route"] == (
+        "explicit_heavy_or_resumable_session_projection_repair"
+    )
 
 
 def test_auto_maintenance_resource_launch_records_blocked_resource_gate(tmp_path: Path, monkeypatch: Any) -> None:
@@ -85103,6 +85190,125 @@ def test_sweep_codex_sessions_reports_post_sync_staleness_when_source_grows(
     assert result["freshness"]["reason"] == "source_size_changed"
     assert result["freshness_reason"] == "source_size_changed"
     assert result["retry_required"] is True
+
+
+def test_sweep_codex_sessions_preserves_oversized_raw_before_deferred_indexing(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    source_root = tmp_path / "codex-sessions"
+    session_id = "sweep-oversized-capture"
+    transcript = (
+        source_root
+        / "2026"
+        / "05"
+        / "03"
+        / f"rollout-2026-05-03T12-00-00-{session_id}.jsonl"
+    )
+    initial_rows = [
+        {
+            "timestamp": "2026-05-03T12:00:00Z",
+            "type": "session_meta",
+            "payload": {"id": session_id, "cwd": str(workspace)},
+        },
+        {
+            "timestamp": "2026-05-03T12:00:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "Preserve oversized raw independently",
+                    }
+                ],
+            },
+        },
+    ]
+    write_jsonl(transcript, initial_rows)
+    initial = module.sweep_codex_sessions(
+        aoa_root=aoa_root,
+        source_root=source_root,
+        since="2026-05-01",
+        apply=True,
+        min_age_seconds=0,
+        index_max_raw_bytes=None,
+    )
+    session_dir = Path(initial["results"][0]["session_dir"])
+    initial_manifest = json.loads(
+        (session_dir / "session.manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    initial_raw_sha256 = initial_manifest["raw"]["sha256"]
+
+    write_jsonl(
+        transcript,
+        initial_rows
+        + [
+            {
+                "timestamp": "2026-05-03T12:00:02Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "New tail remains raw-accessible",
+                        }
+                    ],
+                },
+            }
+        ],
+    )
+
+    planned = module.sweep_codex_sessions(
+        aoa_root=aoa_root,
+        source_root=source_root,
+        since="2026-05-01",
+        min_age_seconds=0,
+        index_max_raw_bytes=1,
+    )
+    assert planned["counts"] == {"planned_raw_mirror": 1}
+    assert planned["mirror_only_candidate_count"] == 1
+
+    mirrored = module.sweep_codex_sessions(
+        aoa_root=aoa_root,
+        source_root=source_root,
+        since="2026-05-01",
+        apply=True,
+        min_age_seconds=0,
+        index_max_raw_bytes=1,
+    )
+    result = mirrored["results"][0]
+    assert mirrored["counts"] == {"mirrored_index_deferred": 1}
+    assert mirrored["mirror_only_candidate_count"] == 1
+    assert result["raw_capture_current"] is True
+    assert result["indexing_deferred"] is True
+    assert result["last_good_projection_preserved"] is True
+    assert result["freshness_reason"] == (
+        "preserved_capture_ahead_of_projection"
+    )
+
+    final_manifest = json.loads(
+        (session_dir / "session.manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert final_manifest["archive_status"] == "indexed"
+    assert final_manifest["raw"]["sha256"] == initial_raw_sha256
+    capture = json.loads(
+        (session_dir / "raw" / module.RAW_CAPTURE_STATE_JSON).read_text(
+            encoding="utf-8"
+        )
+    )
+    capture_path = Path(capture["capture_path"])
+    assert capture["status"] == "preserved_unindexed"
+    assert capture_path.is_file()
+    assert capture_path.read_bytes() == transcript.read_bytes()
 
 
 def test_sweep_codex_sessions_supplements_date_window_with_recent_transcript_activity(tmp_path: Path) -> None:

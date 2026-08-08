@@ -292,6 +292,13 @@ Deferred live state is not silently green and is not stable corruption. The
 next route is either to wait for quiet, run a targeted catch-up, or inspect raw
 evidence directly when authorized.
 
+Automatic transcript sweeps separate raw preservation from projection cost.
+Once a source exceeds the sweep indexing envelope, the sweep publishes a
+content-addressed raw capture and preserves the last-good indexes instead of
+starting one uninterruptible whole-session rebuild. The capture remains
+explicitly ahead of the stale projection until a compatible heavy or resumable
+index route lands.
+
 Before a sampled live-tail candidate is declared quiet enough for automatic
 catch-up, the status route rechecks its declared transcript path with one
 bounded filesystem stat. A newer live mtime overrides the persisted scheduling
@@ -395,6 +402,11 @@ independently of the packet's global recommendation. An unrelated cleanup or
 historical projection recommendation must not displace a ready recent-session
 catch-up; the shared lease, resource gate, and command-local guards still
 decide whether that bounded writer may run.
+
+That fast path remains inside the selected profile's route-size envelope. An
+oversized live-tail target is deferred to an explicit heavy or resumable route,
+while ordinary bounded maintenance continues across the rest of the backlog;
+one large session must not monopolize recurring catch-up attempts.
 
 Due retry items are ordered by a versioned profile-aware dispatch deadline,
 not by retry-ready time alone. Short hot and catch-up wait targets bound urgent

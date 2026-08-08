@@ -1645,6 +1645,7 @@ DEFAULT_HOOK_REGISTRY_LOCK_TIMEOUT_SEC = 0.25
 DEFAULT_CODEX_SESSION_SWEEP_SINCE_DAYS = 7
 DEFAULT_CODEX_SESSION_SWEEP_ACTIVITY_SINCE_DAYS = 2
 DEFAULT_CODEX_SESSION_SWEEP_MIN_AGE_SECONDS = 60
+DEFAULT_CODEX_SESSION_SWEEP_INDEX_MAX_RAW_BYTES = 512 * 1024 * 1024
 HOOK_STATUS_MESSAGES = {
     "SessionStart": "AoA session memory start",
     "UserPromptSubmit": "AoA session memory prompt",
@@ -15990,6 +15991,9 @@ def sweep_codex_sessions(
     activity_since_seconds: float | None = None,
     min_raw_bytes: int | None = None,
     max_raw_bytes: int | None = None,
+    index_max_raw_bytes: int | None = (
+        DEFAULT_CODEX_SESSION_SWEEP_INDEX_MAX_RAW_BYTES
+    ),
     write_report: bool = False,
 ) -> dict[str, Any]:
     now = utc_now()
@@ -16017,6 +16021,7 @@ def sweep_codex_sessions(
     counts: Counter[str] = Counter()
     repair_candidate_count = 0
     selected_repair_count = 0
+    mirror_only_candidate_count = 0
     for record in records:
         transcript_path = Path(str(record.get("transcript_path") or "")).expanduser()
         try:
@@ -16031,6 +16036,11 @@ def sweep_codex_sessions(
             session_dir=archive_session_dirs.get(session_id),
         )
         base = sweep_result_base(record, freshness, age_seconds=age_seconds)
+        mirror_only = bool(
+            index_max_raw_bytes is not None
+            and int(record.get("bytes") or 0)
+            > int(index_max_raw_bytes)
+        )
         if freshness.get("fresh"):
             status = "skipped_fresh"
             result = {**base, "status": status}
@@ -16053,9 +16063,20 @@ def sweep_codex_sessions(
         else:
             repair_candidate_count += 1
             selected_repair_count += 1
+            if mirror_only:
+                mirror_only_candidate_count += 1
             if not apply:
-                status = "planned"
-                result = {**base, "status": status}
+                status = (
+                    "planned_raw_mirror"
+                    if mirror_only
+                    else "planned"
+                )
+                result = {
+                    **base,
+                    "status": status,
+                    "index_max_raw_bytes": index_max_raw_bytes,
+                    "indexing_deferred": mirror_only,
+                }
             else:
                 event = {
                     "session_id": record.get("session_id"),
@@ -16066,28 +16087,76 @@ def sweep_codex_sessions(
                     "hook_event_name": "CodexSessionSweep",
                 }
                 try:
-                    sync_payload = sync_session_from_transcript(
-                        aoa_root=aoa_root,
-                        event=event,
-                        transcript_path=transcript_path,
-                        hook_event_name="CodexSessionSweep",
-                    )
-                    post_sync_freshness = indexed_archive_freshness(
-                        aoa_root,
-                        session_id=session_id,
-                        transcript_path=transcript_path,
-                        session_dir=Path(str(sync_payload.get("session_dir"))),
-                    )
-                    status = post_sync_freshness_status(post_sync_freshness)
-                    result = {
-                        **base,
-                        **sync_payload,
-                        "status": status,
-                        "pre_sync_freshness": freshness,
-                        "freshness": post_sync_freshness,
-                        "freshness_reason": post_sync_freshness.get("reason"),
-                        "retry_required": not bool(post_sync_freshness.get("fresh")),
-                    }
+                    if mirror_only:
+                        sync_payload = mirror_transcript_without_indexing(
+                            aoa_root=aoa_root,
+                            event=event,
+                            transcript_path=transcript_path,
+                            hook_event_name="CodexSessionSweep",
+                            now=now,
+                        )
+                        post_sync_freshness = indexed_archive_freshness(
+                            aoa_root,
+                            session_id=session_id,
+                            transcript_path=transcript_path,
+                            session_dir=Path(
+                                str(sync_payload.get("session_dir"))
+                            ),
+                        )
+                        status = "mirrored_index_deferred"
+                        result = {
+                            **base,
+                            **sync_payload,
+                            "status": status,
+                            "pre_sync_freshness": freshness,
+                            "freshness": post_sync_freshness,
+                            "freshness_reason": post_sync_freshness.get(
+                                "reason"
+                            ),
+                            "raw_capture_current": bool(
+                                sync_payload.get("capture", {}).get(
+                                    "source_stable_during_capture"
+                                )
+                            ),
+                            "indexing_deferred": True,
+                            "index_max_raw_bytes": index_max_raw_bytes,
+                            "retry_required": True,
+                            "next_route": (
+                                "explicit_heavy_or_resumable_session_"
+                                "projection_repair"
+                            ),
+                        }
+                    else:
+                        sync_payload = sync_session_from_transcript(
+                            aoa_root=aoa_root,
+                            event=event,
+                            transcript_path=transcript_path,
+                            hook_event_name="CodexSessionSweep",
+                        )
+                        post_sync_freshness = indexed_archive_freshness(
+                            aoa_root,
+                            session_id=session_id,
+                            transcript_path=transcript_path,
+                            session_dir=Path(
+                                str(sync_payload.get("session_dir"))
+                            ),
+                        )
+                        status = post_sync_freshness_status(
+                            post_sync_freshness
+                        )
+                        result = {
+                            **base,
+                            **sync_payload,
+                            "status": status,
+                            "pre_sync_freshness": freshness,
+                            "freshness": post_sync_freshness,
+                            "freshness_reason": post_sync_freshness.get(
+                                "reason"
+                            ),
+                            "retry_required": not bool(
+                                post_sync_freshness.get("fresh")
+                            ),
+                        }
                 except Exception as exc:
                     status = "error"
                     result = {**base, "status": status, "error": f"{exc.__class__.__name__}: {exc}"}
@@ -16112,9 +16181,11 @@ def sweep_codex_sessions(
         ),
         "min_raw_bytes": min_raw_bytes,
         "max_raw_bytes": max_raw_bytes,
+        "index_max_raw_bytes": index_max_raw_bytes,
         "discovered_count": len(records),
         "repair_candidate_count": repair_candidate_count,
         "selected_repair_count": selected_repair_count,
+        "mirror_only_candidate_count": mirror_only_candidate_count,
         "counts": dict(counts),
         "results": results,
     }
@@ -16178,9 +16249,11 @@ def codex_session_sweep_markdown(payload: dict[str, Any]) -> str:
         f"- activity_supplement_discovered_count: `{payload.get('activity_supplement_discovered_count')}`",
         f"- min_raw_bytes: `{payload.get('min_raw_bytes')}`",
         f"- max_raw_bytes: `{payload.get('max_raw_bytes')}`",
+        f"- index_max_raw_bytes: `{payload.get('index_max_raw_bytes')}`",
         f"- discovered_count: `{payload.get('discovered_count')}`",
         f"- repair_candidate_count: `{payload.get('repair_candidate_count')}`",
         f"- selected_repair_count: `{payload.get('selected_repair_count')}`",
+        f"- mirror_only_candidate_count: `{payload.get('mirror_only_candidate_count')}`",
         f"- counts: `{json.dumps(payload.get('counts', {}), ensure_ascii=False)}`",
         "",
         "| status | reason | age_s | bytes | date | session | title | archive |",
@@ -42300,6 +42373,7 @@ def auto_maintenance_live_tail_resource_route(
     repair_graph: bool | None,
     reason: str,
     budget_seconds: float | None,
+    route_max_raw_bytes: int | None,
 ) -> dict[str, Any]:
     if profile != "catchup" or target != "all" or not apply:
         return {"used": False, "reason": "not_catchup_all_apply"}
@@ -42325,6 +42399,61 @@ def auto_maintenance_live_tail_resource_route(
         return {"used": False, "reason": "unsupported_live_tail_command_kind", "command_kind": command_kind}
     if not command:
         return {"used": False, "reason": "missing_live_tail_command"}
+    target_raw_bytes: int | None = None
+    if (
+        command_kind
+        in {
+            "targeted_index_maintenance_without_graph",
+            "bounded_index_maintenance_without_graph",
+        }
+        and route_max_raw_bytes is not None
+    ):
+        target_ref = str(
+            live_tail.get("catchup_target_session_id")
+            or live_tail.get("catchup_target_session_label")
+            or live_tail.get("catchup_target")
+            or ""
+        )
+        try:
+            target_record = resolve_session_record(aoa_root, target_ref)
+            target_raw_bytes = session_record_declared_raw_bytes(
+                target_record
+            )
+        except (OSError, ValueError) as exc:
+            return {
+                "used": False,
+                "reason": "live_tail_target_cost_unavailable",
+                "command_kind": command_kind,
+                "target": live_tail.get("catchup_target"),
+                "route_max_raw_bytes": route_max_raw_bytes,
+                "diagnostics": [
+                    f"live_tail_target_cost_unavailable:{exc}"
+                ],
+            }
+        if target_raw_bytes > route_max_raw_bytes:
+            return {
+                "used": False,
+                "reason": "live_tail_target_exceeds_route_raw_limit",
+                "command_kind": command_kind,
+                "scope": live_tail.get("catchup_scope"),
+                "target": live_tail.get("catchup_target"),
+                "target_session_id": live_tail.get(
+                    "catchup_target_session_id"
+                ),
+                "target_session_label": live_tail.get(
+                    "catchup_target_session_label"
+                ),
+                "target_raw_bytes": target_raw_bytes,
+                "route_max_raw_bytes": route_max_raw_bytes,
+                "fallback_route": "bounded_profile_auto_maintenance",
+                "oversized_target_next_route": (
+                    "explicit_heavy_or_resumable_session_projection_repair"
+                ),
+                "truth_status": (
+                    "oversized_live_tail_deferred_without_blocking_other_"
+                    "bounded_catchup_work"
+                ),
+            }
     child_command = normalize_session_memory_child_command(command)
     append_child_arg(child_command, "--budget-seconds", budget_seconds)
     if command_kind != "graph_queue_maintenance":
@@ -42337,6 +42466,8 @@ def auto_maintenance_live_tail_resource_route(
         "target": live_tail.get("catchup_target"),
         "target_session_id": live_tail.get("catchup_target_session_id"),
         "target_session_label": live_tail.get("catchup_target_session_label"),
+        "target_raw_bytes": target_raw_bytes,
+        "route_max_raw_bytes": route_max_raw_bytes,
         "top_level_recommendation": top_level_recommendation,
         "independent_of_top_level_recommendation": (
             top_level_recommendation != "run_live_catchup"
@@ -46450,6 +46581,15 @@ def auto_maintenance_resource_launch(
         repair_graph=repair_graph,
         reason=reason,
         budget_seconds=effective_budget_argument,
+        route_max_raw_bytes=(
+            None
+            if int_value(settings.get("route_max_raw_mb")) <= 0
+            else int(
+                float(settings.get("route_max_raw_mb"))
+                * 1024
+                * 1024
+            )
+        ),
     )
     live_tail_child_command = (
         live_tail_fast_path.get("child_command")
@@ -176589,6 +176729,14 @@ def command_sweep_codex_sessions(args: argparse.Namespace) -> int:
     )
     min_raw_bytes = int(args.min_raw_mb * 1024 * 1024) if args.min_raw_mb is not None else None
     max_raw_bytes = int(args.max_raw_mb * 1024 * 1024) if args.max_raw_mb is not None else None
+    index_max_raw_bytes = (
+        None
+        if args.index_max_raw_mb is not None
+        and float(args.index_max_raw_mb) <= 0
+        else int(float(args.index_max_raw_mb) * 1024 * 1024)
+        if args.index_max_raw_mb is not None
+        else DEFAULT_CODEX_SESSION_SWEEP_INDEX_MAX_RAW_BYTES
+    )
     activity_since_seconds = (
         float(args.activity_since_days) * 86400
         if args.activity_since_days is not None and float(args.activity_since_days) > 0
@@ -176608,6 +176756,7 @@ def command_sweep_codex_sessions(args: argparse.Namespace) -> int:
         activity_since_seconds=activity_since_seconds,
         min_raw_bytes=min_raw_bytes,
         max_raw_bytes=max_raw_bytes,
+        index_max_raw_bytes=index_max_raw_bytes,
         write_report=args.write_report,
     )
     print(json.dumps(import_print_payload(payload, full=args.full), indent=2, ensure_ascii=False))
@@ -186436,6 +186585,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sweep_sessions.add_argument("--min-raw-mb", type=float, help="Skip stale repair candidates smaller than this many MiB; use for a separate heavy-session lane.")
     sweep_sessions.add_argument("--max-raw-mb", type=float, help="Skip repair candidates whose source transcript is larger than this many MiB.")
+    sweep_sessions.add_argument(
+        "--index-max-raw-mb",
+        type=float,
+        default=(
+            DEFAULT_CODEX_SESSION_SWEEP_INDEX_MAX_RAW_BYTES
+            / 1024
+            / 1024
+        ),
+        help=(
+            "Preserve larger transcripts as content-addressed raw captures "
+            "without starting a monolithic index rebuild; <=0 disables the "
+            "guard."
+        ),
+    )
     sweep_sessions.add_argument("--dry-run", action="store_true", help="Plan only. This is the default unless --apply is provided.")
     sweep_sessions.add_argument("--apply", action="store_true", help="Sync planned missing, stale, deferred, or raw-unavailable archives. Default is dry-run.")
     sweep_sessions.add_argument("--write-report", action="store_true", help="Write JSON and Markdown sweep reports under .aoa/diagnostics.")
