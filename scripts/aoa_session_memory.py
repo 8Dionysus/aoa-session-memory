@@ -50902,6 +50902,15 @@ def auto_maintenance(
             return payload
         search_schema_transition = auto_maintenance_search_schema_transition(freshness_before)
         search_full_rebuild_reasons = auto_maintenance_search_full_rebuild_reasons(freshness_before)
+        structural_search_bootstrap_priority = bool(
+            effective_repair_indexes
+            and profile == "deep"
+            and search_full_rebuild_reasons
+        )
+        maintenance_repair_token_accounting = bool(
+            effective_repair_token_accounting
+            and not structural_search_bootstrap_priority
+        )
         if effective_repair_indexes and profile != "deep" and search_full_rebuild_reasons:
             work_counts = auto_maintenance_freshness_work_counts(freshness_before)
             search_state = freshness_before.get("search_index") if isinstance(freshness_before.get("search_index"), dict) else {}
@@ -51620,7 +51629,7 @@ def auto_maintenance(
             graph_max_refresh_nodes=effective_graph_max_refresh_nodes,
             graph_max_refresh_edges=effective_graph_max_refresh_edges,
             repair_indexes=effective_repair_indexes,
-            repair_token_accounting=effective_repair_token_accounting,
+            repair_token_accounting=maintenance_repair_token_accounting,
             write_report=write_report,
             reason=f"auto_maintenance:{profile}:{reason}",
             budget_seconds=maintenance_budget_seconds,
@@ -51851,6 +51860,14 @@ def auto_maintenance(
             "elapsed_ms": int((time.monotonic() - auto_budget_started) * 1000),
             "repair_indexes": effective_repair_indexes,
             "repair_token_accounting": effective_repair_token_accounting,
+            "maintenance_repair_token_accounting": maintenance_repair_token_accounting,
+            "structural_search_bootstrap_priority": structural_search_bootstrap_priority,
+            "token_accounting_deferred_reason": (
+                "structural_search_bootstrap_has_priority"
+                if effective_repair_token_accounting
+                and not maintenance_repair_token_accounting
+                else ""
+            ),
             "repair_graph": effective_repair_graph,
             "allow_deferred_graph": allow_deferred_graph,
             "max_raw_bytes": effective_max_raw_bytes,

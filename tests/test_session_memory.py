@@ -66142,6 +66142,74 @@ def test_catchup_auto_maintenance_defers_full_search_rebuild_to_deep(tmp_path: P
     assert len(calls["freshness"]) == 2
 
 
+def test_deep_auto_maintenance_prioritizes_structural_search_bootstrap_over_token_accounting(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    calls: dict[str, Any] = {}
+
+    def fake_freshness(**kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "target": kwargs["target"],
+            "selected_count": 304,
+            "needs_index_maintenance": True,
+            "needs_graph_maintenance": True,
+            "diagnostics": ["index_maintenance_needed", "graph_maintenance_needed"],
+            "search_index": {
+                "status": "empty",
+                "needs_refresh": True,
+                "has_documents": False,
+                "has_route_index": False,
+                "has_route_terms": False,
+                "reasons": ["search_schema_mismatch", "search_documents_empty"],
+                "diagnostics": ["search_schema_mismatch", "search_documents_empty"],
+                "dirty_session_count": 0,
+            },
+            "atlas_index": {"status": "current", "needs_refresh": False},
+            "graph_store": {"status": "missing", "needs_maintenance": True},
+        }
+
+    def fake_maintenance(**kwargs: Any) -> dict[str, Any]:
+        calls["maintenance"] = kwargs
+        return {
+            "ok": True,
+            "apply": kwargs["apply"],
+            "target": kwargs["target"],
+            "selected_count": 304,
+            "repair_indexes": kwargs["repair_indexes"],
+            "repair_graph": kwargs["repair_graph"],
+            "index_repair_needed": True,
+            "graph_repair_needed": True,
+            "search_repair_remaining_count": 0,
+            "atlas_repair_remaining_count": 0,
+            "search_shards_repair_remaining_count": 0,
+            "action_counts": {"applied": 1},
+            "actions": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr(module, "graph_freshness_gates", fake_freshness)
+    monkeypatch.setattr(module, "route_cache_freshness_gates", fake_freshness)
+    monkeypatch.setattr(module, "maintain_indexes", fake_maintenance)
+
+    payload = module.auto_maintenance(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        profile="deep",
+        apply=True,
+    )
+
+    assert payload["structural_search_bootstrap_priority"] is True
+    assert payload["repair_token_accounting"] is True
+    assert payload["maintenance_repair_token_accounting"] is False
+    assert payload["token_accounting_deferred_reason"] == "structural_search_bootstrap_has_priority"
+    assert calls["maintenance"]["repair_token_accounting"] is False
+
+
 def test_catchup_full_rebuild_guard_shares_outer_budget_and_skips_post_probe_after_exhaustion(
     tmp_path: Path,
     monkeypatch: Any,
