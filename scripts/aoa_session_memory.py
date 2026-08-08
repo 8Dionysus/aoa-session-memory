@@ -16036,13 +16036,21 @@ def sweep_codex_sessions(
         if effective_activity_since_seconds is not None
         else None
     )
+    metadata_probe_max_raw_bytes = min(
+        candidate
+        for candidate in (max_raw_bytes, index_max_raw_bytes)
+        if candidate is not None
+    ) if any(
+        candidate is not None
+        for candidate in (max_raw_bytes, index_max_raw_bytes)
+    ) else None
     records = discover_codex_transcripts(
         source_root=source_root,
         since=since,
         until=until,
         activity_since_epoch=activity_since_epoch,
         min_raw_bytes=min_raw_bytes,
-        max_raw_bytes=max_raw_bytes,
+        max_raw_bytes=metadata_probe_max_raw_bytes,
     )
     archive_session_dirs = sweep_archive_session_dirs(aoa_root, records)
     results: list[dict[str, Any]] = []
@@ -16210,6 +16218,7 @@ def sweep_codex_sessions(
         "min_raw_bytes": min_raw_bytes,
         "max_raw_bytes": max_raw_bytes,
         "index_max_raw_bytes": index_max_raw_bytes,
+        "metadata_probe_max_raw_bytes": metadata_probe_max_raw_bytes,
         "discovered_count": len(records),
         "repair_candidate_count": repair_candidate_count,
         "selected_repair_count": selected_repair_count,

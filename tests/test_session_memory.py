@@ -85461,6 +85461,7 @@ def test_sweep_codex_sessions_reports_post_sync_staleness_when_source_grows(
 
 def test_sweep_codex_sessions_preserves_oversized_raw_before_deferred_indexing(
     tmp_path: Path,
+    monkeypatch: Any,
 ) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
@@ -85532,6 +85533,14 @@ def test_sweep_codex_sessions_preserves_oversized_raw_before_deferred_indexing(
         ],
     )
 
+    probed_paths: list[Path] = []
+    original_transcript_probe = module.transcript_probe
+
+    def recording_transcript_probe(path: Path) -> dict[str, Any]:
+        probed_paths.append(path)
+        return original_transcript_probe(path)
+
+    monkeypatch.setattr(module, "transcript_probe", recording_transcript_probe)
     planned = module.sweep_codex_sessions(
         aoa_root=aoa_root,
         source_root=source_root,
@@ -85541,6 +85550,8 @@ def test_sweep_codex_sessions_preserves_oversized_raw_before_deferred_indexing(
     )
     assert planned["counts"] == {"planned_raw_mirror": 1}
     assert planned["mirror_only_candidate_count"] == 1
+    assert planned["metadata_probe_max_raw_bytes"] == 1
+    assert probed_paths == []
 
     mirrored = module.sweep_codex_sessions(
         aoa_root=aoa_root,
