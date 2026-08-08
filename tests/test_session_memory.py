@@ -53440,6 +53440,16 @@ def test_auto_maintenance_runtime_envelope_bounds_hard_timeout_to_budget_plus_gr
         budget_seconds=30,
     )["hard_timeout_seconds"] == 210
     assert module.auto_maintenance_runtime_envelope(
+        "catchup",
+        budget_seconds=900,
+    ) == {
+        "budget_seconds": 900.0,
+        "hard_timeout_grace_seconds": 60.0,
+        "configured_timeout_ceiling_seconds": 1800.0,
+        "hard_timeout_seconds": 960,
+        "wrapper_timeout_seconds": 1080.0,
+    }
+    assert module.auto_maintenance_runtime_envelope(
         "deep",
         budget_seconds=10000,
     )["hard_timeout_seconds"] == module.AUTO_MAINTENANCE_PROFILES["deep"]["timeout_sec"]

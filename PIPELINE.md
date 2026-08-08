@@ -408,6 +408,11 @@ oversized live-tail target is deferred to an explicit heavy or resumable route,
 while ordinary bounded maintenance continues across the rest of the backlog;
 one large session must not monopolize recurring catch-up attempts.
 
+The recurring catch-up route has a narrow hard-timeout grace after its
+cooperative budget. The host resource launcher terminates a child that cannot
+reach an internal checkpoint within that envelope and records a retryable
+timeout instead of allowing an unbounded service run.
+
 Interrupted projection stages are removable only after a stronger raw authority
 is verified again at deletion time. A content-addressed owner capture qualifies
 when its declared and actual SHA-256 both exactly match the staged raw; the

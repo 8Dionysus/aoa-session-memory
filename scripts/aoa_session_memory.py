@@ -1388,7 +1388,7 @@ AUTO_MAINTENANCE_PROFILES = {
         "resource_kind": "indexing",
         "resource_demand_epoch": "v3",
         "budget_seconds": 600,
-        "hard_timeout_grace_seconds": 180,
+        "hard_timeout_grace_seconds": 60,
         "timeout_sec": 1800,
         "index_drip_on_block": False,
         "graph_drip_on_block": True,
