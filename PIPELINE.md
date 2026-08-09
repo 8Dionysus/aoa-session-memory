@@ -101,6 +101,20 @@ complete prior generation and removes its stage and backup; it never repairs a
 mixed tree in place. Physical raw-block compression and confirmed plaintext
 removal use the same boundary while keeping stable evidence refs.
 
+Task episodes inside session assembly also materialize as immutable
+content-addressed shards under `session-index-shards/`. Each shard is redacted
+under the ephemeral whole-session literal policy before persistence, and its
+manifest binds raw source identity, task-episode generation, policy versions,
+artifact and payload hashes, and the current projection publish identity.
+Completed shard waves remain reusable inside the exact projection-work
+identity after a cooperative deadline. Atomic validation requires ordered
+payload parity with the embedded `session.index.json` compatibility view. The
+compatibility view remains present until CLI and MCP readers complete a
+separate selective-hydration migration.
+Credential matchers retain their exact admitting expressions; cheap
+necessary-marker prefilters skip only matchers that cannot possibly match the
+current text, while opaque-credential detection remains unconditional.
+
 Sibling session-projection stages name their producer PID before a publish
 journal exists. If that process terminates during construction, maintenance may
 remove the generated stage only after the PID is absent, while holding the

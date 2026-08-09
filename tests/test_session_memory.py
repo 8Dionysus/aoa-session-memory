@@ -19586,6 +19586,7 @@ def test_sync_session_publish_rolls_back_raw_and_projections_together(
             if relative.parts[0] not in {
                 "raw",
                 "segments",
+                module.SESSION_INDEX_SHARDS_DIR,
             } and relative.name not in {
                 "session.manifest.json",
                 module.SESSION_INDEX_JSON,
@@ -21260,6 +21261,7 @@ def test_raw_block_storage_compact_rolls_back_whole_projection_on_publish_failur
             if relative.parts[0] not in {
                 "raw",
                 "segments",
+                module.SESSION_INDEX_SHARDS_DIR,
             } and relative.name not in {
                 "session.manifest.json",
                 module.SESSION_INDEX_JSON,
@@ -82819,6 +82821,8 @@ def test_session_projection_rejects_changed_producer_and_preserves_last_good(
                     module.SESSION_INDEX_MARKDOWN,
                 }
                 or path.parent.name in {"raw", "segments"}
+                or module.SESSION_INDEX_SHARDS_DIR
+                in path.relative_to(session_dir).parts
             )
         }
 
@@ -83304,6 +83308,11 @@ def test_session_projection_process_parallel_matches_serial_semantics(
         lambda **_kwargs: None,
     )
     monkeypatch.setattr(
+        module,
+        "reusable_event_classification_cache_record",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
         module, "EVENT_CLASSIFICATION_BLOCK_MAX_LINES", 2
     )
 
@@ -83316,6 +83325,13 @@ def test_session_projection_process_parallel_matches_serial_semantics(
     shutil.rmtree(
         module.event_classification_cache_root(session_dir)
     )
+    for work_dir in session_dir.parent.glob(
+        f".{session_dir.name}.projection-work-*"
+    ):
+        shutil.rmtree(
+            module.event_classification_cache_root(work_dir),
+            ignore_errors=True,
+        )
     parallel = module.reindex_session_from_raw(
         aoa_root,
         record,
@@ -88138,6 +88154,7 @@ def test_first_pass_distillation_is_atomic_deterministic_and_stales_after_source
                 "raw",
                 "segments",
                 "distillation",
+                module.SESSION_INDEX_SHARDS_DIR,
             } and relative.name not in {
                 "session.manifest.json",
                 module.SESSION_INDEX_JSON,
@@ -88525,6 +88542,157 @@ def test_owner_resolution_uses_indexed_paths_when_grounding_falls_back(tmp_path:
     assert owner["status"] == "resolved_from_evidence"
     assert owner["owner_root"] == "/srv/example/aoa-sdk"
     assert owner["confidence"] == "medium"
+
+
+def test_session_index_task_episode_shards_checkpoint_and_resume(
+    tmp_path: Path,
+) -> None:
+    stage_dir = tmp_path / "session-stage"
+    episodes = [
+        {
+            "episode_id": f"task-{index:04d}",
+            "stable_id": f"session:task-{index:04d}:event-{index}",
+            "identity": {
+                "canonical_id": f"episode:canonical-{index}"
+            },
+            "status": "closed",
+            "semantic_text": (
+                "bounded semantic text "
+                "shard-redaction-marker-13579"
+            ),
+            "event_range": {
+                "from_line": index + 1,
+                "to_line": index + 1,
+            },
+        }
+        for index in range(3)
+    ]
+    publish_identity = {
+        "source": {
+            "raw_sha256": "a" * 64,
+            "raw_bytes": 300,
+            "raw_line_count": 3,
+        },
+        "publish_id": "b" * 64,
+    }
+    literal_policy = module.DerivedSessionSensitiveLiteralPolicy(
+        values_by_kind={
+            "fixture": {"shard-redaction-marker-13579"}
+        }
+    )
+
+    first = module.materialize_session_index_task_episode_shards(
+        stage_dir,
+        episodes,
+        publish_identity=publish_identity,
+        literal_policy=literal_policy,
+        workers=1,
+        cooperative_deadline_monotonic=time.monotonic() - 1,
+    )
+
+    assert first["complete"] is False
+    assert first["execution"]["completed_shard_count"] == 1
+    assert first["execution"]["rebuilt_shard_count"] == 1
+
+    resumed = module.materialize_session_index_task_episode_shards(
+        stage_dir,
+        episodes,
+        publish_identity=publish_identity,
+        literal_policy=literal_policy,
+        workers=2,
+    )
+    second = module.materialize_session_index_task_episode_shards(
+        stage_dir,
+        episodes,
+        publish_identity=publish_identity,
+        literal_policy=literal_policy,
+        workers=2,
+    )
+
+    assert resumed["complete"] is True
+    assert resumed["execution"]["checkpoint_reused_shard_count"] == 1
+    assert resumed["execution"]["rebuilt_shard_count"] == 2
+    assert second["complete"] is True
+    assert second["execution"]["checkpoint_reused_shard_count"] == 3
+    assert second["execution"]["rebuilt_shard_count"] == 0
+    assert resumed["payloads"] == second["payloads"]
+    shard_bytes = b"".join(
+        path.read_bytes()
+        for path in (
+            stage_dir
+            / module.SESSION_INDEX_SHARDS_DIR
+            / module.SESSION_INDEX_TASK_EPISODE_SHARDS_DIR
+        ).glob("*.json")
+    )
+    assert b"shard-redaction-marker-13579" not in shard_bytes
+    assert module.DERIVED_TEXT_REDACTION_MARKER.encode() in shard_bytes
+
+
+def test_session_index_shard_manifest_validates_embedded_compatibility_view(
+    tmp_path: Path,
+) -> None:
+    stage_dir = tmp_path / "session-stage"
+    episode = {
+        "episode_id": "task-0001",
+        "stable_id": "session:task-0001:event-1",
+        "identity": {"canonical_id": "episode:canonical-1"},
+        "status": "closed",
+        "semantic_text": "verified bounded episode",
+    }
+    publish_identity = {
+        "source": {
+            "raw_sha256": "c" * 64,
+            "raw_bytes": 100,
+            "raw_line_count": 1,
+        }
+    }
+    publish_identity["publish_id"] = module.projection_publish_id(
+        publish_identity
+    )
+    shards = module.materialize_session_index_task_episode_shards(
+        stage_dir,
+        [episode],
+        publish_identity=publish_identity,
+        literal_policy=module.DerivedSessionSensitiveLiteralPolicy(
+            values_by_kind={}
+        ),
+        workers=1,
+    )
+    module.write_session_index_shard_manifest(
+        stage_dir,
+        publish_identity=publish_identity,
+        source_identity=shards["source_identity"],
+        task_episode_records=shards["records"],
+    )
+    session_index = {
+        "task_episodes": shards["payloads"],
+        "component_storage": {
+            "manifest_ref": str(
+                Path(module.SESSION_INDEX_SHARDS_DIR)
+                / module.SESSION_INDEX_SHARD_MANIFEST_JSON
+            ),
+            "task_episode_shard_count": 1,
+        },
+    }
+
+    assert module.staged_session_index_shard_diagnostics(
+        stage_dir=stage_dir,
+        session_index=session_index,
+        expected_publish_id=publish_identity["publish_id"],
+    ) == []
+
+    shard_path = stage_dir / shards["records"][0]["ref"]
+    shard_path.write_text("{}\n", encoding="utf-8")
+    assert any(
+        reason.startswith(
+            "session_index_task_episode_shard_artifact_mismatch"
+        )
+        for reason in module.staged_session_index_shard_diagnostics(
+            stage_dir=stage_dir,
+            session_index=session_index,
+            expected_publish_id=publish_identity["publish_id"],
+        )
+    )
 
 
 def test_repair_session_titles_skips_ide_context_prompt(tmp_path: Path) -> None:
@@ -91232,6 +91400,65 @@ def test_session_sensitive_literal_policy_prefilter_preserves_assignment_detecti
         f"detached {assignment_value}",
         literal_policy=policy,
     )
+
+
+def test_derived_privacy_prefilters_skip_expensive_matchers_for_benign_text(
+    monkeypatch,
+) -> None:
+    class ForbiddenSubMatcher:
+        def sub(self, _replacement, _source: str):
+            raise AssertionError("candidate matcher scanned benign text")
+
+    for name in (
+        "DERIVED_TEXT_NAMED_QUOTED_ASSIGNMENT_RE",
+        "DERIVED_TEXT_NAMED_BARE_ASSIGNMENT_RE",
+        "DERIVED_TEXT_SENSITIVE_FLAG_RE",
+    ):
+        monkeypatch.setattr(module, name, ForbiddenSubMatcher())
+
+    benign = "ordinary transcript payload " + ("x" * 450_000)
+    projection = module.derived_text_privacy_projection(benign)
+
+    assert projection["status"] == "unchanged"
+    assert projection["text"] == benign
+
+
+@pytest.mark.parametrize(
+    "label,separator,secret",
+    [
+        ("".join(("api", "_key")), "=", "abcdefghijklmnop123456"),
+        ("".join(("client", "-secret")), "=", "abcdefghijklmnop123456"),
+        ("".join(("--access", "-token")), " ", "abcdefghijklmnop123456"),
+        ("".join(("service.", "password")), "=", "abcdefghijklmnop123456"),
+        ("".join(("credential", "s")), ":", "abcdefghijklmnop123456"),
+    ],
+)
+def test_derived_privacy_prefilters_admit_every_sensitive_shape(
+    label: str,
+    separator: str,
+    secret: str,
+) -> None:
+    source = f"{label}{separator}{secret}"
+    assert module.DERIVED_TEXT_SENSITIVE_LABEL_PREFILTER_RE.search(source)
+    assert module.DERIVED_SENSITIVE_ASSIGNMENT_PREFILTER_RE.search(source)
+    assert secret not in module.redact_derived_text(source)
+
+
+def test_redaction_prefilter_skips_full_assignment_matcher_for_benign_text(
+    monkeypatch,
+) -> None:
+    class ForbiddenSubMatcher:
+        def sub(self, _replacement, _source: str):
+            raise AssertionError("full assignment matcher scanned benign text")
+
+    monkeypatch.setattr(
+        module,
+        "DERIVED_SENSITIVE_ASSIGNMENT_RE",
+        ForbiddenSubMatcher(),
+    )
+    benign = "ordinary transcript payload " + ("x" * 450_000)
+
+    assert module.redact_derived_text(benign) == benign
 
 
 def test_generated_session_search_and_graph_views_do_not_duplicate_credentials(

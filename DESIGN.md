@@ -472,6 +472,16 @@ necessary-label prefilter before the exact sensitive-assignment matcher; the
 prefilter is a semantic no-op and removes the dominant benign-input
 backtracking cost.
 
+Session-index assembly is likewise decomposed without changing reader truth.
+Privacy-safe task episodes are immutable content-addressed component shards;
+their compact manifest binds raw source, producer generation, policy versions,
+artifact hashes, payload hashes, and the session publish identity. Completed
+shards checkpoint inside exact projection work and may be produced in bounded
+deterministic waves. During the coordinated reader migration,
+`session.index.json` retains its embedded task-episode compatibility view and
+staged validation proves exact shard-to-view parity. The shard store is a
+rebuildable acceleration and storage projection, not a second evidence owner.
+
 ## Query and Evidence-Reading Contract
 
 A query route should:

@@ -57,6 +57,10 @@ EVENT_CLASSIFICATION_BLOCK_MAX_LINES = 512
 EVENT_CLASSIFICATION_BLOCK_TARGET_BYTES = 4 * 1024 * 1024
 EVENT_CLASSIFICATION_CACHE_DIR = "classification-cache"
 EVENT_CLASSIFICATION_CACHE_INDEX_JSON = "index.json"
+SESSION_INDEX_SHARD_SCHEMA_VERSION = 1
+SESSION_INDEX_SHARDS_DIR = "session-index-shards"
+SESSION_INDEX_SHARD_MANIFEST_JSON = "manifest.json"
+SESSION_INDEX_TASK_EPISODE_SHARDS_DIR = "task-episodes"
 SESSION_MEMORY_EVIDENCE_PACKET_SCHEMA_VERSION = 1
 DERIVED_TEXT_REDACTION_POLICY_VERSION = 5
 DERIVED_TEXT_REDACTION_MARKER = "[REDACTED:credential]"
@@ -4683,6 +4687,15 @@ DERIVED_TEXT_SENSITIVE_LABEL_PATTERN = (
     r"bearer[_-]?token|session[_-]?token)"
     r"(?:[_-][A-Za-z0-9]+)*"
 )
+# Every named-assignment and sensitive-flag match below necessarily contains
+# one of these label stems.  The cheap prefilter therefore skips only regex
+# work, never a candidate that the admitting expressions could redact.
+DERIVED_TEXT_SENSITIVE_LABEL_PREFILTER_RE = re.compile(
+    r"(?:api[_-]?key|apikey|secret|client[_-]?secret|private[_-]?key|"
+    r"password|passwd|credential|access[_-]?token|refresh[_-]?token|"
+    r"auth[_-]?token|bearer[_-]?token|session[_-]?token)",
+    flags=re.IGNORECASE,
+)
 DERIVED_TEXT_SENSITIVE_METADATA_SUFFIX_RE = re.compile(
     r"(?:[_-](?:name|status|state|path|file|filename|id|present|configured|"
     r"enabled|source|owner|kind|type|count|length|len|label|risk|signal|"
@@ -4738,6 +4751,10 @@ DERIVED_TEXT_KNOWN_CREDENTIAL_RE = re.compile(
     r"(?:AKIA|ASIA)[0-9A-Z]{16}|"
     r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"
     r")(?![A-Za-z0-9])",
+    flags=re.IGNORECASE,
+)
+DERIVED_TEXT_KNOWN_CREDENTIAL_PREFILTER_RE = re.compile(
+    r"(?:sk-|ghp_|github_pat_|xox[baprs]-|AIza|AKIA|ASIA|eyJ)",
     flags=re.IGNORECASE,
 )
 DERIVED_TEXT_OPAQUE_CREDENTIAL_RE = re.compile(
@@ -4888,10 +4905,22 @@ def derived_text_privacy_projection(
         placeholder = record(derived_text_privacy_label_kind(label), label)
         return f"{match.group('prefix')}{quote}{placeholder}{quote}"
 
-    redacted = DERIVED_TEXT_PEM_PRIVATE_KEY_RE.sub(redact_pem, source)
-    redacted = DERIVED_TEXT_NAMED_QUOTED_ASSIGNMENT_RE.sub(redact_named, redacted)
-    redacted = DERIVED_TEXT_NAMED_BARE_ASSIGNMENT_RE.sub(redact_named, redacted)
-    redacted = DERIVED_TEXT_SENSITIVE_FLAG_RE.sub(redact_named, redacted)
+    redacted = source
+    if "-----BEGIN" in redacted:
+        redacted = DERIVED_TEXT_PEM_PRIVATE_KEY_RE.sub(redact_pem, redacted)
+    if DERIVED_TEXT_SENSITIVE_LABEL_PREFILTER_RE.search(redacted):
+        redacted = DERIVED_TEXT_NAMED_QUOTED_ASSIGNMENT_RE.sub(
+            redact_named,
+            redacted,
+        )
+        redacted = DERIVED_TEXT_NAMED_BARE_ASSIGNMENT_RE.sub(
+            redact_named,
+            redacted,
+        )
+        redacted = DERIVED_TEXT_SENSITIVE_FLAG_RE.sub(
+            redact_named,
+            redacted,
+        )
 
     def redact_url(match: re.Match[str]) -> str:
         return (
@@ -4900,19 +4929,23 @@ def derived_text_privacy_projection(
             f"{match.group('suffix')}"
         )
 
-    redacted = DERIVED_TEXT_URL_CREDENTIAL_RE.sub(redact_url, redacted)
+    if "://" in redacted and "@" in redacted:
+        redacted = DERIVED_TEXT_URL_CREDENTIAL_RE.sub(redact_url, redacted)
 
     def redact_authorization(match: re.Match[str]) -> str:
         return f"{match.group('prefix')}{record('token', 'Authorization')}"
 
-    redacted = DERIVED_TEXT_AUTHORIZATION_RE.sub(
-        redact_authorization,
-        redacted,
-    )
-    redacted = DERIVED_TEXT_KNOWN_CREDENTIAL_RE.sub(
-        lambda _match: record("token"),
-        redacted,
-    )
+    redacted_casefold = redacted.casefold()
+    if "authorization" in redacted_casefold or "bearer" in redacted_casefold:
+        redacted = DERIVED_TEXT_AUTHORIZATION_RE.sub(
+            redact_authorization,
+            redacted,
+        )
+    if DERIVED_TEXT_KNOWN_CREDENTIAL_PREFILTER_RE.search(redacted):
+        redacted = DERIVED_TEXT_KNOWN_CREDENTIAL_RE.sub(
+            lambda _match: record("token"),
+            redacted,
+        )
 
     def redact_opaque(match: re.Match[str]) -> str:
         token = str(match.group("value") or "")
@@ -12765,10 +12798,16 @@ def derived_session_sensitive_literal_values_from_texts(
         values_by_kind[kind].add(candidate)
 
     for source in sources:
-        for match in DERIVED_BEARER_CREDENTIAL_RE.finditer(source):
-            add("bearer_credential", match.groupdict().get("value"))
-        for match in DERIVED_SENSITIVE_CLI_ARGUMENT_RE.finditer(source):
-            add("sensitive_cli_argument", match.groupdict().get("value"))
+        source_casefold = source.casefold()
+        if "bearer" in source_casefold:
+            for match in DERIVED_BEARER_CREDENTIAL_RE.finditer(source):
+                add("bearer_credential", match.groupdict().get("value"))
+        if (
+            "--" in source
+            and DERIVED_SENSITIVE_ASSIGNMENT_PREFILTER_RE.search(source)
+        ):
+            for match in DERIVED_SENSITIVE_CLI_ARGUMENT_RE.finditer(source):
+                add("sensitive_cli_argument", match.groupdict().get("value"))
         if DERIVED_SENSITIVE_ASSIGNMENT_PREFILTER_RE.search(source):
             for match in DERIVED_SENSITIVE_ASSIGNMENT_RE.finditer(source):
                 add(
@@ -12776,10 +12815,12 @@ def derived_session_sensitive_literal_values_from_texts(
                     match.groupdict().get("value"),
                     label=str(match.groupdict().get("key") or ""),
                 )
-        for match in DERIVED_URI_USERINFO_RE.finditer(source):
-            add("uri_userinfo_password", match.groupdict().get("value"))
-        for match in DERIVED_KNOWN_CREDENTIAL_RE.finditer(source):
-            add("known_credential_prefix", match.group(0))
+        if "://" in source and "@" in source:
+            for match in DERIVED_URI_USERINFO_RE.finditer(source):
+                add("uri_userinfo_password", match.groupdict().get("value"))
+        if DERIVED_TEXT_KNOWN_CREDENTIAL_PREFILTER_RE.search(source):
+            for match in DERIVED_KNOWN_CREDENTIAL_RE.finditer(source):
+                add("known_credential_prefix", match.group(0))
     return {
         kind: set(values)
         for kind, values in values_by_kind.items()
@@ -12833,10 +12874,13 @@ def redact_derived_text_with_report(
         redacted, count = literal_policy.redact(redacted)
         counts["session_sensitive_literal"] += count
 
-    redacted, count = DERIVED_PRIVATE_KEY_BLOCK_RE.subn(
-        DERIVED_PRIVATE_KEY_REDACTION_MARKER,
-        redacted,
-    )
+    if "-----BEGIN" in redacted:
+        redacted, count = DERIVED_PRIVATE_KEY_BLOCK_RE.subn(
+            DERIVED_PRIVATE_KEY_REDACTION_MARKER,
+            redacted,
+        )
+    else:
+        count = 0
     counts["private_key_block"] += count
 
     def replace_prefixed(kind: str) -> Callable[[re.Match[str]], str]:
@@ -12852,26 +12896,36 @@ def redact_derived_text_with_report(
 
         return replacement
 
-    redacted = DERIVED_BEARER_CREDENTIAL_RE.sub(
-        replace_prefixed("bearer_credential"),
-        redacted,
-    )
-    redacted = DERIVED_SENSITIVE_CLI_ARGUMENT_RE.sub(
-        replace_prefixed("sensitive_cli_argument"),
-        redacted,
-    )
-    redacted = DERIVED_SENSITIVE_ASSIGNMENT_RE.sub(
-        replace_prefixed("sensitive_assignment"),
-        redacted,
-    )
-    redacted = DERIVED_URI_USERINFO_RE.sub(
-        replace_prefixed("uri_userinfo_password"),
-        redacted,
-    )
-    redacted, count = DERIVED_KNOWN_CREDENTIAL_RE.subn(
-        DERIVED_TEXT_REDACTION_MARKER,
-        redacted,
-    )
+    if "bearer" in redacted.casefold():
+        redacted = DERIVED_BEARER_CREDENTIAL_RE.sub(
+            replace_prefixed("bearer_credential"),
+            redacted,
+        )
+    if (
+        "--" in redacted
+        and DERIVED_SENSITIVE_ASSIGNMENT_PREFILTER_RE.search(redacted)
+    ):
+        redacted = DERIVED_SENSITIVE_CLI_ARGUMENT_RE.sub(
+            replace_prefixed("sensitive_cli_argument"),
+            redacted,
+        )
+    if DERIVED_SENSITIVE_ASSIGNMENT_PREFILTER_RE.search(redacted):
+        redacted = DERIVED_SENSITIVE_ASSIGNMENT_RE.sub(
+            replace_prefixed("sensitive_assignment"),
+            redacted,
+        )
+    if "://" in redacted and "@" in redacted:
+        redacted = DERIVED_URI_USERINFO_RE.sub(
+            replace_prefixed("uri_userinfo_password"),
+            redacted,
+        )
+    if DERIVED_TEXT_KNOWN_CREDENTIAL_PREFILTER_RE.search(redacted):
+        redacted, count = DERIVED_KNOWN_CREDENTIAL_RE.subn(
+            DERIVED_TEXT_REDACTION_MARKER,
+            redacted,
+        )
+    else:
+        count = 0
     counts["known_credential_prefix"] += count
     privacy_projection = derived_text_privacy_projection(redacted)
     redacted = str(privacy_projection.get("text") or "")
@@ -21120,7 +21174,417 @@ def write_session_index(
     reference_session_dir: Path | None = None,
     publish_identity: dict[str, Any] | None = None,
     literal_policy: DerivedSessionSensitiveLiteralPolicy | None = None,
-) -> None:
+    workers: int = 1,
+    cooperative_deadline_monotonic: float | None = None,
+    execution_metrics_out: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return write_session_index_impl(
+        session_dir,
+        manifest,
+        events,
+        reference_session_dir=reference_session_dir,
+        publish_identity=publish_identity,
+        literal_policy=literal_policy,
+        workers=workers,
+        cooperative_deadline_monotonic=(
+            cooperative_deadline_monotonic
+        ),
+        execution_metrics_out=execution_metrics_out,
+    )
+
+
+def session_index_shard_json_bytes(value: Any) -> bytes:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def session_index_shard_payload_sha256(value: Any) -> str:
+    return hashlib.sha256(
+        session_index_shard_json_bytes(value)
+    ).hexdigest()
+
+
+def session_index_task_episode_shard_key(
+    episode: dict[str, Any],
+    ordinal: int,
+) -> str:
+    identity = (
+        episode.get("identity")
+        if isinstance(episode.get("identity"), dict)
+        else {}
+    )
+    stable = str(
+        identity.get("canonical_id")
+        or episode.get("stable_id")
+        or episode.get("episode_id")
+        or f"ordinal-{ordinal:04d}"
+    )
+    return f"{ordinal:04d}:{stable}"
+
+
+def session_index_task_episode_shard_envelope(
+    task: tuple[
+        int,
+        str,
+        dict[str, Any],
+        DerivedSessionSensitiveLiteralPolicy,
+        dict[str, Any],
+    ],
+) -> tuple[int, str, dict[str, Any]]:
+    (
+        ordinal,
+        component_key,
+        episode,
+        literal_policy,
+        source_identity,
+    ) = task
+    payload = redact_derived_value(
+        episode,
+        literal_policy=literal_policy,
+    )
+    envelope = {
+        "schema_version": SESSION_INDEX_SHARD_SCHEMA_VERSION,
+        "artifact_type": "session_index_component_shard",
+        "component": "task_episodes",
+        "component_key": component_key,
+        "source_identity": source_identity,
+        "redaction": {
+            "privacy_policy_version": (
+                DERIVED_TEXT_PRIVACY_POLICY_VERSION
+            ),
+            "redaction_policy_version": (
+                DERIVED_TEXT_REDACTION_POLICY_VERSION
+            ),
+            "whole_session_literal_policy": True,
+        },
+        "payload_sha256": session_index_shard_payload_sha256(
+            payload
+        ),
+        "payload": payload,
+    }
+    return ordinal, component_key, envelope
+
+
+def write_session_index_component_shard(
+    shard_dir: Path,
+    envelope: dict[str, Any],
+) -> dict[str, Any]:
+    shard_dir.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=".component-shard-",
+        suffix=".json",
+        dir=shard_dir,
+    )
+    os.close(descriptor)
+    temporary_path = Path(temporary_name)
+    try:
+        write_json(temporary_path, envelope)
+        artifact_sha256 = sha256_file(temporary_path)
+        final_path = shard_dir / f"{artifact_sha256}.json"
+        if final_path.is_file():
+            if sha256_file(final_path) != artifact_sha256:
+                raise ValueError(
+                    "session_index_component_shard_digest_mismatch"
+                )
+            temporary_path.unlink(missing_ok=True)
+        else:
+            temporary_path.replace(final_path)
+        return {
+            "component_key": str(
+                envelope.get("component_key") or ""
+            ),
+            "ref": str(
+                Path(SESSION_INDEX_SHARDS_DIR)
+                / SESSION_INDEX_TASK_EPISODE_SHARDS_DIR
+                / final_path.name
+            ),
+            "artifact_sha256": artifact_sha256,
+            "payload_sha256": str(
+                envelope.get("payload_sha256") or ""
+            ),
+            "bytes": final_path.stat().st_size,
+        }
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
+def staged_session_index_task_episode_shards(
+    session_dir: Path,
+    *,
+    source_identity: dict[str, Any],
+) -> dict[str, tuple[dict[str, Any], dict[str, Any]]]:
+    shard_dir = (
+        session_dir
+        / SESSION_INDEX_SHARDS_DIR
+        / SESSION_INDEX_TASK_EPISODE_SHARDS_DIR
+    )
+    current: dict[
+        str, tuple[dict[str, Any], dict[str, Any]]
+    ] = {}
+    if not shard_dir.is_dir():
+        return current
+    for path in sorted(shard_dir.glob("*.json")):
+        if path.stem != sha256_file(path):
+            continue
+        envelope = read_json(path, {})
+        if (
+            int_value(envelope.get("schema_version"))
+            != SESSION_INDEX_SHARD_SCHEMA_VERSION
+            or envelope.get("artifact_type")
+            != "session_index_component_shard"
+            or envelope.get("component") != "task_episodes"
+            or envelope.get("source_identity") != source_identity
+            or not isinstance(envelope.get("payload"), dict)
+            or session_index_shard_payload_sha256(
+                envelope["payload"]
+            )
+            != str(envelope.get("payload_sha256") or "")
+        ):
+            continue
+        component_key = str(
+            envelope.get("component_key") or ""
+        )
+        if not component_key:
+            continue
+        current[component_key] = (
+            envelope,
+            {
+                "component_key": component_key,
+                "ref": str(
+                    Path(SESSION_INDEX_SHARDS_DIR)
+                    / SESSION_INDEX_TASK_EPISODE_SHARDS_DIR
+                    / path.name
+                ),
+                "artifact_sha256": path.stem,
+                "payload_sha256": str(
+                    envelope.get("payload_sha256") or ""
+                ),
+                "bytes": path.stat().st_size,
+            },
+        )
+    return current
+
+
+def materialize_session_index_task_episode_shards(
+    session_dir: Path,
+    task_episodes: list[dict[str, Any]],
+    *,
+    publish_identity: dict[str, Any],
+    literal_policy: DerivedSessionSensitiveLiteralPolicy,
+    workers: int,
+    cooperative_deadline_monotonic: float | None = None,
+) -> dict[str, Any]:
+    generation_identity = task_episode_source_generation_identity()
+    source = (
+        publish_identity.get("source")
+        if isinstance(publish_identity.get("source"), dict)
+        else {}
+    )
+    source_identity = {
+        "raw_sha256": str(source.get("raw_sha256") or ""),
+        "raw_bytes": int_value(source.get("raw_bytes")),
+        "raw_line_count": int_value(
+            source.get("raw_line_count")
+        ),
+        "task_episode_generation_id": str(
+            generation_identity.get("generation_id") or ""
+        ),
+    }
+    existing = staged_session_index_task_episode_shards(
+        session_dir,
+        source_identity=source_identity,
+    )
+    payloads: dict[int, dict[str, Any]] = {}
+    records: dict[int, dict[str, Any]] = {}
+    pending: list[
+        tuple[
+            int,
+            str,
+            dict[str, Any],
+            DerivedSessionSensitiveLiteralPolicy,
+            dict[str, Any],
+        ]
+    ] = []
+    reused_count = 0
+    for ordinal, episode in enumerate(task_episodes):
+        component_key = session_index_task_episode_shard_key(
+            episode,
+            ordinal,
+        )
+        prior = existing.get(component_key)
+        if prior is not None:
+            envelope, record = prior
+            payloads[ordinal] = dict(envelope["payload"])
+            records[ordinal] = dict(record)
+            reused_count += 1
+            continue
+        pending.append(
+            (
+                ordinal,
+                component_key,
+                episode,
+                literal_policy,
+                source_identity,
+            )
+        )
+
+    configured_workers = max(1, min(6, int_value(workers, 1)))
+    actual_workers = min(configured_workers, len(pending))
+    fallback_reason = ""
+    execution_mode = "serial"
+    shard_dir = (
+        session_dir
+        / SESSION_INDEX_SHARDS_DIR
+        / SESSION_INDEX_TASK_EPISODE_SHARDS_DIR
+    )
+
+    def record_result(
+        result: tuple[int, str, dict[str, Any]],
+    ) -> None:
+        ordinal, _, envelope = result
+        record = write_session_index_component_shard(
+            shard_dir,
+            envelope,
+        )
+        payloads[ordinal] = dict(envelope["payload"])
+        records[ordinal] = record
+
+    processed_pending = 0
+    if actual_workers > 1:
+        try:
+            execution_mode = "process_pool"
+            with ProcessPoolExecutor(
+                max_workers=actual_workers,
+                mp_context=multiprocessing.get_context("fork"),
+            ) as executor:
+                for wave_start in range(
+                    0, len(pending), actual_workers
+                ):
+                    wave = pending[
+                        wave_start : wave_start + actual_workers
+                    ]
+                    for result in executor.map(
+                        session_index_task_episode_shard_envelope,
+                        wave,
+                    ):
+                        record_result(result)
+                        processed_pending += 1
+                    if (
+                        cooperative_deadline_monotonic is not None
+                        and time.monotonic()
+                        >= cooperative_deadline_monotonic
+                    ):
+                        break
+        except Exception as exc:
+            fallback_reason = f"{type(exc).__name__}:{exc}"
+            execution_mode = "serial_fallback"
+    if actual_workers <= 1 or fallback_reason:
+        for task in pending[processed_pending:]:
+            record_result(
+                session_index_task_episode_shard_envelope(task)
+            )
+            processed_pending += 1
+            if (
+                cooperative_deadline_monotonic is not None
+                and time.monotonic()
+                >= cooperative_deadline_monotonic
+            ):
+                break
+
+    complete = len(payloads) == len(task_episodes)
+    ordered_payloads = [
+        payloads[index]
+        for index in range(len(task_episodes))
+        if index in payloads
+    ]
+    ordered_records = [
+        records[index]
+        for index in range(len(task_episodes))
+        if index in records
+    ]
+    if complete and shard_dir.is_dir():
+        referenced_names = {
+            Path(str(record.get("ref") or "")).name
+            for record in ordered_records
+        }
+        for path in shard_dir.glob("*.json"):
+            if path.name not in referenced_names:
+                path.unlink()
+    return {
+        "complete": complete,
+        "payloads": ordered_payloads,
+        "records": ordered_records,
+        "source_identity": source_identity,
+        "execution": {
+            "configured_workers": configured_workers,
+            "actual_workers": max(1, actual_workers),
+            "mode": execution_mode,
+            "parallel_fallback_reason": fallback_reason,
+            "planned_shard_count": len(task_episodes),
+            "completed_shard_count": len(payloads),
+            "checkpoint_reused_shard_count": reused_count,
+            "rebuilt_shard_count": processed_pending,
+        },
+    }
+
+
+def write_session_index_shard_manifest(
+    session_dir: Path,
+    *,
+    publish_identity: dict[str, Any],
+    source_identity: dict[str, Any],
+    task_episode_records: list[dict[str, Any]],
+) -> dict[str, Any]:
+    manifest = {
+        "schema_version": SESSION_INDEX_SHARD_SCHEMA_VERSION,
+        "artifact_type": "session_index_shard_manifest",
+        "storage_mode": (
+            "content_addressed_components_with_embedded_compatibility_view"
+        ),
+        "projection_publish": publish_identity,
+        "source_identity": source_identity,
+        "components": {
+            "task_episodes": task_episode_records,
+        },
+        "component_counts": {
+            "task_episodes": len(task_episode_records),
+        },
+        "authority": (
+            "rebuildable acceleration and storage projection; raw, "
+            "manifest, and segment evidence remain stronger"
+        ),
+    }
+    manifest_path = (
+        session_dir
+        / SESSION_INDEX_SHARDS_DIR
+        / SESSION_INDEX_SHARD_MANIFEST_JSON
+    )
+    write_json(manifest_path, manifest)
+    return manifest
+
+
+def write_session_index_impl(
+    session_dir: Path,
+    manifest: dict[str, Any],
+    events: list[RawEvent],
+    *,
+    reference_session_dir: Path | None = None,
+    publish_identity: dict[str, Any] | None = None,
+    literal_policy: DerivedSessionSensitiveLiteralPolicy | None = None,
+    workers: int = 1,
+    cooperative_deadline_monotonic: float | None = None,
+    execution_metrics_out: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    execution_started = time.monotonic()
+    execution_metrics: dict[str, Any] = {}
+    if literal_policy is None:
+        literal_policy = DerivedSessionSensitiveLiteralPolicy(
+            values_by_kind={},
+        )
     counts = Counter(event.event_type for event in events)
     by_type = {event_type: counts[event_type] for event_type in EVENT_TYPE_ORDER if counts[event_type]}
     family_counts = dict(sorted(Counter(event.family for event in events).items()))
@@ -21131,27 +21595,81 @@ def write_session_index(
     session_act_counts = session_act_counts_for_events(events)
     agent_event_counts = agent_event_counts_for_events(events)
     route_signal_counts = route_signal_counts_for_events(events)
+    phase_started = time.monotonic()
+    task_episode_segments = (
+        manifest.get("segments", [])
+        if isinstance(manifest.get("segments"), list)
+        else []
+    )
     task_episodes = generated_task_episodes_for_events(
         events,
-        manifest.get("segments", []) if isinstance(manifest.get("segments"), list) else [],
-        lineage=manifest.get("lineage") if isinstance(manifest.get("lineage"), dict) else {},
+        task_episode_segments,
+        lineage=(
+            manifest.get("lineage")
+            if isinstance(manifest.get("lineage"), dict)
+            else {}
+        ),
     )
+    execution_metrics["task_episode_generation_ms"] = int(
+        (time.monotonic() - phase_started) * 1000
+    )
+    phase_started = time.monotonic()
     attach_task_episode_session_context(
         task_episodes,
         session_dir=reference_session_dir or session_dir,
         manifest=manifest,
     )
-    task_episodes = redact_derived_value(
-        task_episodes,
-        literal_policy=literal_policy,
+    execution_metrics["task_episode_context_ms"] = int(
+        (time.monotonic() - phase_started) * 1000
     )
-    task_episode_counts = task_episode_counts_for_episodes(task_episodes)
+    phase_started = time.monotonic()
+    task_episode_shards = (
+        materialize_session_index_task_episode_shards(
+            session_dir,
+            task_episodes,
+            publish_identity=(publish_identity or {}),
+            literal_policy=literal_policy,
+            workers=workers,
+            cooperative_deadline_monotonic=(
+                cooperative_deadline_monotonic
+            ),
+        )
+    )
+    execution_metrics["task_episode_shards_ms"] = int(
+        (time.monotonic() - phase_started) * 1000
+    )
+    execution_metrics["task_episode_shards"] = dict(
+        task_episode_shards.get("execution", {})
+    )
+    if not task_episode_shards.get("complete"):
+        execution_metrics["total_ms"] = int(
+            (time.monotonic() - execution_started) * 1000
+        )
+        if execution_metrics_out is not None:
+            execution_metrics_out.update(execution_metrics)
+        return {
+            "status": "checkpointed",
+            "checkpoint_phase": "session_index_task_episode_shards",
+            "execution": execution_metrics,
+        }
+    task_episodes = [
+        dict(item)
+        for item in task_episode_shards.get("payloads", [])
+        if isinstance(item, dict)
+    ]
+    task_episode_counts = task_episode_counts_for_episodes(
+        task_episodes,
+    )
+    phase_started = time.monotonic()
     goal_lifecycle_payload = generated_goal_lifecycles_for_events(
         events,
         manifest.get("segments", []) if isinstance(manifest.get("segments"), list) else [],
         task_episodes,
         session_id=str(manifest["session_id"]),
         session_label=str((manifest.get("display") if isinstance(manifest.get("display"), dict) else {}).get("label") or manifest.get("session_label") or ""),
+    )
+    execution_metrics["goal_lifecycle_generation_ms"] = int(
+        (time.monotonic() - phase_started) * 1000
     )
     display = manifest.get("display", {}) if isinstance(manifest.get("display"), dict) else {}
     lineage = manifest.get("lineage") if isinstance(manifest.get("lineage"), dict) else {}
@@ -21228,7 +21746,7 @@ def write_session_index(
         "session_act_counts": session_act_counts,
         "agent_event_counts": agent_event_counts,
         "task_episode_counts": task_episode_counts,
-        "task_episodes": task_episodes,
+        "task_episodes": [],
         "goal_lifecycle_counts": goal_lifecycle_payload["goal_lifecycle_counts"],
         "goal_event_counts": goal_lifecycle_payload["goal_event_counts"],
         "goal_lifecycles": goal_lifecycle_payload["goal_lifecycles"],
@@ -21253,17 +21771,44 @@ def write_session_index(
         ],
         "session_sensitive_literals": (
             literal_policy.report()
-            if literal_policy is not None
-            else DerivedSessionSensitiveLiteralPolicy(
-                values_by_kind={},
-            ).report()
         ),
     }
+    phase_started = time.monotonic()
     session_index_json = redact_derived_value(
         session_index_json,
         literal_policy=literal_policy,
     )
+    execution_metrics["root_redaction_ms"] = int(
+        (time.monotonic() - phase_started) * 1000
+    )
+    session_index_json["task_episodes"] = task_episodes
+    shard_manifest = write_session_index_shard_manifest(
+        session_dir,
+        publish_identity=(publish_identity or {}),
+        source_identity=dict(
+            task_episode_shards.get("source_identity", {})
+        ),
+        task_episode_records=[
+            dict(item)
+            for item in task_episode_shards.get("records", [])
+            if isinstance(item, dict)
+        ],
+    )
+    session_index_json["component_storage"] = {
+        "schema_version": SESSION_INDEX_SHARD_SCHEMA_VERSION,
+        "mode": shard_manifest["storage_mode"],
+        "manifest_ref": str(
+            Path(SESSION_INDEX_SHARDS_DIR)
+            / SESSION_INDEX_SHARD_MANIFEST_JSON
+        ),
+        "task_episode_shard_count": len(task_episodes),
+        "embedded_compatibility_view": True,
+    }
+    phase_started = time.monotonic()
     write_json(session_dir / SESSION_INDEX_JSON, session_index_json)
+    execution_metrics["compatibility_json_write_ms"] = int(
+        (time.monotonic() - phase_started) * 1000
+    )
     legacy_json = session_dir / LEGACY_SESSION_INDEX_JSON
     if legacy_json.exists():
         legacy_json.unlink()
@@ -21389,6 +21934,7 @@ def write_session_index(
             for key, count in list(keys.items())[:12]:
                 lines.append(f"  - `{key}`: {count}")
         lines.append("")
+    phase_started = time.monotonic()
     (session_dir / SESSION_INDEX_MARKDOWN).write_text(
         redact_derived_text(
             "\n".join(lines),
@@ -21399,6 +21945,21 @@ def write_session_index(
     legacy_md = session_dir / LEGACY_SESSION_INDEX_MARKDOWN
     if legacy_md.exists():
         legacy_md.unlink()
+    execution_metrics["markdown_write_ms"] = int(
+        (time.monotonic() - phase_started) * 1000
+    )
+    execution_metrics["total_ms"] = int(
+        (time.monotonic() - execution_started) * 1000
+    )
+    if execution_metrics_out is not None:
+        execution_metrics_out.update(execution_metrics)
+    return {
+        "status": "complete",
+        "component_storage": session_index_json[
+            "component_storage"
+        ],
+        "execution": execution_metrics,
+    }
 
 
 def session_projection_publish_journal_path(
@@ -21936,6 +22497,157 @@ def session_projection_semantic_digest(
     }
 
 
+def staged_session_index_shard_diagnostics(
+    *,
+    stage_dir: Path,
+    session_index: dict[str, Any],
+    expected_publish_id: str,
+) -> list[str]:
+    storage = (
+        session_index.get("component_storage")
+        if isinstance(
+            session_index.get("component_storage"), dict
+        )
+        else {}
+    )
+    if not storage:
+        return []
+    diagnostics: list[str] = []
+    expected_manifest_ref = str(
+        Path(SESSION_INDEX_SHARDS_DIR)
+        / SESSION_INDEX_SHARD_MANIFEST_JSON
+    )
+    if str(storage.get("manifest_ref") or "") != (
+        expected_manifest_ref
+    ):
+        return ["session_index_shard_manifest_ref_invalid"]
+    manifest_path = stage_dir / expected_manifest_ref
+    manifest = read_json(manifest_path, {})
+    if (
+        int_value(manifest.get("schema_version"))
+        != SESSION_INDEX_SHARD_SCHEMA_VERSION
+        or manifest.get("artifact_type")
+        != "session_index_shard_manifest"
+    ):
+        return ["session_index_shard_manifest_invalid"]
+    if projection_publish_id(
+        manifest.get("projection_publish")
+        if isinstance(manifest.get("projection_publish"), dict)
+        else {}
+    ) != expected_publish_id:
+        diagnostics.append(
+            "session_index_shard_manifest_publish_id_mismatch"
+        )
+    components = (
+        manifest.get("components")
+        if isinstance(manifest.get("components"), dict)
+        else {}
+    )
+    records = (
+        components.get("task_episodes")
+        if isinstance(components.get("task_episodes"), list)
+        else []
+    )
+    episodes = (
+        session_index.get("task_episodes")
+        if isinstance(session_index.get("task_episodes"), list)
+        else []
+    )
+    if len(records) != len(episodes):
+        diagnostics.append(
+            "session_index_task_episode_shard_count_mismatch"
+        )
+        return diagnostics
+    if int_value(storage.get("task_episode_shard_count"), -1) != len(
+        episodes
+    ):
+        diagnostics.append(
+            "session_index_component_storage_count_mismatch"
+        )
+    manifest_source_identity = (
+        manifest.get("source_identity")
+        if isinstance(manifest.get("source_identity"), dict)
+        else {}
+    )
+    for ordinal, (record, episode) in enumerate(
+        zip(records, episodes, strict=True)
+    ):
+        if not isinstance(record, dict) or not isinstance(
+            episode, dict
+        ):
+            diagnostics.append(
+                f"session_index_task_episode_shard_record_invalid:{ordinal}"
+            )
+            continue
+        expected_key = session_index_task_episode_shard_key(
+            episode,
+            ordinal,
+        )
+        if str(record.get("component_key") or "") != expected_key:
+            diagnostics.append(
+                f"session_index_task_episode_shard_key_mismatch:{ordinal}"
+            )
+        ref = str(record.get("ref") or "")
+        relative = Path(ref)
+        expected_parent = (
+            Path(SESSION_INDEX_SHARDS_DIR)
+            / SESSION_INDEX_TASK_EPISODE_SHARDS_DIR
+        )
+        if (
+            relative.is_absolute()
+            or ".." in relative.parts
+            or relative.parent != expected_parent
+            or relative.suffix != ".json"
+        ):
+            diagnostics.append(
+                f"session_index_task_episode_shard_ref_invalid:{ordinal}"
+            )
+            continue
+        shard_path = stage_dir / relative
+        artifact_sha256 = str(
+            record.get("artifact_sha256") or ""
+        )
+        if (
+            not shard_path.is_file()
+            or artifact_sha256 != shard_path.stem
+            or sha256_file(shard_path) != artifact_sha256
+        ):
+            diagnostics.append(
+                f"session_index_task_episode_shard_artifact_mismatch:{ordinal}"
+            )
+            continue
+        envelope = read_json(shard_path, {})
+        payload = (
+            envelope.get("payload")
+            if isinstance(envelope.get("payload"), dict)
+            else {}
+        )
+        payload_sha256 = session_index_shard_payload_sha256(
+            episode
+        )
+        if (
+            int_value(envelope.get("schema_version"))
+            != SESSION_INDEX_SHARD_SCHEMA_VERSION
+            or envelope.get("artifact_type")
+            != "session_index_component_shard"
+            or envelope.get("component") != "task_episodes"
+            or envelope.get("source_identity")
+            != manifest_source_identity
+            or str(envelope.get("component_key") or "")
+            != expected_key
+            or str(envelope.get("payload_sha256") or "")
+            != payload_sha256
+            or str(record.get("payload_sha256") or "")
+            != payload_sha256
+            or session_index_shard_payload_sha256(payload)
+            != payload_sha256
+        ):
+            diagnostics.append(
+                f"session_index_task_episode_shard_payload_mismatch:{ordinal}"
+            )
+    return diagnostics
+
+
 def validate_staged_session_projection(
     *,
     stage_dir: Path,
@@ -21995,6 +22707,13 @@ def validate_staged_session_projection(
                 staged_manifest
                 if isinstance(staged_manifest, dict)
                 else {},
+            )
+        )
+        diagnostics.extend(
+            staged_session_index_shard_diagnostics(
+                stage_dir=stage_dir,
+                session_index=staged_session_index,
+                expected_publish_id=expected_publish_id,
             )
         )
     else:
@@ -22338,6 +23057,7 @@ def stage_existing_session_projection(
         Path(SESSION_INDEX_MARKDOWN),
         Path("session.manifest.json"),
         Path(SESSION_INDEX_JSON),
+        Path(SESSION_INDEX_SHARDS_DIR),
     ]
     try:
         for relative_path in relative_paths:
@@ -22402,6 +23122,7 @@ def atomic_publish_session_projection(
         Path(SESSION_INDEX_MARKDOWN),
         Path("session.manifest.json"),
         Path(SESSION_INDEX_JSON),
+        Path(SESSION_INDEX_SHARDS_DIR),
         Path("distillation"),
     ]
     operations: list[dict[str, Any]] = []
@@ -31356,17 +32077,33 @@ def reindex_session_from_raw(
                 publish_identity=publish_identity,
             ),
         )
-        write_session_index(
+        session_index_execution: dict[str, Any] = {}
+        session_index_result = write_session_index(
             stage_dir,
             manifest,
             events,
             reference_session_dir=session_dir,
             publish_identity=publish_identity,
             literal_policy=literal_policy,
+            workers=configured_segment_workers,
+            cooperative_deadline_monotonic=(
+                cooperative_deadline_monotonic
+            ),
+            execution_metrics_out=session_index_execution,
         )
         phase_timings_ms["session_index_generation"] = int(
             (time.monotonic() - phase_started) * 1000
         )
+        work_state["session_index_execution"] = (
+            session_index_execution
+        )
+        if session_index_result.get("status") == "checkpointed":
+            return checkpointed_result(
+                str(
+                    session_index_result.get("checkpoint_phase")
+                    or "session_index_shards_in_progress"
+                )
+            )
         save_work_state("projection_complete_unpublished")
         if deadline_exhausted():
             return checkpointed_result(
