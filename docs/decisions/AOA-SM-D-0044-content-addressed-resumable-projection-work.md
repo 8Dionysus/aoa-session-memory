@@ -69,8 +69,11 @@ changes. Existing graph stores receive this state through an idempotent
 migration.
 
 Oversized initial projections use a resumable heavy lane with bounded slices.
-All oversized deferred candidates, not only the one admitted by fairness for
-the current slice, are removed from that maintenance cycle's locked scope.
+All oversized deferred or generation-stale candidates, not only the one
+admitted by fairness for the current slice, are removed from that maintenance
+cycle's locked scope. Compatible indexed sessions remain eligible for bounded
+metadata/search work; an indexed session is routed heavy only when its session
+projection generation actually requires rebuilding.
 Catch-up permits a 300-second per-session slice because target-host live proof
 showed 91.7-110.9 seconds of mandatory parse/classification cost on a real
 68.2-MB event-dense archive; the former 120-second slice preserved work but

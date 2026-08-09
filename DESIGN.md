@@ -606,8 +606,10 @@ freshness.
 
 Fairness admission and locked-scope eligibility are separate decisions. A
 cycle may admit only one oversized session to its resumable build lane, but it
-must exclude every other oversized deferred candidate from ordinary repair
-while the global maintenance lease is held. Heavy-slice calibration must cover
+must exclude every other oversized deferred or generation-stale candidate from
+ordinary repair while the global maintenance lease is held. A compatible
+indexed session remains eligible for non-rebuild maintenance. Heavy-slice
+calibration must cover
 the observed fixed parse and privacy cost of real event-dense archives while
 remaining bounded and resource-admitted.
 

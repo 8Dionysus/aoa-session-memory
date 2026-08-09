@@ -83567,18 +83567,20 @@ def test_auto_maintenance_heavy_checkpoint_does_not_starve_fresh_scope(
     heavy_record = create_session("auto-heavy", 0)
     second_heavy_record = create_session("auto-heavy-second", 1)
     fresh_record = create_session("auto-fresh", 2)
-    for deferred_record in (heavy_record, second_heavy_record):
-        heavy_session_dir = module.session_dir_from_record(
-            deferred_record
-        )
-        heavy_manifest_path = (
-            heavy_session_dir / "session.manifest.json"
-        )
-        heavy_manifest = module.read_json(heavy_manifest_path, {})
-        heavy_manifest["archive_status"] = (
-            "raw_mirrored_index_deferred"
-        )
-        module.write_json(heavy_manifest_path, heavy_manifest)
+    heavy_session_dir = module.session_dir_from_record(heavy_record)
+    heavy_manifest_path = heavy_session_dir / "session.manifest.json"
+    heavy_manifest = module.read_json(heavy_manifest_path, {})
+    heavy_manifest["archive_status"] = "raw_mirrored_index_deferred"
+    module.write_json(heavy_manifest_path, heavy_manifest)
+    second_heavy_session_dir = module.session_dir_from_record(
+        second_heavy_record
+    )
+    # Published but generation-stale oversized sessions must also stay out of
+    # the locked repair lane.  A missing generated session index is a bounded
+    # stale-route witness; raw evidence and the manifest remain untouched.
+    (
+        second_heavy_session_dir / module.SESSION_INDEX_JSON
+    ).unlink()
     monkeypatch.setattr(
         module, "SESSION_PROJECTION_HEAVY_LANE_RAW_BYTES", 1
     )

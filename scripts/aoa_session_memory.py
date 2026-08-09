@@ -52196,9 +52196,22 @@ def heavy_projection_lane_candidates(
         )
         if not isinstance(manifest, dict):
             continue
-        if str(manifest.get("archive_status") or "") != (
-            "raw_mirrored_index_deferred"
+        archive_status = str(
+            manifest.get("archive_status") or ""
+        )
+        if archive_status not in {
+            "indexed",
+            "raw_mirrored_index_deferred",
+        }:
+            continue
+        if (
+            archive_status == "indexed"
+            and not session_record_has_stale_route_index(record)
         ):
+            # A compatible published projection can stay in the ordinary
+            # metadata/search lane.  Only indexed sessions that would require
+            # an actual projection rebuild belong to the unlocked heavy lane;
+            # token-only drift retains its dedicated atomic backfill.
             continue
         raw = (
             manifest.get("raw")
@@ -52424,7 +52437,8 @@ def auto_maintenance(
             or str(record.get("session_label") or "") == target
         ]
     if apply and heavy_candidates:
-        # Every oversized deferred projection belongs to the resumable lane,
+        # Every oversized deferred or generation-stale projection belongs to
+        # the resumable lane,
         # even though fairness admits only one such builder per cycle.  If we
         # excluded only the admitted record, a second oversized session could
         # fall through into the ordinary repair selection below and perform a

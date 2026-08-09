@@ -448,15 +448,19 @@ oversized live-tail target is deferred to an explicit heavy or resumable route,
 while ordinary bounded maintenance continues across the rest of the backlog;
 one large session must not monopolize recurring catch-up attempts.
 
-The automatic heavy lane advances at most one oversized initial projection per
+The automatic heavy lane advances at most one oversized deferred or
+generation-stale projection per
 bounded slice before ordinary maintenance acquires the global lease. Segment
 generation uses a deterministic process pool with a default of four workers
 and a bounded one-to-six range, falling back visibly to serial execution when
 the pool cannot start. Every other oversized deferred candidate is also
 excluded from the remainder of that locked cycle; otherwise a second heavy
 session could fall through the ordinary repair selection and rebuild under the
-global lease. Recent smaller sessions can still reach their search and session
-projections. Catch-up gives the per-session heavy lane up to a 300-second slice:
+global lease. A compatible published oversized session remains in the ordinary
+metadata/search lane; an indexed session enters the heavy lane only when its
+session route generation actually requires a projection rebuild. Recent
+smaller sessions can still reach their search and session projections. Catch-up
+gives the per-session heavy lane up to a 300-second slice:
 real event-dense archives can spend about two minutes in mandatory parsing and
 privacy checks before segment work resumes, so the former 120-second slice
 could preserve a checkpoint without advancing it. Timer-originated resource
