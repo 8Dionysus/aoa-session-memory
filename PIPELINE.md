@@ -124,10 +124,17 @@ A long session rebuild uses a sibling content-addressed
 checkpoint binds the raw publish identity, all producer generations, and the
 privacy, redaction, and token-accounting policy versions. Completed raw blocks
 and segments carry size-and-SHA receipts and are reused only while those
-receipts remain current. Cooperative deadlines are checked between phases and
-bounded segment waves; a timeout preserves compatible work and the published
-last-good generation. Source, producer, or policy drift selects a new work ID
-instead of resuming incompatible artifacts.
+receipts remain current. Before either layer, event classification uses
+append-stable content-addressed raw line blocks. Each completed block is
+checkpointed, so a cooperative deadline can preserve progress before segment
+generation and a growing session can reuse its sealed prefix. The cache stores
+derived classification fields only: raw text, parsed payloads, and exact
+sensitive literals remain excluded. Rehydration verifies and rereads raw
+authority, then performs global correlation reconciliation in canonical order.
+Cooperative deadlines are checked between phases and bounded classification or
+segment waves; a timeout preserves compatible work and the published last-good
+generation. Source, producer, or policy drift selects a new work ID instead of
+resuming incompatible artifacts.
 
 For a growing session, each published raw block is admitted for reuse only
 when its role, line range, byte size, declared SHA-256, and freshly measured
@@ -137,7 +144,9 @@ materialized normally. A current per-block token summary may be reused only
 under the current accounting schema and generator. This avoids rewriting and
 re-accounting sealed history without trusting the manifest alone.
 
-Session-sensitive literal discovery first searches for the mandatory family
+Session-sensitive literal discovery scans the same bounded raw blocks, in a
+bounded process pool when useful, but merges exact values only in process
+memory. It first searches for the mandatory family
 of sensitive assignment labels before invoking the exact assignment matcher.
 Every exact assignment match contains one of those labels, so benign oversized
 lines avoid pathological regex backtracking without reducing credential
@@ -453,17 +462,18 @@ generation-stale projection per
 bounded slice before ordinary maintenance acquires the global lease. Segment
 generation uses a deterministic process pool with a default of four workers
 and a bounded one-to-six range, falling back visibly to serial execution when
-the pool cannot start. Every other oversized deferred candidate is also
+the pool cannot start. Event classification uses the same bounded worker
+envelope and persists a receipt after every completed block. Every other
+oversized deferred candidate is also
 excluded from the remainder of that locked cycle; otherwise a second heavy
 session could fall through the ordinary repair selection and rebuild under the
 global lease. A compatible published oversized session remains in the ordinary
 metadata/search lane; an indexed session enters the heavy lane only when its
 session route generation actually requires a projection rebuild. Recent
 smaller sessions can still reach their search and session projections. Catch-up
-gives the per-session heavy lane up to a 300-second slice:
-real event-dense archives can spend about two minutes in mandatory parsing and
-privacy checks before segment work resumes, so the former 120-second slice
-could preserve a checkpoint without advancing it. Timer-originated resource
+gives the per-session heavy lane up to a 300-second slice. Event-dense archives
+may still require multiple slices, but classification now advances a durable
+block checkpoint instead of repeating the full pre-segment cost. Timer-originated resource
 denial retains the normal persistent retry intent; a checkpoint is progress,
 not completion.
 

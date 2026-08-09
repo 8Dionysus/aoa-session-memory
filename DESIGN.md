@@ -609,9 +609,14 @@ cycle may admit only one oversized session to its resumable build lane, but it
 must exclude every other oversized deferred or generation-stale candidate from
 ordinary repair while the global maintenance lease is held. A compatible
 indexed session remains eligible for non-rebuild maintenance. Heavy-slice
-calibration must cover
-the observed fixed parse and privacy cost of real event-dense archives while
-remaining bounded and resource-admitted.
+calibration must cover the observed classification and privacy cost of real
+event-dense archives while remaining bounded and resource-admitted.
+Classification is itself an incremental projection: append-stable raw blocks
+are content-addressed, checkpointed before segment work, and rebuilt only when
+their raw digest or classifier/privacy generation changes. The persisted cache
+excludes raw text, parsed payloads, and exact sensitive literals; deterministic
+rehydration rereads raw authority and applies global reconciliation before
+downstream projection.
 
 Explicit semantic non-progress is also a control signal. When a globally
 applicable graph pass selected work but changed no semantic graph content, the

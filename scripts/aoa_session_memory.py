@@ -52,6 +52,11 @@ DERIVED_TEXT_PRIVACY_POLICY_VERSION = 1
 DERIVED_TEXT_PRIVACY_LOOKAHEAD_CHARS = 8192
 SESSION_PROJECTION_PUBLISH_IDENTITY_VERSION = 1
 SESSION_PROJECTION_WORK_STATE_SCHEMA_VERSION = 1
+EVENT_CLASSIFICATION_CACHE_SCHEMA_VERSION = 1
+EVENT_CLASSIFICATION_BLOCK_MAX_LINES = 512
+EVENT_CLASSIFICATION_BLOCK_TARGET_BYTES = 4 * 1024 * 1024
+EVENT_CLASSIFICATION_CACHE_DIR = "classification-cache"
+EVENT_CLASSIFICATION_CACHE_INDEX_JSON = "index.json"
 SESSION_MEMORY_EVIDENCE_PACKET_SCHEMA_VERSION = 1
 DERIVED_TEXT_REDACTION_POLICY_VERSION = 5
 DERIVED_TEXT_REDACTION_MARKER = "[REDACTED:credential]"
@@ -12722,9 +12727,9 @@ def derived_session_sensitive_literal_is_specific(
     return re.fullmatch(r"[A-Za-z]+", candidate) is None
 
 
-def derived_session_sensitive_literal_policy_from_texts(
+def derived_session_sensitive_literal_values_from_texts(
     sources: Iterable[str],
-) -> DerivedSessionSensitiveLiteralPolicy:
+) -> dict[str, set[str]]:
     values_by_kind: dict[str, set[str]] = defaultdict(set)
 
     def add(kind: str, value: Any, *, label: str = "") -> None:
@@ -12775,8 +12780,22 @@ def derived_session_sensitive_literal_policy_from_texts(
             add("uri_userinfo_password", match.groupdict().get("value"))
         for match in DERIVED_KNOWN_CREDENTIAL_RE.finditer(source):
             add("known_credential_prefix", match.group(0))
+    return {
+        kind: set(values)
+        for kind, values in values_by_kind.items()
+        if values
+    }
+
+
+def derived_session_sensitive_literal_policy_from_texts(
+    sources: Iterable[str],
+) -> DerivedSessionSensitiveLiteralPolicy:
     return DerivedSessionSensitiveLiteralPolicy(
-        values_by_kind=values_by_kind,
+        values_by_kind=(
+            derived_session_sensitive_literal_values_from_texts(
+                sources
+            )
+        ),
     )
 
 
@@ -13822,6 +13841,447 @@ def parse_raw_events(
             }
         )
     return reconciled
+
+
+def event_classification_generation_identity() -> dict[str, Any]:
+    """Bind cached classification fields to their exact producer contract."""
+    payload = {
+        "schema_version": EVENT_CLASSIFICATION_CACHE_SCHEMA_VERSION,
+        "projection": "raw_event_classification_cache",
+        "segment_index_generation_id": (
+            segment_index_generation_identity()["generation_id"]
+        ),
+        "derived_text_privacy_policy_version": (
+            DERIVED_TEXT_PRIVACY_POLICY_VERSION
+        ),
+        "derived_text_redaction_policy_version": (
+            DERIVED_TEXT_REDACTION_POLICY_VERSION
+        ),
+        "normalization": (
+            "content_addressed_line_blocks_without_raw_or_parsed_payload_v1"
+        ),
+    }
+    generation_id = hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return {**payload, "generation_id": generation_id}
+
+
+def scan_raw_event_classification_blocks(
+    raw_path: Path,
+    *,
+    max_lines: int | None = None,
+    target_bytes: int | None = None,
+) -> dict[str, Any]:
+    """Scan raw once into append-stable line blocks without classifying it."""
+    bounded_max_lines = max(
+        1,
+        int_value(
+            max_lines
+            if max_lines is not None
+            else EVENT_CLASSIFICATION_BLOCK_MAX_LINES,
+            1,
+        ),
+    )
+    bounded_target_bytes = max(
+        1,
+        int_value(
+            target_bytes
+            if target_bytes is not None
+            else EVENT_CLASSIFICATION_BLOCK_TARGET_BYTES,
+            1,
+        ),
+    )
+    source_sha256 = hashlib.sha256()
+    blocks: list[dict[str, Any]] = []
+    total_bytes = 0
+    line_count = 0
+    latest_timestamp = ""
+    block_start_offset = 0
+    block_start_line = 1
+    block_bytes = 0
+    block_lines = 0
+    block_sha256 = hashlib.sha256()
+
+    def finish_block() -> None:
+        nonlocal block_start_offset
+        nonlocal block_start_line
+        nonlocal block_bytes
+        nonlocal block_lines
+        nonlocal block_sha256
+        if block_lines <= 0:
+            return
+        ordinal = len(blocks)
+        digest = block_sha256.hexdigest()
+        blocks.append(
+            {
+                "ordinal": ordinal,
+                "byte_start": block_start_offset,
+                "byte_end": block_start_offset + block_bytes,
+                "byte_count": block_bytes,
+                "line_start": block_start_line,
+                "line_end": block_start_line + block_lines - 1,
+                "line_count": block_lines,
+                "raw_sha256": digest,
+                "cache_key": (
+                    f"{block_start_line:09d}-"
+                    f"{block_start_line + block_lines - 1:09d}-"
+                    f"{digest}"
+                ),
+            }
+        )
+        block_start_offset += block_bytes
+        block_start_line += block_lines
+        block_bytes = 0
+        block_lines = 0
+        block_sha256 = hashlib.sha256()
+
+    with raw_path.open("rb") as handle:
+        for line_no, raw_line in enumerate(handle, start=1):
+            source_sha256.update(raw_line)
+            block_sha256.update(raw_line)
+            line_bytes = len(raw_line)
+            total_bytes += line_bytes
+            block_bytes += line_bytes
+            block_lines += 1
+            line_count = line_no
+            try:
+                parsed = json.loads(
+                    raw_line.decode("utf-8", errors="replace")
+                )
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, dict) and parsed.get("timestamp"):
+                latest_timestamp = str(parsed["timestamp"])
+            if (
+                block_lines >= bounded_max_lines
+                or block_bytes >= bounded_target_bytes
+            ):
+                finish_block()
+    finish_block()
+    return {
+        "schema_version": EVENT_CLASSIFICATION_CACHE_SCHEMA_VERSION,
+        "artifact_type": "raw_event_classification_plan",
+        "raw_path": str(raw_path),
+        "raw_sha256": source_sha256.hexdigest(),
+        "raw_bytes": total_bytes,
+        "raw_line_count": line_count,
+        "processed_to_line": line_count,
+        "processed_to_timestamp": latest_timestamp,
+        "block_count": len(blocks),
+        "block_max_lines": bounded_max_lines,
+        "block_target_bytes": bounded_target_bytes,
+        "blocks": blocks,
+    }
+
+
+def raw_event_classification_payload(
+    event: RawEvent,
+    *,
+    literal_policy: DerivedSessionSensitiveLiteralPolicy | None = None,
+) -> dict[str, Any]:
+    return redact_derived_value({
+        "event_id": event.event_id,
+        "line_no": event.line_no,
+        "event_type": event.event_type,
+        "source_type": event.source_type,
+        "title": event.title,
+        "timestamp": event.timestamp,
+        "tags": list(event.tags),
+        "importance": event.importance,
+        "compaction_boundary": event.compaction_boundary,
+        "family": event.family,
+        "phase": event.phase,
+        "actor": event.actor,
+        "action": event.action,
+        "object_ref": event.object_ref,
+        "outcome": event.outcome,
+        "confidence": event.confidence,
+        "correlation_id": event.correlation_id,
+        "facets": event.facets,
+    }, literal_policy=literal_policy)
+
+
+def raw_event_from_classification_payload(
+    *,
+    raw: str,
+    parsed: dict[str, Any] | None,
+    payload: dict[str, Any],
+) -> RawEvent:
+    line_no = int_value(payload.get("line_no"))
+    return RawEvent(
+        event_id=str(payload.get("event_id") or f"{line_no:06d}"),
+        line_no=line_no,
+        raw=raw,
+        parsed=parsed,
+        event_type=str(payload.get("event_type") or "RAW_EVENT"),
+        source_type=str(payload.get("source_type") or "unresolved-source"),
+        title=str(payload.get("title") or "Raw event"),
+        timestamp=(
+            str(payload.get("timestamp"))
+            if payload.get("timestamp")
+            else None
+        ),
+        tags=[
+            str(item)
+            for item in payload.get("tags", [])
+            if str(item)
+        ],
+        importance=str(payload.get("importance") or "medium"),
+        compaction_boundary=bool(payload.get("compaction_boundary")),
+        family=str(payload.get("family") or "raw_evidence"),
+        phase=str(payload.get("phase") or "observe"),
+        actor=str(payload.get("actor") or "unknown"),
+        action=str(payload.get("action") or "preserve"),
+        object_ref=str(payload.get("object_ref") or "raw_event"),
+        outcome=str(payload.get("outcome") or "observed"),
+        confidence=str(payload.get("confidence") or "medium"),
+        correlation_id=(
+            str(payload.get("correlation_id"))
+            if payload.get("correlation_id")
+            else None
+        ),
+        facets=(
+            dict(payload.get("facets"))
+            if isinstance(payload.get("facets"), dict)
+            else {}
+        ),
+    )
+
+
+def raw_classification_block_bytes(
+    raw_path: Path,
+    block: dict[str, Any],
+) -> bytes:
+    byte_start = int_value(block.get("byte_start"))
+    byte_count = int_value(block.get("byte_count"))
+    with raw_path.open("rb") as handle:
+        handle.seek(byte_start)
+        payload = handle.read(byte_count)
+    if len(payload) != byte_count:
+        raise ValueError("classification_block_byte_count_mismatch")
+    if hashlib.sha256(payload).hexdigest() != str(
+        block.get("raw_sha256") or ""
+    ):
+        raise ValueError("classification_block_raw_digest_mismatch")
+    return payload
+
+
+def event_classification_cache_artifact_path(
+    cache_root: Path,
+    block: dict[str, Any],
+) -> Path:
+    cache_key = str(block.get("cache_key") or "")
+    return cache_root / "blocks" / f"{cache_key}.json.gz"
+
+
+def write_deterministic_gzip_json(
+    path: Path,
+    payload: dict[str, Any],
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    compressed = gzip.compress(encoded, compresslevel=1, mtime=0)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.tmp-",
+        dir=path.parent,
+    )
+    os.close(descriptor)
+    temporary_path = Path(temporary_name)
+    try:
+        temporary_path.write_bytes(compressed)
+        temporary_path.replace(path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
+def read_gzip_json(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(gzip.decompress(path.read_bytes()))
+    except (OSError, EOFError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def sanitize_event_classification_cache_artifact(
+    *,
+    artifact_path: Path,
+    block: dict[str, Any],
+    generation_identity: dict[str, Any],
+    literal_policy: DerivedSessionSensitiveLiteralPolicy,
+) -> None:
+    cached = read_gzip_json(artifact_path)
+    classifications = (
+        cached.get("classifications")
+        if isinstance(cached.get("classifications"), list)
+        else []
+    )
+    if (
+        cached.get("generation_identity") != generation_identity
+        or cached.get("block") != block
+        or len(classifications) != int_value(block.get("line_count"))
+    ):
+        raise ValueError("classification_cache_reuse_identity_mismatch")
+    write_deterministic_gzip_json(
+        artifact_path,
+        {
+            **cached,
+            "classifications": [
+                redact_derived_value(
+                    item,
+                    literal_policy=literal_policy,
+                )
+                for item in classifications
+                if isinstance(item, dict)
+            ],
+        },
+    )
+
+
+def classify_raw_event_block_task(
+    task: tuple[
+        str,
+        dict[str, Any],
+        str,
+        dict[str, Any],
+        dict[str, set[str]],
+    ],
+) -> dict[str, Any]:
+    (
+        raw_path_text,
+        block,
+        artifact_path_text,
+        generation_identity,
+        sensitive_values_by_kind,
+    ) = task
+    raw_path = Path(raw_path_text)
+    artifact_path = Path(artifact_path_text)
+    started = time.perf_counter_ns()
+    raw_payload = raw_classification_block_bytes(raw_path, block)
+    raw_lines = raw_payload.splitlines()
+    expected_line_count = int_value(block.get("line_count"))
+    if len(raw_lines) != expected_line_count:
+        raise ValueError("classification_block_line_count_mismatch")
+    line_start = int_value(block.get("line_start"))
+    literal_policy = DerivedSessionSensitiveLiteralPolicy(
+        values_by_kind=sensitive_values_by_kind
+    )
+    classifications: list[dict[str, Any]] = []
+    for offset, raw_line in enumerate(raw_lines):
+        raw = raw_line.decode("utf-8", errors="replace")
+        try:
+            loaded = json.loads(raw)
+            parsed = loaded if isinstance(loaded, dict) else None
+        except json.JSONDecodeError:
+            parsed = None
+        classifications.append(
+            raw_event_classification_payload(
+                classify_raw_event(raw, parsed, line_start + offset),
+                literal_policy=literal_policy,
+            )
+        )
+    write_deterministic_gzip_json(
+        artifact_path,
+        {
+            "schema_version": EVENT_CLASSIFICATION_CACHE_SCHEMA_VERSION,
+            "artifact_type": "raw_event_classification_block",
+            "generation_identity": generation_identity,
+            "block": dict(block),
+            "classifications": classifications,
+        },
+    )
+    return {
+        "cache_key": block.get("cache_key"),
+        "artifact_path": str(artifact_path),
+        "classification_ms": int(
+            (time.perf_counter_ns() - started) / 1_000_000
+        ),
+        "event_count": len(classifications),
+    }
+
+
+def sensitive_literal_block_task(
+    task: tuple[str, dict[str, Any]],
+) -> dict[str, Any]:
+    raw_path_text, block = task
+    started = time.perf_counter_ns()
+    raw_payload = raw_classification_block_bytes(
+        Path(raw_path_text), block
+    )
+    values_by_kind = (
+        derived_session_sensitive_literal_values_from_texts(
+            line.decode("utf-8", errors="replace")
+            for line in raw_payload.splitlines()
+        )
+    )
+    return {
+        "cache_key": block.get("cache_key"),
+        "values_by_kind": {
+            kind: sorted(values)
+            for kind, values in values_by_kind.items()
+            if values
+        },
+        "scan_ms": int(
+            (time.perf_counter_ns() - started) / 1_000_000
+        ),
+    }
+
+
+def load_raw_event_classification_block(
+    *,
+    raw_path: Path,
+    block: dict[str, Any],
+    artifact_path: Path,
+    generation_identity: dict[str, Any],
+) -> list[RawEvent]:
+    cached = read_gzip_json(artifact_path)
+    if (
+        int_value(cached.get("schema_version"))
+        != EVENT_CLASSIFICATION_CACHE_SCHEMA_VERSION
+        or cached.get("generation_identity") != generation_identity
+        or cached.get("block") != block
+    ):
+        raise ValueError("classification_cache_identity_mismatch")
+    classifications = (
+        cached.get("classifications")
+        if isinstance(cached.get("classifications"), list)
+        else []
+    )
+    raw_lines = raw_classification_block_bytes(
+        raw_path, block
+    ).splitlines()
+    if len(raw_lines) != len(classifications):
+        raise ValueError("classification_cache_event_count_mismatch")
+    events: list[RawEvent] = []
+    for raw_line, classification in zip(
+        raw_lines, classifications, strict=True
+    ):
+        if not isinstance(classification, dict):
+            raise ValueError("classification_cache_record_invalid")
+        raw = raw_line.decode("utf-8", errors="replace")
+        try:
+            loaded = json.loads(raw)
+            parsed = loaded if isinstance(loaded, dict) else None
+        except json.JSONDecodeError:
+            parsed = None
+        events.append(
+            raw_event_from_classification_payload(
+                raw=raw,
+                parsed=parsed,
+                payload=classification,
+            )
+        )
+    return events
 
 
 def parse_raw_event_sample(raw_path: Path, *, max_lines: int = 2000) -> list[RawEvent]:
@@ -20975,6 +21435,9 @@ def session_projection_work_identity(
         "schema_version": SESSION_PROJECTION_WORK_STATE_SCHEMA_VERSION,
         "projection_publish": publish_identity,
         "generation_identities": {
+            "event_classification": (
+                event_classification_generation_identity()
+            ),
             "session_index": session_index_generation_identity(),
             "segment_index": segment_index_generation_identity(),
             "task_episode_source": (
@@ -21672,6 +22135,65 @@ def validate_staged_session_projection(
                             "staged_compressed_raw_block_payload_mismatch:"
                             f"{block_id}"
                         )
+    classification_cache_root = (
+        event_classification_cache_root(stage_dir)
+    )
+    classification_cache_index = read_json(
+        event_classification_cache_index_path(
+            classification_cache_root
+        ),
+        {},
+    )
+    expected_classification_generation = (
+        event_classification_generation_identity()
+    )
+    if classification_cache_root.exists() and (
+        not isinstance(classification_cache_index, dict)
+        or classification_cache_index.get(
+            "generation_identity"
+        )
+        != expected_classification_generation
+    ):
+        diagnostics.append("classification_cache_generation_mismatch")
+    elif classification_cache_root.exists():
+        classification_records = (
+            classification_cache_index.get("blocks")
+            if isinstance(
+                classification_cache_index.get("blocks"), dict
+            )
+            else {}
+        )
+        for cache_key, classification_record in (
+            classification_records.items()
+        ):
+            block = (
+                classification_record.get("block")
+                if isinstance(classification_record, dict)
+                else {}
+            )
+            if not event_classification_cache_record_current(
+                cache_root=classification_cache_root,
+                record=classification_record,
+                block=block,
+            ):
+                diagnostics.append(
+                    "classification_cache_artifact_invalid:"
+                    f"{cache_key}"
+                )
+                continue
+            cached_payload = read_gzip_json(
+                classification_cache_root
+                / str(classification_record.get("artifact") or "")
+            )
+            if (
+                cached_payload.get("generation_identity")
+                != expected_classification_generation
+                or cached_payload.get("block") != block
+            ):
+                diagnostics.append(
+                    "classification_cache_payload_invalid:"
+                    f"{cache_key}"
+                )
     raw_capture_state = read_json(
         stage_dir / "raw" / RAW_CAPTURE_STATE_JSON,
         {},
@@ -21806,6 +22328,7 @@ def stage_existing_session_projection(
     )
     relative_paths = [
         Path("raw") / "session.raw.jsonl",
+        Path("raw") / EVENT_CLASSIFICATION_CACHE_DIR,
         Path("segments"),
         Path("raw") / RAW_BLOCKS_DIR,
         Path("raw") / RAW_BLOCK_INDEX_JSON,
@@ -21869,6 +22392,7 @@ def atomic_publish_session_projection(
     )
     relative_paths = [
         Path("raw") / "session.raw.jsonl",
+        Path("raw") / EVENT_CLASSIFICATION_CACHE_DIR,
         Path("segments"),
         Path("raw") / RAW_BLOCKS_DIR,
         Path("raw") / RAW_BLOCK_INDEX_JSON,
@@ -29566,6 +30090,145 @@ def distill_session_first_pass(
     }
 
 
+def event_classification_cache_root(
+    projection_root: Path,
+) -> Path:
+    return (
+        projection_root
+        / "raw"
+        / EVENT_CLASSIFICATION_CACHE_DIR
+    )
+
+
+def event_classification_cache_index_path(
+    cache_root: Path,
+) -> Path:
+    return cache_root / EVENT_CLASSIFICATION_CACHE_INDEX_JSON
+
+
+def event_classification_cache_record(
+    *,
+    cache_root: Path,
+    block: dict[str, Any],
+    artifact_path: Path,
+) -> dict[str, Any]:
+    return {
+        "block": dict(block),
+        "artifact": str(artifact_path.relative_to(cache_root)),
+        "bytes": artifact_path.stat().st_size,
+        "sha256": sha256_file(artifact_path),
+    }
+
+
+def event_classification_cache_record_current(
+    *,
+    cache_root: Path,
+    record: Any,
+    block: dict[str, Any],
+) -> bool:
+    if (
+        not isinstance(record, dict)
+        or record.get("block") != block
+    ):
+        return False
+    artifact = cache_root / str(record.get("artifact") or "")
+    return bool(
+        artifact.is_file()
+        and artifact.stat().st_size
+        == int_value(record.get("bytes"), -1)
+        and sha256_file(artifact)
+        == str(record.get("sha256") or "")
+    )
+
+
+def write_event_classification_cache_index(
+    *,
+    cache_root: Path,
+    generation_identity: dict[str, Any],
+    records: dict[str, dict[str, Any]],
+) -> None:
+    write_json(
+        event_classification_cache_index_path(cache_root),
+        {
+            "schema_version": (
+                EVENT_CLASSIFICATION_CACHE_SCHEMA_VERSION
+            ),
+            "artifact_type": "raw_event_classification_cache",
+            "generated_at": utc_now(),
+            "generation_identity": generation_identity,
+            "block_count": len(records),
+            "blocks": {
+                key: records[key]
+                for key in sorted(records)
+            },
+            "privacy": {
+                "raw_persisted": False,
+                "parsed_payload_persisted": False,
+                "sensitive_literal_values_persisted": False,
+            },
+            "authority_boundary": (
+                "cache is rebuildable classification acceleration; "
+                "raw evidence remains authoritative"
+            ),
+        },
+    )
+
+
+def event_classification_cache_candidate_roots(
+    *,
+    session_dir: Path,
+    stage_dir: Path,
+) -> list[Path]:
+    roots = [event_classification_cache_root(session_dir)]
+    work_prefix = f".{session_dir.name}.projection-work-"
+    for candidate in sorted(session_dir.parent.iterdir()):
+        if (
+            not candidate.is_dir()
+            or candidate == stage_dir
+            or not candidate.name.startswith(work_prefix)
+        ):
+            continue
+        roots.append(event_classification_cache_root(candidate))
+    return roots
+
+
+def reusable_event_classification_cache_record(
+    *,
+    session_dir: Path,
+    stage_dir: Path,
+    block: dict[str, Any],
+    generation_identity: dict[str, Any],
+) -> tuple[Path, dict[str, Any]] | None:
+    cache_key = str(block.get("cache_key") or "")
+    for cache_root in event_classification_cache_candidate_roots(
+        session_dir=session_dir,
+        stage_dir=stage_dir,
+    ):
+        index = read_json(
+            event_classification_cache_index_path(cache_root),
+            {},
+        )
+        if (
+            not isinstance(index, dict)
+            or index.get("generation_identity")
+            != generation_identity
+        ):
+            continue
+        records = (
+            index.get("blocks")
+            if isinstance(index.get("blocks"), dict)
+            else {}
+        )
+        record = records.get(cache_key)
+        if event_classification_cache_record_current(
+            cache_root=cache_root,
+            record=record,
+            block=block,
+        ):
+            return cache_root, dict(record)
+    return None
+
+
 def reindex_session_from_raw(
     aoa_root: Path,
     record: dict[str, Any],
@@ -29704,25 +30367,12 @@ def reindex_session_from_raw(
     )
     now = utc_now()
     phase_started = time.monotonic()
-    parse_phase_timings_ns: dict[str, int] = {}
-    events = parse_raw_events(
-        raw_path,
-        phase_timings_ns=parse_phase_timings_ns,
-    )
-    phase_timings_ms["parse_and_classification"] = int(
+    raw_scan = scan_raw_event_classification_blocks(raw_path)
+    phase_timings_ms["raw_source_scan"] = int(
         (time.monotonic() - phase_started) * 1000
     )
-    phase_timings_ms["raw_json_parse"] = int(
-        parse_phase_timings_ns.get("raw_json_parse", 0)
-        / 1_000_000
-    )
-    phase_timings_ms["event_classification"] = int(
-        parse_phase_timings_ns.get("event_classification", 0)
-        / 1_000_000
-    )
-    publish_identity = session_projection_publish_identity(
-        raw_path=raw_path,
-        events=events,
+    publish_identity = session_projection_publish_identity_from_scan(
+        raw_scan
     )
     work_identity = session_projection_work_identity(
         publish_identity
@@ -29756,10 +30406,18 @@ def reindex_session_from_raw(
             "created_at": now,
             "updated_at": now,
             "phase": "planned",
+            "classification_blocks": {},
             "raw_blocks": {},
             "segments": {},
         }
         write_json(checkpoint_path, work_state)
+    completed_classification_blocks = (
+        work_state.get("classification_blocks")
+        if isinstance(
+            work_state.get("classification_blocks"), dict
+        )
+        else {}
+    )
     completed_segments = (
         work_state.get("segments")
         if isinstance(work_state.get("segments"), dict)
@@ -29772,6 +30430,9 @@ def reindex_session_from_raw(
                 "updated_at": utc_now(),
                 "phase": phase,
                 "phase_timings_ms": dict(phase_timings_ms),
+                "classification_blocks": (
+                    completed_classification_blocks
+                ),
                 "segments": completed_segments,
             }
         )
@@ -29785,6 +30446,9 @@ def reindex_session_from_raw(
 
     def checkpointed_result(phase: str) -> dict[str, Any]:
         save_work_state(phase)
+        planned_segment_count = (
+            len(segment_ranges(events)) if events else 0
+        )
         return {
             "session_id": manifest.get("session_id"),
             "session_label": manifest.get("session_label"),
@@ -29794,7 +30458,13 @@ def reindex_session_from_raw(
             "work_id": work_identity["work_id"],
             "work_dir": str(stage_dir),
             "completed_segment_count": len(completed_segments),
-            "planned_segment_count": len(segment_ranges(events)),
+            "planned_segment_count": planned_segment_count,
+            "completed_classification_block_count": len(
+                completed_classification_blocks
+            ),
+            "planned_classification_block_count": int_value(
+                raw_scan.get("block_count")
+            ),
             "projection_publish": publish_identity,
             "phase_timings_ms": dict(phase_timings_ms),
             "segment_execution": work_state.get(
@@ -29802,6 +30472,9 @@ def reindex_session_from_raw(
             ),
             "raw_block_execution": work_state.get(
                 "raw_block_execution", {}
+            ),
+            "classification_execution": work_state.get(
+                "classification_execution", {}
             ),
             "wall_time_ms": int(
                 (time.monotonic() - build_started) * 1000
@@ -29817,13 +30490,92 @@ def reindex_session_from_raw(
 
     publish_result: dict[str, Any] = {}
     first_pass_distillation: dict[str, Any] = {}
+    events: list[RawEvent] = []
     try:
         if deadline_exhausted():
             return checkpointed_result("planned")
-        phase_started = time.monotonic()
-        literal_policy = derived_session_sensitive_literal_policy(
-            events
+        classification_generation = (
+            event_classification_generation_identity()
         )
+        classification_cache_root = (
+            event_classification_cache_root(stage_dir)
+        )
+        classification_cache_root.mkdir(
+            parents=True, exist_ok=True
+        )
+        scan_blocks = [
+            dict(item)
+            for item in raw_scan.get("blocks", [])
+            if isinstance(item, dict)
+        ]
+        phase_started = time.monotonic()
+        sensitive_values_by_kind: dict[str, set[str]] = {}
+        sensitive_scan_fallback_reason = ""
+        actual_sensitive_scan_workers = min(
+            configured_segment_workers, len(scan_blocks)
+        )
+
+        def merge_sensitive_scan(result: dict[str, Any]) -> None:
+            values_by_kind = result.get("values_by_kind")
+            if not isinstance(values_by_kind, dict):
+                return
+            for kind, values in values_by_kind.items():
+                if not isinstance(values, list):
+                    continue
+                sensitive_values_by_kind.setdefault(
+                    str(kind), set()
+                ).update(str(value) for value in values if value)
+
+        if actual_sensitive_scan_workers > 1:
+            try:
+                with ProcessPoolExecutor(
+                    max_workers=actual_sensitive_scan_workers,
+                    mp_context=multiprocessing.get_context("fork"),
+                ) as executor:
+                    results = executor.map(
+                        sensitive_literal_block_task,
+                        [
+                            (str(raw_path), block)
+                            for block in scan_blocks
+                        ],
+                    )
+                    for result in results:
+                        merge_sensitive_scan(result)
+            except Exception as exc:
+                sensitive_scan_fallback_reason = (
+                    type(exc).__name__
+                )
+                sensitive_values_by_kind = {}
+        if (
+            actual_sensitive_scan_workers <= 1
+            or sensitive_scan_fallback_reason
+        ):
+            for block in scan_blocks:
+                merge_sensitive_scan(
+                    sensitive_literal_block_task(
+                        (str(raw_path), block)
+                    )
+                )
+        literal_policy = DerivedSessionSensitiveLiteralPolicy(
+            values_by_kind=sensitive_values_by_kind
+        )
+        work_state["sensitive_literal_execution"] = {
+            "configured_workers": configured_segment_workers,
+            "actual_workers": max(
+                1, actual_sensitive_scan_workers
+            ),
+            "mode": (
+                "process_pool"
+                if actual_sensitive_scan_workers > 1
+                and not sensitive_scan_fallback_reason
+                else "serial"
+            ),
+            "parallel_fallback_reason": (
+                sensitive_scan_fallback_reason
+            ),
+            "literal_values_persisted": False,
+            "policy_report": literal_policy.report(),
+        }
         phase_timings_ms["sensitive_literal_policy"] = int(
             (time.monotonic() - phase_started) * 1000
         )
@@ -29832,6 +30584,261 @@ def reindex_session_from_raw(
             return checkpointed_result(
                 "sensitive_literal_policy_complete"
             )
+
+        classification_started = time.monotonic()
+        reusable_block_count = 0
+        pending_classification_blocks: list[dict[str, Any]] = []
+        for block in scan_blocks:
+            cache_key = str(block.get("cache_key") or "")
+            prior_record = completed_classification_blocks.get(
+                cache_key
+            )
+            if event_classification_cache_record_current(
+                cache_root=classification_cache_root,
+                record=prior_record,
+                block=block,
+            ):
+                reusable_block_count += 1
+                continue
+            reusable = reusable_event_classification_cache_record(
+                session_dir=session_dir,
+                stage_dir=stage_dir,
+                block=block,
+                generation_identity=classification_generation,
+            )
+            if reusable is None:
+                completed_classification_blocks.pop(
+                    cache_key, None
+                )
+                pending_classification_blocks.append(block)
+                continue
+            source_cache_root, source_record = reusable
+            source_artifact = source_cache_root / str(
+                source_record.get("artifact") or ""
+            )
+            target_artifact = (
+                event_classification_cache_artifact_path(
+                    classification_cache_root, block
+                )
+            )
+            target_artifact.unlink(missing_ok=True)
+            stage_projection_path_with_links(
+                source=source_artifact,
+                target=target_artifact,
+            )
+            sanitize_event_classification_cache_artifact(
+                artifact_path=target_artifact,
+                block=block,
+                generation_identity=classification_generation,
+                literal_policy=literal_policy,
+            )
+            completed_classification_blocks[cache_key] = (
+                event_classification_cache_record(
+                    cache_root=classification_cache_root,
+                    block=block,
+                    artifact_path=target_artifact,
+                )
+            )
+            reusable_block_count += 1
+        write_event_classification_cache_index(
+            cache_root=classification_cache_root,
+            generation_identity=classification_generation,
+            records=completed_classification_blocks,
+        )
+        save_work_state("classification_blocks_planned")
+
+        classification_fallback_reason = ""
+        actual_classification_workers = min(
+            configured_segment_workers,
+            len(pending_classification_blocks),
+        )
+        rebuilt_classification_block_count = 0
+
+        def record_classification_completion(
+            block: dict[str, Any],
+        ) -> None:
+            nonlocal rebuilt_classification_block_count
+            cache_key = str(block.get("cache_key") or "")
+            artifact_path = (
+                event_classification_cache_artifact_path(
+                    classification_cache_root, block
+                )
+            )
+            completed_classification_blocks[cache_key] = (
+                event_classification_cache_record(
+                    cache_root=classification_cache_root,
+                    block=block,
+                    artifact_path=artifact_path,
+                )
+            )
+            rebuilt_classification_block_count += 1
+            write_event_classification_cache_index(
+                cache_root=classification_cache_root,
+                generation_identity=classification_generation,
+                records=completed_classification_blocks,
+            )
+            save_work_state("classification_blocks_in_progress")
+
+        if actual_classification_workers > 1:
+            try:
+                with ProcessPoolExecutor(
+                    max_workers=actual_classification_workers,
+                    mp_context=multiprocessing.get_context("fork"),
+                ) as executor:
+                    for wave_start in range(
+                        0,
+                        len(pending_classification_blocks),
+                        actual_classification_workers,
+                    ):
+                        wave = pending_classification_blocks[
+                            wave_start : (
+                                wave_start
+                                + actual_classification_workers
+                            )
+                        ]
+                        futures = [
+                            executor.submit(
+                                classify_raw_event_block_task,
+                                (
+                                    str(raw_path),
+                                    block,
+                                    str(
+                                        event_classification_cache_artifact_path(
+                                            classification_cache_root,
+                                            block,
+                                        )
+                                    ),
+                                    classification_generation,
+                                    sensitive_values_by_kind,
+                                ),
+                            )
+                            for block in wave
+                        ]
+                        for block, future in zip(
+                            wave, futures, strict=True
+                        ):
+                            future.result()
+                            record_classification_completion(block)
+                        if deadline_exhausted():
+                            phase_timings_ms[
+                                "event_classification"
+                            ] = int(
+                                (
+                                    time.monotonic()
+                                    - classification_started
+                                )
+                                * 1000
+                            )
+                            return checkpointed_result(
+                                "classification_blocks_in_progress"
+                            )
+            except Exception as exc:
+                classification_fallback_reason = (
+                    f"{type(exc).__name__}:{exc}"
+                )
+        if (
+            actual_classification_workers <= 1
+            or classification_fallback_reason
+        ):
+            for block in pending_classification_blocks:
+                cache_key = str(block.get("cache_key") or "")
+                if event_classification_cache_record_current(
+                    cache_root=classification_cache_root,
+                    record=completed_classification_blocks.get(
+                        cache_key
+                    ),
+                    block=block,
+                ):
+                    continue
+                classify_raw_event_block_task(
+                    (
+                        str(raw_path),
+                        block,
+                        str(
+                            event_classification_cache_artifact_path(
+                                classification_cache_root, block
+                            )
+                        ),
+                        classification_generation,
+                        sensitive_values_by_kind,
+                    )
+                )
+                record_classification_completion(block)
+                if deadline_exhausted():
+                    phase_timings_ms[
+                        "event_classification"
+                    ] = int(
+                        (
+                            time.monotonic()
+                            - classification_started
+                        )
+                        * 1000
+                    )
+                    return checkpointed_result(
+                        "classification_blocks_in_progress"
+                    )
+        work_state["classification_execution"] = {
+            "configured_workers": configured_segment_workers,
+            "actual_workers": max(
+                1, actual_classification_workers
+            ),
+            "mode": (
+                "process_pool"
+                if actual_classification_workers > 1
+                and not classification_fallback_reason
+                else "serial"
+            ),
+            "parallel_fallback_reason": (
+                classification_fallback_reason
+            ),
+            "bounded_wave_size": max(
+                1, actual_classification_workers
+            ),
+            "reused_block_count": reusable_block_count,
+            "rebuilt_block_count": (
+                rebuilt_classification_block_count
+            ),
+            "block_count": len(scan_blocks),
+        }
+        phase_timings_ms["event_classification"] = int(
+            (time.monotonic() - classification_started) * 1000
+        )
+        save_work_state("classification_blocks_complete")
+        if deadline_exhausted():
+            return checkpointed_result(
+                "classification_blocks_complete"
+            )
+
+        phase_started = time.monotonic()
+        for block in scan_blocks:
+            events.extend(
+                load_raw_event_classification_block(
+                    raw_path=raw_path,
+                    block=block,
+                    artifact_path=(
+                        event_classification_cache_artifact_path(
+                            classification_cache_root, block
+                        )
+                    ),
+                    generation_identity=(
+                        classification_generation
+                    ),
+                )
+            )
+        events = reconcile_correlated_event_outcomes(events)
+        phase_timings_ms["classification_rehydration"] = int(
+            (time.monotonic() - phase_started) * 1000
+        )
+        phase_timings_ms["parse_and_classification"] = (
+            phase_timings_ms.get("raw_source_scan", 0)
+            + phase_timings_ms.get("event_classification", 0)
+            + phase_timings_ms.get(
+                "classification_rehydration", 0
+            )
+        )
+        save_work_state("classification_rehydrated")
+        if deadline_exhausted():
+            return checkpointed_result("classification_rehydrated")
         staged_raw_path = (
             stage_dir / "raw" / "session.raw.jsonl"
         )
@@ -30366,9 +31373,10 @@ def reindex_session_from_raw(
                 "projection_complete_unpublished"
             )
         phase_started = time.monotonic()
-        current_raw_identity = session_projection_publish_identity(
-            raw_path=raw_path,
-            events=parse_raw_events(raw_path),
+        current_raw_identity = (
+            session_projection_publish_identity_from_scan(
+                scan_raw_event_classification_blocks(raw_path)
+            )
         )
         if current_raw_identity != publish_identity:
             save_work_state("source_drifted_before_publish")
@@ -30412,6 +31420,12 @@ def reindex_session_from_raw(
                 ),
                 "raw_block_execution": work_state.get(
                     "raw_block_execution", {}
+                ),
+                "classification_execution": work_state.get(
+                    "classification_execution", {}
+                ),
+                "sensitive_literal_execution": work_state.get(
+                    "sensitive_literal_execution", {}
                 ),
                 "wall_time_ms": int(
                     (time.monotonic() - build_started) * 1000
@@ -30510,6 +31524,12 @@ def reindex_session_from_raw(
         ),
         "raw_block_execution": work_state.get(
             "raw_block_execution", {}
+        ),
+        "classification_execution": work_state.get(
+            "classification_execution", {}
+        ),
+        "sensitive_literal_execution": work_state.get(
+            "sensitive_literal_execution", {}
         ),
         "wall_time_ms": int(
             (time.monotonic() - build_started) * 1000
@@ -30619,10 +31639,10 @@ def publish_prebuilt_session_projection(
             "ok": False,
             "diagnostics": ["raw_missing_before_publish"],
         }
-    events = parse_raw_events(raw_path)
-    current_publish_identity = session_projection_publish_identity(
-        raw_path=raw_path,
-        events=events,
+    current_publish_identity = (
+        session_projection_publish_identity_from_scan(
+            scan_raw_event_classification_blocks(raw_path)
+        )
     )
     current_work_identity = session_projection_work_identity(
         current_publish_identity
@@ -30681,7 +31701,11 @@ def publish_prebuilt_session_projection(
         "session_id": published_manifest.get("session_id"),
         "session_label": published_manifest.get("session_label"),
         "session_dir": str(session_dir),
-        "event_count": len(events),
+        "event_count": int_value(
+            current_publish_identity.get("source", {}).get(
+                "raw_line_count"
+            )
+        ),
         "segment_count": len(
             published_manifest.get("segments", [])
             if isinstance(published_manifest.get("segments"), list)
@@ -111009,20 +112033,30 @@ def session_projection_publish_identity(
     raw_path: Path,
     events: list[RawEvent],
 ) -> dict[str, Any]:
-    source_sha256 = sha256_file(raw_path)
-    source_bytes = raw_path.stat().st_size
-    processed_to_line = max(
-        (int_value(event.line_no) for event in events),
-        default=0,
+    return session_projection_publish_identity_from_scan(
+        {
+            "raw_sha256": sha256_file(raw_path),
+            "raw_bytes": raw_path.stat().st_size,
+            "raw_line_count": len(events),
+            "processed_to_line": max(
+                (int_value(event.line_no) for event in events),
+                default=0,
+            ),
+            "processed_to_timestamp": next(
+                (
+                    str(event.timestamp)
+                    for event in reversed(events)
+                    if str(event.timestamp or "")
+                ),
+                "",
+            ),
+        }
     )
-    processed_to_timestamp = next(
-        (
-            str(event.timestamp)
-            for event in reversed(events)
-            if str(event.timestamp or "")
-        ),
-        "",
-    )
+
+
+def session_projection_publish_identity_from_scan(
+    scan: dict[str, Any],
+) -> dict[str, Any]:
     generation_dependencies = {
         "session_index": session_index_generation_identity()[
             "generation_id"
@@ -111041,13 +112075,17 @@ def session_projection_publish_identity(
             SESSION_PROJECTION_PUBLISH_IDENTITY_VERSION
         ),
         "source": {
-            "raw_sha256": source_sha256,
-            "raw_bytes": source_bytes,
-            "raw_line_count": len(events),
+            "raw_sha256": str(scan.get("raw_sha256") or ""),
+            "raw_bytes": int_value(scan.get("raw_bytes")),
+            "raw_line_count": int_value(
+                scan.get("raw_line_count")
+            ),
         },
         "processed_watermark": {
-            "to_line": processed_to_line,
-            "to_timestamp": processed_to_timestamp,
+            "to_line": int_value(scan.get("processed_to_line")),
+            "to_timestamp": str(
+                scan.get("processed_to_timestamp") or ""
+            ),
         },
         "dependency_generations": generation_dependencies,
     }

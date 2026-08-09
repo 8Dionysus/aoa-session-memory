@@ -83303,11 +83303,18 @@ def test_session_projection_process_parallel_matches_serial_semantics(
         "reuse_published_session_segment",
         lambda **_kwargs: None,
     )
+    monkeypatch.setattr(
+        module, "EVENT_CLASSIFICATION_BLOCK_MAX_LINES", 2
+    )
 
     serial = module.reindex_session_from_raw(
         aoa_root,
         record,
         segment_workers=1,
+    )
+    session_dir = module.session_dir_from_record(record)
+    shutil.rmtree(
+        module.event_classification_cache_root(session_dir)
     )
     parallel = module.reindex_session_from_raw(
         aoa_root,
@@ -83317,12 +83324,276 @@ def test_session_projection_process_parallel_matches_serial_semantics(
 
     assert serial["status"] == "reindexed"
     assert parallel["status"] == "reindexed"
+    assert serial["classification_execution"]["mode"] == "serial"
+    assert parallel["classification_execution"]["mode"] == (
+        "process_pool"
+    )
+    assert parallel["classification_execution"][
+        "actual_workers"
+    ] == 4
     assert parallel["segment_execution"]["mode"] == "process_pool"
     assert parallel["segment_execution"]["actual_workers"] == 4
     assert (
         serial["publish_result"]["validation"]["semantic_digest"]
         == parallel["publish_result"]["validation"]["semantic_digest"]
     )
+
+
+def test_event_classification_checkpoint_resumes_without_persisting_literals(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "classification-checkpoint.jsonl"
+    synthetic_literal = (
+        "classification-checkpoint-sensitive-value-123456"
+    )
+    rows: list[dict[str, Any]] = [
+        {
+            "timestamp": "2026-07-21T00:10:00Z",
+            "type": "session_meta",
+            "payload": {
+                "id": "classification-checkpoint",
+                "cwd": str(workspace),
+            },
+        }
+    ]
+    for ordinal in range(8):
+        rows.append(
+            {
+                "timestamp": f"2026-07-21T00:10:{ordinal + 1:02d}Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": (
+                                f"classification row {ordinal} "
+                                + (
+                                    f"unlabelled repeat {synthetic_literal}"
+                                    if ordinal == 1
+                                    else (
+                                        f"token={synthetic_literal}"
+                                        if ordinal == 3
+                                        else ""
+                                    )
+                                )
+                            ),
+                        }
+                    ],
+                },
+            }
+        )
+    write_jsonl(transcript, rows)
+    receipt = module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "classification-checkpoint",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    record = module.resolve_session_record(
+        aoa_root, "classification-checkpoint"
+    )
+    session_dir = Path(str(receipt["session_dir"]))
+    raw_path = Path(
+        module.read_json(
+            session_dir / "session.manifest.json", {}
+        )["raw"]["path"]
+    )
+    raw_sha_before = module.sha256_file(raw_path)
+    monkeypatch.setattr(
+        module, "EVENT_CLASSIFICATION_BLOCK_MAX_LINES", 2
+    )
+    original_classify_block = module.classify_raw_event_block_task
+    fake_clock = [0.0]
+    calls: list[str] = []
+
+    def stop_after_one_block(task: Any) -> dict[str, Any]:
+        result = original_classify_block(task)
+        calls.append(str(result["cache_key"]))
+        fake_clock[0] = 2.0
+        return result
+
+    monkeypatch.setattr(module.time, "monotonic", lambda: fake_clock[0])
+    monkeypatch.setattr(
+        module,
+        "classify_raw_event_block_task",
+        stop_after_one_block,
+    )
+    interrupted = module.reindex_session_from_raw(
+        aoa_root,
+        record,
+        cooperative_deadline_monotonic=1.0,
+        segment_workers=1,
+    )
+
+    assert interrupted["status"] == "checkpointed"
+    assert interrupted["checkpoint_phase"] == (
+        "classification_blocks_in_progress"
+    )
+    assert interrupted["completed_classification_block_count"] == 1
+    assert module.sha256_file(raw_path) == raw_sha_before
+
+    fake_clock[0] = 0.0
+    calls.clear()
+    monkeypatch.setattr(
+        module,
+        "classify_raw_event_block_task",
+        original_classify_block,
+    )
+    resumed = module.reindex_session_from_raw(
+        aoa_root, record, segment_workers=1
+    )
+
+    assert resumed["status"] == "reindexed"
+    assert resumed["classification_execution"][
+        "reused_block_count"
+    ] == 1
+    cache_root = module.event_classification_cache_root(session_dir)
+    cached_plaintext = "\n".join(
+        json.dumps(module.read_gzip_json(path), sort_keys=True)
+        for path in sorted((cache_root / "blocks").glob("*.json.gz"))
+    )
+    assert synthetic_literal not in cached_plaintext
+    assert module.sha256_file(raw_path) == raw_sha_before
+
+
+def test_event_classification_cache_reuses_stable_prefix_after_growth(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "classification-growth.jsonl"
+    late_discovered_literal = (
+        "opaque-late-discovered-secret-987654321"
+    )
+    rows: list[dict[str, Any]] = [
+        {
+            "timestamp": "2026-07-21T00:20:00Z",
+            "type": "session_meta",
+            "payload": {
+                "id": "classification-growth",
+                "cwd": str(workspace),
+            },
+        }
+    ]
+    rows.extend(
+        {
+            "timestamp": f"2026-07-21T00:20:{ordinal + 1:02d}Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": (
+                            f"stable prefix {ordinal} "
+                            + (
+                                late_discovered_literal
+                                if ordinal == 1
+                                else ""
+                            )
+                        ),
+                    }
+                ],
+            },
+        }
+        for ordinal in range(4)
+    )
+    write_jsonl(transcript, rows)
+    receipt = module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "classification-growth",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    record = module.resolve_session_record(
+        aoa_root, "classification-growth"
+    )
+    session_dir = Path(str(receipt["session_dir"]))
+    raw_path = Path(
+        module.read_json(
+            session_dir / "session.manifest.json", {}
+        )["raw"]["path"]
+    )
+    monkeypatch.setattr(
+        module, "EVENT_CLASSIFICATION_BLOCK_MAX_LINES", 2
+    )
+    first = module.reindex_session_from_raw(
+        aoa_root, record, segment_workers=1
+    )
+    first_raw_sha = module.sha256_file(raw_path)
+    assert first["status"] == "reindexed"
+    assert first["classification_execution"][
+        "rebuilt_block_count"
+    ] == 3
+
+    with raw_path.open("a", encoding="utf-8") as handle:
+        for ordinal in range(2):
+            handle.write(
+                json.dumps(
+                    {
+                        "timestamp": (
+                            f"2026-07-21T00:20:{10 + ordinal:02d}Z"
+                        ),
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "input_text",
+                                    "text": (
+                                        f"appended tail {ordinal} "
+                                        + (
+                                            "token="
+                                            + late_discovered_literal
+                                            if ordinal == 0
+                                            else ""
+                                        )
+                                    ),
+                                }
+                            ],
+                        },
+                    }
+                )
+                + "\n"
+            )
+    grown_raw_sha = module.sha256_file(raw_path)
+    grown = module.reindex_session_from_raw(
+        aoa_root, record, segment_workers=1
+    )
+
+    assert grown["status"] == "reindexed"
+    assert grown_raw_sha != first_raw_sha
+    assert module.sha256_file(raw_path) == grown_raw_sha
+    assert grown["classification_execution"][
+        "reused_block_count"
+    ] == 2
+    assert grown["classification_execution"][
+        "rebuilt_block_count"
+    ] == 2
+    cache_root = module.event_classification_cache_root(session_dir)
+    grown_cache_plaintext = "\n".join(
+        json.dumps(module.read_gzip_json(path), sort_keys=True)
+        for path in sorted((cache_root / "blocks").glob("*.json.gz"))
+    )
+    assert late_discovered_literal not in grown_cache_plaintext
 
 
 def test_split_publish_lock_keeps_segment_build_outside_global_lease(
