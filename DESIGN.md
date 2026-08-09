@@ -604,6 +604,13 @@ backpressure, bounded retry, priority, and starvation visibility. A timer or
 systemd success proves only that a launcher ran; it does not prove semantic
 freshness.
 
+Fairness admission and locked-scope eligibility are separate decisions. A
+cycle may admit only one oversized session to its resumable build lane, but it
+must exclude every other oversized deferred candidate from ordinary repair
+while the global maintenance lease is held. Heavy-slice calibration must cover
+the observed fixed parse and privacy cost of real event-dense archives while
+remaining bounded and resource-admitted.
+
 Explicit semantic non-progress is also a control signal. When a globally
 applicable graph pass selected work but changed no semantic graph content, the
 automatic graph lane must open a circuit instead of escalating the same state

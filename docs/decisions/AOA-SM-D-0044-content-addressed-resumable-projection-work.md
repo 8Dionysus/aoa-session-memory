@@ -69,10 +69,14 @@ changes. Existing graph stores receive this state through an idempotent
 migration.
 
 Oversized initial projections use a resumable heavy lane with bounded slices.
-A checkpointed heavy session is removed from the rest of that maintenance
-cycle's locked scope, allowing ordinary fresh sessions to continue. Automatic
-launches remain subject to the host resource controller and persistent bounded
-retry queue.
+All oversized deferred candidates, not only the one admitted by fairness for
+the current slice, are removed from that maintenance cycle's locked scope.
+Catch-up permits a 300-second per-session slice because target-host live proof
+showed 91.7-110.9 seconds of mandatory parse/classification cost on a real
+68.2-MB event-dense archive; the former 120-second slice preserved work but
+could repeatedly finish before the next segment wave. Ordinary fresh sessions
+remain eligible. Automatic launches stay subject to the host resource
+controller and persistent bounded retry queue.
 
 ## Rationale
 

@@ -52424,6 +52424,16 @@ def auto_maintenance(
             or str(record.get("session_label") or "") == target
         ]
     if apply and heavy_candidates:
+        # Every oversized deferred projection belongs to the resumable lane,
+        # even though fairness admits only one such builder per cycle.  If we
+        # excluded only the admitted record, a second oversized session could
+        # fall through into the ordinary repair selection below and perform a
+        # full CPU build while the global maintenance lock is held.
+        heavy_lane_excluded_session_ids.update(
+            str(record.get("session_id") or "")
+            for record in heavy_candidates
+            if str(record.get("session_id") or "")
+        )
         prioritized_heavy = prioritize_session_records(
             heavy_candidates,
             query_priority_session_ids,
@@ -52432,10 +52442,16 @@ def auto_maintenance(
         heavy_session_id = str(
             heavy_record.get("session_id") or ""
         )
-        heavy_lane_excluded_session_ids.add(heavy_session_id)
         profile_slice_seconds = {
             "hot": 60.0,
-            "catchup": 120.0,
+            # Real event-dense 68 MiB archives can spend roughly two minutes
+            # in mandatory parse/classification and privacy checks before any
+            # segment wave can resume.  A 120-second catchup slice therefore
+            # preserved the checkpoint but repeatedly made no forward segment
+            # progress.  Keep hot work short; give the explicitly heavy,
+            # per-session leased catchup lane one representative five-minute
+            # slice outside the global maintenance lock.
+            "catchup": 300.0,
             "backlog": 300.0,
             "deep": 300.0,
         }.get(profile, 120.0)

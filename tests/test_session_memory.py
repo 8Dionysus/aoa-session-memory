@@ -83565,16 +83565,25 @@ def test_auto_maintenance_heavy_checkpoint_does_not_starve_fresh_scope(
         return module.resolve_session_record(aoa_root, session_id)
 
     heavy_record = create_session("auto-heavy", 0)
-    fresh_record = create_session("auto-fresh", 1)
-    heavy_session_dir = module.session_dir_from_record(heavy_record)
-    heavy_manifest_path = heavy_session_dir / "session.manifest.json"
-    heavy_manifest = module.read_json(heavy_manifest_path, {})
-    heavy_manifest["archive_status"] = "raw_mirrored_index_deferred"
-    module.write_json(heavy_manifest_path, heavy_manifest)
+    second_heavy_record = create_session("auto-heavy-second", 1)
+    fresh_record = create_session("auto-fresh", 2)
+    for deferred_record in (heavy_record, second_heavy_record):
+        heavy_session_dir = module.session_dir_from_record(
+            deferred_record
+        )
+        heavy_manifest_path = (
+            heavy_session_dir / "session.manifest.json"
+        )
+        heavy_manifest = module.read_json(heavy_manifest_path, {})
+        heavy_manifest["archive_status"] = (
+            "raw_mirrored_index_deferred"
+        )
+        module.write_json(heavy_manifest_path, heavy_manifest)
     monkeypatch.setattr(
         module, "SESSION_PROJECTION_HEAVY_LANE_RAW_BYTES", 1
     )
     heavy_calls: list[list[str]] = []
+    heavy_budgets: list[float | None] = []
     freshness_scopes: list[list[str]] = []
 
     def checkpoint_heavy(**kwargs: Any) -> dict[str, Any]:
@@ -83582,6 +83591,7 @@ def test_auto_maintenance_heavy_checkpoint_does_not_starve_fresh_scope(
         heavy_calls.append(
             [str(record.get("session_id") or "") for record in selected]
         )
+        heavy_budgets.append(kwargs.get("budget_seconds"))
         return {
             "ok": False,
             "status": "partial",
@@ -83639,17 +83649,19 @@ def test_auto_maintenance_heavy_checkpoint_does_not_starve_fresh_scope(
         profile="catchup",
         apply=True,
         discovery_limit=0,
-        budget_seconds=120,
+        budget_seconds=300,
     )
 
     assert heavy_calls == [["auto-heavy"]]
+    assert len(heavy_budgets) == 1
+    assert heavy_budgets[0] == pytest.approx(300.0, abs=0.1)
     assert freshness_scopes == [["auto-fresh"]]
     assert payload["selection_scope"]["heavy_projection_lane"][
         "status"
     ] == "checkpointed"
     assert payload["selection_scope"][
         "heavy_projection_lane_excluded_from_locked_maintenance"
-    ] == ["auto-heavy"]
+    ] == ["auto-heavy", "auto-heavy-second"]
     assert payload["selection_scope"]["selected_count"] == 1
     assert payload["status"] == "nothing_to_do"
 

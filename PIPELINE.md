@@ -452,10 +452,16 @@ The automatic heavy lane advances at most one oversized initial projection per
 bounded slice before ordinary maintenance acquires the global lease. Segment
 generation uses a deterministic process pool with a default of four workers
 and a bounded one-to-six range, falling back visibly to serial execution when
-the pool cannot start. A checkpointed heavy session is excluded only from the
-remainder of that locked cycle, so recent smaller sessions can still reach
-their search and session projections. Timer-originated resource denial retains
-the normal persistent retry intent; a checkpoint is progress, not completion.
+the pool cannot start. Every other oversized deferred candidate is also
+excluded from the remainder of that locked cycle; otherwise a second heavy
+session could fall through the ordinary repair selection and rebuild under the
+global lease. Recent smaller sessions can still reach their search and session
+projections. Catch-up gives the per-session heavy lane up to a 300-second slice:
+real event-dense archives can spend about two minutes in mandatory parsing and
+privacy checks before segment work resumes, so the former 120-second slice
+could preserve a checkpoint without advancing it. Timer-originated resource
+denial retains the normal persistent retry intent; a checkpoint is progress,
+not completion.
 
 The recurring catch-up route has a narrow hard-timeout grace after its
 cooperative budget. The host resource launcher terminates a child that cannot
