@@ -40394,7 +40394,15 @@ def maintain_indexes(
                 if not result.get("ok") and not result.get("budget_exhausted"):
                     diagnostics.extend(str(item) for item in result.get("diagnostics", []))
 
-        if episode_semantic_action["needed"] and not route_upstream_changed_session_ids:
+        structural_search_bootstrap_first = bool(
+            search_rebuild_required
+            and maintenance_profile == "deep"
+        )
+        if (
+            episode_semantic_action["needed"]
+            and not route_upstream_changed_session_ids
+            and not structural_search_bootstrap_first
+        ):
             execute_episode_semantic_projection_action()
         if search_state_refresh_action["needed"] and not reindex_ran and not token_backfill_ran:
             if not has_budget():
@@ -40632,7 +40640,13 @@ def maintain_indexes(
                     budget_exhausted = budget_exhausted or bool(result.get("budget_exhausted"))
                     if not result.get("ok") and result.get("diagnostics"):
                         diagnostics.extend(str(item) for item in result.get("diagnostics", []))
-        if episode_semantic_action["needed"] and route_upstream_changed_session_ids:
+        if (
+            episode_semantic_action["needed"]
+            and (
+                route_upstream_changed_session_ids
+                or structural_search_bootstrap_first
+            )
+        ):
             execute_episode_semantic_projection_action()
         if entity_registry_action["needed"]:
             search_action_result = (
@@ -50411,7 +50425,10 @@ def auto_maintenance(
         else None
     )
     selected_records_override: list[dict[str, Any]] | None = None
-    selection_scope: dict[str, Any] = {"mode": "target_filters"}
+    selection_scope: dict[str, Any] = {
+        "mode": "target_filters",
+        "profile": profile,
+    }
     diagnostics: list[str] = []
     try:
         query_demand_records = chronological_session_records(aoa_root)

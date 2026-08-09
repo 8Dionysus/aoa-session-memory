@@ -66210,6 +66210,105 @@ def test_deep_auto_maintenance_prioritizes_structural_search_bootstrap_over_toke
     assert calls["maintenance"]["repair_token_accounting"] is False
 
 
+def test_deep_index_maintenance_runs_structural_search_bootstrap_before_episode_sidecar(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-08-08T00-00-00-search-first.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-08-08T00:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": "search-first", "cwd": str(repo)},
+            },
+            {
+                "timestamp": "2026-08-08T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "Bootstrap lexical search before sidecars"}],
+                },
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "search-first",
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    assert module.search_index_sessions(aoa_root=aoa_root, target="all")["ok"] is True
+    with sqlite3.connect(module.search_db_path(aoa_root)) as conn:
+        conn.execute(
+            "UPDATE meta SET value = ? WHERE key = 'schema_version'",
+            (str(module.SEARCH_SCHEMA_VERSION - 3),),
+        )
+        conn.commit()
+
+    call_order: list[str] = []
+    episode_completed = False
+    original_search_index_sessions = module.search_index_sessions
+
+    def tracked_search_index_sessions(**kwargs: Any) -> dict[str, Any]:
+        call_order.append("search")
+        return original_search_index_sessions(**kwargs)
+
+    def fake_episode_state(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {
+            "status": "current" if episode_completed else "partial",
+            "needs_refresh": not episode_completed,
+            "dirty_session_count": 0 if episode_completed else 1,
+            "dirty_session_ids": [] if episode_completed else ["search-first"],
+        }
+
+    def fake_episode_index(**_kwargs: Any) -> dict[str, Any]:
+        nonlocal episode_completed
+        call_order.append("episode")
+        episode_completed = True
+        return {
+            "ok": True,
+            "selected_count": 1,
+            "processed_count": 1,
+            "successful_count": 1,
+            "completed_session_ids": ["search-first"],
+            "remaining_count": 0,
+            "budget_exhausted": False,
+            "indexed_episode_count": 1,
+            "elapsed_ms": 1,
+            "queue": {},
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr(module, "search_index_sessions", tracked_search_index_sessions)
+    monkeypatch.setattr(module, "episode_semantic_projection_state", fake_episode_state)
+    monkeypatch.setattr(module, "episode_semantic_index_sessions", fake_episode_index)
+
+    payload = module.maintain_indexes(
+        aoa_root=aoa_root,
+        target="all",
+        apply=True,
+        repair_graph=False,
+        repair_token_accounting=False,
+        reason="auto_maintenance:deep:test_search_first",
+        selection_scope={"mode": "target_filters", "profile": "deep"},
+    )
+
+    assert payload["search_clean_rebuild_required"] is True
+    assert call_order[:2] == ["search", "episode"]
+
+
 def test_catchup_full_rebuild_guard_shares_outer_budget_and_skips_post_probe_after_exhaustion(
     tmp_path: Path,
     monkeypatch: Any,
