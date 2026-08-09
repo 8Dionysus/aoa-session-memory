@@ -14,6 +14,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 import warnings
 from datetime import datetime, timezone
@@ -25,11 +26,60 @@ import pytest
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "aoa_session_memory.py"
+BENCHMARK_SCRIPT = (
+    Path(__file__).resolve().parents[1]
+    / "scripts"
+    / "benchmark_session_projection.py"
+)
 spec = importlib.util.spec_from_file_location("aoa_session_memory", SCRIPT)
 assert spec and spec.loader
 module = importlib.util.module_from_spec(spec)
 sys.modules["aoa_session_memory"] = module
 spec.loader.exec_module(module)
+
+
+def test_session_projection_benchmark_smoke_proves_parity_and_reuse(
+    tmp_path: Path,
+) -> None:
+    receipt_path = tmp_path / "benchmark-receipt.json"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(BENCHMARK_SCRIPT),
+            "--segments",
+            "3",
+            "--payload-bytes",
+            "64",
+            "--workers",
+            "2",
+            "--fresh-segments",
+            "1",
+            "--growth-segments",
+            "1",
+            "--temp-root",
+            str(tmp_path),
+            "--output",
+            str(receipt_path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(completed.stdout)
+
+    assert completed.returncode == 0, completed.stderr
+    assert payload["ok"] is True
+    assert payload["status"] == "complete"
+    assert json.loads(receipt_path.read_text(encoding="utf-8")) == payload
+    assert payload["serial_parallel_semantic_parity"] is True
+    assert payload["cold_serial"]["raw_unchanged"] is True
+    assert payload["cold_parallel"]["raw_unchanged"] is True
+    assert payload["growing_session"]["segment_execution"][
+        "published_reused_segment_count"
+    ] >= 2
+    assert payload["growing_session"]["raw_block_execution"][
+        "reused_block_count"
+    ] >= 2
 
 
 def test_best_effort_progress_emitter_quarantines_broken_pipe() -> None:
@@ -21456,7 +21506,7 @@ def test_raw_block_storage_compact_apply_uses_maintenance_lock(tmp_path: Path, m
     assert {"raw_blocks", "session_manifests", "session_registry"} <= set(calls["touched_surfaces"])
 
 
-def test_reindex_sessions_command_uses_maintenance_lock_for_mutation(
+def test_reindex_sessions_command_uses_split_publish_lock_for_mutation(
     tmp_path: Path,
     monkeypatch: Any,
 ) -> None:
@@ -21476,15 +21526,7 @@ def test_reindex_sessions_command_uses_maintenance_lock_for_mutation(
             "results": [],
         }
 
-    def fake_lock(root: Path, callback: Any, **kwargs: Any) -> dict[str, Any]:
-        calls["root"] = root
-        calls.update(kwargs)
-        payload = callback()
-        payload["maintenance_coordinator"] = {"status": "completed"}
-        return payload
-
     monkeypatch.setattr(module, "reindex_sessions", fake_reindex)
-    monkeypatch.setattr(module, "run_with_maintenance_lock", fake_lock)
     args = module.argparse.Namespace(
         workspace_root=str(workspace),
         aoa_root=str(aoa_root),
@@ -21503,18 +21545,10 @@ def test_reindex_sessions_command_uses_maintenance_lock_for_mutation(
     )
 
     assert module.command_reindex_sessions(args) == 0
-    assert calls["root"] == aoa_root
-    assert calls["owner_job"] == "reindex-sessions"
-    assert calls["mode"] == "manual-bulk"
-    assert calls["target"] == "session-id"
-    assert calls["reason"] == "operator_reindex_sessions"
-    assert {
-        "route_indexes",
-        "session_manifests",
-        "sessions",
-        "token_accounting",
-    } <= set(calls["touched_surfaces"])
-    assert calls["budget_seconds"] == 600
+    assert calls["reindex"]["aoa_root"] == aoa_root
+    assert calls["reindex"]["target"] == "session-id"
+    assert calls["reindex"]["budget_seconds"] == 600
+    assert calls["reindex"]["split_publish_lock"] is True
     assert calls["reindex"]["max_raw_bytes"] == 200 * 1024 * 1024
 
 
@@ -21525,10 +21559,8 @@ def test_reindex_sessions_command_does_not_report_lock_deferral_as_success(
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
 
-    def fail_reindex(**_kwargs: Any) -> dict[str, Any]:
-        raise AssertionError("deferred reindex must not enter the writer")
-
-    def defer_for_lock(_root: Path, _callback: Any, **_kwargs: Any) -> dict[str, Any]:
+    def defer_reindex(**kwargs: Any) -> dict[str, Any]:
+        assert kwargs["split_publish_lock"] is True
         return {
             "ok": True,
             "status": "skipped_lock_held",
@@ -21536,8 +21568,7 @@ def test_reindex_sessions_command_does_not_report_lock_deferral_as_success(
             "maintenance_coordinator": {"status": "skipped_lock_held"},
         }
 
-    monkeypatch.setattr(module, "reindex_sessions", fail_reindex)
-    monkeypatch.setattr(module, "run_with_maintenance_lock", defer_for_lock)
+    monkeypatch.setattr(module, "reindex_sessions", defer_reindex)
     args = module.argparse.Namespace(
         workspace_root=str(workspace),
         aoa_root=str(aoa_root),
@@ -27367,6 +27398,12 @@ def test_session_scoped_skill_prompt_visibility_is_context_only(
         module.ROUTE_SIGNAL_CLASSIFIER_VERSION - 1
     )
     module.write_json(segment_path, segment_index)
+    session_index_path = session_dir / module.SESSION_INDEX_JSON
+    session_index = module.read_json(session_index_path, {})
+    session_index["route_signal_classifier_version"] = (
+        module.ROUTE_SIGNAL_CLASSIFIER_VERSION - 1
+    )
+    module.write_json(session_index_path, session_index)
 
     stale_scan = module.session_query_source_event_scan(
         aoa_root=aoa_root,
@@ -41389,10 +41426,10 @@ def test_graph_rejects_stale_entity_registry_dependency_and_preserves_rows(
     )
     assert stale["source_version_state"][
         "version_mismatch_source_count"
-    ] == 1
-    assert source_states["reason_group_counts"][
-        "graph_entity_registry_dependency_mismatch"
-    ] >= 1
+    ] == 0
+    assert source_states["reason_group_counts"].get(
+        "graph_entity_registry_dependency_mismatch", 0
+    ) == 0
     assert cardinality_refresh["projection"]["status"] == "blocked"
     assert prune["status"] == "blocked"
     assert neighborhood is None
@@ -49984,14 +50021,14 @@ def test_archived_home_routes_are_independent_of_current_home(
 ) -> None:
     archived_path = "~/.codex/skills/aoa-eval/SKILL.md"
 
-    monkeypatch.setenv("HOME", "/home/alpha")
+    monkeypatch.setenv("HOME", "/home/example/alpha")
     first_route = module.archived_path_route_owner_root(archived_path)
     first_context = module.work_context_for_session_events(
         {"cwd": archived_path},
         [],
     )
 
-    monkeypatch.setenv("HOME", "/srv/example/home/beta")
+    monkeypatch.setenv("HOME", "/srv/example/home/example/beta")
     second_route = module.archived_path_route_owner_root(archived_path)
     second_context = module.work_context_for_session_events(
         {"cwd": archived_path},
@@ -50031,14 +50068,14 @@ def test_archived_memory_surfaces_ignore_current_home_and_codex_home(
         "aoa_session_memory": ".aoa",
     }
     for surface, expected_root in expected_roots.items():
-        monkeypatch.setenv("HOME", "/home/alpha")
+        monkeypatch.setenv("HOME", "/home/example/alpha")
         monkeypatch.setenv("CODEX_HOME", "/runtime/alpha/.codex")
         first = module.work_context_for_session_events(
             {},
             [event_for(surface)],
         )
 
-        monkeypatch.setenv("HOME", "/srv/example/home/beta")
+        monkeypatch.setenv("HOME", "/srv/example/home/example/beta")
         monkeypatch.setenv("CODEX_HOME", "/runtime/beta/.codex")
         second = module.work_context_for_session_events(
             {},
@@ -79146,6 +79183,87 @@ def test_token_accounting_backfill_respects_budget(tmp_path: Path, monkeypatch: 
     assert "token_accounting_backfill_budget_exhausted" in payload["diagnostics"]
 
 
+def test_token_accounting_backfill_uses_token_only_atomic_projection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "token-only-backfill.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-07-20T00:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "token-only-backfill",
+                    "cwd": str(workspace),
+                },
+            },
+            {
+                "timestamp": "2026-07-20T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "refresh only token ledgers",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    receipt = module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "token-only-backfill",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    record = module.resolve_session_record(
+        aoa_root,
+        "token-only-backfill",
+    )
+    session_dir = Path(str(receipt["session_dir"]))
+    raw_path = Path(
+        module.read_json(
+            session_dir / "session.manifest.json", {}
+        )["raw"]["path"]
+    )
+    raw_sha_before = module.sha256_file(raw_path)
+    monkeypatch.setattr(
+        module,
+        "reindex_session_from_raw",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("full reindex must not run")
+        ),
+    )
+
+    result = module.token_accounting_backfill_candidate(
+        aoa_root,
+        record,
+        apply=True,
+        force=True,
+    )
+
+    assert result["status"] == "backfilled"
+    assert result["applied_mode"] == "token_projection_only"
+    assert result["reindex_result"]["status"] == (
+        "token_projection_backfilled"
+    )
+    assert result["raw_unchanged"] is True
+    assert module.sha256_file(raw_path) == raw_sha_before
+    assert result["after_diagnostics"] == []
+
+
 def test_index_maintenance_reports_token_planning_budget_exhausted(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
@@ -82749,8 +82867,1200 @@ def test_session_projection_rejects_changed_producer_and_preserves_last_good(
     )
 
 
+def test_session_projection_checkpoint_resumes_completed_segments_without_raw_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "checkpoint-resume-session.jsonl"
+    rows: list[dict[str, Any]] = [
+        {
+            "timestamp": "2026-07-20T00:00:00Z",
+            "type": "session_meta",
+            "payload": {
+                "id": "checkpoint-resume-session",
+                "cwd": str(workspace),
+            },
+        }
+    ]
+    for ordinal in range(5):
+        rows.extend(
+            [
+                {
+                    "timestamp": (
+                        f"2026-07-20T00:00:{ordinal * 2 + 1:02d}Z"
+                    ),
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": f"checkpoint segment {ordinal}",
+                            }
+                        ],
+                    },
+                },
+                {
+                    "timestamp": (
+                        f"2026-07-20T00:00:{ordinal * 2 + 2:02d}Z"
+                    ),
+                    "type": "turn_context",
+                    "payload": {
+                        "summary": f"boundary {ordinal}",
+                    },
+                },
+            ]
+        )
+    write_jsonl(transcript, rows)
+    receipt = module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "checkpoint-resume-session",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    session_dir = Path(str(receipt["session_dir"]))
+    record = module.resolve_session_record(
+        aoa_root,
+        "checkpoint-resume-session",
+    )
+    raw_path = Path(
+        module.read_json(
+            session_dir / "session.manifest.json", {}
+        )["raw"]["path"]
+    )
+    raw_sha_before = module.sha256_file(raw_path)
+    original_write_segment = module.write_segment
+    calls: list[int] = []
+    fake_clock = [0.0]
+
+    def counted_write_segment(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        payload = original_write_segment(*args, **kwargs)
+        calls.append(int(args[2]))
+        fake_clock[0] = 2.0
+        return payload
+
+    monkeypatch.setattr(module.time, "monotonic", lambda: fake_clock[0])
+    monkeypatch.setattr(module, "write_segment", counted_write_segment)
+    monkeypatch.setattr(
+        module,
+        "reuse_published_session_segment",
+        lambda **_kwargs: None,
+    )
+    interrupted = module.reindex_session_from_raw(
+        aoa_root,
+        record,
+        cooperative_deadline_monotonic=1.0,
+        segment_workers=1,
+    )
+
+    assert interrupted["status"] == "checkpointed"
+    assert interrupted["completed_segment_count"] == 1
+    assert calls == [0]
+    assert module.sha256_file(raw_path) == raw_sha_before
+    assert Path(interrupted["work_dir"]).is_dir()
+
+    fake_clock[0] = 0.0
+    calls.clear()
+    resumed = module.reindex_session_from_raw(
+        aoa_root,
+        record,
+        segment_workers=1,
+    )
+
+    assert resumed["status"] == "reindexed"
+    assert 0 not in calls
+    assert len(calls) == resumed["segment_count"] - 1
+    assert module.sha256_file(raw_path) == raw_sha_before
+    assert not Path(interrupted["work_dir"]).exists()
+
+
+def test_maintenance_cleanup_preserves_current_checkpoint_and_removes_only_obsolete_work(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "stale-work-cleanup.jsonl"
+    rows: list[dict[str, Any]] = [
+        {
+            "timestamp": "2026-07-20T01:00:00Z",
+            "type": "session_meta",
+            "payload": {
+                "id": "stale-work-cleanup",
+                "cwd": str(workspace),
+            },
+        }
+    ]
+    for ordinal in range(3):
+        rows.extend(
+            [
+                {
+                    "timestamp": f"2026-07-20T01:00:{ordinal * 2 + 1:02d}Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": f"cleanup checkpoint {ordinal}",
+                            }
+                        ],
+                    },
+                },
+                {
+                    "timestamp": f"2026-07-20T01:00:{ordinal * 2 + 2:02d}Z",
+                    "type": "turn_context",
+                    "payload": {"summary": f"boundary {ordinal}"},
+                },
+            ]
+        )
+    write_jsonl(transcript, rows)
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "stale-work-cleanup",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    record = module.resolve_session_record(
+        aoa_root, "stale-work-cleanup"
+    )
+    original_write_segment = module.write_segment
+    fake_clock = [0.0]
+
+    def stop_after_one_segment(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        result = original_write_segment(*args, **kwargs)
+        fake_clock[0] = 2.0
+        return result
+
+    monkeypatch.setattr(module.time, "monotonic", lambda: fake_clock[0])
+    monkeypatch.setattr(module, "write_segment", stop_after_one_segment)
+    monkeypatch.setattr(
+        module,
+        "reuse_published_session_segment",
+        lambda **_kwargs: None,
+    )
+    interrupted = module.reindex_session_from_raw(
+        aoa_root,
+        record,
+        cooperative_deadline_monotonic=1.0,
+        segment_workers=1,
+    )
+    work_dir = Path(interrupted["work_dir"])
+
+    current = module.session_projection_work_status(aoa_root)
+    current_cleanup = module.maintenance_cleanup(
+        aoa_root=aoa_root, apply=False
+    )
+
+    assert interrupted["status"] == "checkpointed"
+    assert current["resumable_current_count"] == 1
+    assert current["obsolete_count"] == 0
+    assert current_cleanup["session_projection_work"][
+        "needs_cleanup"
+    ] is False
+    assert work_dir.is_dir()
+
+    session_dir = module.session_dir_from_record(record)
+    raw_path = Path(
+        module.read_json(
+            session_dir / "session.manifest.json", {}
+        )["raw"]["path"]
+    )
+    with raw_path.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "timestamp": "2026-07-20T01:00:20Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "raw changed after checkpoint",
+                            }
+                        ],
+                    },
+                }
+            )
+            + "\n"
+        )
+    old_epoch = time.time() - 600
+    for item in sorted(work_dir.rglob("*"), reverse=True):
+        os.utime(item, (old_epoch, old_epoch), follow_symlinks=False)
+    os.utime(work_dir, (old_epoch, old_epoch), follow_symlinks=False)
+    raw_sha_before_cleanup = module.sha256_file(raw_path)
+
+    obsolete = module.session_projection_work_status(aoa_root)
+    applied = module.maintenance_cleanup(
+        aoa_root=aoa_root, apply=True
+    )
+
+    assert obsolete["obsolete_count"] == 1
+    assert obsolete["entries"][0]["status"] == (
+        "obsolete_incompatible"
+    )
+    assert applied["action_counts"][
+        "obsolete_projection_work_removed"
+    ] == 1
+    assert not work_dir.exists()
+    assert module.sha256_file(raw_path) == raw_sha_before_cleanup
+
+
+@pytest.mark.parametrize("change_kind", ["generation", "policy"])
+def test_checkpoint_resume_invalidates_changed_generation_or_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    change_kind: str,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    session_id = f"checkpoint-{change_kind}-drift"
+    transcript = tmp_path / f"{session_id}.jsonl"
+    rows: list[dict[str, Any]] = [
+        {
+            "timestamp": "2026-07-20T02:00:00Z",
+            "type": "session_meta",
+            "payload": {"id": session_id, "cwd": str(workspace)},
+        }
+    ]
+    for ordinal in range(3):
+        rows.extend(
+            [
+                {
+                    "timestamp": f"2026-07-20T02:00:{ordinal * 2 + 1:02d}Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": f"{change_kind} segment {ordinal}",
+                            }
+                        ],
+                    },
+                },
+                {
+                    "timestamp": f"2026-07-20T02:00:{ordinal * 2 + 2:02d}Z",
+                    "type": "turn_context",
+                    "payload": {"summary": f"boundary {ordinal}"},
+                },
+            ]
+        )
+    write_jsonl(transcript, rows)
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": session_id,
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    record = module.resolve_session_record(aoa_root, session_id)
+    original_write_segment = module.write_segment
+    fake_clock = [0.0]
+    calls: list[int] = []
+
+    def counted_write_segment(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        result = original_write_segment(*args, **kwargs)
+        calls.append(int(args[2]))
+        fake_clock[0] = 2.0
+        return result
+
+    monkeypatch.setattr(module.time, "monotonic", lambda: fake_clock[0])
+    monkeypatch.setattr(module, "write_segment", counted_write_segment)
+    monkeypatch.setattr(
+        module,
+        "reuse_published_session_segment",
+        lambda **_kwargs: None,
+    )
+    interrupted = module.reindex_session_from_raw(
+        aoa_root,
+        record,
+        cooperative_deadline_monotonic=1.0,
+        segment_workers=1,
+    )
+    old_work_dir = Path(interrupted["work_dir"])
+
+    if change_kind == "generation":
+        original_identity = module.segment_index_generation_identity
+
+        def changed_identity(
+            *args: Any, **kwargs: Any
+        ) -> dict[str, Any]:
+            identity = original_identity(*args, **kwargs)
+            return {
+                **identity,
+                "generation_id": (
+                    f"{identity['generation_id']}-changed"
+                ),
+            }
+
+        monkeypatch.setattr(
+            module,
+            "segment_index_generation_identity",
+            changed_identity,
+        )
+    else:
+        monkeypatch.setattr(
+            module,
+            "DERIVED_TEXT_PRIVACY_POLICY_VERSION",
+            module.DERIVED_TEXT_PRIVACY_POLICY_VERSION + 1,
+        )
+    fake_clock[0] = 0.0
+    calls.clear()
+    resumed = module.reindex_session_from_raw(
+        aoa_root,
+        record,
+        segment_workers=1,
+    )
+
+    assert interrupted["status"] == "checkpointed"
+    assert resumed["status"] == "reindexed"
+    assert resumed["work_id"] != interrupted["work_id"]
+    assert calls == list(range(resumed["segment_count"]))
+    assert old_work_dir.is_dir()
+
+
+def test_session_projection_process_parallel_matches_serial_semantics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "parallel-parity-session.jsonl"
+    rows: list[dict[str, Any]] = [
+        {
+            "timestamp": "2026-07-21T00:00:00Z",
+            "type": "session_meta",
+            "payload": {
+                "id": "parallel-parity-session",
+                "cwd": str(workspace),
+            },
+        }
+    ]
+    for ordinal in range(6):
+        rows.extend(
+            [
+                {
+                    "timestamp": f"2026-07-21T00:00:{ordinal * 2 + 1:02d}Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": f"parallel parity {ordinal}",
+                            }
+                        ],
+                    },
+                },
+                {
+                    "timestamp": f"2026-07-21T00:00:{ordinal * 2 + 2:02d}Z",
+                    "type": "turn_context",
+                    "payload": {"summary": f"boundary {ordinal}"},
+                },
+            ]
+        )
+    write_jsonl(transcript, rows)
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "parallel-parity-session",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    record = module.resolve_session_record(
+        aoa_root,
+        "parallel-parity-session",
+    )
+    monkeypatch.setattr(
+        module,
+        "reuse_published_session_segment",
+        lambda **_kwargs: None,
+    )
+
+    serial = module.reindex_session_from_raw(
+        aoa_root,
+        record,
+        segment_workers=1,
+    )
+    parallel = module.reindex_session_from_raw(
+        aoa_root,
+        record,
+        segment_workers=4,
+    )
+
+    assert serial["status"] == "reindexed"
+    assert parallel["status"] == "reindexed"
+    assert parallel["segment_execution"]["mode"] == "process_pool"
+    assert parallel["segment_execution"]["actual_workers"] == 4
+    assert (
+        serial["publish_result"]["validation"]["semantic_digest"]
+        == parallel["publish_result"]["validation"]["semantic_digest"]
+    )
+
+
+def test_split_publish_lock_keeps_segment_build_outside_global_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "split-publish-lock.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-07-21T01:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "split-publish-lock",
+                    "cwd": str(workspace),
+                },
+            },
+            {
+                "timestamp": "2026-07-21T01:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "build without global lock",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "split-publish-lock",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    record = module.resolve_session_record(
+        aoa_root,
+        "split-publish-lock",
+    )
+    original_write_segment = module.write_segment
+    lock_observations: list[bool] = []
+
+    def observed_write_segment(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        lock_observations.append(
+            bool(module.maintenance_lock_snapshot(aoa_root)["active"])
+        )
+        return original_write_segment(*args, **kwargs)
+
+    monkeypatch.setenv("AOA_SESSION_MEMORY_SEGMENT_WORKERS", "1")
+    monkeypatch.setattr(module, "write_segment", observed_write_segment)
+    monkeypatch.setattr(
+        module,
+        "reuse_published_session_segment",
+        lambda **_kwargs: None,
+    )
+
+    payload = module.reindex_sessions(
+        aoa_root=aoa_root,
+        selected_records=[record],
+        split_publish_lock=True,
+    )
+
+    assert payload["ok"] is True
+    assert payload["results"][0]["status"] == "reindexed"
+    assert payload["results"][0]["split_publish_lock"] is True
+    assert lock_observations == [False]
+    assert payload["results"][0]["maintenance_coordinator"][
+        "mode"
+    ] == "publish"
+
+
+def test_fresh_session_publishes_while_heavy_session_build_is_active(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+
+    def create_session(session_id: str, minute: int) -> dict[str, Any]:
+        transcript = tmp_path / f"{session_id}.jsonl"
+        write_jsonl(
+            transcript,
+            [
+                {
+                    "timestamp": f"2026-07-21T02:{minute:02d}:00Z",
+                    "type": "session_meta",
+                    "payload": {
+                        "id": session_id,
+                        "cwd": str(workspace),
+                    },
+                },
+                {
+                    "timestamp": f"2026-07-21T02:{minute:02d}:01Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": f"build {session_id}",
+                            }
+                        ],
+                    },
+                },
+            ],
+        )
+        module.handle_hook_event(
+            "Stop",
+            {
+                "session_id": session_id,
+                "transcript_path": str(transcript),
+                "cwd": str(workspace),
+                "hook_event_name": "Stop",
+            },
+            workspace_root=workspace,
+            aoa_root=aoa_root,
+        )
+        return module.resolve_session_record(aoa_root, session_id)
+
+    heavy_record = create_session("concurrent-heavy", 0)
+    fresh_record = create_session("concurrent-fresh", 1)
+    heavy_label = str(heavy_record["session_label"])
+    original_write_segment = module.write_segment
+    heavy_entered = threading.Event()
+    release_heavy = threading.Event()
+
+    def coordinated_write_segment(
+        *args: Any, **kwargs: Any
+    ) -> dict[str, Any]:
+        if heavy_label in str(args[0]) and not heavy_entered.is_set():
+            heavy_entered.set()
+            assert release_heavy.wait(timeout=20)
+        return original_write_segment(*args, **kwargs)
+
+    monkeypatch.setenv("AOA_SESSION_MEMORY_SEGMENT_WORKERS", "1")
+    monkeypatch.setattr(
+        module, "write_segment", coordinated_write_segment
+    )
+    monkeypatch.setattr(
+        module,
+        "reuse_published_session_segment",
+        lambda **_kwargs: None,
+    )
+    heavy_result: dict[str, Any] = {}
+
+    def run_heavy() -> None:
+        heavy_result.update(
+            module.reindex_sessions(
+                aoa_root=aoa_root,
+                selected_records=[heavy_record],
+                split_publish_lock=True,
+            )
+        )
+
+    thread = threading.Thread(target=run_heavy, daemon=True)
+    thread.start()
+    assert heavy_entered.wait(timeout=20)
+
+    fresh_result = module.reindex_sessions(
+        aoa_root=aoa_root,
+        selected_records=[fresh_record],
+        split_publish_lock=True,
+    )
+
+    assert thread.is_alive()
+    assert fresh_result["ok"] is True
+    assert fresh_result["completed_session_ids"] == [
+        "concurrent-fresh"
+    ]
+    assert fresh_result["results"][0]["status"] == "reindexed"
+    release_heavy.set()
+    thread.join(timeout=20)
+    assert not thread.is_alive()
+    assert heavy_result["ok"] is True
+    assert heavy_result["completed_session_ids"] == [
+        "concurrent-heavy"
+    ]
+
+
+def test_auto_maintenance_heavy_checkpoint_does_not_starve_fresh_scope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+
+    def create_session(session_id: str, minute: int) -> dict[str, Any]:
+        transcript = tmp_path / f"{session_id}.jsonl"
+        write_jsonl(
+            transcript,
+            [
+                {
+                    "timestamp": f"2026-07-21T04:{minute:02d}:00Z",
+                    "type": "session_meta",
+                    "payload": {
+                        "id": session_id,
+                        "cwd": str(workspace),
+                    },
+                },
+                {
+                    "timestamp": f"2026-07-21T04:{minute:02d}:01Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": f"maintain {session_id}",
+                            }
+                        ],
+                    },
+                },
+            ],
+        )
+        module.handle_hook_event(
+            "Stop",
+            {
+                "session_id": session_id,
+                "transcript_path": str(transcript),
+                "cwd": str(workspace),
+                "hook_event_name": "Stop",
+            },
+            workspace_root=workspace,
+            aoa_root=aoa_root,
+        )
+        return module.resolve_session_record(aoa_root, session_id)
+
+    heavy_record = create_session("auto-heavy", 0)
+    fresh_record = create_session("auto-fresh", 1)
+    heavy_session_dir = module.session_dir_from_record(heavy_record)
+    heavy_manifest_path = heavy_session_dir / "session.manifest.json"
+    heavy_manifest = module.read_json(heavy_manifest_path, {})
+    heavy_manifest["archive_status"] = "raw_mirrored_index_deferred"
+    module.write_json(heavy_manifest_path, heavy_manifest)
+    monkeypatch.setattr(
+        module, "SESSION_PROJECTION_HEAVY_LANE_RAW_BYTES", 1
+    )
+    heavy_calls: list[list[str]] = []
+    freshness_scopes: list[list[str]] = []
+
+    def checkpoint_heavy(**kwargs: Any) -> dict[str, Any]:
+        selected = kwargs["selected_records"]
+        heavy_calls.append(
+            [str(record.get("session_id") or "") for record in selected]
+        )
+        return {
+            "ok": False,
+            "status": "partial",
+            "budget_exhausted": True,
+            "remaining_count": 1,
+            "results": [
+                {
+                    "status": "checkpointed",
+                    "session_id": "auto-heavy",
+                    "work_dir": str(tmp_path / "heavy-work"),
+                }
+            ],
+        }
+
+    def clean_freshness(**kwargs: Any) -> dict[str, Any]:
+        selected = kwargs.get("selected_records") or []
+        freshness_scopes.append(
+            [str(record.get("session_id") or "") for record in selected]
+        )
+        return {
+            "ok": True,
+            "diagnostics": [],
+            "needs_index_maintenance": False,
+            "needs_graph_maintenance": False,
+            "needs_sidecar_export": False,
+            "needs_offline_graph_build": False,
+            "needs_optional_dense_maintenance": False,
+            "search_index": {
+                "dirty_session_count": 0,
+                "actionable_dirty_session_count": 0,
+                "deferred_live_session_count": 0,
+            },
+            "atlas_index": {"dirty_session_count": 0},
+            "entity_registry": {"needs_maintenance": False},
+            "episode_semantic_projection": {
+                "dirty_session_count": 0
+            },
+            "episode_posting_cardinality": {
+                "metadata_incomplete_session_count": 0
+            },
+            "episode_dense_projection": {"dirty_session_count": 0},
+            "graph_store": {
+                "actionable_source_count": 0,
+                "deferred_live_source_count": 0,
+            },
+        }
+
+    monkeypatch.setattr(module, "reindex_sessions", checkpoint_heavy)
+    monkeypatch.setattr(
+        module, "route_cache_freshness_gates", clean_freshness
+    )
+    payload = module.auto_maintenance(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        profile="catchup",
+        apply=True,
+        discovery_limit=0,
+        budget_seconds=120,
+    )
+
+    assert heavy_calls == [["auto-heavy"]]
+    assert freshness_scopes == [["auto-fresh"]]
+    assert payload["selection_scope"]["heavy_projection_lane"][
+        "status"
+    ] == "checkpointed"
+    assert payload["selection_scope"][
+        "heavy_projection_lane_excluded_from_locked_maintenance"
+    ] == ["auto-heavy"]
+    assert payload["selection_scope"]["selected_count"] == 1
+    assert payload["status"] == "nothing_to_do"
+
+
+def test_per_session_build_lease_defers_duplicate_builder(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "duplicate-builder.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-07-21T02:30:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "duplicate-builder",
+                    "cwd": str(workspace),
+                },
+            },
+            {
+                "timestamp": "2026-07-21T02:30:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "only one builder owns this session",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "duplicate-builder",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    record = module.resolve_session_record(aoa_root, "duplicate-builder")
+    session_dir = module.session_dir_from_record(record)
+    lease_path = module.session_projection_build_lease_path(session_dir)
+    with lease_path.open("a+", encoding="utf-8") as lease_handle:
+        fcntl.flock(lease_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        deferred = module.reindex_session_from_raw(aoa_root, record)
+        fcntl.flock(lease_handle, fcntl.LOCK_UN)
+
+    assert deferred["status"] == "deferred_session_lease"
+    assert deferred["mutates"] is False
+    assert deferred["diagnostics"] == [
+        "session_projection_build_lease_held"
+    ]
+
+
+def test_prebuilt_projection_rejects_source_growth_and_preserves_last_good(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "source-growth-before-publish.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-07-21T03:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "source-growth-before-publish",
+                    "cwd": str(workspace),
+                },
+            },
+            {
+                "timestamp": "2026-07-21T03:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "build against a stable source",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "source-growth-before-publish",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    record = module.resolve_session_record(
+        aoa_root, "source-growth-before-publish"
+    )
+    session_dir = module.session_dir_from_record(record)
+
+    def published_projection() -> dict[str, bytes]:
+        return {
+            str(path.relative_to(session_dir)): path.read_bytes()
+            for path in sorted(session_dir.rglob("*"))
+            if path.is_file()
+            and path.name != "session.raw.jsonl"
+            and (
+                path.name
+                in {
+                    "session.manifest.json",
+                    module.SESSION_INDEX_JSON,
+                    module.SESSION_INDEX_MARKDOWN,
+                }
+                or path.parent.name in {"raw", "segments"}
+            )
+        }
+
+    last_good = published_projection()
+    built = module.reindex_session_from_raw(
+        aoa_root,
+        record,
+        defer_publish=True,
+        segment_workers=1,
+    )
+    raw_path = Path(
+        module.read_json(
+            session_dir / "session.manifest.json", {}
+        )["raw"]["path"]
+    )
+    with raw_path.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "timestamp": "2026-07-21T03:00:02Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "source grew before publish",
+                            }
+                        ],
+                    },
+                }
+            )
+            + "\n"
+        )
+    rejected = (
+        module.publish_prebuilt_session_projection_under_maintenance_lock(
+            aoa_root=aoa_root,
+            record=record,
+            work_dir=Path(built["work_dir"]),
+        )
+    )
+
+    assert built["status"] == "built_unpublished"
+    assert rejected["status"] == "diagnostic"
+    assert rejected["mutates"] is False
+    assert (
+        "projection_dependencies_drifted_before_publish"
+        in rejected["diagnostics"]
+    )
+    assert "last_good_projection_preserved" in rejected["diagnostics"]
+    assert published_projection() == last_good
+
+
+def test_growing_session_reuses_unchanged_published_segments(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "growing-session.jsonl"
+    rows: list[dict[str, Any]] = [
+        {
+            "timestamp": "2026-07-22T00:00:00Z",
+            "type": "session_meta",
+            "payload": {
+                "id": "growing-session",
+                "cwd": str(workspace),
+            },
+        }
+    ]
+    for ordinal in range(4):
+        rows.extend(
+            [
+                {
+                    "timestamp": f"2026-07-22T00:00:{ordinal * 2 + 1:02d}Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": f"stable segment {ordinal}",
+                            }
+                        ],
+                    },
+                },
+                {
+                    "timestamp": f"2026-07-22T00:00:{ordinal * 2 + 2:02d}Z",
+                    "type": "turn_context",
+                    "payload": {"summary": f"stable boundary {ordinal}"},
+                },
+            ]
+        )
+    write_jsonl(transcript, rows)
+    receipt = module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "growing-session",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    session_dir = Path(str(receipt["session_dir"]))
+    record = module.resolve_session_record(aoa_root, "growing-session")
+    raw_path = Path(
+        module.read_json(
+            session_dir / "session.manifest.json", {}
+        )["raw"]["path"]
+    )
+    with raw_path.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "timestamp": "2026-07-22T00:00:20Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "new growing tail",
+                            }
+                        ],
+                    },
+                }
+            )
+            + "\n"
+        )
+
+    grown = module.reindex_session_from_raw(
+        aoa_root,
+        record,
+        segment_workers=4,
+    )
+
+    assert grown["status"] == "reindexed"
+    execution = grown["segment_execution"]
+    assert execution["published_reused_segment_count"] >= 3
+    assert execution["rebuilt_segment_count"] < grown["segment_count"]
+    raw_block_execution = grown["raw_block_execution"]
+    assert raw_block_execution["reused_block_count"] >= 3
+    assert (
+        raw_block_execution["rebuilt_block_count"]
+        < grown["raw_block_count"]
+    )
+
+
+def test_graph_registry_dependency_digest_invalidates_only_used_routes() -> None:
+    def entry(key: str, owner: str) -> dict[str, Any]:
+        return {
+            "entity_id": f"skill:{key}",
+            "kind": "skill",
+            "canonical_key": key,
+            "status": "registered",
+            "route_layer": "skill",
+            "route_signal": f"skill:{key}",
+            "source_surface": f"skills/{key}/SKILL.md",
+            "owner": owner,
+            "canonicalization": {
+                "schema_version": 1,
+                "status": "resolved",
+                "identity_claim_allowed": True,
+                "collision_preserved": False,
+                "candidate_count": 1,
+                "active_candidate_count": 1,
+                "selected_candidate_id": f"skill:{key}",
+                "candidate_ids": [f"skill:{key}"],
+            },
+        }
+
+    routes = [{"layer": "skill", "key": "used"}]
+    baseline_index = {
+        ("skill", "used"): entry("used", "owner-a"),
+        ("skill", "unrelated"): entry("unrelated", "owner-b"),
+    }
+    unrelated_changed = {
+        **baseline_index,
+        ("skill", "unrelated"): entry(
+            "unrelated", "different-owner"
+        ),
+    }
+    used_changed = {
+        **baseline_index,
+        ("skill", "used"): entry("used", "different-owner"),
+    }
+
+    baseline = module.graph_source_registry_dependency_for_route_tokens(
+        routes, baseline_index
+    )
+    unrelated = (
+        module.graph_source_registry_dependency_for_route_tokens(
+            routes, unrelated_changed
+        )
+    )
+    affected = module.graph_source_registry_dependency_for_route_tokens(
+        routes, used_changed
+    )
+
+    assert baseline["digest"] == unrelated["digest"]
+    assert baseline["digest"] != affected["digest"]
+    assert baseline["route_count"] == 1
+    assert baseline["resolved_entity_count"] == 1
+
+
+def test_graph_selective_registry_dependency_migration_is_one_time_and_bounded() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE graph_sources (source_key TEXT PRIMARY KEY)"
+    )
+    conn.execute(
+        "CREATE TABLE node_contribs ("
+        "source_key TEXT, node_type TEXT, payload_json TEXT)"
+    )
+    conn.executemany(
+        "INSERT INTO graph_sources(source_key) VALUES (?)",
+        [("source-used",), ("source-empty",)],
+    )
+    conn.execute(
+        "INSERT INTO node_contribs VALUES (?, ?, ?)",
+        (
+            "source-used",
+            "skill",
+            json.dumps(
+                {
+                    "route_layer": "skill",
+                    "route_key": "used",
+                }
+            ),
+        ),
+    )
+    registry_entry = {
+        "entity_id": "skill:used",
+        "kind": "skill",
+        "canonical_key": "used",
+        "status": "registered",
+        "route_layer": "skill",
+        "route_signal": "skill:used",
+        "source_surface": "skills/used/SKILL.md",
+        "owner": "aoa-skills",
+        "canonicalization": {
+            "schema_version": 1,
+            "status": "resolved",
+            "candidate_ids": ["skill:used"],
+        },
+    }
+
+    migrated = module.graph_migrate_selective_registry_dependencies(
+        conn=conn,
+        registry_index={("skill", "used"): registry_entry},
+    )
+    rows = {
+        row["source_key"]: row
+        for row in conn.execute(
+            "SELECT * FROM graph_sources ORDER BY source_key"
+        ).fetchall()
+    }
+    migrated_again = (
+        module.graph_migrate_selective_registry_dependencies(
+            conn=conn,
+            registry_index={("skill", "used"): registry_entry},
+        )
+    )
+
+    assert migrated["source_count"] == 2
+    assert migrated["route_bearing_source_count"] == 1
+    assert rows["source-used"]["entity_registry_selective_digest"]
+    assert json.loads(
+        rows["source-used"]["entity_registry_route_tokens_json"]
+    ) == [{"key": "used", "layer": "skill"}]
+    assert json.loads(
+        rows["source-empty"]["entity_registry_route_tokens_json"]
+    ) == []
+    assert migrated_again["source_count"] == 2
+    conn.close()
+
+
 def test_route_generation_refresh_uses_atomic_session_rebuild(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
@@ -82804,16 +84114,41 @@ def test_route_generation_refresh_uses_atomic_session_rebuild(
         module.ROUTE_SIGNAL_CLASSIFIER_VERSION - 1
     )
     module.write_json(segment_path, segment_index)
+    session_index_path = session_dir / module.SESSION_INDEX_JSON
+    session_index = module.read_json(session_index_path, {})
+    session_index["route_signal_classifier_version"] = (
+        module.ROUTE_SIGNAL_CLASSIFIER_VERSION - 1
+    )
+    module.write_json(session_index_path, session_index)
 
     planned = module.refresh_route_indexes_from_raw(
         aoa_root,
         record,
         dry_run=True,
     )
-    refreshed = module.refresh_route_indexes_from_raw(
-        aoa_root,
-        record,
+    original_write_segment = module.write_segment
+    lock_observations: list[bool] = []
+
+    def observed_write_segment(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        lock_observations.append(
+            bool(module.maintenance_lock_snapshot(aoa_root)["active"])
+        )
+        return original_write_segment(*args, **kwargs)
+
+    monkeypatch.setenv("AOA_SESSION_MEMORY_SEGMENT_WORKERS", "1")
+    monkeypatch.setattr(module, "write_segment", observed_write_segment)
+    monkeypatch.setattr(
+        module,
+        "reuse_published_session_segment",
+        lambda **_kwargs: None,
     )
+    batch = module.reindex_sessions(
+        aoa_root=aoa_root,
+        selected_records=[record],
+        stale_route_indexes=True,
+        split_publish_lock=True,
+    )
+    refreshed = batch["results"][0]
 
     assert planned["planned_action"] == (
         "atomic_session_projection_rebuild_for_route_generation"
@@ -82825,6 +84160,9 @@ def test_route_generation_refresh_uses_atomic_session_rebuild(
     assert refreshed["route_refresh_scope"] == (
         "full_session_projection_generation"
     )
+    assert refreshed["split_publish_lock"] is True
+    assert lock_observations == [False]
+    assert refreshed["maintenance_coordinator"]["mode"] == "publish"
     restored_index = module.read_json(segment_path, {})
     assert (
         restored_index["route_signal_classifier_version"]
@@ -89569,6 +90907,46 @@ def test_session_sensitive_literal_policy_redacts_detached_values_without_persis
     ):
         assert sensitive_value not in report_text
         assert sensitive_value not in repr_text
+
+
+def test_session_sensitive_literal_policy_skips_expensive_assignment_matcher_for_benign_text(
+    monkeypatch,
+) -> None:
+    class ForbiddenAssignmentMatcher:
+        def finditer(self, _source: str):
+            raise AssertionError(
+                "full assignment matcher must not scan benign text"
+            )
+
+    monkeypatch.setattr(
+        module,
+        "DERIVED_SENSITIVE_ASSIGNMENT_RE",
+        ForbiddenAssignmentMatcher(),
+    )
+    benign = "ordinary transcript payload " + ("x" * 450_000)
+
+    policy = module.derived_session_sensitive_literal_policy_from_texts(
+        [benign]
+    )
+
+    assert policy.report()["literal_count"] == 0
+
+
+def test_session_sensitive_literal_policy_prefilter_preserves_assignment_detection() -> None:
+    assignment_value = "".join(
+        ["assignment", "abcdefghijklmnop", "0123456789"]
+    )
+    source = f"service.api-key={assignment_value}"
+
+    policy = module.derived_session_sensitive_literal_policy_from_texts(
+        [source]
+    )
+
+    assert policy.report()["literal_count"] == 1
+    assert assignment_value not in module.redact_derived_text(
+        f"detached {assignment_value}",
+        literal_policy=policy,
+    )
 
 
 def test_generated_session_search_and_graph_views_do_not_duplicate_credentials(

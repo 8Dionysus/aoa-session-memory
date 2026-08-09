@@ -119,6 +119,39 @@ prefix of the resolvable live source. Publication uses the normal atomic
 last-good boundary, refreshes the registry, and marks search and graph dirty;
 it does not claim either derived projection is fresh.
 
+A long session rebuild uses a sibling content-addressed
+`.projection-work-<work-id>` directory rather than one disposable stage. Its
+checkpoint binds the raw publish identity, all producer generations, and the
+privacy, redaction, and token-accounting policy versions. Completed raw blocks
+and segments carry size-and-SHA receipts and are reused only while those
+receipts remain current. Cooperative deadlines are checked between phases and
+bounded segment waves; a timeout preserves compatible work and the published
+last-good generation. Source, producer, or policy drift selects a new work ID
+instead of resuming incompatible artifacts.
+
+For a growing session, each published raw block is admitted for reuse only
+when its role, line range, byte size, declared SHA-256, and freshly measured
+artifact SHA-256 all match the current raw event slice. The immutable block is
+then linked into the sibling work tree; the changed tail and new blocks are
+materialized normally. A current per-block token summary may be reused only
+under the current accounting schema and generator. This avoids rewriting and
+re-accounting sealed history without trusting the manifest alone.
+
+Session-sensitive literal discovery first searches for the mandatory family
+of sensitive assignment labels before invoking the exact assignment matcher.
+Every exact assignment match contains one of those labels, so benign oversized
+lines avoid pathological regex backtracking without reducing credential
+coverage. The ephemeral literal policy is still rebuilt from raw authority and
+is never serialized.
+
+Heavy construction owns a nonblocking per-session build lease. It does not own
+the global maintenance lease. A completed build is revalidated against current
+raw and generation identities, then takes the global lease only for atomic
+publication, registry update, and dirty propagation. A source race abstains and
+leaves last-good readable. Maintenance never removes a current resumable work
+directory; it may remove only an old incompatible work identity after proving
+the session lease inactive and revalidating current raw authority.
+
 ## 6. Count-only accounting
 
 Token observations are separated by basis:
@@ -132,6 +165,13 @@ Aggregates retain basis counts and totals. No aggregation may merge an
 estimate into provider-reported or exact usage. Accounting stores counts and
 refs only; it excludes prompt text, raw text, transcript paths, session titles,
 and tokenizer payloads.
+
+When the published session generation remains compatible and only token fields
+are stale, backfill stages the existing projection and atomically rewrites the
+manifest, raw-block index, segment indexes, and session-index accounting
+fields. It verifies the raw SHA before and after and does not rerun
+segmentation. A `raw_mirrored_index_deferred` session without a complete
+projection still requires initial materialization.
 
 ## 7. Route projections
 
@@ -407,6 +447,15 @@ That fast path remains inside the selected profile's route-size envelope. An
 oversized live-tail target is deferred to an explicit heavy or resumable route,
 while ordinary bounded maintenance continues across the rest of the backlog;
 one large session must not monopolize recurring catch-up attempts.
+
+The automatic heavy lane advances at most one oversized initial projection per
+bounded slice before ordinary maintenance acquires the global lease. Segment
+generation uses a deterministic process pool with a default of four workers
+and a bounded one-to-six range, falling back visibly to serial execution when
+the pool cannot start. A checkpointed heavy session is excluded only from the
+remainder of that locked cycle, so recent smaller sessions can still reach
+their search and session projections. Timer-originated resource denial retains
+the normal persistent retry intent; a checkpoint is progress, not completion.
 
 The recurring catch-up route has a narrow hard-timeout grace after its
 cooperative budget. The host resource launcher terminates a child that cannot

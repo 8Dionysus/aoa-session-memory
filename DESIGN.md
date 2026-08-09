@@ -447,6 +447,31 @@ generation readable. Repeating the same dense input and generation must
 produce identical document hashes and vector bytes even if observation
 timestamps differ.
 
+Atomic publication does not require monolithic computation. Session projection
+work is content-addressed by raw publish identity, producer generations, and
+policy versions, and may checkpoint between phases and segment waves. A
+per-session lease prevents duplicate builders while allowing unrelated sessions
+to advance. Long CPU work remains outside the global maintenance lease; only a
+dependency recheck, atomic publish, registry update, and dirty propagation use
+the global writer boundary. Last-good remains the reader generation until that
+boundary succeeds.
+
+Segment input digests bind the bounded raw event slice, role, raw-block content,
+and generation policies. An unchanged segment may be reused across growth of a
+live session; the changed tail and new segments are rebuilt. Deterministic
+process workers alter execution cost, not semantic ordering or projection
+digests. Token-only accounting drift is a projection metadata transition, not
+by itself a reason to repeat parsing and segmentation.
+
+Raw-block reuse is independently evidence-bearing. Current event bytes are
+hashed and compared with both the prior record and the actual published block
+before an immutable link is staged. This lets a growing projection reuse sealed
+raw blocks and their compatible block-local token summaries while preserving
+raw authority and atomic publication. Privacy scanning likewise uses a
+necessary-label prefilter before the exact sensitive-assignment matcher; the
+prefilter is a semantic no-op and removes the dominant benign-input
+backtracking cost.
+
 ## Query and Evidence-Reading Contract
 
 A query route should:
@@ -564,6 +589,15 @@ canonicalization epoch. Existing graph contributions remain structurally
 interpretable; query admission pauses until a proof-gated registry-only rebind
 updates the derived materialization and dependency pins. Unknown or changed
 epochs remain explicit rebuild boundaries.
+
+Each graph source additionally stores the normalized registry route tokens it
+actually used and a digest of their resolved canonical entity projections.
+Unrelated registry growth may require a store-level proof-gated rebind but does
+not make every source contribution dirty. A canonical entity, alias,
+resolution, owner, or relation input change invalidates only sources whose
+selective dependency digest changes. Legacy rows receive this dependency in a
+controlled idempotent migration; missing or unverifiable dependency data stays
+fail closed.
 
 Active sessions need quiet-window/debounce behavior. Resource-heavy work needs
 backpressure, bounded retry, priority, and starvation visibility. A timer or

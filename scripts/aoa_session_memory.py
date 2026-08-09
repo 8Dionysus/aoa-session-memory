@@ -11,6 +11,7 @@ import hashlib
 import inspect
 import json
 import math
+import multiprocessing
 import os
 import queue
 import random
@@ -28,7 +29,7 @@ import urllib.request
 import warnings
 import zlib
 from collections import Counter, defaultdict, deque
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -50,6 +51,7 @@ SESSION_MEMORY_GENERATION_IDENTITY_VERSION = 3
 DERIVED_TEXT_PRIVACY_POLICY_VERSION = 1
 DERIVED_TEXT_PRIVACY_LOOKAHEAD_CHARS = 8192
 SESSION_PROJECTION_PUBLISH_IDENTITY_VERSION = 1
+SESSION_PROJECTION_WORK_STATE_SCHEMA_VERSION = 1
 SESSION_MEMORY_EVIDENCE_PACKET_SCHEMA_VERSION = 1
 DERIVED_TEXT_REDACTION_POLICY_VERSION = 5
 DERIVED_TEXT_REDACTION_MARKER = "[REDACTED:credential]"
@@ -1273,6 +1275,7 @@ SEARCH_REPAIR_COST_WARM_DOCUMENT_COUNT = 15_000
 SEARCH_REPAIR_COST_HEAVY_DOCUMENT_COUNT = 100_000
 SEARCH_REPAIR_COST_WARM_SOURCE_PATH_COUNT = 96
 SEARCH_REPAIR_COST_HEAVY_SOURCE_PATH_COUNT = 384
+SESSION_PROJECTION_HEAVY_LANE_RAW_BYTES = 64 * 1024 * 1024
 INDEX_MAINTENANCE_DISCOVERY_STATE_SCHEMA_VERSION = 1
 INDEX_MAINTENANCE_DISCOVERY_STATE_JSON = "index-maintenance-discovery-state.json"
 INDEX_MAINTENANCE_DISCOVERY_CURSOR_RESERVE_DIVISOR = 4
@@ -10392,7 +10395,8 @@ def session_query_source_event_scan(
         },
         "compatible": False,
     }
-    if session_generation_reasons:
+    session_index_incompatible = bool(session_generation_reasons)
+    if session_index_incompatible:
         packet["status"] = "incompatible_generation"
         packet["diagnostics"] = unique_preserving_order(
             [
@@ -10401,7 +10405,10 @@ def session_query_source_event_scan(
             ]
         )
         packet["session_index"] = str(session_index_path)
-        return packet
+        # Keep the bounded segment scan for diagnostic coverage, but never
+        # expose entries or task-episode ranges while the session-level
+        # generation is incompatible.
+        task_episode_ranges = []
     segments = [
         item
         for item in (
@@ -10495,16 +10502,17 @@ def session_query_source_event_scan(
                 "session_event_scan_limit_exhausted"
             )
         raw_block_ref = segment_raw_block_ref(segment_index, session_dir)
-        entries.extend(
-            {
-                "event": event,
-                "segment": segment,
-                "segment_index": segment_index,
-                "index_path": index_path,
-                "raw_block_ref": raw_block_ref,
-            }
-            for event in selected_events
-        )
+        if not session_index_incompatible:
+            entries.extend(
+                {
+                    "event": event,
+                    "segment": segment,
+                    "segment_index": segment_index,
+                    "index_path": index_path,
+                    "raw_block_ref": raw_block_ref,
+                }
+                for event in selected_events
+            )
         if len(selected_events) < len(events):
             break
     packet["event_count_scanned"] = len(entries)
@@ -10531,6 +10539,7 @@ def session_query_source_event_scan(
     packet["_entries"] = entries
     complete = bool(
         segments
+        and not session_index_incompatible
         and not packet["truncated"]
         and int_value(packet.get("missing_segment_index_count")) == 0
         and int_value(
@@ -10543,7 +10552,8 @@ def session_query_source_event_scan(
         "complete"
         if complete
         else "incompatible_generation"
-        if int_value(packet.get("incompatible_segment_index_count"))
+        if session_index_incompatible
+        or int_value(packet.get("incompatible_segment_index_count"))
         else "incomplete"
     )
     packet["diagnostics"] = unique_preserving_order(
@@ -12567,6 +12577,17 @@ DERIVED_SENSITIVE_ASSIGNMENT_RE = re.compile(
     r")"
     r"(?P<value>[^\s\"'`;\]\[}{,\\]{8,})"
 )
+# Every DERIVED_SENSITIVE_ASSIGNMENT_RE match necessarily contains one of
+# these labels.  Checking that mandatory literal family first avoids the
+# expensive optional-key backtracking path on large benign transcript lines
+# while preserving the exact admitting matcher for candidate-bearing text.
+DERIVED_SENSITIVE_ASSIGNMENT_PREFILTER_RE = re.compile(
+    r"(?i)(?:"
+    r"api[-_]?key|access[-_]?token|refresh[-_]?token|auth[-_]?token|"
+    r"bearer[-_]?token|client[-_]?secret|private[-_]?key|password|passwd|"
+    r"credential|encrypted[-_]?content|ciphertext"
+    r")"
+)
 DERIVED_SENSITIVE_CLI_ARGUMENT_RE = re.compile(
     r"(?ix)"
     r"(?P<prefix>--(?:api[-_]?key|access[-_]?token|refresh[-_]?token|"
@@ -12743,12 +12764,13 @@ def derived_session_sensitive_literal_policy_from_texts(
             add("bearer_credential", match.groupdict().get("value"))
         for match in DERIVED_SENSITIVE_CLI_ARGUMENT_RE.finditer(source):
             add("sensitive_cli_argument", match.groupdict().get("value"))
-        for match in DERIVED_SENSITIVE_ASSIGNMENT_RE.finditer(source):
-            add(
-                "sensitive_assignment",
-                match.groupdict().get("value"),
-                label=str(match.groupdict().get("key") or ""),
-            )
+        if DERIVED_SENSITIVE_ASSIGNMENT_PREFILTER_RE.search(source):
+            for match in DERIVED_SENSITIVE_ASSIGNMENT_RE.finditer(source):
+                add(
+                    "sensitive_assignment",
+                    match.groupdict().get("value"),
+                    label=str(match.groupdict().get("key") or ""),
+                )
         for match in DERIVED_URI_USERINFO_RE.finditer(source):
             add("uri_userinfo_password", match.groupdict().get("value"))
         for match in DERIVED_KNOWN_CREDENTIAL_RE.finditer(source):
@@ -13762,20 +13784,44 @@ def conversation_act_for_event(
     }
 
 
-def parse_raw_events(raw_path: Path) -> list[RawEvent]:
+def parse_raw_events(
+    raw_path: Path,
+    *,
+    phase_timings_ns: dict[str, int] | None = None,
+) -> list[RawEvent]:
     events: list[RawEvent] = []
+    parse_ns = 0
+    classification_ns = 0
     with raw_path.open("r", encoding="utf-8", errors="replace") as handle:
         for line_no, line in enumerate(handle, start=1):
             raw = line.rstrip("\n")
             parsed: dict[str, Any] | None = None
+            parse_started = time.perf_counter_ns()
             try:
                 loaded = json.loads(raw)
                 if isinstance(loaded, dict):
                     parsed = loaded
             except json.JSONDecodeError:
                 parsed = None
+            parse_ns += time.perf_counter_ns() - parse_started
+            classification_started = time.perf_counter_ns()
             events.append(classify_raw_event(raw, parsed, line_no))
-    return reconcile_correlated_event_outcomes(events)
+            classification_ns += (
+                time.perf_counter_ns() - classification_started
+            )
+    reconciliation_started = time.perf_counter_ns()
+    reconciled = reconcile_correlated_event_outcomes(events)
+    classification_ns += (
+        time.perf_counter_ns() - reconciliation_started
+    )
+    if phase_timings_ns is not None:
+        phase_timings_ns.update(
+            {
+                "raw_json_parse": parse_ns,
+                "event_classification": classification_ns,
+            }
+        )
+    return reconciled
 
 
 def parse_raw_event_sample(raw_path: Path, *, max_lines: int = 2000) -> list[RawEvent]:
@@ -19811,6 +19857,8 @@ def write_raw_block_artifacts(
     *,
     reference_session_dir: Path | None = None,
     publish_identity: dict[str, Any] | None = None,
+    published_raw_blocks: dict[str, Any] | None = None,
+    execution_metrics_out: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     raw_dir = session_dir / "raw"
     reference_raw_dir = (
@@ -19821,18 +19869,94 @@ def write_raw_block_artifacts(
     blocks_dir.mkdir(parents=True, exist_ok=True)
     block_records: list[dict[str, Any]] = []
     compaction_records: list[dict[str, Any]] = []
+    token_accounting_seconds = 0.0
+    reused_block_count = 0
+    rebuilt_block_count = 0
+    prior_blocks_by_segment = {
+        str(item.get("segment_id") or ""): item
+        for item in (
+            published_raw_blocks.get("blocks", [])
+            if isinstance(published_raw_blocks, dict)
+            and isinstance(published_raw_blocks.get("blocks"), list)
+            else []
+        )
+        if isinstance(item, dict) and item.get("segment_id")
+    }
     for segment_no, (start, end, role) in enumerate(ranges):
         segment_id = f"{segment_no:03d}"
         block_name = f"{segment_id}__{role}.raw.jsonl"
         block_path = blocks_dir / block_name
         block_events = events[start:end]
-        block_text = "\n".join(event.raw for event in block_events)
-        if block_text:
-            block_text += "\n"
-        block_path.write_text(block_text, encoding="utf-8")
+        block_hasher = hashlib.sha256()
+        block_bytes = 0
+        for event in block_events:
+            encoded = event.raw.encode("utf-8")
+            block_hasher.update(encoded)
+            block_hasher.update(b"\n")
+            block_bytes += len(encoded) + 1
+        block_sha256 = block_hasher.hexdigest()
         first_line = block_events[0].line_no if block_events else None
         last_line = block_events[-1].line_no if block_events else None
         boundary_events = [event for event in block_events if event.compaction_boundary]
+        source_block_path = reference_blocks_dir / block_name
+        prior_block = prior_blocks_by_segment.get(segment_id)
+        prior_summary = (
+            prior_block.get("token_accounting")
+            if isinstance(prior_block, dict)
+            and isinstance(prior_block.get("token_accounting"), dict)
+            else {}
+        )
+        prior_range = (
+            prior_block.get("source_range")
+            if isinstance(prior_block, dict)
+            and isinstance(prior_block.get("source_range"), dict)
+            else {}
+        )
+        reusable_block = bool(
+            isinstance(prior_block, dict)
+            and str(prior_block.get("role") or "") == role
+            and int_value(prior_block.get("line_count"), -1)
+            == len(block_events)
+            and int_value(prior_block.get("bytes"), -1)
+            == block_bytes
+            and str(prior_block.get("sha256") or "")
+            == block_sha256
+            and prior_range.get("from_line") == first_line
+            and prior_range.get("to_line") == last_line
+            and source_block_path.is_file()
+            and source_block_path.stat().st_size == block_bytes
+            and sha256_file(source_block_path) == block_sha256
+        )
+        if reusable_block:
+            block_path.unlink(missing_ok=True)
+            stage_projection_path_with_links(
+                source=source_block_path,
+                target=block_path,
+            )
+            reused_block_count += 1
+        else:
+            with block_path.open("w", encoding="utf-8") as handle:
+                for event in block_events:
+                    handle.write(event.raw)
+                    handle.write("\n")
+            rebuilt_block_count += 1
+        token_started = time.monotonic()
+        if reusable_block and token_accounting_summary_schema_current(
+            prior_summary
+        ):
+            block_token_accounting = prior_summary
+        else:
+            block_token_accounting = token_accounting_summary_for_events(
+                block_events,
+                scope={
+                    "kind": "raw_block",
+                    "block_id": segment_id,
+                    "segment_id": segment_id,
+                    "role": role,
+                },
+                include_observations=False,
+            )
+        token_accounting_seconds += time.monotonic() - token_started
         record = {
             "block_id": segment_id,
             "segment_id": segment_id,
@@ -19846,15 +19970,11 @@ def write_raw_block_artifacts(
             "source_raw": raw_rel,
             "source_range": {"from_line": first_line, "to_line": last_line},
             "line_count": len(block_events),
-            "bytes": block_path.stat().st_size,
-            "sha256": sha256_file(block_path),
+            "bytes": block_bytes,
+            "sha256": block_sha256,
             "closed_by_compaction": bool(boundary_events),
             "boundary_event_ids": [event.event_id for event in boundary_events],
-            "token_accounting": token_accounting_summary_for_events(
-                block_events,
-                scope={"kind": "raw_block", "block_id": segment_id, "segment_id": segment_id, "role": role},
-                include_observations=False,
-            ),
+            "token_accounting": block_token_accounting,
         }
         block_records.append(record)
         for event in boundary_events:
@@ -19889,6 +20009,17 @@ def write_raw_block_artifacts(
         )
     else:
         compaction_path.write_text("", encoding="utf-8")
+    if execution_metrics_out is not None:
+        execution_metrics_out.clear()
+        execution_metrics_out.update(
+            {
+                "reused_block_count": reused_block_count,
+                "rebuilt_block_count": rebuilt_block_count,
+                "token_accounting_ms": int(
+                    token_accounting_seconds * 1000
+                ),
+            }
+        )
     return {
         "index": str(reference_raw_dir / RAW_BLOCK_INDEX_JSON),
         "compaction_events": str(
@@ -19925,6 +20056,11 @@ def write_segment(
 
     first_line = events[0].line_no if events else None
     last_line = events[-1].line_no if events else None
+    input_digest = session_projection_segment_input_digest(
+        events=events,
+        role=role,
+        raw_block=raw_block,
+    )
     event_views = [
         (
             event,
@@ -20101,6 +20237,7 @@ def write_segment(
         "derived_text_redaction": segment_redaction,
         "segment_id": segment_id,
         "segment_role": role,
+        "input_digest": input_digest,
         "source_raw": raw_rel,
         "source_block": raw_block if isinstance(raw_block, dict) else None,
         "source_range": {"from_line": first_line, "to_line": last_line},
@@ -20135,6 +20272,7 @@ def write_segment(
     return {
         "segment_id": segment_id,
         "role": role,
+        "input_digest": input_digest,
         "markdown": str(reference_md_path),
         "index": str(reference_index_path),
         "event_count": len(events),
@@ -20146,6 +20284,202 @@ def write_segment(
             include_observations=False,
         ),
     }
+
+
+def session_projection_segment_input_digest(
+    *,
+    events: list[RawEvent],
+    role: str,
+    raw_block: dict[str, Any] | None,
+) -> str:
+    payload = {
+        "schema_version": 1,
+        "role": role,
+        "event_count": len(events),
+        "source_range": {
+            "from_line": events[0].line_no if events else None,
+            "to_line": events[-1].line_no if events else None,
+        },
+        "event_raw_sha256": hashlib.sha256(
+            "\n".join(event.raw for event in events).encode("utf-8")
+        ).hexdigest(),
+        "raw_block_sha256": (
+            str(raw_block.get("sha256") or "")
+            if isinstance(raw_block, dict)
+            else ""
+        ),
+        "segment_generation_id": (
+            segment_index_generation_identity()["generation_id"]
+        ),
+        "derived_text_privacy_policy_version": (
+            DERIVED_TEXT_PRIVACY_POLICY_VERSION
+        ),
+        "derived_text_redaction_policy_version": (
+            DERIVED_TEXT_REDACTION_POLICY_VERSION
+        ),
+    }
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def reuse_published_session_segment(
+    *,
+    stage_dir: Path,
+    session_dir: Path,
+    segment_no: int,
+    role: str,
+    events: list[RawEvent],
+    raw_block: dict[str, Any] | None,
+    published_segment: Any,
+    publish_identity: dict[str, Any],
+) -> dict[str, Any] | None:
+    if not isinstance(published_segment, dict):
+        return None
+    segment_id = f"{segment_no:03d}"
+    expected_digest = session_projection_segment_input_digest(
+        events=events,
+        role=role,
+        raw_block=raw_block,
+    )
+    if (
+        str(published_segment.get("segment_id") or "") != segment_id
+        or str(published_segment.get("role") or "") != role
+        or str(published_segment.get("input_digest") or "")
+        != expected_digest
+    ):
+        return None
+    source_md = Path(str(published_segment.get("markdown") or ""))
+    source_index = Path(str(published_segment.get("index") or ""))
+    existing_index = read_json(source_index, {})
+    required_mapping_keys = (
+        "by_type",
+        "by_tag",
+        "by_source_type",
+        "by_family",
+        "by_phase",
+        "by_actor",
+        "by_action",
+        "by_outcome",
+        "by_correlation",
+        "by_conversation_act",
+        "by_session_act",
+        "by_agent_event",
+        "by_route_layer",
+        "by_route_signal",
+    )
+    indexed_events = (
+        existing_index.get("events")
+        if isinstance(existing_index, dict)
+        and isinstance(existing_index.get("events"), list)
+        else []
+    )
+    universal_structure_current = bool(
+        len(indexed_events) == len(events)
+        and all(
+            isinstance(existing_index.get(key), dict)
+            for key in required_mapping_keys
+        )
+        and all(
+            isinstance(item, dict)
+            and all(
+                field in item
+                for field in (
+                    "event_id",
+                    "type",
+                    "family",
+                    "phase",
+                    "actor",
+                    "action",
+                    "outcome",
+                    "raw_ref",
+                )
+            )
+            for item in indexed_events
+        )
+    )
+    if not (
+        source_md.is_file()
+        and source_index.is_file()
+        and isinstance(existing_index, dict)
+        and universal_structure_current
+        and str(existing_index.get("input_digest") or "")
+        == expected_digest
+        and str(existing_index.get("generation_id") or "")
+        == str(
+            segment_index_generation_identity().get(
+                "generation_id"
+            )
+            or ""
+        )
+        and not generated_segment_index_stale_reasons(
+            existing_index
+        )
+    ):
+        return None
+    target_md = stage_dir / "segments" / source_md.name
+    target_index = stage_dir / "segments" / source_index.name
+    target_md.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source_md, target_md)
+    reused_index = dict(existing_index)
+    reused_index["projection_publish"] = publish_identity
+    reused_index["source_block"] = raw_block
+    write_json(target_index, reused_index)
+    return {
+        **published_segment,
+        "segment_id": segment_id,
+        "role": role,
+        "input_digest": expected_digest,
+        "markdown": str(session_dir / "segments" / source_md.name),
+        "index": str(session_dir / "segments" / source_index.name),
+        "raw_block": raw_block,
+    }
+
+
+def write_segment_process_task(
+    task: tuple[
+        Path,
+        str,
+        int,
+        str,
+        list[RawEvent],
+        dict[str, Any] | None,
+        Path,
+        dict[str, Any],
+        DerivedSessionSensitiveLiteralPolicy,
+    ],
+) -> tuple[int, str, dict[str, Any]]:
+    (
+        stage_dir,
+        raw_rel,
+        segment_no,
+        role,
+        events,
+        raw_block,
+        reference_session_dir,
+        publish_identity,
+        literal_policy,
+    ) = task
+    return (
+        segment_no,
+        role,
+        write_segment(
+            stage_dir,
+            raw_rel,
+            segment_no,
+            role,
+            events,
+            raw_block,
+            reference_session_dir=reference_session_dir,
+            publish_identity=publish_identity,
+            literal_policy=literal_policy,
+        ),
+    )
 
 
 def write_segment_route_index_only(
@@ -20630,6 +20964,101 @@ def session_projection_stage_prefix(
     return (
         f".{session_dir.name}.projection-stage-"
         f"{os.getpid()}-"
+    )
+
+
+def session_projection_work_identity(
+    publish_identity: dict[str, Any],
+) -> dict[str, Any]:
+    """Bind resumable work to every input that can change derived output."""
+    payload = {
+        "schema_version": SESSION_PROJECTION_WORK_STATE_SCHEMA_VERSION,
+        "projection_publish": publish_identity,
+        "generation_identities": {
+            "session_index": session_index_generation_identity(),
+            "segment_index": segment_index_generation_identity(),
+            "task_episode_source": (
+                task_episode_source_generation_identity()
+            ),
+        },
+        "policy_versions": {
+            "derived_text_privacy": (
+                DERIVED_TEXT_PRIVACY_POLICY_VERSION
+            ),
+            "derived_text_redaction": (
+                DERIVED_TEXT_REDACTION_POLICY_VERSION
+            ),
+            "token_accounting": TOKEN_ACCOUNTING_SCHEMA_VERSION,
+        },
+    }
+    work_id = hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return {**payload, "work_id": work_id}
+
+
+def session_projection_work_dir(
+    session_dir: Path,
+    work_id: str,
+) -> Path:
+    return session_dir.parent / (
+        f".{session_dir.name}.projection-work-{work_id[:24]}"
+    )
+
+
+def session_projection_work_checkpoint_path(
+    work_dir: Path,
+) -> Path:
+    return work_dir / ".projection-work-state.json"
+
+
+def session_projection_build_lease_path(
+    session_dir: Path,
+) -> Path:
+    return session_dir.parent / (
+        f".{session_dir.name}.projection-build.lock"
+    )
+
+
+def session_projection_artifact_receipt(path: Path) -> dict[str, Any]:
+    return {
+        "rel": str(path),
+        "bytes": path.stat().st_size,
+        "sha256": sha256_file(path),
+    }
+
+
+def session_projection_artifact_receipt_current(
+    receipt: Any,
+) -> bool:
+    if not isinstance(receipt, dict):
+        return False
+    path = Path(str(receipt.get("rel") or ""))
+    return bool(
+        path.is_file()
+        and path.stat().st_size == int_value(receipt.get("bytes"), -1)
+        and sha256_file(path) == str(receipt.get("sha256") or "")
+    )
+
+
+def session_projection_segment_checkpoint_current(
+    item: Any,
+) -> bool:
+    if not isinstance(item, dict):
+        return False
+    artifacts = (
+        item.get("artifacts")
+        if isinstance(item.get("artifacts"), list)
+        else []
+    )
+    return len(artifacts) == 2 and all(
+        session_projection_artifact_receipt_current(artifact)
+        for artifact in artifacts
     )
 
 
@@ -21408,19 +21837,25 @@ def atomic_publish_session_projection(
     session_dir: Path,
     publish_identity: dict[str, Any],
 ) -> dict[str, Any]:
+    atomic_started = time.monotonic()
     recovery = recover_interrupted_session_projection_publish(
         session_dir
     )
+    validation_started = time.monotonic()
     validation = validate_staged_session_projection(
         stage_dir=stage_dir,
         session_dir=session_dir,
         publish_identity=publish_identity,
+    )
+    validation_ms = int(
+        (time.monotonic() - validation_started) * 1000
     )
     if not validation.get("ok"):
         raise ValueError(
             "staged_session_projection_invalid:"
             + ",".join(validation.get("diagnostics", []))
         )
+    publish_started = time.monotonic()
     backup_root = Path(
         tempfile.mkdtemp(
             prefix=(
@@ -21521,6 +21956,15 @@ def atomic_publish_session_projection(
         "validation": validation,
         "producer_source_state": producer_source_state,
         "prior_recovery": recovery,
+        "phase_timings_ms": {
+            "projection_validation": validation_ms,
+            "atomic_publish": int(
+                (time.monotonic() - publish_started) * 1000
+            ),
+            "total": int(
+                (time.monotonic() - atomic_started) * 1000
+            ),
+        },
     }
 
 
@@ -22244,6 +22688,7 @@ def sync_session_from_transcript(
     )
 
     ranges = segment_ranges(events)
+    raw_block_execution: dict[str, Any] = {}
     raw_blocks = write_raw_block_artifacts(
         stage_dir,
         raw_rel,
@@ -22251,6 +22696,12 @@ def sync_session_from_transcript(
         events,
         reference_session_dir=session_dir,
         publish_identity=publish_identity,
+        published_raw_blocks=(
+            existing.get("raw_blocks")
+            if isinstance(existing.get("raw_blocks"), dict)
+            else None
+        ),
+        execution_metrics_out=raw_block_execution,
     )
     raw_blocks_by_segment = {
         str(block.get("segment_id")): block
@@ -29124,7 +29575,28 @@ def reindex_session_from_raw(
     first_pass_distillation_max_events_per_type: (
         int | None
     ) = None,
+    cooperative_deadline_monotonic: float | None = None,
+    segment_workers: int | None = None,
+    defer_publish: bool = False,
 ) -> dict[str, Any]:
+    build_started = time.monotonic()
+    build_cpu_started = time.process_time()
+    phase_timings_ms: dict[str, int] = {}
+    configured_segment_workers = max(
+        1,
+        min(
+            6,
+            int_value(
+                segment_workers
+                if segment_workers is not None
+                else os.environ.get(
+                    "AOA_SESSION_MEMORY_SEGMENT_WORKERS",
+                    "4",
+                ),
+                4,
+            ),
+        ),
+    )
     session_dir = session_dir_from_record(record)
     manifest_path = session_dir / "session.manifest.json"
     manifest = read_json(manifest_path, {})
@@ -29193,37 +29665,187 @@ def reindex_session_from_raw(
             "needs_token_accounting_backfill": not isinstance(manifest.get("token_accounting"), dict),
         }
 
+    build_lease_path = session_projection_build_lease_path(
+        session_dir
+    )
+    build_lease_handle = build_lease_path.open(
+        "a+", encoding="utf-8"
+    )
+    try:
+        fcntl.flock(
+            build_lease_handle,
+            fcntl.LOCK_EX | fcntl.LOCK_NB,
+        )
+    except BlockingIOError:
+        build_lease_handle.close()
+        return {
+            "session_id": manifest.get("session_id"),
+            "session_label": manifest.get("session_label"),
+            "session_dir": str(session_dir),
+            "status": "deferred_session_lease",
+            "mutates": False,
+            "lease_path": str(build_lease_path),
+            "diagnostics": [
+                "session_projection_build_lease_held"
+            ],
+        }
+    write_maintenance_lock_owner(
+        build_lease_handle,
+        {
+            "schema_version": 1,
+            "pid": os.getpid(),
+            "session_id": manifest.get("session_id"),
+            "acquired_at": utc_now(),
+        },
+    )
+
     recovery = recover_interrupted_session_projection_publish(
         session_dir
     )
     now = utc_now()
-    events = parse_raw_events(raw_path)
-    literal_policy = derived_session_sensitive_literal_policy(
-        events
+    phase_started = time.monotonic()
+    parse_phase_timings_ns: dict[str, int] = {}
+    events = parse_raw_events(
+        raw_path,
+        phase_timings_ns=parse_phase_timings_ns,
+    )
+    phase_timings_ms["parse_and_classification"] = int(
+        (time.monotonic() - phase_started) * 1000
+    )
+    phase_timings_ms["raw_json_parse"] = int(
+        parse_phase_timings_ns.get("raw_json_parse", 0)
+        / 1_000_000
+    )
+    phase_timings_ms["event_classification"] = int(
+        parse_phase_timings_ns.get("event_classification", 0)
+        / 1_000_000
     )
     publish_identity = session_projection_publish_identity(
         raw_path=raw_path,
         events=events,
     )
-    stage_dir = Path(
-        tempfile.mkdtemp(
-            prefix=session_projection_stage_prefix(
-                session_dir
-            ),
-            dir=session_dir.parent,
-        )
+    work_identity = session_projection_work_identity(
+        publish_identity
     )
+    stage_dir = session_projection_work_dir(
+        session_dir,
+        str(work_identity["work_id"]),
+    )
+    checkpoint_path = session_projection_work_checkpoint_path(
+        stage_dir
+    )
+    work_state = read_json(checkpoint_path, {})
+    if (
+        not isinstance(work_state, dict)
+        or work_state.get("work_identity") != work_identity
+    ):
+        if stage_dir.exists():
+            remove_projection_publish_path(stage_dir)
+        stage_dir.mkdir(parents=True, exist_ok=False)
+        work_state = {
+            "schema_version": (
+                SESSION_PROJECTION_WORK_STATE_SCHEMA_VERSION
+            ),
+            "artifact_type": "session_projection_work_state",
+            "work_identity": work_identity,
+            "session_id": str(
+                manifest.get("session_id")
+                or record.get("session_id")
+                or ""
+            ),
+            "created_at": now,
+            "updated_at": now,
+            "phase": "planned",
+            "raw_blocks": {},
+            "segments": {},
+        }
+        write_json(checkpoint_path, work_state)
+    completed_segments = (
+        work_state.get("segments")
+        if isinstance(work_state.get("segments"), dict)
+        else {}
+    )
+
+    def save_work_state(phase: str) -> None:
+        work_state.update(
+            {
+                "updated_at": utc_now(),
+                "phase": phase,
+                "phase_timings_ms": dict(phase_timings_ms),
+                "segments": completed_segments,
+            }
+        )
+        write_json(checkpoint_path, work_state)
+
+    def deadline_exhausted() -> bool:
+        return bool(
+            cooperative_deadline_monotonic is not None
+            and time.monotonic() >= cooperative_deadline_monotonic
+        )
+
+    def checkpointed_result(phase: str) -> dict[str, Any]:
+        save_work_state(phase)
+        return {
+            "session_id": manifest.get("session_id"),
+            "session_label": manifest.get("session_label"),
+            "session_dir": str(session_dir),
+            "status": "checkpointed",
+            "checkpoint_phase": phase,
+            "work_id": work_identity["work_id"],
+            "work_dir": str(stage_dir),
+            "completed_segment_count": len(completed_segments),
+            "planned_segment_count": len(segment_ranges(events)),
+            "projection_publish": publish_identity,
+            "phase_timings_ms": dict(phase_timings_ms),
+            "segment_execution": work_state.get(
+                "segment_execution", {}
+            ),
+            "raw_block_execution": work_state.get(
+                "raw_block_execution", {}
+            ),
+            "wall_time_ms": int(
+                (time.monotonic() - build_started) * 1000
+            ),
+            "cpu_time_ms": int(
+                (time.process_time() - build_cpu_started) * 1000
+            ),
+            "recovery": recovery,
+            "diagnostics": [
+                "cooperative_deadline_reached_progress_preserved"
+            ],
+        }
+
     publish_result: dict[str, Any] = {}
     first_pass_distillation: dict[str, Any] = {}
     try:
+        if deadline_exhausted():
+            return checkpointed_result("planned")
+        phase_started = time.monotonic()
+        literal_policy = derived_session_sensitive_literal_policy(
+            events
+        )
+        phase_timings_ms["sensitive_literal_policy"] = int(
+            (time.monotonic() - phase_started) * 1000
+        )
+        save_work_state("sensitive_literal_policy_complete")
+        if deadline_exhausted():
+            return checkpointed_result(
+                "sensitive_literal_policy_complete"
+            )
         staged_raw_path = (
             stage_dir / "raw" / "session.raw.jsonl"
         )
-        staged_raw_path.parent.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
-        shutil.copy2(raw_path, staged_raw_path)
+        if not staged_raw_path.is_file():
+            phase_started = time.monotonic()
+            staged_raw_path.parent.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
+            shutil.copy2(raw_path, staged_raw_path)
+            phase_timings_ms["raw_copy"] = int(
+                (time.monotonic() - phase_started) * 1000
+            )
+            save_work_state("raw_copied")
         published_raw_path = (
             session_dir / "raw" / "session.raw.jsonl"
         )
@@ -29241,37 +29863,294 @@ def reindex_session_from_raw(
             manifest.pop("lineage", None)
         raw_rel = "raw/session.raw.jsonl"
         ranges = segment_ranges(events)
-        raw_blocks = write_raw_block_artifacts(
-            stage_dir,
-            raw_rel,
-            ranges,
-            events,
-            reference_session_dir=session_dir,
-            publish_identity=publish_identity,
+        if deadline_exhausted():
+            return checkpointed_result("raw_copied")
+        raw_blocks_state = (
+            work_state.get("raw_blocks")
+            if isinstance(work_state.get("raw_blocks"), dict)
+            else {}
         )
+        raw_block_artifacts = (
+            raw_blocks_state.get("artifacts")
+            if isinstance(raw_blocks_state.get("artifacts"), list)
+            else []
+        )
+        raw_blocks_current = bool(
+            raw_blocks_state.get("payload")
+            and raw_block_artifacts
+            and all(
+                session_projection_artifact_receipt_current(item)
+                for item in raw_block_artifacts
+            )
+        )
+        if raw_blocks_current:
+            raw_blocks = dict(raw_blocks_state["payload"])
+            work_state["raw_block_execution"] = (
+                raw_blocks_state.get("execution", {})
+            )
+            phase_timings_ms["raw_blocks_reused"] = 0
+        else:
+            phase_started = time.monotonic()
+            raw_block_execution: dict[str, Any] = {}
+            raw_blocks = write_raw_block_artifacts(
+                stage_dir,
+                raw_rel,
+                ranges,
+                events,
+                reference_session_dir=session_dir,
+                publish_identity=publish_identity,
+                published_raw_blocks=(
+                    manifest.get("raw_blocks")
+                    if isinstance(
+                        manifest.get("raw_blocks"), dict
+                    )
+                    else None
+                ),
+                execution_metrics_out=raw_block_execution,
+            )
+            raw_artifact_paths = sorted(
+                path
+                for path in (stage_dir / "raw").rglob("*")
+                if path.is_file()
+                and path.name != "session.raw.jsonl"
+                and path != checkpoint_path
+            )
+            work_state["raw_blocks"] = {
+                "payload": raw_blocks,
+                "artifacts": [
+                    session_projection_artifact_receipt(path)
+                    for path in raw_artifact_paths
+                ],
+                "execution": raw_block_execution,
+            }
+            work_state["raw_block_execution"] = (
+                raw_block_execution
+            )
+            phase_timings_ms[
+                "raw_block_token_accounting"
+            ] = int_value(
+                raw_block_execution.get("token_accounting_ms")
+            )
+            phase_timings_ms["raw_block_generation"] = int(
+                (time.monotonic() - phase_started) * 1000
+            )
+            save_work_state("raw_blocks_complete")
         raw_blocks_by_segment = {
             str(block.get("segment_id")): block
             for block in raw_blocks.get("blocks", [])
             if isinstance(block, dict)
         }
-        segment_payloads = [
-            write_segment(
-                stage_dir,
-                raw_rel,
+        if deadline_exhausted():
+            return checkpointed_result("raw_blocks_complete")
+        segment_payload_by_id: dict[str, dict[str, Any]] = {}
+        published_segments_by_id = {
+            str(item.get("segment_id") or ""): item
+            for item in (
+                manifest.get("segments")
+                if isinstance(manifest.get("segments"), list)
+                else []
+            )
+            if isinstance(item, dict) and item.get("segment_id")
+        }
+        pending_segments: list[
+            tuple[int, int, int, str]
+        ] = []
+        phase_started = time.monotonic()
+        for segment_no, (start, end, role) in enumerate(ranges):
+            segment_id = f"{segment_no:03d}"
+            prior_segment = completed_segments.get(segment_id)
+            if session_projection_segment_checkpoint_current(
+                prior_segment
+            ):
+                segment_payload_by_id[segment_id] = dict(
+                    prior_segment["payload"]
+                )
+                continue
+            pending_segments.append(
+                (segment_no, start, end, role)
+            )
+
+        def record_segment_completion(
+            segment_no: int,
+            role: str,
+            segment_payload: dict[str, Any],
+        ) -> None:
+            segment_id = f"{segment_no:03d}"
+            md_path = stage_dir / "segments" / (
+                f"{segment_id}__{role}.md"
+            )
+            index_path = stage_dir / "segments" / (
+                f"{segment_id}__{role}.index.json"
+            )
+            completed_segments[segment_id] = {
+                "payload": segment_payload,
+                "artifacts": [
+                    session_projection_artifact_receipt(md_path),
+                    session_projection_artifact_receipt(index_path),
+                ],
+            }
+            segment_payload_by_id[segment_id] = segment_payload
+            save_work_state("segments_in_progress")
+
+        reused_published_segment_count = 0
+        build_pending_segments: list[
+            tuple[int, int, int, str]
+        ] = []
+        for segment_no, start, end, role in pending_segments:
+            segment_id = f"{segment_no:03d}"
+            reused_payload = reuse_published_session_segment(
+                stage_dir=stage_dir,
+                session_dir=session_dir,
+                segment_no=segment_no,
+                role=role,
+                events=events[start:end],
+                raw_block=raw_blocks_by_segment.get(segment_id),
+                published_segment=published_segments_by_id.get(
+                    segment_id
+                ),
+                publish_identity=publish_identity,
+            )
+            if reused_payload is None:
+                build_pending_segments.append(
+                    (segment_no, start, end, role)
+                )
+                continue
+            record_segment_completion(
                 segment_no,
                 role,
-                events[start:end],
-                raw_blocks_by_segment.get(
-                    f"{segment_no:03d}"
-                ),
-                reference_session_dir=session_dir,
-                publish_identity=publish_identity,
-                literal_policy=literal_policy,
+                reused_payload,
             )
-            for segment_no, (start, end, role) in enumerate(
-                ranges
-            )
+            reused_published_segment_count += 1
+        pending_segments = build_pending_segments
+
+        parallel_fallback_reason = ""
+        actual_segment_workers = min(
+            configured_segment_workers,
+            len(pending_segments),
+        )
+        if actual_segment_workers > 1:
+            try:
+                with ProcessPoolExecutor(
+                    max_workers=actual_segment_workers,
+                    mp_context=multiprocessing.get_context("fork"),
+                ) as executor:
+                    for wave_start in range(
+                        0,
+                        len(pending_segments),
+                        actual_segment_workers,
+                    ):
+                        wave = pending_segments[
+                            wave_start : (
+                                wave_start + actual_segment_workers
+                            )
+                        ]
+                        futures = [
+                            executor.submit(
+                                write_segment_process_task,
+                                (
+                                    stage_dir,
+                                    raw_rel,
+                                    segment_no,
+                                    role,
+                                    events[start:end],
+                                    raw_blocks_by_segment.get(
+                                        f"{segment_no:03d}"
+                                    ),
+                                    session_dir,
+                                    publish_identity,
+                                    literal_policy,
+                                ),
+                            )
+                            for segment_no, start, end, role in wave
+                        ]
+                        wave_results = [
+                            future.result() for future in futures
+                        ]
+                        for (
+                            completed_no,
+                            completed_role,
+                            segment_payload,
+                        ) in sorted(wave_results):
+                            record_segment_completion(
+                                completed_no,
+                                completed_role,
+                                segment_payload,
+                            )
+                        if deadline_exhausted():
+                            phase_timings_ms[
+                                "segment_generation"
+                            ] = int(
+                                (
+                                    time.monotonic()
+                                    - phase_started
+                                )
+                                * 1000
+                            )
+                            return checkpointed_result(
+                                "segments_in_progress"
+                            )
+            except Exception as exc:
+                parallel_fallback_reason = (
+                    f"{type(exc).__name__}:{exc}"
+                )
+        if actual_segment_workers <= 1 or parallel_fallback_reason:
+            for segment_no, start, end, role in pending_segments:
+                segment_id = f"{segment_no:03d}"
+                if segment_id in segment_payload_by_id:
+                    continue
+                segment_payload = write_segment(
+                    stage_dir,
+                    raw_rel,
+                    segment_no,
+                    role,
+                    events[start:end],
+                    raw_blocks_by_segment.get(segment_id),
+                    reference_session_dir=session_dir,
+                    publish_identity=publish_identity,
+                    literal_policy=literal_policy,
+                )
+                record_segment_completion(
+                    segment_no,
+                    role,
+                    segment_payload,
+                )
+                if deadline_exhausted():
+                    phase_timings_ms["segment_generation"] = int(
+                        (time.monotonic() - phase_started) * 1000
+                    )
+                    return checkpointed_result(
+                        "segments_in_progress"
+                    )
+        segment_payloads = [
+            segment_payload_by_id[f"{segment_no:03d}"]
+            for segment_no in range(len(ranges))
         ]
+        phase_timings_ms["segment_generation"] = int(
+            (time.monotonic() - phase_started) * 1000
+        )
+        work_state["segment_execution"] = {
+            "configured_workers": configured_segment_workers,
+            "actual_workers": max(1, actual_segment_workers),
+            "mode": (
+                "process_pool"
+                if actual_segment_workers > 1
+                and not parallel_fallback_reason
+                else "serial"
+            ),
+            "parallel_fallback_reason": parallel_fallback_reason,
+            "bounded_wave_size": max(1, actual_segment_workers),
+            "checkpoint_reused_segment_count": (
+                len(ranges)
+                - len(build_pending_segments)
+                - reused_published_segment_count
+            ),
+            "published_reused_segment_count": (
+                reused_published_segment_count
+            ),
+            "rebuilt_segment_count": len(build_pending_segments),
+        }
+        save_work_state("segments_complete")
+        phase_started = time.monotonic()
         token_accounting = token_accounting_summary_for_session(
             events,
             session_id=str(
@@ -29280,6 +30159,15 @@ def reindex_session_from_raw(
                 or "unknown"
             ),
         )
+        phase_timings_ms["token_accounting"] = int(
+            (time.monotonic() - phase_started) * 1000
+        )
+        save_work_state("token_accounting_complete")
+        if deadline_exhausted():
+            return checkpointed_result(
+                "token_accounting_complete"
+            )
+        phase_started = time.monotonic()
         manifest["archive_status"] = "indexed"
         manifest["archive_format_version"] = 2
         manifest["token_accounting_schema_version"] = (
@@ -29469,10 +30357,91 @@ def reindex_session_from_raw(
             publish_identity=publish_identity,
             literal_policy=literal_policy,
         )
+        phase_timings_ms["session_index_generation"] = int(
+            (time.monotonic() - phase_started) * 1000
+        )
+        save_work_state("projection_complete_unpublished")
+        if deadline_exhausted():
+            return checkpointed_result(
+                "projection_complete_unpublished"
+            )
+        phase_started = time.monotonic()
+        current_raw_identity = session_projection_publish_identity(
+            raw_path=raw_path,
+            events=parse_raw_events(raw_path),
+        )
+        if current_raw_identity != publish_identity:
+            save_work_state("source_drifted_before_publish")
+            return {
+                "session_id": manifest.get("session_id"),
+                "session_label": manifest.get("session_label"),
+                "session_dir": str(session_dir),
+                "status": "diagnostic",
+                "diagnostics": [
+                    "session_projection_source_drifted_before_publish",
+                    "last_good_projection_preserved",
+                ],
+                "work_id": work_identity["work_id"],
+                "work_dir": str(stage_dir),
+                "projection_publish": publish_identity,
+                "current_projection_publish": current_raw_identity,
+                "recovery": recovery,
+            }
+        if defer_publish:
+            save_work_state("awaiting_atomic_publish")
+            return {
+                "session_id": manifest.get("session_id"),
+                "session_label": manifest.get("session_label"),
+                "session_dir": str(session_dir),
+                "status": "built_unpublished",
+                "mutates": True,
+                "published": False,
+                "work_id": work_identity["work_id"],
+                "work_dir": str(stage_dir),
+                "projection_publish": publish_identity,
+                "event_count": len(events),
+                "segment_count": len(segment_payloads),
+                "raw_block_count": len(
+                    raw_blocks.get("blocks", [])
+                    if isinstance(raw_blocks.get("blocks"), list)
+                    else []
+                ),
+                "phase_timings_ms": dict(phase_timings_ms),
+                "segment_execution": work_state.get(
+                    "segment_execution", {}
+                ),
+                "raw_block_execution": work_state.get(
+                    "raw_block_execution", {}
+                ),
+                "wall_time_ms": int(
+                    (time.monotonic() - build_started) * 1000
+                ),
+                "cpu_time_ms": int(
+                    (time.process_time() - build_cpu_started) * 1000
+                ),
+                "recovery": recovery,
+                "diagnostics": [],
+            }
         publish_result = atomic_publish_session_projection(
             stage_dir=stage_dir,
             session_dir=session_dir,
             publish_identity=publish_identity,
+        )
+        phase_timings_ms["validate_and_atomic_publish"] = int(
+            (time.monotonic() - phase_started) * 1000
+        )
+        publish_phase_timings = (
+            publish_result.get("phase_timings_ms")
+            if isinstance(
+                publish_result.get("phase_timings_ms"), dict
+            )
+            else {}
+        )
+        phase_timings_ms["projection_validation"] = int_value(
+            publish_phase_timings.get("projection_validation")
+        )
+        phase_timings_ms["atomic_publish"] = int_value(
+            publish_phase_timings.get("atomic_publish")
         )
     except (OSError, ValueError) as exc:
         remove_projection_publish_path(stage_dir)
@@ -29494,13 +30463,21 @@ def reindex_session_from_raw(
     legacy_md = session_dir / LEGACY_SESSION_INDEX_MARKDOWN
     legacy_json.unlink(missing_ok=True)
     legacy_md.unlink(missing_ok=True)
+    phase_started = time.monotonic()
     update_registry(aoa_root, manifest, session_dir)
+    phase_timings_ms["registry_update"] = int(
+        (time.monotonic() - phase_started) * 1000
+    )
+    phase_started = time.monotonic()
     dirty_propagation = propagate_session_projection_dirty(
         aoa_root=aoa_root,
         session_dir=session_dir,
         manifest=manifest,
         reason="archive_reindexed_from_raw",
         checked_at=now,
+    )
+    phase_timings_ms["search_graph_dirty_propagation"] = int(
+        (time.monotonic() - phase_started) * 1000
     )
     search_freshness_state = (
         dirty_propagation.get("projections", {})
@@ -29512,6 +30489,7 @@ def reindex_session_from_raw(
         "session_label": manifest.get("session_label"),
         "session_dir": str(session_dir),
         "status": "reindexed",
+        "work_id": work_identity["work_id"],
         "event_count": len(events),
         "segment_count": len(segment_payloads),
         "raw_block_count": len(raw_blocks.get("blocks", []) if isinstance(raw_blocks.get("blocks"), list) else []),
@@ -29526,7 +30504,235 @@ def reindex_session_from_raw(
         "recovery": recovery,
         "search_freshness_state": search_freshness_state,
         "dirty_propagation": dirty_propagation,
+        "phase_timings_ms": phase_timings_ms,
+        "segment_execution": work_state.get(
+            "segment_execution", {}
+        ),
+        "raw_block_execution": work_state.get(
+            "raw_block_execution", {}
+        ),
+        "wall_time_ms": int(
+            (time.monotonic() - build_started) * 1000
+        ),
+        "cpu_time_ms": int(
+            (time.process_time() - build_cpu_started) * 1000
+        ),
     }
+
+
+def publish_prebuilt_session_projection(
+    *,
+    aoa_root: Path,
+    record: dict[str, Any],
+    work_dir: Path,
+) -> dict[str, Any]:
+    """Revalidate and publish one complete build while caller owns global lock."""
+    session_dir = session_dir_from_record(record)
+    expected_parent = session_dir.parent.resolve()
+    try:
+        work_parent = work_dir.resolve().parent
+    except OSError:
+        work_parent = Path()
+    if (
+        work_parent != expected_parent
+        or not work_dir.name.startswith(
+            f".{session_dir.name}.projection-work-"
+        )
+        or not work_dir.is_dir()
+        or work_dir.is_symlink()
+    ):
+        return {
+            "status": "diagnostic",
+            "ok": False,
+            "diagnostics": ["invalid_projection_work_dir"],
+        }
+    lease_path = session_projection_build_lease_path(session_dir)
+    lease_handle = lease_path.open("a+", encoding="utf-8")
+    try:
+        fcntl.flock(
+            lease_handle,
+            fcntl.LOCK_EX | fcntl.LOCK_NB,
+        )
+    except BlockingIOError:
+        lease_handle.close()
+        return {
+            "status": "deferred_session_lease",
+            "ok": True,
+            "mutates": False,
+            "diagnostics": [
+                "session_projection_build_lease_held"
+            ],
+        }
+    checkpoint = read_json(
+        session_projection_work_checkpoint_path(work_dir),
+        {},
+    )
+    staged_manifest = read_json(
+        work_dir / "session.manifest.json", {}
+    )
+    if not (
+        isinstance(checkpoint, dict)
+        and checkpoint.get("phase")
+        in {
+            "projection_complete_unpublished",
+            "awaiting_atomic_publish",
+        }
+        and isinstance(staged_manifest, dict)
+        and staged_manifest
+    ):
+        return {
+            "status": "diagnostic",
+            "ok": False,
+            "diagnostics": [
+                "projection_work_not_complete_for_publish"
+            ],
+        }
+    work_identity = (
+        checkpoint.get("work_identity")
+        if isinstance(checkpoint.get("work_identity"), dict)
+        else {}
+    )
+    publish_identity = (
+        work_identity.get("projection_publish")
+        if isinstance(
+            work_identity.get("projection_publish"), dict
+        )
+        else {}
+    )
+    owner_manifest = read_json(
+        session_dir / "session.manifest.json", {}
+    )
+    raw = (
+        owner_manifest.get("raw")
+        if isinstance(owner_manifest.get("raw"), dict)
+        else {}
+    )
+    raw_path = Path(
+        str(
+            raw.get("path")
+            or session_dir / "raw" / "session.raw.jsonl"
+        )
+    )
+    if not raw_path.is_file():
+        return {
+            "status": "diagnostic",
+            "ok": False,
+            "diagnostics": ["raw_missing_before_publish"],
+        }
+    events = parse_raw_events(raw_path)
+    current_publish_identity = session_projection_publish_identity(
+        raw_path=raw_path,
+        events=events,
+    )
+    current_work_identity = session_projection_work_identity(
+        current_publish_identity
+    )
+    producer_state = session_memory_loaded_producer_source_state()
+    if (
+        current_publish_identity != publish_identity
+        or current_work_identity != work_identity
+        or not producer_state.get("stable")
+    ):
+        return {
+            "status": "diagnostic",
+            "ok": False,
+            "mutates": False,
+            "diagnostics": [
+                "projection_dependencies_drifted_before_publish",
+                "last_good_projection_preserved",
+            ],
+            "projection_publish": publish_identity,
+            "current_projection_publish": current_publish_identity,
+            "producer_source_state": producer_state,
+        }
+    publish_result = atomic_publish_session_projection(
+        stage_dir=work_dir,
+        session_dir=session_dir,
+        publish_identity=publish_identity,
+    )
+    legacy_json = session_dir / LEGACY_SESSION_INDEX_JSON
+    legacy_md = session_dir / LEGACY_SESSION_INDEX_MARKDOWN
+    legacy_json.unlink(missing_ok=True)
+    legacy_md.unlink(missing_ok=True)
+    published_manifest = read_json(
+        session_dir / "session.manifest.json", {}
+    )
+    registry_started = time.monotonic()
+    update_registry(aoa_root, published_manifest, session_dir)
+    registry_update_ms = int(
+        (time.monotonic() - registry_started) * 1000
+    )
+    dirty_started = time.monotonic()
+    dirty_propagation = propagate_session_projection_dirty(
+        aoa_root=aoa_root,
+        session_dir=session_dir,
+        manifest=published_manifest,
+        reason="prebuilt_session_projection_published",
+        checked_at=utc_now(),
+    )
+    dirty_propagation_ms = int(
+        (time.monotonic() - dirty_started) * 1000
+    )
+    return {
+        "status": "reindexed",
+        "ok": True,
+        "mutates": True,
+        "published": True,
+        "session_id": published_manifest.get("session_id"),
+        "session_label": published_manifest.get("session_label"),
+        "session_dir": str(session_dir),
+        "event_count": len(events),
+        "segment_count": len(
+            published_manifest.get("segments", [])
+            if isinstance(published_manifest.get("segments"), list)
+            else []
+        ),
+        "projection_publish": publish_identity,
+        "publish_result": publish_result,
+        "dirty_propagation": dirty_propagation,
+        "phase_timings_ms": {
+            **(
+                publish_result.get("phase_timings_ms")
+                if isinstance(
+                    publish_result.get("phase_timings_ms"), dict
+                )
+                else {}
+            ),
+            "registry_update": registry_update_ms,
+            "search_graph_dirty_propagation": (
+                dirty_propagation_ms
+            ),
+        },
+        "diagnostics": [],
+    }
+
+
+def publish_prebuilt_session_projection_under_maintenance_lock(
+    *,
+    aoa_root: Path,
+    record: dict[str, Any],
+    work_dir: Path,
+    lock_timeout_sec: float = 0.0,
+) -> dict[str, Any]:
+    return run_with_maintenance_lock(
+        aoa_root,
+        lambda: publish_prebuilt_session_projection(
+            aoa_root=aoa_root,
+            record=record,
+            work_dir=work_dir,
+        ),
+        owner_job="session-projection-publish",
+        mode="publish",
+        target=str(record.get("session_id") or ""),
+        reason="publish_completed_session_projection",
+        touched_surfaces=[
+            "route_indexes",
+            "session_manifests",
+            "sessions",
+            "token_accounting",
+        ],
+        lock_timeout_sec=lock_timeout_sec,
+    )
 
 
 def refresh_route_indexes_from_raw(
@@ -29535,6 +30741,8 @@ def refresh_route_indexes_from_raw(
     *,
     dry_run: bool = False,
     max_raw_bytes: int | None = None,
+    cooperative_deadline_monotonic: float | None = None,
+    defer_publish: bool = False,
 ) -> dict[str, Any]:
     session_dir = session_dir_from_record(record)
     manifest_path = session_dir / "session.manifest.json"
@@ -29593,10 +30801,23 @@ def refresh_route_indexes_from_raw(
             record,
             dry_run=dry_run,
             max_raw_bytes=max_raw_bytes,
+            cooperative_deadline_monotonic=(
+                cooperative_deadline_monotonic
+            ),
+            defer_publish=defer_publish,
         )
     segments = manifest.get("segments") if isinstance(manifest.get("segments"), list) else []
     if not segments:
-        return reindex_session_from_raw(aoa_root, record, dry_run=dry_run, max_raw_bytes=max_raw_bytes)
+        return reindex_session_from_raw(
+            aoa_root,
+            record,
+            dry_run=dry_run,
+            max_raw_bytes=max_raw_bytes,
+            cooperative_deadline_monotonic=(
+                cooperative_deadline_monotonic
+            ),
+            defer_publish=defer_publish,
+        )
     if dry_run:
         return {
             "session_id": manifest.get("session_id"),
@@ -29616,8 +30837,15 @@ def refresh_route_indexes_from_raw(
         record,
         dry_run=False,
         max_raw_bytes=max_raw_bytes,
+        cooperative_deadline_monotonic=(
+            cooperative_deadline_monotonic
+        ),
+        defer_publish=defer_publish,
     )
-    if rebuilt.get("status") == "reindexed":
+    if rebuilt.get("status") in {
+        "reindexed",
+        "built_unpublished",
+    }:
         rebuilt["action"] = (
             "route_indexes_refreshed_via_atomic_session_rebuild"
         )
@@ -29950,6 +31178,7 @@ def reindex_sessions(
     budget_seconds: float | None = None,
     progress_every: int = 0,
     selected_records: list[dict[str, Any]] | None = None,
+    split_publish_lock: bool = False,
 ) -> dict[str, Any]:
     now = utc_now()
     started = time.monotonic()
@@ -30012,6 +31241,8 @@ def reindex_sessions(
                 record,
                 dry_run=dry_run,
                 max_raw_bytes=max_raw_bytes,
+                cooperative_deadline_monotonic=deadline,
+                defer_publish=split_publish_lock,
             )
         else:
             result = reindex_session_from_raw(
@@ -30019,7 +31250,45 @@ def reindex_sessions(
                 record,
                 dry_run=dry_run,
                 max_raw_bytes=max_raw_bytes,
+                cooperative_deadline_monotonic=deadline,
+                defer_publish=split_publish_lock,
             )
+        if (
+            split_publish_lock
+            and result.get("status") == "built_unpublished"
+        ):
+            build_result = dict(result)
+            published = (
+                publish_prebuilt_session_projection_under_maintenance_lock(
+                    aoa_root=aoa_root,
+                    record=record,
+                    work_dir=Path(str(result["work_dir"])),
+                )
+            )
+            build_phase_timings = (
+                build_result.get("phase_timings_ms")
+                if isinstance(
+                    build_result.get("phase_timings_ms"), dict
+                )
+                else {}
+            )
+            publish_phase_timings = (
+                published.get("phase_timings_ms")
+                if isinstance(
+                    published.get("phase_timings_ms"), dict
+                )
+                else {}
+            )
+            result = {
+                **build_result,
+                **published,
+                "build_result": build_result,
+                "split_publish_lock": True,
+                "phase_timings_ms": {
+                    **build_phase_timings,
+                    **publish_phase_timings,
+                },
+            }
         counts[str(result.get("status") or "unknown")] += 1
         results.append(result)
         if progress_every > 0 and record_index % progress_every == 0:
@@ -30033,6 +31302,12 @@ def reindex_sessions(
                     ),
                 }
             )
+        if str(result.get("status") or "") == "checkpointed":
+            # The selected record was visited but remains unfinished. Report
+            # the cooperative slice as exhausted and preserve the current
+            # record in the remaining-work count for a later resume.
+            budget_exhausted = True
+            break
     processed_count = len(results)
     completed_session_ids = list(
         dict.fromkeys(
@@ -30055,13 +31330,18 @@ def reindex_sessions(
         "dry_run": dry_run,
         "max_raw_bytes": max_raw_bytes,
         "stale_route_indexes": stale_route_indexes,
+        "split_publish_lock": split_publish_lock,
         "budget_seconds": budget_seconds,
         "budget_exhausted": budget_exhausted,
         "candidate_selected_count": candidate_selected_count,
         "selected_count": len(records),
         "processed_count": processed_count,
         "completed_session_ids": completed_session_ids,
-        "remaining_count": max(0, len(records) - processed_count),
+        "remaining_count": max(
+            0,
+            len(records) - processed_count
+            + (1 if counts.get("checkpointed", 0) else 0),
+        ),
         "counts": dict(counts),
         "progress_telemetry": progress_telemetry.summary(),
         "results": results,
@@ -30278,6 +31558,213 @@ def token_accounting_generated_diagnostics(record: dict[str, Any], manifest: dic
         diagnostics.append("raw_block_index_missing")
 
     return sorted(set(diagnostics))
+
+
+def token_accounting_backfill_projection_only(
+    aoa_root: Path,
+    record: dict[str, Any],
+) -> dict[str, Any]:
+    """Refresh token ledgers without regenerating segment content."""
+    session_dir = session_dir_from_record(record)
+    manifest_path = session_dir / "session.manifest.json"
+    manifest = read_json(manifest_path, {})
+    if not isinstance(manifest, dict) or not manifest:
+        return {
+            "status": "diagnostic",
+            "diagnostics": ["missing_manifest"],
+        }
+    if str(manifest.get("archive_status") or "") != "indexed":
+        return {
+            "status": "full_reindex_required",
+            "diagnostics": ["archive_not_materialized"],
+        }
+    raw = manifest.get("raw") if isinstance(manifest.get("raw"), dict) else {}
+    raw_path = Path(
+        str(
+            raw.get("path")
+            or session_dir / "raw" / "session.raw.jsonl"
+        )
+    )
+    if not raw_path.is_file():
+        return {
+            "status": "diagnostic",
+            "diagnostics": ["raw_missing"],
+        }
+    raw_sha_before = sha256_file(raw_path)
+    events = parse_raw_events(raw_path)
+    ranges = segment_ranges(events)
+    segments = (
+        manifest.get("segments")
+        if isinstance(manifest.get("segments"), list)
+        else []
+    )
+    raw_blocks = (
+        manifest.get("raw_blocks")
+        if isinstance(manifest.get("raw_blocks"), dict)
+        else {}
+    )
+    raw_block_items = (
+        raw_blocks.get("blocks")
+        if isinstance(raw_blocks.get("blocks"), list)
+        else []
+    )
+    publish_identity = session_projection_publish_identity(
+        raw_path=raw_path,
+        events=events,
+    )
+    existing_publish_id = projection_publish_id(
+        manifest.get("index_schema")
+        if isinstance(manifest.get("index_schema"), dict)
+        else {}
+    )
+    if (
+        len(segments) != len(ranges)
+        or len(raw_block_items) != len(ranges)
+        or existing_publish_id
+        != projection_publish_id(publish_identity)
+    ):
+        return {
+            "status": "full_reindex_required",
+            "diagnostics": [
+                "projection_shape_or_generation_incompatible"
+            ],
+        }
+    literal_policy = derived_session_sensitive_literal_policy(events)
+    stage_dir = stage_existing_session_projection(session_dir)
+    try:
+        updated_segments: list[dict[str, Any]] = []
+        updated_blocks: list[dict[str, Any]] = []
+        for segment_no, (start, end, role) in enumerate(ranges):
+            segment_events = events[start:end]
+            segment_summary_full = token_accounting_summary_for_events(
+                segment_events,
+                scope={
+                    "kind": "segment",
+                    "segment_id": f"{segment_no:03d}",
+                    "segment_role": role,
+                },
+                include_observations=True,
+            )
+            segment_summary_manifest = (
+                token_accounting_summary_for_events(
+                    segment_events,
+                    scope={
+                        "kind": "segment",
+                        "segment_id": f"{segment_no:03d}",
+                        "segment_role": role,
+                    },
+                    include_observations=False,
+                )
+            )
+            segment = dict(segments[segment_no])
+            segment["token_accounting"] = segment_summary_manifest
+            updated_segments.append(segment)
+            segment_index_path = (
+                stage_dir
+                / "segments"
+                / Path(str(segment.get("index") or "")).name
+            )
+            segment_index = read_json(segment_index_path, {})
+            if not isinstance(segment_index, dict) or not segment_index:
+                raise ValueError(
+                    f"segment_index_missing:{segment_no:03d}"
+                )
+            segment_index["token_accounting_schema_version"] = (
+                TOKEN_ACCOUNTING_SCHEMA_VERSION
+            )
+            segment_index["token_accounting"] = segment_summary_full
+            write_json(
+                segment_index_path,
+                redact_derived_value(
+                    segment_index,
+                    literal_policy=literal_policy,
+                ),
+            )
+            block = dict(raw_block_items[segment_no])
+            block["token_accounting"] = (
+                token_accounting_summary_for_events(
+                    segment_events,
+                    scope={
+                        "kind": "raw_block",
+                        "block_id": f"{segment_no:03d}",
+                        "segment_id": f"{segment_no:03d}",
+                        "role": role,
+                    },
+                    include_observations=False,
+                )
+            )
+            updated_blocks.append(block)
+        raw_blocks = {**raw_blocks, "blocks": updated_blocks}
+        manifest["segments"] = updated_segments
+        manifest["raw_blocks"] = raw_blocks
+        manifest["token_accounting_schema_version"] = (
+            TOKEN_ACCOUNTING_SCHEMA_VERSION
+        )
+        manifest["token_accounting"] = (
+            token_accounting_summary_for_session(
+                events,
+                session_id=str(
+                    manifest.get("session_id") or "unknown"
+                ),
+            )
+        )
+        manifest["updated_at"] = utc_now()
+        write_json(stage_dir / "session.manifest.json", manifest)
+        raw_block_index_path = (
+            stage_dir / "raw" / RAW_BLOCK_INDEX_JSON
+        )
+        raw_block_index = read_json(raw_block_index_path, {})
+        if not isinstance(raw_block_index, dict):
+            raw_block_index = {}
+        raw_block_index["projection_publish"] = publish_identity
+        raw_block_index["blocks"] = updated_blocks
+        write_json(raw_block_index_path, raw_block_index)
+        write_session_index(
+            stage_dir,
+            manifest,
+            events,
+            reference_session_dir=session_dir,
+            publish_identity=publish_identity,
+            literal_policy=literal_policy,
+        )
+        publish_result = atomic_publish_session_projection(
+            stage_dir=stage_dir,
+            session_dir=session_dir,
+            publish_identity=publish_identity,
+        )
+    except (OSError, ValueError) as exc:
+        remove_projection_publish_path(stage_dir)
+        return {
+            "status": "diagnostic",
+            "diagnostics": [
+                "token_only_backfill_failed_last_good_preserved",
+                f"{type(exc).__name__}:{exc}",
+            ],
+            "raw_sha256_before": raw_sha_before,
+            "raw_sha256_after": sha256_file(raw_path),
+        }
+    update_registry(aoa_root, manifest, session_dir)
+    dirty_propagation = propagate_session_projection_dirty(
+        aoa_root=aoa_root,
+        session_dir=session_dir,
+        manifest=manifest,
+        reason="token_accounting_projection_backfilled",
+        checked_at=utc_now(),
+    )
+    raw_sha_after = sha256_file(raw_path)
+    return {
+        "status": "token_projection_backfilled",
+        "session_id": manifest.get("session_id"),
+        "session_dir": str(session_dir),
+        "event_count": len(events),
+        "segment_count": len(updated_segments),
+        "raw_sha256_before": raw_sha_before,
+        "raw_sha256_after": raw_sha_after,
+        "raw_unchanged": raw_sha_before == raw_sha_after,
+        "publish_result": publish_result,
+        "dirty_propagation": dirty_propagation,
+        "diagnostics": [],
+    }
 
 
 def token_accounting_compaction_deltas(manifest: dict[str, Any]) -> list[dict[str, Any]]:
@@ -30528,21 +32015,49 @@ def token_accounting_backfill_candidate(
         "raw_path": str(raw_path),
         "raw_bytes": raw_bytes,
         "diagnostics": diagnostics,
-        "planned_actions": ["reindex_from_preserved_raw"],
+        "planned_actions": [
+            (
+                "token_projection_only"
+                if archive_status == "indexed"
+                else "initial_materialization_from_preserved_raw"
+            )
+        ],
+        "backfill_mode": (
+            "token_projection_only"
+            if archive_status == "indexed"
+            else "full_initial_materialization"
+        ),
         "force": force,
     }
     if not apply:
         return {**result_base, "status": "planned"}
 
     raw_sha_before = sha256_file(raw_path)
-    result = reindex_session_from_raw(
-        aoa_root,
-        record,
-        dry_run=False,
-        max_raw_bytes=max_raw_bytes,
+    result = (
+        token_accounting_backfill_projection_only(
+            aoa_root,
+            record,
+        )
+        if archive_status == "indexed"
+        else {
+            "status": "full_reindex_required",
+            "diagnostics": ["archive_not_materialized"],
+        }
     )
+    if result.get("status") == "full_reindex_required":
+        result = reindex_session_from_raw(
+            aoa_root,
+            record,
+            dry_run=False,
+            max_raw_bytes=max_raw_bytes,
+        )
     raw_sha_after = sha256_file(raw_path)
-    status = "backfilled" if result.get("status") == "reindexed" else str(result.get("status") or "unknown")
+    status = (
+        "backfilled"
+        if result.get("status")
+        in {"reindexed", "token_projection_backfilled"}
+        else str(result.get("status") or "unknown")
+    )
     after_manifest = read_json(manifest_path, {})
     after_diagnostics = token_accounting_generated_diagnostics(record, after_manifest if isinstance(after_manifest, dict) else {})
     return {
@@ -30552,6 +32067,12 @@ def token_accounting_backfill_candidate(
         "raw_sha256_after": raw_sha_after,
         "raw_unchanged": raw_sha_before == raw_sha_after,
         "after_diagnostics": after_diagnostics,
+        "applied_mode": (
+            "token_projection_only"
+            if result.get("status")
+            == "token_projection_backfilled"
+            else "full_reindex"
+        ),
         "reindex_result": result,
     }
 
@@ -48148,6 +49669,7 @@ def search_rebuild_tmp_status(aoa_root: Path) -> dict[str, Any]:
 
 
 SESSION_PROJECTION_UNOWNED_CONFIRM_MIN_AGE_SECONDS = 300
+SESSION_PROJECTION_OBSOLETE_WORK_MIN_AGE_SECONDS = 300
 
 
 def stable_file_content_identity(path: Path) -> dict[str, Any]:
@@ -49112,6 +50634,267 @@ def session_projection_stage_status(
     }
 
 
+def session_projection_current_work_identity(
+    owner_session_dir: Path,
+) -> dict[str, Any]:
+    """Resolve current raw and producer identity without trusting a checkpoint."""
+    manifest = read_json(
+        owner_session_dir / "session.manifest.json", {}
+    )
+    raw = (
+        manifest.get("raw")
+        if isinstance(manifest, dict)
+        and isinstance(manifest.get("raw"), dict)
+        else {}
+    )
+    raw_path = (
+        projection_path_from_ref(
+            raw.get("path"), base=owner_session_dir
+        )
+        if raw.get("path")
+        else owner_session_dir / "raw" / "session.raw.jsonl"
+    )
+    payload: dict[str, Any] = {
+        "ok": False,
+        "raw_path": str(raw_path),
+        "raw_sha256": "",
+        "work_identity": {},
+        "diagnostics": [],
+    }
+    if (
+        raw_path.is_symlink()
+        or not raw_path.is_file()
+        or not owner_session_dir.is_dir()
+        or owner_session_dir.is_symlink()
+    ):
+        payload["diagnostics"] = [
+            "projection_work_owner_raw_not_regular"
+        ]
+        return payload
+    try:
+        before = file_snapshot(raw_path)
+        events = parse_raw_events(raw_path)
+        publish_identity = session_projection_publish_identity(
+            raw_path=raw_path,
+            events=events,
+        )
+        after = file_snapshot(raw_path)
+    except (OSError, ValueError) as exc:
+        payload["diagnostics"] = [
+            "projection_work_current_identity_failed:"
+            f"{type(exc).__name__}"
+        ]
+        return payload
+    if before != after:
+        payload["diagnostics"] = [
+            "projection_work_owner_raw_changed_during_identity_check"
+        ]
+        return payload
+    payload.update(
+        {
+            "ok": True,
+            "raw_sha256": str(
+                publish_identity.get("source", {}).get(
+                    "raw_sha256", ""
+                )
+            ),
+            "work_identity": session_projection_work_identity(
+                publish_identity
+            ),
+        }
+    )
+    return payload
+
+
+def session_projection_work_entries(
+    aoa_root: Path,
+) -> list[dict[str, Any]]:
+    """Classify resumable work without deleting current compatible progress."""
+    sessions_root = aoa_root / SESSION_ROOT
+    if not sessions_root.exists():
+        return []
+    now = time.time()
+    current_identity_cache: dict[str, dict[str, Any]] = {}
+    entries: list[dict[str, Any]] = []
+    marker = ".projection-work-"
+    for path in sorted(sessions_root.glob(".*.projection-work-*")):
+        if path.is_symlink() or not path.is_dir():
+            continue
+        name = path.name
+        if not name.startswith(".") or marker not in name:
+            continue
+        session_name, work_id_prefix = name[1:].rsplit(marker, 1)
+        if not re.fullmatch(r"[0-9a-f]{24}", work_id_prefix):
+            continue
+        owner_session_dir = sessions_root / session_name
+        checkpoint = read_json(
+            session_projection_work_checkpoint_path(path), {}
+        )
+        stored_identity = (
+            checkpoint.get("work_identity")
+            if isinstance(checkpoint, dict)
+            and isinstance(checkpoint.get("work_identity"), dict)
+            else {}
+        )
+        stored_work_id = str(stored_identity.get("work_id") or "")
+        descendants = [
+            item
+            for item in path.rglob("*")
+            if item.exists() or item.is_symlink()
+        ]
+        mtimes = [
+            path_mtime(item)
+            for item in [path, *descendants]
+            if item.exists() or item.is_symlink()
+        ]
+        latest_mtime = max(mtimes) if mtimes else 0.0
+        age_seconds = (
+            max(0, int(now - latest_mtime))
+            if latest_mtime > 0
+            else -1
+        )
+        lease_path = session_projection_build_lease_path(
+            owner_session_dir
+        )
+        lease_active = False
+        lease_proven_inactive = False
+        lease_handle: Any | None = None
+        if lease_path.is_file() and not lease_path.is_symlink():
+            try:
+                lease_handle = lease_path.open("r+", encoding="utf-8")
+                fcntl.flock(
+                    lease_handle,
+                    fcntl.LOCK_EX | fcntl.LOCK_NB,
+                )
+                lease_proven_inactive = True
+            except BlockingIOError:
+                lease_active = True
+            except OSError:
+                pass
+            finally:
+                if lease_handle is not None:
+                    if lease_proven_inactive:
+                        try:
+                            fcntl.flock(lease_handle, fcntl.LOCK_UN)
+                        except OSError:
+                            pass
+                    lease_handle.close()
+        if session_name not in current_identity_cache:
+            current_identity_cache[session_name] = (
+                session_projection_current_work_identity(
+                    owner_session_dir
+                )
+            )
+        current = current_identity_cache[session_name]
+        shape_valid = bool(
+            stored_work_id
+            and stored_work_id.startswith(work_id_prefix)
+            and int_value(checkpoint.get("schema_version"))
+            == SESSION_PROJECTION_WORK_STATE_SCHEMA_VERSION
+        )
+        identity_current = bool(
+            shape_valid
+            and current.get("ok")
+            and stored_identity == current.get("work_identity")
+        )
+        incompatible = bool(
+            shape_valid
+            and current.get("ok")
+            and stored_identity != current.get("work_identity")
+        )
+        safe_to_remove = bool(
+            incompatible
+            and lease_proven_inactive
+            and age_seconds
+            >= SESSION_PROJECTION_OBSOLETE_WORK_MIN_AGE_SECONDS
+        )
+        if lease_active:
+            status = "active_build_lease"
+        elif identity_current:
+            status = "resumable_current"
+        elif incompatible and not lease_proven_inactive:
+            status = "obsolete_lease_unresolved"
+        elif incompatible and not safe_to_remove:
+            status = "obsolete_grace_period"
+        elif safe_to_remove:
+            status = "obsolete_incompatible"
+        else:
+            status = "blocked_unverified"
+        entries.append(
+            {
+                "path": str(path),
+                "session_name": session_name,
+                "owner_session_dir": str(owner_session_dir),
+                "work_id_prefix": work_id_prefix,
+                "stored_work_id": stored_work_id,
+                "phase": str(checkpoint.get("phase") or ""),
+                "status": status,
+                "safe_to_remove": safe_to_remove,
+                "lease_path": str(lease_path),
+                "lease_active": lease_active,
+                "lease_proven_inactive": lease_proven_inactive,
+                "identity_current": identity_current,
+                "raw_authority_verified": bool(current.get("ok")),
+                "current_raw_sha256": str(
+                    current.get("raw_sha256") or ""
+                ),
+                "size_bytes": path_total_size(path),
+                "age_seconds": age_seconds,
+                "latest_mtime": latest_mtime,
+                "diagnostics": list(current.get("diagnostics", [])),
+            }
+        )
+    return entries
+
+
+def session_projection_work_status(
+    aoa_root: Path,
+) -> dict[str, Any]:
+    entries = session_projection_work_entries(aoa_root)
+    obsolete = [
+        entry
+        for entry in entries
+        if entry.get("status") == "obsolete_incompatible"
+        and entry.get("safe_to_remove")
+    ]
+    blocked = [
+        entry
+        for entry in entries
+        if entry.get("status")
+        in {"blocked_unverified", "obsolete_lease_unresolved"}
+    ]
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_projection_work_status",
+        "generated_at": utc_now(),
+        "status": (
+            "cleanup_needed"
+            if obsolete
+            else "blocked_unverified"
+            if blocked
+            else "active_or_resumable"
+            if entries
+            else "clean"
+        ),
+        "needs_cleanup": bool(obsolete),
+        "entry_count": len(entries),
+        "obsolete_count": len(obsolete),
+        "resumable_current_count": sum(
+            entry.get("status") == "resumable_current"
+            for entry in entries
+        ),
+        "active_count": sum(
+            entry.get("status") == "active_build_lease"
+            for entry in entries
+        ),
+        "blocked_count": len(blocked),
+        "entries": entries,
+        "diagnostics": (
+            ["obsolete_session_projection_work"] if obsolete else []
+        ),
+    }
+
+
 def maintenance_cleanup_markdown(payload: dict[str, Any]) -> str:
     action_counts = payload.get("action_counts") if isinstance(payload.get("action_counts"), dict) else {}
     lines = [
@@ -49129,6 +50912,7 @@ def maintenance_cleanup_markdown(payload: dict[str, Any]) -> str:
         f"- graph_rebuild_tmp_removed: `{action_counts.get('graph_rebuild_tmp_removed', 0)}`",
         f"- search_rebuild_tmp_removed: `{action_counts.get('search_rebuild_tmp_removed', 0)}`",
         f"- session_projection_stage_removed: `{action_counts.get('session_projection_stage_removed', 0)}`",
+        f"- obsolete_projection_work_removed: `{action_counts.get('obsolete_projection_work_removed', 0)}`",
         "",
         payload.get("stop_line", ""),
     ]
@@ -49179,6 +50963,9 @@ def maintenance_cleanup(
     session_stage_status = session_projection_stage_status(
         aoa_root
     )
+    session_work_status = session_projection_work_status(
+        aoa_root
+    )
     removable_graph_tmp_entries = [
         entry
         for entry in graph_tmp_status.get("entries", [])
@@ -49196,6 +50983,13 @@ def maintenance_cleanup(
         for entry in session_stage_status.get("entries", [])
         if isinstance(entry, dict)
         and entry.get("status") == "orphaned"
+        and entry.get("safe_to_remove")
+    ]
+    removable_session_work_entries = [
+        entry
+        for entry in session_work_status.get("entries", [])
+        if isinstance(entry, dict)
+        and entry.get("status") == "obsolete_incompatible"
         and entry.get("safe_to_remove")
     ]
     unowned_session_stage_entries = [
@@ -49283,6 +51077,11 @@ def maintenance_cleanup(
         for item in session_stage_status.get("diagnostics", [])
         if item
     )
+    diagnostics.extend(
+        str(item)
+        for item in session_work_status.get("diagnostics", [])
+        if item
+    )
     diagnostics.extend(confirmation_errors)
     if matched_unowned_digests and not confirmation_errors:
         diagnostics.append(
@@ -49299,6 +51098,7 @@ def maintenance_cleanup(
         "graph_rebuild_tmp_removed": 0,
         "search_rebuild_tmp_removed": 0,
         "session_projection_stage_removed": 0,
+        "obsolete_projection_work_removed": 0,
     }
     if apply and not lock_active and not confirmation_errors:
         if stale_active_job:
@@ -49417,10 +51217,113 @@ def maintenance_cleanup(
                 action_counts[
                     "session_projection_stage_removed"
                 ] += 1
+        for entry in removable_session_work_entries:
+            work_path = Path(str(entry.get("path") or ""))
+            owner_session_dir = Path(
+                str(entry.get("owner_session_dir") or "")
+            )
+            lease_path = Path(str(entry.get("lease_path") or ""))
+            if (
+                work_path.is_symlink()
+                or not work_path.is_dir()
+                or not work_path.name.startswith(
+                    f".{owner_session_dir.name}.projection-work-"
+                )
+                or lease_path.is_symlink()
+                or not lease_path.is_file()
+            ):
+                removal_revalidation_errors.append(
+                    "projection_work_shape_changed_before_removal:"
+                    f"{work_path.name}"
+                )
+                continue
+            lease_handle = lease_path.open("r+", encoding="utf-8")
+            lease_acquired = False
+            try:
+                try:
+                    fcntl.flock(
+                        lease_handle,
+                        fcntl.LOCK_EX | fcntl.LOCK_NB,
+                    )
+                    lease_acquired = True
+                except BlockingIOError:
+                    removal_revalidation_errors.append(
+                        "projection_work_lease_appeared_before_removal:"
+                        f"{work_path.name}"
+                    )
+                    continue
+                checkpoint = read_json(
+                    session_projection_work_checkpoint_path(work_path),
+                    {},
+                )
+                stored_identity = (
+                    checkpoint.get("work_identity")
+                    if isinstance(checkpoint, dict)
+                    and isinstance(
+                        checkpoint.get("work_identity"), dict
+                    )
+                    else {}
+                )
+                stored_work_id = str(
+                    stored_identity.get("work_id") or ""
+                )
+                current = session_projection_current_work_identity(
+                    owner_session_dir
+                )
+                latest_mtime = max(
+                    [path_mtime(work_path)]
+                    + [
+                        path_mtime(item)
+                        for item in work_path.rglob("*")
+                        if item.exists() or item.is_symlink()
+                    ]
+                )
+                old_enough = (
+                    max(0, int(time.time() - latest_mtime))
+                    >= SESSION_PROJECTION_OBSOLETE_WORK_MIN_AGE_SECONDS
+                )
+                identity_incompatible = bool(
+                    current.get("ok")
+                    and stored_identity
+                    and stored_identity
+                    != current.get("work_identity")
+                )
+                name_matches_identity = bool(
+                    stored_work_id
+                    and work_path.name.endswith(
+                        stored_work_id[:24]
+                    )
+                )
+                if not (
+                    identity_incompatible
+                    and name_matches_identity
+                    and old_enough
+                ):
+                    removal_revalidation_errors.append(
+                        "projection_work_no_longer_safe_to_remove:"
+                        f"{work_path.name}"
+                    )
+                    continue
+                removed_bytes += int_value(entry.get("size_bytes"))
+                remove_projection_publish_path(work_path)
+                removed_paths.append(str(work_path))
+                action_counts[
+                    "obsolete_projection_work_removed"
+                ] += 1
+            finally:
+                if lease_acquired:
+                    try:
+                        fcntl.flock(lease_handle, fcntl.LOCK_UN)
+                    except OSError:
+                        pass
+                lease_handle.close()
         graph_tmp_status = graph_rebuild_tmp_status(aoa_root)
         search_tmp_status = search_rebuild_tmp_status(aoa_root)
         session_stage_status = (
             session_projection_stage_status(aoa_root)
+        )
+        session_work_status = session_projection_work_status(
+            aoa_root
         )
 
     if lock_handle is not None:
@@ -49438,6 +51341,7 @@ def maintenance_cleanup(
         or bool(
             session_stage_status.get("needs_cleanup")
         )
+        or bool(session_work_status.get("needs_cleanup"))
         or int_value(
             session_stage_status.get(
                 "journal_recovery_count"
@@ -49454,6 +51358,7 @@ def maintenance_cleanup(
         or bool(graph_tmp_status.get("needs_cleanup"))
         or bool(search_tmp_status.get("needs_cleanup"))
         or bool(session_stage_status.get("needs_cleanup"))
+        or bool(session_work_status.get("needs_cleanup"))
         or int_value(
             session_stage_status.get(
                 "journal_recovery_count"
@@ -49513,6 +51418,7 @@ def maintenance_cleanup(
         "graph_rebuild_temps": graph_tmp_status,
         "search_rebuild_temps": search_tmp_status,
         "session_projection_stages": session_stage_status,
+        "session_projection_work": session_work_status,
         "confirmed_unowned_session_stage_digests": sorted(
             confirmed_unowned_digests
         ),
@@ -50279,6 +52185,47 @@ def auto_maintenance_clean_noop_reason(freshness: dict[str, Any]) -> str:
     return "freshness_gate_clean_no_actionable_search_atlas_or_graph_work"
 
 
+def heavy_projection_lane_candidates(
+    records: Iterable[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for record in records:
+        session_dir = session_dir_from_record(record)
+        manifest = read_json(
+            session_dir / "session.manifest.json", {}
+        )
+        if not isinstance(manifest, dict):
+            continue
+        if str(manifest.get("archive_status") or "") != (
+            "raw_mirrored_index_deferred"
+        ):
+            continue
+        raw = (
+            manifest.get("raw")
+            if isinstance(manifest.get("raw"), dict)
+            else {}
+        )
+        raw_path = Path(
+            str(
+                raw.get("path")
+                or session_dir / "raw" / "session.raw.jsonl"
+            )
+        )
+        try:
+            raw_bytes = raw_path.stat().st_size
+        except OSError:
+            continue
+        if raw_bytes < SESSION_PROJECTION_HEAVY_LANE_RAW_BYTES:
+            continue
+        candidates.append(
+            {
+                **record,
+                "heavy_lane_raw_bytes": raw_bytes,
+            }
+        )
+    return candidates
+
+
 def auto_maintenance(
     *,
     workspace_root: Path,
@@ -50312,6 +52259,7 @@ def auto_maintenance(
     progress_every: int = 0,
 ) -> dict[str, Any]:
     now = utc_now()
+    auto_function_started = time.monotonic()
     settings = auto_maintenance_profile(profile)
     profile_since_days = settings.get("since_days")
     effective_since_days = since_days if since_days is not None else (int_value(profile_since_days) if profile_since_days is not None else None)
@@ -50463,6 +52411,85 @@ def auto_maintenance(
             "query_demand_priority_session_ids": query_priority_session_ids,
         }
     )
+    heavy_lane_result: dict[str, Any] = {}
+    heavy_lane_excluded_session_ids: set[str] = set()
+    heavy_candidates = heavy_projection_lane_candidates(
+        query_demand_records
+    )
+    if target != "all":
+        heavy_candidates = [
+            record
+            for record in heavy_candidates
+            if str(record.get("session_id") or "") == target
+            or str(record.get("session_label") or "") == target
+        ]
+    if apply and heavy_candidates:
+        prioritized_heavy = prioritize_session_records(
+            heavy_candidates,
+            query_priority_session_ids,
+        )
+        heavy_record = prioritized_heavy[0]
+        heavy_session_id = str(
+            heavy_record.get("session_id") or ""
+        )
+        heavy_lane_excluded_session_ids.add(heavy_session_id)
+        profile_slice_seconds = {
+            "hot": 60.0,
+            "catchup": 120.0,
+            "backlog": 300.0,
+            "deep": 300.0,
+        }.get(profile, 120.0)
+        elapsed_before_heavy = max(
+            0.0, time.monotonic() - auto_function_started
+        )
+        remaining_before_heavy = (
+            max(
+                0.0,
+                float(effective_budget_seconds)
+                - elapsed_before_heavy,
+            )
+            if effective_budget_seconds is not None
+            else profile_slice_seconds
+        )
+        heavy_lane_budget = max(
+            sys.float_info.epsilon,
+            min(profile_slice_seconds, remaining_before_heavy),
+        )
+        heavy_lane_result = reindex_sessions(
+            aoa_root=aoa_root,
+            selected_records=[heavy_record],
+            budget_seconds=heavy_lane_budget,
+            split_publish_lock=True,
+            progress_every=progress_every,
+        )
+        heavy_results = (
+            heavy_lane_result.get("results")
+            if isinstance(heavy_lane_result.get("results"), list)
+            else []
+        )
+        heavy_status = str(
+            (
+                heavy_results[0]
+                if heavy_results
+                and isinstance(heavy_results[0], dict)
+                else {}
+            ).get("status")
+            or "unknown"
+        )
+        if heavy_status == "reindexed":
+            heavy_lane_excluded_session_ids.discard(
+                heavy_session_id
+            )
+        selection_scope["heavy_projection_lane"] = {
+            "status": heavy_status,
+            "session_id": heavy_session_id,
+            "raw_bytes": int_value(
+                heavy_record.get("heavy_lane_raw_bytes")
+            ),
+            "budget_seconds": heavy_lane_budget,
+            "global_lock_held_during_build": False,
+            "result": heavy_lane_result,
+        }
     lock_path = maintenance_lock_path(aoa_root)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     resource_launcher = auto_maintenance_resource_launcher(
@@ -50594,7 +52621,7 @@ def auto_maintenance(
         write_maintenance_lock_owner(lock_handle, coordinator_owner)
         write_maintenance_coordinator_active(aoa_root, coordinator_owner)
         coordinator_finished: dict[str, Any] | None = None
-        auto_budget_started = time.monotonic()
+        auto_budget_started = auto_function_started
         auto_budget_deadline = (
             auto_budget_started + float(effective_budget_seconds)
             if effective_budget_seconds is not None
@@ -50754,6 +52781,31 @@ def auto_maintenance(
                     "diagnostics", []
                 ),
             }
+        if heavy_lane_excluded_session_ids:
+            if selected_records_override is None:
+                selected_records_override = (
+                    [resolve_session_record(aoa_root, target)]
+                    if target != "all"
+                    else chronological_session_records(
+                        aoa_root,
+                        since=effective_since,
+                        until=until,
+                        limit=effective_limit,
+                    )
+                )
+            selected_records_override = [
+                record
+                for record in selected_records_override
+                if str(record.get("session_id") or "")
+                not in heavy_lane_excluded_session_ids
+            ]
+            selection_scope[
+                "heavy_projection_lane_excluded_from_locked_maintenance"
+            ] = sorted(heavy_lane_excluded_session_ids)
+            selection_scope["selected_count"] = len(
+                selected_records_override
+            )
+
         def run_auto_freshness_probe() -> dict[str, Any]:
             if allow_deferred_graph:
                 return route_cache_freshness_gates(
@@ -116381,6 +118433,160 @@ def graph_entity_registry_node(
     }
 
 
+def graph_source_registry_dependency_for_route_tokens(
+    route_tokens: Iterable[dict[str, Any]],
+    registry_index: dict[tuple[str, str], dict[str, Any]],
+) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for token in route_tokens:
+        if not isinstance(token, dict):
+            continue
+        layer = route_key_slug(token.get("layer"), fallback="")
+        key = route_key_slug(
+            token.get("key"), fallback="", max_chars=120
+        )
+        identity = (layer, key)
+        if not layer or not key or identity in seen:
+            continue
+        seen.add(identity)
+        entry = graph_entity_registry_entry_for_route(
+            registry_index, layer, key
+        )
+        rows.append(
+            {
+                "layer": layer,
+                "key": key,
+                "entity": (
+                    graph_entity_registry_node_semantic_projection(
+                        entry
+                    )
+                    if isinstance(entry, dict)
+                    else None
+                ),
+            }
+        )
+    rows.sort(key=lambda item: (item["layer"], item["key"]))
+    digest = hashlib.sha256(
+        json.dumps(
+            rows,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return {
+        "schema_version": 1,
+        "digest": digest,
+        "route_count": len(rows),
+        "resolved_entity_count": sum(
+            1 for row in rows if row.get("entity") is not None
+        ),
+        "route_tokens": [
+            {"layer": row["layer"], "key": row["key"]}
+            for row in rows
+        ],
+    }
+
+
+def graph_source_registry_dependency_for_contribution(
+    contribution: dict[str, Any],
+    registry_index: dict[tuple[str, str], dict[str, Any]],
+) -> dict[str, Any]:
+    route_tokens = [
+        {
+            "layer": node.get("route_layer"),
+            "key": node.get("route_key"),
+        }
+        for node in (
+            contribution.get("nodes")
+            if isinstance(contribution.get("nodes"), list)
+            else []
+        )
+        if isinstance(node, dict)
+        and node.get("route_layer")
+        and node.get("route_key")
+    ]
+    return graph_source_registry_dependency_for_route_tokens(
+        route_tokens,
+        registry_index,
+    )
+
+
+def graph_migrate_selective_registry_dependencies(
+    *,
+    conn: sqlite3.Connection,
+    registry_index: dict[tuple[str, str], dict[str, Any]],
+) -> dict[str, Any]:
+    columns = {
+        str(row[1])
+        for row in conn.execute(
+            "PRAGMA table_info(graph_sources)"
+        ).fetchall()
+    }
+    if "entity_registry_route_tokens_json" not in columns:
+        conn.execute(
+            "ALTER TABLE graph_sources ADD COLUMN "
+            "entity_registry_route_tokens_json TEXT NOT NULL DEFAULT '[]'"
+        )
+    if "entity_registry_selective_digest" not in columns:
+        conn.execute(
+            "ALTER TABLE graph_sources ADD COLUMN "
+            "entity_registry_selective_digest TEXT NOT NULL DEFAULT ''"
+        )
+    route_tokens_by_source: defaultdict[
+        str, list[dict[str, str]]
+    ] = defaultdict(list)
+    for row in conn.execute(
+        "SELECT source_key, payload_json FROM node_contribs "
+        "WHERE node_type != 'entity_registry'"
+    ):
+        try:
+            payload = json.loads(str(row["payload_json"] or "{}"))
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        layer = route_key_slug(
+            payload.get("route_layer"), fallback=""
+        )
+        key = route_key_slug(
+            payload.get("route_key"),
+            fallback="",
+            max_chars=120,
+        )
+        if layer and key:
+            route_tokens_by_source[str(row["source_key"] or "")].append(
+                {"layer": layer, "key": key}
+            )
+    updated = 0
+    for row in conn.execute(
+        "SELECT source_key FROM graph_sources"
+    ).fetchall():
+        source_key = str(row["source_key"] or "")
+        dependency = graph_source_registry_dependency_for_route_tokens(
+            route_tokens_by_source.get(source_key, []),
+            registry_index,
+        )
+        conn.execute(
+            "UPDATE graph_sources SET "
+            "entity_registry_route_tokens_json = ?, "
+            "entity_registry_selective_digest = ? "
+            "WHERE source_key = ?",
+            (
+                graph_json(dependency["route_tokens"]),
+                dependency["digest"],
+                source_key,
+            ),
+        )
+        updated += 1
+    return {
+        "status": "migrated",
+        "source_count": updated,
+        "route_bearing_source_count": len(route_tokens_by_source),
+    }
+
+
 GRAPH_PROJECTION_CONTENT_DIGEST_VERSION = 2
 GRAPH_PROJECTION_CONTENT_DIGEST_EXCLUDED_COLUMNS = frozenset(
     {
@@ -118238,6 +120444,17 @@ def graph_entity_registry_dependency_rebind(
                 non_registry_digest_before
             )
             refreshed_plan = plan
+        phase = "selective_registry_dependency_migration"
+        selective_dependency_migration = (
+            graph_migrate_selective_registry_dependencies(
+                conn=conn,
+                registry_index=(
+                    dependency.get("index")
+                    if isinstance(dependency.get("index"), dict)
+                    else {}
+                ),
+            )
+        )
         phase = "generation_and_dependency_binding"
         dependency_json = graph_json(dependency_packet)
         expected_generation = (
@@ -118461,6 +120678,9 @@ def graph_entity_registry_dependency_rebind(
         "rebound_at": rebound_at,
         "plan": plan,
         "materialization_refresh": materialization_refresh,
+        "selective_dependency_migration": (
+            selective_dependency_migration
+        ),
         "refreshed_plan": refreshed_plan,
         "post_commit_proof": post_commit_proof,
         "non_registry_content_digest_before": (
@@ -118574,6 +120794,11 @@ class GraphSqliteStore:
                 )
             }
         self.entity_registry_dependency = dependency
+        self.entity_registry_index = (
+            dependency.get("index")
+            if isinstance(dependency.get("index"), dict)
+            else {}
+        )
         self.entity_registry_dependency_id = str(
             dependency.get("dependency_id") or ""
         )
@@ -118678,6 +120903,8 @@ class GraphSqliteStore:
                 generation_identity_json TEXT NOT NULL DEFAULT '',
                 entity_registry_dependency_id TEXT NOT NULL DEFAULT '',
                 entity_registry_dependency_json TEXT NOT NULL DEFAULT '',
+                entity_registry_route_tokens_json TEXT NOT NULL DEFAULT '[]',
+                entity_registry_selective_digest TEXT NOT NULL DEFAULT '',
                 indexed_at TEXT NOT NULL,
                 status TEXT NOT NULL,
                 diagnostic TEXT NOT NULL DEFAULT '',
@@ -118704,6 +120931,14 @@ class GraphSqliteStore:
         if "entity_registry_dependency_json" not in existing_source_columns:
             self.conn.execute(
                 "ALTER TABLE graph_sources ADD COLUMN entity_registry_dependency_json TEXT NOT NULL DEFAULT ''"
+            )
+        if "entity_registry_route_tokens_json" not in existing_source_columns:
+            self.conn.execute(
+                "ALTER TABLE graph_sources ADD COLUMN entity_registry_route_tokens_json TEXT NOT NULL DEFAULT '[]'"
+            )
+        if "entity_registry_selective_digest" not in existing_source_columns:
+            self.conn.execute(
+                "ALTER TABLE graph_sources ADD COLUMN entity_registry_selective_digest TEXT NOT NULL DEFAULT ''"
             )
         self.conn.execute(
             """
@@ -118965,6 +121200,19 @@ class GraphSqliteStore:
                         "non_registry_content"
                     )
 
+                selective_dependency_migration = (
+                    graph_migrate_selective_registry_dependencies(
+                        conn=self.conn,
+                        registry_index=(
+                            dependency.get("index")
+                            if isinstance(
+                                dependency.get("index"), dict
+                            )
+                            else {}
+                        ),
+                    )
+                )
+
                 dependency_packet = (
                     graph_entity_registry_dependency_packet(
                         dependency
@@ -118973,6 +121221,11 @@ class GraphSqliteStore:
                 dependency_json = graph_json(dependency_packet)
                 self.entity_registry_dependency = (
                     dependency_packet
+                )
+                self.entity_registry_index = (
+                    dependency.get("index")
+                    if isinstance(dependency.get("index"), dict)
+                    else {}
                 )
                 self.entity_registry_dependency_id = dependency_id
                 self.entity_registry_dependency_json = (
@@ -119028,6 +121281,9 @@ class GraphSqliteStore:
                         ),
                         "non_registry_content_digest_after": (
                             non_registry_after
+                        ),
+                        "selective_dependency_migration": (
+                            selective_dependency_migration
                         ),
                     }
                 )
@@ -119086,9 +121342,34 @@ class GraphSqliteStore:
             self.entity_registry_dependency_json,
         )
 
+    def _current_entity_registry_index(
+        self,
+    ) -> dict[tuple[str, str], dict[str, Any]]:
+        if self.entity_registry_index:
+            return self.entity_registry_index
+        current = graph_entity_registry_dependency_snapshot(
+            self.aoa_root,
+            ensure_current=False,
+            allow_ephemeral=False,
+        )
+        if (
+            current.get("current")
+            and str(current.get("dependency_id") or "")
+            == self.entity_registry_dependency_id
+            and isinstance(current.get("index"), dict)
+        ):
+            self.entity_registry_index = current["index"]
+        return self.entity_registry_index
+
     def _insert_source_row(self, contribution: dict[str, Any], *, status: str = "current") -> None:
         source = contribution.get("source") if isinstance(contribution.get("source"), dict) else {}
         diagnostic = ";".join(str(item) for item in source.get("diagnostics", []) if item)
+        selective_dependency = (
+            graph_source_registry_dependency_for_contribution(
+                contribution,
+                self._current_entity_registry_index(),
+            )
+        )
         self.conn.execute(
             """
             INSERT OR REPLACE INTO graph_sources(
@@ -119100,9 +121381,11 @@ class GraphSqliteStore:
                 generation_identity_json,
                 entity_registry_dependency_id,
                 entity_registry_dependency_json,
+                entity_registry_route_tokens_json,
+                entity_registry_selective_digest,
                 indexed_at, status, diagnostic,
                 node_count, edge_count
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 source.get("source_key"),
@@ -119122,6 +121405,8 @@ class GraphSqliteStore:
                 self.graph_generation_identity_json,
                 self.entity_registry_dependency_id,
                 self.entity_registry_dependency_json,
+                graph_json(selective_dependency["route_tokens"]),
+                selective_dependency["digest"],
                 utc_now(),
                 status,
                 diagnostic,
@@ -121538,6 +123823,9 @@ def build_session_graph_legacy(
         )
         else {}
     )
+    entity_registry_dependency_packet["index"] = (
+        entity_registry_index
+    )
     records, diagnostics = graph_session_records(aoa_root, target=target, since=since, until=until, limit=limit)
     sqlite_accumulator: GraphSqliteAccumulator | None = None
     nodes: dict[str, dict[str, Any]] = {}
@@ -123026,6 +125314,15 @@ def graph_source_version_state_from_connection(
         if "entity_registry_dependency_id" in source_columns
         else "''"
     )
+    entity_registry_selective_digest_expr = (
+        "entity_registry_selective_digest"
+        if "entity_registry_selective_digest" in source_columns
+        else "''"
+    )
+    entity_registry_dependency_mismatch_expr = (
+        f"({entity_registry_dependency_id_expr} != ? AND "
+        f"{entity_registry_selective_digest_expr} = '')"
+    )
     row = conn.execute(
         f"""
         SELECT
@@ -123035,14 +125332,14 @@ def graph_source_version_state_from_connection(
             SUM(CASE WHEN graph_event_route_signal_edge_policy != ? THEN 1 ELSE 0 END) AS graph_event_route_signal_edge_policy_mismatch_count,
             SUM(CASE WHEN route_signal_classifier_version != ? THEN 1 ELSE 0 END) AS route_signal_classifier_mismatch_count,
             SUM(CASE WHEN {generation_id_expr} != ? THEN 1 ELSE 0 END) AS generation_mismatch_count,
-            SUM(CASE WHEN {entity_registry_dependency_id_expr} != ? THEN 1 ELSE 0 END) AS entity_registry_dependency_mismatch_count,
+            SUM(CASE WHEN {entity_registry_dependency_mismatch_expr} THEN 1 ELSE 0 END) AS entity_registry_dependency_mismatch_count,
             SUM(CASE
                 WHEN graph_schema_version != ?
                   OR graph_store_schema_version != ?
                   OR graph_event_route_signal_edge_policy != ?
                   OR route_signal_classifier_version != ?
                   OR {generation_id_expr} != ?
-                  OR {entity_registry_dependency_id_expr} != ?
+                  OR {entity_registry_dependency_mismatch_expr}
                 THEN 1 ELSE 0 END
             ) AS version_mismatch_source_count,
             MIN(graph_schema_version) AS min_graph_schema_version,
@@ -123736,17 +126033,52 @@ def graph_source_states(
         stored_dependency_id = str(
             row.get("entity_registry_dependency_id") or ""
         )
+        selective_digest = str(
+            row.get("entity_registry_selective_digest") or ""
+        )
+        route_tokens_value = row.get(
+            "entity_registry_route_tokens_json"
+        )
+        try:
+            route_tokens = json.loads(
+                str(route_tokens_value or "[]")
+            )
+        except json.JSONDecodeError:
+            route_tokens = []
+            dependency_reasons.append(
+                "graph_entity_registry_selective_dependency_invalid"
+            )
+        if not isinstance(route_tokens, list):
+            route_tokens = []
+            dependency_reasons.append(
+                "graph_entity_registry_selective_dependency_invalid"
+            )
+        registry_index = (
+            current_entity_registry_dependency.get("index")
+            if isinstance(
+                current_entity_registry_dependency.get("index"), dict
+            )
+            else {}
+        )
+        current_selective = (
+            graph_source_registry_dependency_for_route_tokens(
+                route_tokens,
+                registry_index,
+            )
+        )
         if not stored_dependency_id:
             dependency_reasons.append(
                 "graph_entity_registry_dependency_missing"
             )
-        elif (
-            expected_entity_registry_dependency_id
-            and stored_dependency_id
-            != expected_entity_registry_dependency_id
+        if not selective_digest:
+            dependency_reasons.append(
+                "graph_entity_registry_selective_dependency_missing"
+            )
+        elif selective_digest != str(
+            current_selective.get("digest") or ""
         ):
             dependency_reasons.append(
-                "graph_entity_registry_dependency_mismatch"
+                "graph_entity_registry_selective_dependency_mismatch"
             )
         if (
             not current_entity_registry_dependency.get("current")
@@ -176959,25 +179291,11 @@ def command_reindex_sessions(args: argparse.Namespace) -> int:
         "write_report": args.write_report,
         "budget_seconds": args.budget_seconds,
         "progress_every": args.progress_every,
+        "split_publish_lock": (
+            not args.dry_run
+        ),
     }
-    if args.dry_run:
-        payload = reindex_sessions(**reindex_kwargs)
-    else:
-        payload = run_with_maintenance_lock(
-            root,
-            lambda: reindex_sessions(**reindex_kwargs),
-            owner_job="reindex-sessions",
-            mode="manual-bulk",
-            target=args.session,
-            reason="operator_reindex_sessions",
-            touched_surfaces=[
-                "route_indexes",
-                "session_manifests",
-                "sessions",
-                "token_accounting",
-            ],
-            budget_seconds=args.budget_seconds,
-        )
+    payload = reindex_sessions(**reindex_kwargs)
     print(json.dumps(reindex_print_payload(payload, full=args.full), indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") and payload.get("status") != "skipped_lock_held" else 1
 
