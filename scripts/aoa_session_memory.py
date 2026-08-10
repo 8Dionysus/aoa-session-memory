@@ -1464,6 +1464,7 @@ AUTO_MAINTENANCE_RETRY_QUEUE_SCHEMA_VERSION = 1
 AUTO_MAINTENANCE_RETRY_QUEUE_JSON = "auto-maintenance-retry-queue.json"
 AUTO_MAINTENANCE_RETRY_QUEUE_LOCK = "auto-maintenance-retry-queue.lock"
 AUTO_MAINTENANCE_RETRY_WORKER_LOCK = "auto-maintenance-retry-worker.lock"
+HEAVY_PROJECTION_LANE_LOCK = "session-projection-heavy.lock"
 AUTO_MAINTENANCE_RETRY_HISTORY_LIMIT = 40
 AUTO_MAINTENANCE_CHILD_PROGRESS_RETRY_STATUSES = frozenset(
     {
@@ -16567,6 +16568,76 @@ def post_sync_freshness_status(freshness: dict[str, Any]) -> str:
     return "sync_completed_unverified"
 
 
+def apply_codex_sweep_record(
+    *,
+    aoa_root: Path,
+    event: dict[str, Any],
+    transcript_path: Path,
+    session_id: str,
+    base: dict[str, Any],
+    freshness: dict[str, Any],
+    mirror_only: bool,
+    index_max_raw_bytes: int | None,
+    now: str,
+) -> tuple[str, dict[str, Any]]:
+    if mirror_only:
+        sync_payload = mirror_transcript_without_indexing(
+            aoa_root=aoa_root,
+            event=event,
+            transcript_path=transcript_path,
+            hook_event_name="CodexSessionSweep",
+            now=now,
+        )
+        post_sync_freshness = indexed_archive_freshness(
+            aoa_root,
+            session_id=session_id,
+            transcript_path=transcript_path,
+            session_dir=Path(str(sync_payload.get("session_dir"))),
+        )
+        status = "mirrored_index_deferred"
+        return status, {
+            **base,
+            **sync_payload,
+            "status": status,
+            "pre_sync_freshness": freshness,
+            "freshness": post_sync_freshness,
+            "freshness_reason": post_sync_freshness.get("reason"),
+            "raw_capture_current": bool(
+                sync_payload.get("capture", {}).get(
+                    "source_stable_during_capture"
+                )
+            ),
+            "indexing_deferred": True,
+            "index_max_raw_bytes": index_max_raw_bytes,
+            "retry_required": True,
+            "next_route": (
+                "explicit_heavy_or_resumable_session_projection_repair"
+            ),
+        }
+    sync_payload = sync_session_from_transcript(
+        aoa_root=aoa_root,
+        event=event,
+        transcript_path=transcript_path,
+        hook_event_name="CodexSessionSweep",
+    )
+    post_sync_freshness = indexed_archive_freshness(
+        aoa_root,
+        session_id=session_id,
+        transcript_path=transcript_path,
+        session_dir=Path(str(sync_payload.get("session_dir"))),
+    )
+    status = post_sync_freshness_status(post_sync_freshness)
+    return status, {
+        **base,
+        **sync_payload,
+        "status": status,
+        "pre_sync_freshness": freshness,
+        "freshness": post_sync_freshness,
+        "freshness_reason": post_sync_freshness.get("reason"),
+        "retry_required": not bool(post_sync_freshness.get("fresh")),
+    }
+
+
 def sweep_codex_sessions(
     *,
     aoa_root: Path,
@@ -16682,80 +16753,70 @@ def sweep_codex_sessions(
                     "model": record.get("model"),
                     "hook_event_name": "CodexSessionSweep",
                 }
-                try:
-                    if mirror_only:
-                        sync_payload = mirror_transcript_without_indexing(
+                raw_bytes = int(record.get("bytes") or 0)
+                heavy_handle: Any | None = None
+                heavy_lease: dict[str, Any] = {
+                    "status": "not_required",
+                    "lease_path": str(
+                        heavy_projection_lane_lock_path(aoa_root)
+                    ),
+                    "blocking_owner": {},
+                }
+                if raw_bytes >= SESSION_PROJECTION_HEAVY_LANE_RAW_BYTES:
+                    heavy_handle, heavy_lease = (
+                        try_acquire_heavy_projection_lane(
+                            aoa_root,
+                            owner={
+                                "lane": "codex_session_sweep",
+                                "session_id": session_id,
+                                "raw_bytes": raw_bytes,
+                                "mirror_only": mirror_only,
+                            },
+                        )
+                    )
+                if (
+                    raw_bytes >= SESSION_PROJECTION_HEAVY_LANE_RAW_BYTES
+                    and heavy_handle is None
+                ):
+                    status = "deferred_heavy_lane_lease"
+                    result = {
+                        **base,
+                        "status": status,
+                        "retry_required": True,
+                        "indexing_deferred": mirror_only,
+                        "heavy_lane_lease": heavy_lease,
+                        "diagnostics": [
+                            "another_automatic_heavy_session_job_is_active"
+                        ],
+                    }
+                else:
+                    try:
+                        status, result = apply_codex_sweep_record(
                             aoa_root=aoa_root,
                             event=event,
                             transcript_path=transcript_path,
-                            hook_event_name="CodexSessionSweep",
+                            session_id=session_id,
+                            base=base,
+                            freshness=freshness,
+                            mirror_only=mirror_only,
+                            index_max_raw_bytes=index_max_raw_bytes,
                             now=now,
                         )
-                        post_sync_freshness = indexed_archive_freshness(
-                            aoa_root,
-                            session_id=session_id,
-                            transcript_path=transcript_path,
-                            session_dir=Path(
-                                str(sync_payload.get("session_dir"))
-                            ),
-                        )
-                        status = "mirrored_index_deferred"
+                        result["heavy_lane_lease"] = heavy_lease
+                    except Exception as exc:
+                        status = "error"
                         result = {
                             **base,
-                            **sync_payload,
                             "status": status,
-                            "pre_sync_freshness": freshness,
-                            "freshness": post_sync_freshness,
-                            "freshness_reason": post_sync_freshness.get(
-                                "reason"
-                            ),
-                            "raw_capture_current": bool(
-                                sync_payload.get("capture", {}).get(
-                                    "source_stable_during_capture"
-                                )
-                            ),
-                            "indexing_deferred": True,
-                            "index_max_raw_bytes": index_max_raw_bytes,
-                            "retry_required": True,
-                            "next_route": (
-                                "explicit_heavy_or_resumable_session_"
-                                "projection_repair"
-                            ),
+                            "error": f"{exc.__class__.__name__}: {exc}",
+                            "heavy_lane_lease": heavy_lease,
                         }
-                    else:
-                        sync_payload = sync_session_from_transcript(
-                            aoa_root=aoa_root,
-                            event=event,
-                            transcript_path=transcript_path,
-                            hook_event_name="CodexSessionSweep",
-                        )
-                        post_sync_freshness = indexed_archive_freshness(
-                            aoa_root,
-                            session_id=session_id,
-                            transcript_path=transcript_path,
-                            session_dir=Path(
-                                str(sync_payload.get("session_dir"))
-                            ),
-                        )
-                        status = post_sync_freshness_status(
-                            post_sync_freshness
-                        )
-                        result = {
-                            **base,
-                            **sync_payload,
-                            "status": status,
-                            "pre_sync_freshness": freshness,
-                            "freshness": post_sync_freshness,
-                            "freshness_reason": post_sync_freshness.get(
-                                "reason"
-                            ),
-                            "retry_required": not bool(
-                                post_sync_freshness.get("fresh")
-                            ),
-                        }
-                except Exception as exc:
-                    status = "error"
-                    result = {**base, "status": status, "error": f"{exc.__class__.__name__}: {exc}"}
+                    finally:
+                        if heavy_handle is not None:
+                            release_heavy_projection_lane(
+                                heavy_handle,
+                                heavy_lease,
+                            )
         counts[status] += 1
         results.append(result)
 
@@ -31756,11 +31817,30 @@ def reindex_session_from_raw(
             configured_segment_workers,
             len(pending_segments),
         )
+        segment_worker_start_method = "serial"
         if actual_segment_workers > 1:
             try:
+                # The parent intentionally retains the complete reconciled
+                # event graph until atomic publication.  Forking here makes
+                # every segment worker inherit that graph and can multiply a
+                # multi-gigabyte RSS footprint.  Spawn starts isolated workers
+                # and transfers only the bounded segment slice in each task.
+                # The executor remains alive across every wave in this build,
+                # so process startup is paid once per continuation slice.
+                segment_worker_start_method = "spawn"
+                module_dir = str(Path(__file__).resolve().parent)
+                if module_dir not in sys.path:
+                    # Spawn imports this portable single-file module in a new
+                    # interpreter.  Test harnesses may load it by file spec
+                    # without adding scripts/ to sys.path; make the worker
+                    # import boundary explicit rather than falling back to a
+                    # memory-multiplying fork.
+                    sys.path.insert(0, module_dir)
                 with ProcessPoolExecutor(
                     max_workers=actual_segment_workers,
-                    mp_context=multiprocessing.get_context("fork"),
+                    mp_context=multiprocessing.get_context(
+                        segment_worker_start_method
+                    ),
                 ) as executor:
                     for wave_start in range(
                         0,
@@ -31866,6 +31946,7 @@ def reindex_session_from_raw(
                 else "serial"
             ),
             "parallel_fallback_reason": parallel_fallback_reason,
+            "process_start_method": segment_worker_start_method,
             "bounded_wave_size": max(1, actual_segment_workers),
             "checkpoint_reused_segment_count": (
                 len(ranges)
@@ -50855,6 +50936,74 @@ def maintenance_lock_path(aoa_root: Path) -> Path:
     return aoa_root / DIAGNOSTICS_ROOT / "auto-maintenance.lock"
 
 
+def heavy_projection_lane_lock_path(aoa_root: Path) -> Path:
+    """Serialize automatic memory-heavy projection construction.
+
+    Per-session leases prevent duplicate work for one archive.  This separate
+    host-local lease prevents two different large archives from each forking a
+    worker pool and exhausting memory at the same time.  It deliberately does
+    not cover ordinary maintenance or final publication.
+    """
+    return aoa_root / DIAGNOSTICS_ROOT / HEAVY_PROJECTION_LANE_LOCK
+
+
+def try_acquire_heavy_projection_lane(
+    aoa_root: Path,
+    *,
+    owner: dict[str, Any],
+) -> tuple[Any | None, dict[str, Any]]:
+    lease_path = heavy_projection_lane_lock_path(aoa_root)
+    lease_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lease_path.open("a+", encoding="utf-8")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        blocking_owner = read_maintenance_lock_owner(handle)
+        handle.close()
+        return None, {
+            "status": "deferred",
+            "lease_path": str(lease_path),
+            "blocking_owner": blocking_owner,
+        }
+    active_owner = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_heavy_projection_lane_lease",
+        "status": "active",
+        "pid": os.getpid(),
+        "acquired_at": utc_now(),
+        "command": compact_argv(sys.argv),
+        **owner,
+    }
+    write_maintenance_lock_owner(handle, active_owner)
+    return handle, {
+        "status": "acquired",
+        "lease_path": str(lease_path),
+        "blocking_owner": {},
+        "owner": active_owner,
+    }
+
+
+def release_heavy_projection_lane(
+    handle: Any,
+    lease: dict[str, Any],
+) -> None:
+    owner = (
+        lease.get("owner")
+        if isinstance(lease.get("owner"), dict)
+        else {}
+    )
+    write_maintenance_lock_owner(
+        handle,
+        {
+            **owner,
+            "status": "released",
+            "released_at": utc_now(),
+        },
+    )
+    fcntl.flock(handle, fcntl.LOCK_UN)
+    handle.close()
+
+
 def maintenance_coordinator_state_path(aoa_root: Path) -> Path:
     return aoa_root / DIAGNOSTICS_ROOT / MAINTENANCE_COORDINATOR_STATE_JSON
 
@@ -54219,16 +54368,13 @@ def auto_maintenance(
         )
         profile_slice_seconds = {
             "hot": 60.0,
-            # Real event-dense 68 MiB archives can spend roughly two minutes
-            # in mandatory parse/classification and privacy checks before any
-            # segment wave can resume.  A 120-second catchup slice therefore
-            # preserved the checkpoint but repeatedly made no forward segment
-            # progress.  Keep hot work short; give the explicitly heavy,
-            # per-session leased catchup lane one representative five-minute
-            # slice outside the global maintenance lock.
-            "catchup": 300.0,
-            "backlog": 300.0,
-            "deep": 300.0,
+            # A content-addressed continuation keeps privacy material only in
+            # process memory.  Give the exclusive heavy lane enough time to
+            # amortize its mandatory scan/rehydration once while retaining the
+            # caller's cooperative deadline and the host resource envelope.
+            "catchup": 900.0,
+            "backlog": 900.0,
+            "deep": 900.0,
         }.get(profile, 120.0)
         elapsed_before_heavy = max(
             0.0, time.monotonic() - auto_function_started
@@ -54246,13 +54392,45 @@ def auto_maintenance(
             sys.float_info.epsilon,
             min(profile_slice_seconds, remaining_before_heavy),
         )
-        heavy_lane_result = reindex_sessions(
-            aoa_root=aoa_root,
-            selected_records=[heavy_record],
-            budget_seconds=heavy_lane_budget,
-            split_publish_lock=True,
-            progress_every=progress_every,
+        heavy_handle, heavy_lease = try_acquire_heavy_projection_lane(
+            aoa_root,
+            owner={
+                "lane": "auto_maintenance_projection",
+                "profile": profile,
+                "session_id": heavy_session_id,
+                "budget_seconds": heavy_lane_budget,
+            },
         )
+        if heavy_handle is None:
+            heavy_lane_result = {
+                "ok": True,
+                "status": "deferred_heavy_lane_lease",
+                "mutates": False,
+                "remaining_count": 1,
+                "results": [
+                    {
+                        "status": "deferred_heavy_lane_lease",
+                        "session_id": heavy_session_id,
+                        "diagnostics": [
+                            "another_automatic_heavy_projection_is_active"
+                        ],
+                    }
+                ],
+            }
+        else:
+            try:
+                heavy_lane_result = reindex_sessions(
+                    aoa_root=aoa_root,
+                    selected_records=[heavy_record],
+                    budget_seconds=heavy_lane_budget,
+                    split_publish_lock=True,
+                    progress_every=progress_every,
+                )
+            finally:
+                release_heavy_projection_lane(
+                    heavy_handle,
+                    heavy_lease,
+                )
         heavy_results = (
             heavy_lane_result.get("results")
             if isinstance(heavy_lane_result.get("results"), list)
@@ -54278,6 +54456,9 @@ def auto_maintenance(
                 heavy_record.get("heavy_lane_raw_bytes")
             ),
             "budget_seconds": heavy_lane_budget,
+            "lease_path": str(heavy_lease.get("lease_path") or ""),
+            "lease_status": str(heavy_lease.get("status") or ""),
+            "blocking_owner": heavy_lease.get("blocking_owner", {}),
             "global_lock_held_during_build": False,
             "result": heavy_lane_result,
         }

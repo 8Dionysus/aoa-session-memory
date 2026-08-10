@@ -451,7 +451,11 @@ Atomic publication does not require monolithic computation. Session projection
 work is content-addressed by raw publish identity, producer generations, and
 policy versions, and may checkpoint between phases and segment waves. A
 per-session lease prevents duplicate builders while allowing unrelated sessions
-to advance. Long CPU work remains outside the global maintenance lease; only a
+to advance. Automatic oversized builders additionally share one nonblocking
+heavy-lane lease so different large sessions cannot multiply their capture or
+full-session resident sets and worker pools. Size-banded transcript sweeps use
+the same lease only for candidates at or above the heavy threshold. A denied heavy lease never blocks ordinary
+small-session maintenance. Long CPU work remains outside the global maintenance lease; only a
 dependency recheck, atomic publish, registry update, and dirty propagation use
 the global writer boundary. Last-good remains the reader generation until that
 boundary succeeds.
@@ -460,7 +464,9 @@ Segment input digests bind the bounded raw event slice, role, raw-block content,
 and generation policies. An unchanged segment may be reused across growth of a
 live session; the changed tail and new segments are rebuilt. Deterministic
 process workers alter execution cost, not semantic ordering or projection
-digests. Token-only accounting drift is a projection metadata transition, not
+digests. Segment workers use isolated interpreter processes and receive only a
+bounded segment slice; they do not inherit the parent's reconciled whole-session
+event graph. Token-only accounting drift is a projection metadata transition, not
 by itself a reason to repeat parsing and segmentation.
 
 Raw-block reuse is independently evidence-bearing. Current event bytes are
@@ -620,7 +626,11 @@ must exclude every other oversized deferred or generation-stale candidate from
 ordinary repair while the global maintenance lease is held. A compatible
 indexed session remains eligible for non-rebuild maintenance. Heavy-slice
 calibration must cover the observed classification and privacy cost of real
-event-dense archives while remaining bounded and resource-admitted.
+event-dense archives while remaining bounded and resource-admitted. The
+resumable catch-up, backlog, and deep lanes may use up to a 900-second
+cooperative slice when their enclosing budget permits, amortizing ephemeral
+privacy-policy construction and whole-session rehydration without persisting
+sensitive literals.
 Classification is itself an incremental projection: append-stable raw blocks
 are content-addressed, checkpointed before segment work, and rebuilt only when
 their raw digest or classifier/privacy generation changes. The persisted cache

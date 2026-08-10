@@ -83349,6 +83349,9 @@ def test_session_projection_process_parallel_matches_serial_semantics(
     ] == 4
     assert parallel["segment_execution"]["mode"] == "process_pool"
     assert parallel["segment_execution"]["actual_workers"] == 4
+    assert parallel["segment_execution"]["process_start_method"] == (
+        "spawn"
+    )
     assert (
         serial["publish_result"]["validation"]["semantic_digest"]
         == parallel["publish_result"]["validation"]["semantic_digest"]
@@ -83938,21 +83941,55 @@ def test_auto_maintenance_heavy_checkpoint_does_not_starve_fresh_scope(
         profile="catchup",
         apply=True,
         discovery_limit=0,
-        budget_seconds=300,
+        budget_seconds=900,
     )
 
     assert heavy_calls == [["auto-heavy"]]
     assert len(heavy_budgets) == 1
-    assert heavy_budgets[0] == pytest.approx(300.0, abs=0.1)
+    assert heavy_budgets[0] == pytest.approx(900.0, abs=0.1)
     assert freshness_scopes == [["auto-fresh"]]
     assert payload["selection_scope"]["heavy_projection_lane"][
         "status"
     ] == "checkpointed"
+    assert payload["selection_scope"]["heavy_projection_lane"][
+        "lease_status"
+    ] == "acquired"
     assert payload["selection_scope"][
         "heavy_projection_lane_excluded_from_locked_maintenance"
     ] == ["auto-heavy", "auto-heavy-second"]
     assert payload["selection_scope"]["selected_count"] == 1
     assert payload["status"] == "nothing_to_do"
+
+    heavy_calls.clear()
+    heavy_lease_path = module.heavy_projection_lane_lock_path(aoa_root)
+    with heavy_lease_path.open("a+", encoding="utf-8") as lease_handle:
+        fcntl.flock(lease_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        module.write_maintenance_lock_owner(
+            lease_handle,
+            {
+                "status": "active",
+                "pid": 4242,
+                "profile": "backlog",
+                "session_id": "other-heavy-session",
+            },
+        )
+        deferred = module.auto_maintenance(
+            workspace_root=workspace,
+            aoa_root=aoa_root,
+            profile="catchup",
+            apply=True,
+            discovery_limit=0,
+            budget_seconds=900,
+        )
+        fcntl.flock(lease_handle, fcntl.LOCK_UN)
+
+    assert heavy_calls == []
+    deferred_lane = deferred["selection_scope"][
+        "heavy_projection_lane"
+    ]
+    assert deferred_lane["status"] == "deferred_heavy_lane_lease"
+    assert deferred_lane["lease_status"] == "deferred"
+    assert deferred_lane["blocking_owner"]["pid"] == 4242
 
 
 def test_per_session_build_lease_defers_duplicate_builder(
@@ -87359,6 +87396,9 @@ def test_sweep_codex_sessions_preserves_oversized_raw_before_deferred_indexing(
     assert planned["metadata_probe_max_raw_bytes"] == 1
     assert probed_paths == []
 
+    monkeypatch.setattr(
+        module, "SESSION_PROJECTION_HEAVY_LANE_RAW_BYTES", 1
+    )
     mirrored = module.sweep_codex_sessions(
         aoa_root=aoa_root,
         source_root=source_root,
@@ -87372,6 +87412,7 @@ def test_sweep_codex_sessions_preserves_oversized_raw_before_deferred_indexing(
     assert mirrored["mirror_only_candidate_count"] == 1
     assert result["raw_capture_current"] is True
     assert result["indexing_deferred"] is True
+    assert result["heavy_lane_lease"]["status"] == "acquired"
     assert result["last_good_projection_preserved"] is True
     assert result["freshness_reason"] == (
         "preserved_capture_ahead_of_projection"
@@ -87393,6 +87434,78 @@ def test_sweep_codex_sessions_preserves_oversized_raw_before_deferred_indexing(
     assert capture["status"] == "preserved_unindexed"
     assert capture_path.is_file()
     assert capture_path.read_bytes() == transcript.read_bytes()
+
+
+def test_sweep_codex_sessions_defers_large_capture_for_heavy_lane_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    source_root = tmp_path / "codex-sessions"
+    session_id = "sweep-heavy-lease"
+    transcript = (
+        source_root
+        / "2026"
+        / "05"
+        / "04"
+        / f"rollout-2026-05-04T12-00-00-{session_id}.jsonl"
+    )
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-05-04T12:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": session_id, "cwd": str(workspace)},
+            },
+            {
+                "timestamp": "2026-05-04T12:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "large capture must serialize",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        module, "SESSION_PROJECTION_HEAVY_LANE_RAW_BYTES", 1
+    )
+    lease_path = module.heavy_projection_lane_lock_path(aoa_root)
+    lease_path.parent.mkdir(parents=True, exist_ok=True)
+    with lease_path.open("a+", encoding="utf-8") as lease_handle:
+        fcntl.flock(lease_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        module.write_maintenance_lock_owner(
+            lease_handle,
+            {
+                "status": "active",
+                "pid": 7331,
+                "lane": "auto_maintenance_projection",
+            },
+        )
+        payload = module.sweep_codex_sessions(
+            aoa_root=aoa_root,
+            source_root=source_root,
+            since="2026-05-01",
+            apply=True,
+            min_age_seconds=0,
+            index_max_raw_bytes=1,
+        )
+        fcntl.flock(lease_handle, fcntl.LOCK_UN)
+
+    result = payload["results"][0]
+    assert payload["counts"] == {"deferred_heavy_lane_lease": 1}
+    assert result["retry_required"] is True
+    assert result["heavy_lane_lease"]["status"] == "deferred"
+    assert result["heavy_lane_lease"]["blocking_owner"]["pid"] == 7331
+    assert not (aoa_root / module.SESSION_ROOT).exists()
 
 
 def test_sweep_codex_sessions_supplements_date_window_with_recent_transcript_activity(tmp_path: Path) -> None:

@@ -473,10 +473,19 @@ one large session must not monopolize recurring catch-up attempts.
 
 The automatic heavy lane advances at most one oversized deferred or
 generation-stale projection per
-bounded slice before ordinary maintenance acquires the global lease. Segment
+bounded slice before ordinary maintenance acquires the global lease. All
+automatic oversized builders share a nonblocking heavy-lane lease across
+profiles. When it is held, another profile defers only its heavy candidate and
+continues toward ordinary bounded maintenance; it does not start a second
+memory-heavy build. Applying Codex sweeps use the same lease per selected raw
+source at or above the heavy threshold, including mirror-only capture; smaller
+sources in the sweep remain eligible. Segment
 generation uses a deterministic process pool with a default of four workers
 and a bounded one-to-six range, falling back visibly to serial execution when
-the pool cannot start. Event classification uses the same bounded worker
+the pool cannot start. Segment processes use the isolated `spawn` start method
+and receive only their bounded event slice, so they do not inherit the
+whole-session reconciled event graph retained by the parent. Event
+classification uses the same bounded worker
 envelope and persists a receipt after every completed block. Every other
 oversized deferred candidate is also
 excluded from the remainder of that locked cycle; otherwise a second heavy
@@ -485,7 +494,9 @@ global lease. A compatible published oversized session remains in the ordinary
 metadata/search lane; an indexed session enters the heavy lane only when its
 session route generation actually requires a projection rebuild. Recent
 smaller sessions can still reach their search and session projections. Catch-up
-gives the per-session heavy lane up to a 300-second slice. Event-dense archives
+and backlog give the exclusive heavy lane up to a 900-second slice when the
+enclosing cooperative budget permits; hot maintenance retains its short slice.
+Event-dense archives
 may still require multiple slices, but classification now advances a durable
 block checkpoint instead of repeating the full pre-segment cost. Timer-originated resource
 denial retains the normal persistent retry intent; a checkpoint is progress,
