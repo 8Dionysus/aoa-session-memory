@@ -68,8 +68,9 @@ Task-episode semantic producer identity covers episode construction and shard
 envelope semantics, not shard materialization/reuse orchestration. Streaming
 tail mode is fail-closed on task-episode generation admission as well as segment
 topology and goal-lifecycle frontier admission. An incompatible task-episode
-generation therefore reconstructs the complete episode set from classification
-metadata instead of publishing a tail-only compatibility view. The exact
+generation therefore performs one complete raw-backed replay instead of
+publishing either a tail-only compatibility view or a metadata-only semantic
+guess. The exact
 pre-split generation `8670e45e...11d` is a declared reuse-then-restamp
 predecessor; unknown generations are not admitted.
 
@@ -91,6 +92,8 @@ persisting a new cache, weakening redaction, or changing evidence authority.
 - Positive: an orchestration-only optimization no longer invalidates episode
   semantics, and an actual semantic incompatibility cannot silently truncate
   the historical episode projection to its replay tail.
+- Tradeoff: a genuine unknown task-episode ABI forces one full raw replay; that
+  is explicit migration cost, not the steady-state append route.
 - Tradeoff: ordered-range lookup relies on the generated segment-manifest
   ordering contract; malformed external lists fail to match rather than being
   searched exhaustively.

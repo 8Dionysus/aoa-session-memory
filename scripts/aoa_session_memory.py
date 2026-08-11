@@ -40290,6 +40290,14 @@ def reindex_session_from_raw(
             )
 
         phase_started = time.monotonic()
+        previous_index_for_incremental = read_json(
+            session_dir / SESSION_INDEX_JSON, {}
+        )
+        task_episode_tail_incremental_ready = (
+            task_episode_incremental_replay_admitted(
+                previous_index_for_incremental
+            )
+        )
         parent_tail_replay_from_line = (
             incremental_parent_tail_replay_from_line(
                 session_dir=session_dir,
@@ -40297,6 +40305,11 @@ def reindex_session_from_raw(
                 raw_scan=raw_scan,
             )
         )
+        if not task_episode_tail_incremental_ready:
+            # Classification metadata is sufficient for navigation, but it
+            # is not a semantic substitute for raw events when an episode ABI
+            # migration must reconstruct the complete historical projection.
+            parent_tail_replay_from_line = 0
         metadata_only_block_count = 0
         parent_raw_bytes_read = 0
         tail_events: list[RawEvent] = []
@@ -40366,18 +40379,10 @@ def reindex_session_from_raw(
                 raw_scan.get("prefix_line_count_reused")
             ),
         )
-        previous_index_for_incremental_goal = read_json(
-            session_dir / SESSION_INDEX_JSON, {}
-        )
         goal_tail_incremental_ready = (
             goal_lifecycle_incremental_replay_admitted(
-                previous_index_for_incremental_goal,
+                previous_index_for_incremental,
                 parent_tail_replay_from_line,
-            )
-        )
-        task_episode_tail_incremental_ready = (
-            task_episode_incremental_replay_admitted(
-                previous_index_for_incremental_goal
             )
         )
         streaming_incremental_mode = bool(
@@ -40467,10 +40472,10 @@ def reindex_session_from_raw(
                 else 0
             ),
             "streaming_fallback_reason": (
-                "goal_lifecycle_incremental_state_unavailable"
-                if not goal_tail_incremental_ready
-                else "task_episode_generation_incompatible"
+                "task_episode_generation_incompatible_full_raw_replay"
                 if not task_episode_tail_incremental_ready
+                else "goal_lifecycle_incremental_state_unavailable"
+                if not goal_tail_incremental_ready
                 else str(segment_tail_plan.get("reason") or "")
                 if not streaming_incremental_mode
                 else ""
