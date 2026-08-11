@@ -83,7 +83,6 @@ def test_session_projection_benchmark_smoke_proves_parity_and_reuse(
     assert payload["initial_capture_execution"]["postings"][
         "historical_raw_bytes_read"
     ] == 0
-    assert payload["initial_history_read_gate"]["ok"] is True
     assert payload["live_route"]["ok"] is True
     assert payload["live_route"]["run_count"] == 3
     assert payload["live_route"]["overlay_p95_within_30_seconds"] is True
@@ -384,6 +383,7 @@ def test_session_projection_benchmark_capture_only_proves_live_route(
     assert payload["initial_capture_execution"]["postings"][
         "historical_raw_bytes_read"
     ] == 0
+    assert payload["initial_history_read_gate"]["ok"] is True
     assert payload["initial_capture_execution"]["cgroup_memory"][
         "available"
     ] in {True, False}
@@ -92308,11 +92308,21 @@ def test_session_index_shard_manifest_validates_manifest_first_components(
         },
     }
 
+    validation_metrics: dict[str, Any] = {}
     assert module.staged_session_index_shard_diagnostics(
         stage_dir=stage_dir,
         session_index=session_index,
         expected_publish_id=publish_identity["publish_id"],
+        validation_metrics_out=validation_metrics,
     ) == []
+    assert validation_metrics == {
+        "metadata_receipt_admitted_count": 1,
+        "full_content_validation_count": 0,
+        "policy": "metadata_receipt_else_full_content_validation_v1",
+    }
+    assert shards["records"][0]["artifact_receipt"]["sha256"] == (
+        shards["records"][0]["artifact_sha256"]
+    )
     assert module.session_index_task_episode_components(
         stage_dir,
         session_index,
@@ -92329,6 +92339,68 @@ def test_session_index_shard_manifest_validates_manifest_first_components(
             session_index=session_index,
             expected_publish_id=publish_identity["publish_id"],
         )
+    )
+
+
+def test_deep_projection_audit_rehashes_task_episode_shards(
+    tmp_path: Path,
+) -> None:
+    session_dir = tmp_path / "session"
+    publish_identity = {
+        "source": {
+            "raw_sha256": "a" * 64,
+            "raw_bytes": 100,
+            "raw_line_count": 1,
+        },
+        "publish_id": "b" * 64,
+    }
+    shards = module.materialize_session_index_task_episode_shards(
+        session_dir,
+        [
+            {
+                "episode_id": "task-audit",
+                "stable_id": "session:task-audit:event-1",
+                "identity": {"canonical_id": "episode:audit"},
+                "status": "closed",
+                "semantic_text": "deep audit episode",
+            }
+        ],
+        publish_identity=publish_identity,
+        literal_policy=module.DerivedSessionSensitiveLiteralPolicy(
+            values_by_kind={}
+        ),
+        workers=1,
+    )
+    module.write_session_index_shard_manifest(
+        session_dir,
+        publish_identity=publish_identity,
+        source_identity=shards["source_identity"],
+        task_episode_records=shards["records"],
+    )
+
+    initial = module.deep_audit_session_projection_artifacts(
+        session_dir=session_dir,
+        manifest={"segments": []},
+    )
+    assert initial["ok"] is True
+    assert initial["task_episode_component_count"] == 1
+
+    artifact = session_dir / shards["records"][0]["ref"]
+    stat = artifact.stat()
+    corrupted = bytearray(artifact.read_bytes())
+    corrupted[len(corrupted) // 2] ^= 1
+    artifact.write_bytes(corrupted)
+    os.utime(artifact, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+
+    audited = module.deep_audit_session_projection_artifacts(
+        session_dir=session_dir,
+        manifest={"segments": []},
+    )
+    assert audited["ok"] is False
+    assert audited["task_episode_component_count"] == 1
+    assert any(
+        reason == "task_episode_shard:0:artifact_sha256_mismatch"
+        for reason in audited["diagnostics"]
     )
 
 

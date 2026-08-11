@@ -723,6 +723,9 @@ def benchmark_build(
             "raw_block_validation": validation.get(
                 "raw_block_validation", {}
             ),
+            "session_index_shard_validation": validation.get(
+                "session_index_shard_validation", {}
+            ),
         },
         "semantic_digest": validation.get("semantic_digest", {}),
         "raw_sha256_before": raw_sha_before,

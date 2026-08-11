@@ -224,7 +224,10 @@ local contracts. Completed raw blocks and segments carry size-and-SHA receipts.
 The ordinary append lane admits an exact records-root/component identity plus
 size/mtime attestation and relinks the immutable file without opening it;
 periodic `doctor --deep-projection-artifacts` bypasses the stat-keyed digest
-cache and re-hashes every admitted classification and segment artifact. Before either layer,
+cache and re-hashes every admitted classification, segment, and task-episode
+artifact. Task-episode component publication uses the same exact SHA plus
+size/mtime/ctime gate and falls back to full content validation whenever its
+receipt is absent or stale. Before either layer,
 event classification uses append-stable content-addressed raw line blocks.
 Each completed block is checkpointed, so a cooperative deadline can preserve
 progress before segment generation and a growing session can reuse its sealed

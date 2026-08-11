@@ -21894,6 +21894,7 @@ def deep_audit_session_projection_artifacts(
     segment_component_count = 0
     legacy_unreceipted_segment_count = 0
     classification_block_count = 0
+    task_episode_component_count = 0
 
     segments = (
         manifest.get("segments")
@@ -22049,6 +22050,87 @@ def deep_audit_session_projection_artifacts(
                         f"{cache_key}"
                     )
 
+    component_manifest = read_json(
+        session_dir
+        / SESSION_INDEX_SHARDS_DIR
+        / SESSION_INDEX_SHARD_MANIFEST_JSON,
+        {},
+    )
+    task_episode_records = (
+        component_manifest.get("components", {}).get(
+            "task_episodes", []
+        )
+        if isinstance(component_manifest, dict)
+        and isinstance(component_manifest.get("components"), dict)
+        and isinstance(
+            component_manifest.get("components", {}).get(
+                "task_episodes"
+            ),
+            list,
+        )
+        else []
+    )
+    expected_parent = (
+        Path(SESSION_INDEX_SHARDS_DIR)
+        / SESSION_INDEX_TASK_EPISODE_SHARDS_DIR
+    )
+    for ordinal, record in enumerate(task_episode_records):
+        if not isinstance(record, dict):
+            diagnostics.append(
+                f"task_episode_shard_record_invalid:{ordinal}"
+            )
+            continue
+        relative = Path(str(record.get("ref") or ""))
+        if (
+            relative.is_absolute()
+            or ".." in relative.parts
+            or relative.parent != expected_parent
+            or relative.suffix != ".json"
+        ):
+            diagnostics.append(
+                f"task_episode_shard_ref_invalid:{ordinal}"
+            )
+            continue
+        artifact_path = session_dir / relative
+        task_episode_component_count += 1
+        artifact_count += int(artifact_path.is_file())
+        if artifact_path.is_file():
+            content_bytes_read += artifact_path.stat().st_size
+        receipt = record.get("artifact_receipt")
+        diagnostics.extend(
+            f"task_episode_shard:{ordinal}:{reason}"
+            for reason in deep_audit_artifact_receipt(
+                artifact_path,
+                receipt,
+            )
+        )
+        artifact_sha256 = str(record.get("artifact_sha256") or "")
+        if artifact_path.stem != artifact_sha256:
+            diagnostics.append(
+                f"task_episode_shard_filename_mismatch:{ordinal}"
+            )
+        envelope = read_json(artifact_path, {})
+        payload = (
+            envelope.get("payload")
+            if isinstance(envelope.get("payload"), dict)
+            else None
+        )
+        if (
+            not isinstance(payload, dict)
+            or envelope.get("artifact_type")
+            != "session_index_component_shard"
+            or envelope.get("component") != "task_episodes"
+            or str(envelope.get("component_key") or "")
+            != str(record.get("component_key") or "")
+            or session_index_shard_payload_sha256(payload)
+            != str(record.get("payload_sha256") or "")
+            or str(envelope.get("payload_sha256") or "")
+            != str(record.get("payload_sha256") or "")
+        ):
+            diagnostics.append(
+                f"task_episode_shard_payload_invalid:{ordinal}"
+            )
+
     return {
         "schema_version": 1,
         "status": "current" if not diagnostics else "failed",
@@ -22061,6 +22143,9 @@ def deep_audit_session_projection_artifacts(
             legacy_unreceipted_segment_count
         ),
         "classification_block_count": classification_block_count,
+        "task_episode_component_count": (
+            task_episode_component_count
+        ),
         "diagnostics": diagnostics,
         "admission": (
             "full_sha256_rehash_of_hot_metadata_attestations_v1"
@@ -23433,6 +23518,7 @@ def write_session_index_component_shard(
             temporary_path.unlink(missing_ok=True)
         else:
             temporary_path.replace(final_path)
+        final_stat = final_path.stat()
         return {
             "component_key": str(
                 envelope.get("component_key") or ""
@@ -23451,7 +23537,13 @@ def write_session_index_component_shard(
             "payload_sha256": str(
                 envelope.get("payload_sha256") or ""
             ),
-            "bytes": final_path.stat().st_size,
+            "bytes": final_stat.st_size,
+            "artifact_receipt": {
+                "bytes": final_stat.st_size,
+                "sha256": artifact_sha256,
+                "mtime_ns": final_stat.st_mtime_ns,
+                "ctime_ns": final_stat.st_ctime_ns,
+            },
         }
     finally:
         temporary_path.unlink(missing_ok=True)
@@ -23514,6 +23606,12 @@ def staged_session_index_task_episode_shards(
                     envelope.get("payload_sha256") or ""
                 ),
                 "bytes": path.stat().st_size,
+                "artifact_receipt": {
+                    "bytes": path.stat().st_size,
+                    "sha256": path.stem,
+                    "mtime_ns": path.stat().st_mtime_ns,
+                    "ctime_ns": path.stat().st_ctime_ns,
+                },
                 "_artifact_path": str(path),
             },
         )
@@ -23625,6 +23723,15 @@ def materialize_session_index_task_episode_shards(
                         source=source_artifact,
                         target=target_artifact,
                     )
+                target_stat = target_artifact.stat()
+                reusable_record["artifact_receipt"] = {
+                    "bytes": target_stat.st_size,
+                    "sha256": str(
+                        reusable_record.get("artifact_sha256") or ""
+                    ),
+                    "mtime_ns": target_stat.st_mtime_ns,
+                    "ctime_ns": target_stat.st_ctime_ns,
+                }
                 payloads[ordinal] = dict(envelope["payload"])
                 records[ordinal] = reusable_record
                 reused_count += 1
@@ -26924,6 +27031,7 @@ def staged_session_index_shard_diagnostics(
     stage_dir: Path,
     session_index: dict[str, Any],
     expected_publish_id: str,
+    validation_metrics_out: dict[str, Any] | None = None,
 ) -> list[str]:
     storage = (
         session_index.get("component_storage")
@@ -26980,6 +27088,8 @@ def staged_session_index_shard_diagnostics(
         diagnostics.append(
             "session_index_component_storage_not_manifest_first"
         )
+    metadata_receipt_admitted_count = 0
+    full_content_validation_count = 0
     for ordinal, record in enumerate(records):
         if not isinstance(record, dict):
             diagnostics.append(
@@ -27006,15 +27116,45 @@ def staged_session_index_shard_diagnostics(
         artifact_sha256 = str(
             record.get("artifact_sha256") or ""
         )
+        artifact_receipt = (
+            record.get("artifact_receipt")
+            if isinstance(record.get("artifact_receipt"), dict)
+            else {}
+        )
+        metadata_receipt_admitted = bool(
+            artifact_sha256
+            and str(artifact_receipt.get("sha256") or "")
+            == artifact_sha256
+            and shard_path.stem == artifact_sha256
+            and immutable_component_artifact_receipt_metadata_current(
+                shard_path,
+                artifact_receipt,
+            )
+        )
         if (
             not shard_path.is_file()
             or artifact_sha256 != shard_path.stem
-            or sha256_file(shard_path) != artifact_sha256
+            or (
+                not metadata_receipt_admitted
+                and sha256_file(shard_path) != artifact_sha256
+            )
         ):
             diagnostics.append(
                 f"session_index_task_episode_shard_artifact_mismatch:{ordinal}"
             )
             continue
+        if metadata_receipt_admitted:
+            metadata_receipt_admitted_count += 1
+            if (
+                not str(record.get("component_key") or "")
+                or not isinstance(record.get("source_identity"), dict)
+                or not str(record.get("payload_sha256") or "")
+            ):
+                diagnostics.append(
+                    f"session_index_task_episode_shard_record_invalid:{ordinal}"
+                )
+            continue
+        full_content_validation_count += 1
         envelope = read_json(shard_path, {})
         payload = (
             envelope.get("payload")
@@ -27052,6 +27192,20 @@ def staged_session_index_shard_diagnostics(
             diagnostics.append(
                 f"session_index_task_episode_shard_payload_mismatch:{ordinal}"
             )
+    if validation_metrics_out is not None:
+        validation_metrics_out.update(
+            {
+                "metadata_receipt_admitted_count": (
+                    metadata_receipt_admitted_count
+                ),
+                "full_content_validation_count": (
+                    full_content_validation_count
+                ),
+                "policy": (
+                    "metadata_receipt_else_full_content_validation_v1"
+                ),
+            }
+        )
     return diagnostics
 
 
@@ -27080,6 +27234,7 @@ def validate_staged_session_projection(
         ).get("raw_bytes")
     )
     diagnostics: list[str] = []
+    session_index_shard_validation: dict[str, Any] = {}
     raw_validation_mode = "published_last_good_raw_v1"
     staged_raw_path = (
         stage_dir / "raw" / "session.raw.jsonl"
@@ -27140,6 +27295,9 @@ def validate_staged_session_projection(
                 stage_dir=stage_dir,
                 session_index=staged_session_index,
                 expected_publish_id=expected_publish_id,
+                validation_metrics_out=(
+                    session_index_shard_validation
+                ),
             )
         )
     else:
@@ -27680,6 +27838,9 @@ def validate_staged_session_projection(
                 "metadata_receipt_or_samefile_reuse_else_full_sha256_v1"
             ),
         },
+        "session_index_shard_validation": (
+            session_index_shard_validation
+        ),
         "producer_source_state": producer_source_state,
         "semantic_digest": (
             session_projection_semantic_digest(stage_dir)

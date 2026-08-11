@@ -588,6 +588,11 @@ Session-index assembly is manifest first. Privacy-safe task episodes are
 immutable content-addressed component shards; their compact manifest binds
 episode-local semantic source identity, producer generation, policy versions,
 artifact hashes, payload hashes, order, and the session publish identity.
+Each newly written or exactly relinked shard also carries a SHA-256 plus
+size/mtime/ctime publication receipt. Atomic hot validation admits that receipt
+only while all metadata and the content-addressed filename match; otherwise it
+falls back to full content validation. Explicit deep projection audit always
+re-hashes and revalidates every task-episode shard and payload.
 Completed shards checkpoint inside exact projection work and may be produced
 in bounded deterministic waves. Closed compatible episodes survive unrelated
 tail growth. A persisted builder frontier admits a compatible segment prefix,

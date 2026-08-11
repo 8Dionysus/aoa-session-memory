@@ -104,6 +104,13 @@ JSON hydration and Markdown rewrite. Classification-cache records use the same
 records-root plus artifact-receipt admission. A separate deep doctor route
 always performs uncached SHA-256 reads, validates payload/component identity,
 and therefore catches same-size content mutation even if mtime was restored.
+Task-episode component shards use the same split proof: the writer records exact
+SHA-256, size, mtime, and ctime after writing or relinking the content-addressed
+artifact; atomic publication admits metadata only while that receipt and the
+filename remain exact, otherwise it performs full content validation. The deep
+doctor route always re-hashes every task-episode shard and revalidates its
+envelope and payload digest. Atomic validation therefore does not immediately
+repeat work already completed by the same stable producer process.
 
 Cold builds, migrations without compatible summaries, and small histories
 without a safe replay frontier retain the strict full-reduction fallback. That
@@ -133,6 +140,9 @@ moving expensive prose rendering to the rare route that needs it.
 - Positive: sealed segment and classification payloads are relinked without
   historical content reads on the hot path, while explicit deep audit retains
   full content proof.
+- Positive: task-episode shards are not immediately re-hashed after their
+  content-addressed write, while stale metadata still falls back fail-closed and
+  explicit deep audit retains full content proof.
 - Tradeoff: legacy embedded indexes remain a supported read fallback until a
   separate cleanup decision removes them.
 - Tradeoff: full review rendering reads only the selected raw block for event
@@ -173,6 +183,8 @@ semantic projection parity, and migrated CLI/search/graph/evidence readers.
 Focused append/full replay parity now covers bounded parent materialization,
 classification-summary aggregation, repeated append watermark advancement, and
 a new compaction boundary. Goal-lifecycle append/full-replay parity and uncached
-deep-audit mutation detection are covered. Large-corpus RSS bounds, MCP/export parity,
+deep-audit mutation detection are covered. Task-episode receipt admission,
+stale-receipt full-content fallback, and deep shard re-hashing are covered.
+Large-corpus RSS bounds, MCP/export parity,
 portable installation, live-equivalent performance, and local landing remain
 required before rollout completion is claimed.
