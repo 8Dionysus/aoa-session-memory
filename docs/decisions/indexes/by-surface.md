@@ -315,6 +315,7 @@
 | [AOA-SM-D-0049 Append-Only Raw Capture Ledger and Persistent Live-Tail Overlay](../AOA-SM-D-0049-append-only-raw-capture-ledger-and-persistent-live-tail-overlay.md) | 2026-08-10 | Accepted | `docs/decisions/AOA-SM-D-0049-append-only-raw-capture-ledger-and-persistent-live-tail-overlay.md` |
 | [AOA-SM-D-0050 Manifest-First Session Components and Lazy Review Rendering](../AOA-SM-D-0050-manifest-first-session-components-and-lazy-review-rendering.md) | 2026-08-10 | Accepted | `docs/decisions/AOA-SM-D-0050-manifest-first-session-components-and-lazy-review-rendering.md` |
 | [AOA-SM-D-0051 Transactional Component Outbox and Vector Freshness](../AOA-SM-D-0051-transactional-component-outbox-and-vector-freshness.md) | 2026-08-10 | Accepted | `docs/decisions/AOA-SM-D-0051-transactional-component-outbox-and-vector-freshness.md` |
+| [AOA-SM-D-0052 Generation-Bound Segment Privacy Admission](../AOA-SM-D-0052-generation-bound-segment-privacy-admission.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0052-generation-bound-segment-privacy-admission.md` |
 
 ## index discovery
 
@@ -388,6 +389,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0023 Manifest-Committed Graph Sidecar Publication](../AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md` |
 
+## performance
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0052 Generation-Bound Segment Privacy Admission](../AOA-SM-D-0052-generation-bound-segment-privacy-admission.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0052-generation-bound-segment-privacy-admission.md` |
+
 ## physical storage transition
 
 | Decision | Date | Status | Path |
@@ -427,6 +434,7 @@
 | [AOA-SM-D-0021 Raw-Preserving Derived-Text Privacy Boundary](../AOA-SM-D-0021-raw-preserving-derived-text-privacy-boundary.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0021-raw-preserving-derived-text-privacy-boundary.md` |
 | [AOA-SM-D-0045 Block-Addressed Incremental Event Classification](../AOA-SM-D-0045-block-addressed-incremental-event-classification.md) | 2026-08-09 | Accepted | `docs/decisions/AOA-SM-D-0045-block-addressed-incremental-event-classification.md` |
 | [AOA-SM-D-0046 Content-Addressed Session-Index Components With Compatibility View](../AOA-SM-D-0046-content-addressed-session-index-components-with-compatibility-view.md) | 2026-08-09 | Accepted | `docs/decisions/AOA-SM-D-0046-content-addressed-session-index-components-with-compatibility-view.md` |
+| [AOA-SM-D-0052 Generation-Bound Segment Privacy Admission](../AOA-SM-D-0052-generation-bound-segment-privacy-admission.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0052-generation-bound-segment-privacy-admission.md` |
 
 ## projection freshness
 
@@ -548,6 +556,7 @@
 | [AOA-SM-D-0044 Content-Addressed Resumable Projection Work](../AOA-SM-D-0044-content-addressed-resumable-projection-work.md) | 2026-08-08 | Accepted | `docs/decisions/AOA-SM-D-0044-content-addressed-resumable-projection-work.md` |
 | [AOA-SM-D-0045 Block-Addressed Incremental Event Classification](../AOA-SM-D-0045-block-addressed-incremental-event-classification.md) | 2026-08-09 | Accepted | `docs/decisions/AOA-SM-D-0045-block-addressed-incremental-event-classification.md` |
 | [AOA-SM-D-0047 Exclusive Heavy Projection Lane and Isolated Segment Workers](../AOA-SM-D-0047-exclusive-heavy-projection-lane-and-isolated-segment-workers.md) | 2026-08-09 | Accepted | `docs/decisions/AOA-SM-D-0047-exclusive-heavy-projection-lane-and-isolated-segment-workers.md` |
+| [AOA-SM-D-0052 Generation-Bound Segment Privacy Admission](../AOA-SM-D-0052-generation-bound-segment-privacy-admission.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0052-generation-bound-segment-privacy-admission.md` |
 
 ## resource scheduling
 
@@ -620,6 +629,7 @@
 | [AOA-SM-D-0046 Content-Addressed Session-Index Components With Compatibility View](../AOA-SM-D-0046-content-addressed-session-index-components-with-compatibility-view.md) | 2026-08-09 | Accepted | `docs/decisions/AOA-SM-D-0046-content-addressed-session-index-components-with-compatibility-view.md` |
 | [AOA-SM-D-0047 Exclusive Heavy Projection Lane and Isolated Segment Workers](../AOA-SM-D-0047-exclusive-heavy-projection-lane-and-isolated-segment-workers.md) | 2026-08-09 | Accepted | `docs/decisions/AOA-SM-D-0047-exclusive-heavy-projection-lane-and-isolated-segment-workers.md` |
 | [AOA-SM-D-0050 Manifest-First Session Components and Lazy Review Rendering](../AOA-SM-D-0050-manifest-first-session-components-and-lazy-review-rendering.md) | 2026-08-10 | Accepted | `docs/decisions/AOA-SM-D-0050-manifest-first-session-components-and-lazy-review-rendering.md` |
+| [AOA-SM-D-0052 Generation-Bound Segment Privacy Admission](../AOA-SM-D-0052-generation-bound-segment-privacy-admission.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0052-generation-bound-segment-privacy-admission.md` |
 
 ## skill evidence
 

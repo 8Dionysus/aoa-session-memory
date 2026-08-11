@@ -95154,6 +95154,154 @@ def test_derived_text_redaction_is_idempotent_and_preserves_benign_identity() ->
     )
 
 
+def test_event_index_deferred_redaction_is_equivalent_to_direct_redaction() -> None:
+    secret = "".join(
+        ["sk-", "proj-", "abcdefghijklmnop", "qrstuvwxyz0123456789"]
+    )
+    raw = json.dumps(
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "text": f"Authorization: Bearer {secret}",
+            },
+        }
+    )
+    event = module.RawEvent(
+        event_id="privacy-deferred:1",
+        line_no=1,
+        raw=raw,
+        parsed=json.loads(raw),
+        event_type="MESSAGE",
+        source_type="response_item",
+        title=f"detached {secret}",
+        timestamp="2026-08-11T00:00:00Z",
+        tags=[f"secret:{secret}"],
+        importance="normal",
+        compaction_boundary=False,
+        facets={
+            "route_signals": [
+                {
+                    "layer": "entity",
+                    "key": f"credential:{secret}",
+                }
+            ]
+        },
+    )
+    policy = module.derived_session_sensitive_literal_policy([event])
+    observations = module.token_accounting_for_event(event)
+
+    direct = module.event_index_record(
+        event,
+        "001.md",
+        literal_policy=policy,
+        token_observations=observations,
+    )
+    deferred = module.event_index_record(
+        event,
+        "001.md",
+        literal_policy=policy,
+        token_observations=observations,
+        redact_output=False,
+    )
+
+    assert secret in json.dumps(deferred, ensure_ascii=False)
+    assert module.redact_derived_value(
+        deferred,
+        literal_policy=policy,
+    ) == direct
+    assert secret not in json.dumps(direct, ensure_ascii=False)
+
+
+def test_segment_pre_redacted_classification_fast_path_preserves_output_and_privacy(
+    tmp_path: Path,
+) -> None:
+    secret = "".join(
+        ["sk-", "proj-", "abcdefghijklmnop", "qrstuvwxyz0123456789"]
+    )
+    raw = json.dumps(
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "token_count",
+                "model": secret,
+                "input_tokens": 7,
+                "output_tokens": 3,
+                "total_tokens": 10,
+            },
+        }
+    )
+    unsafe_event = module.RawEvent(
+        event_id="privacy-fast-path:1",
+        line_no=1,
+        raw=raw,
+        parsed=json.loads(raw),
+        event_type="TOKEN_COUNT",
+        source_type="response_item",
+        title=f"detached {secret}",
+        timestamp="2026-08-11T00:00:00Z",
+        tags=[f"secret:{secret}"],
+        importance="normal",
+        compaction_boundary=False,
+        facets={
+            "route_signals": [
+                {
+                    "layer": "entity",
+                    "key": f"credential:{secret}",
+                }
+            ]
+        },
+    )
+    policy = module.derived_session_sensitive_literal_policy([unsafe_event])
+    safe_event = module.raw_event_from_classification_payload(
+        raw=raw,
+        parsed=json.loads(raw),
+        payload=module.raw_event_classification_payload(
+            unsafe_event,
+            literal_policy=policy,
+        ),
+    )
+    reference = tmp_path / "reference"
+    standard = tmp_path / "standard"
+    fast = tmp_path / "fast"
+
+    module.write_segment(
+        standard,
+        "raw/session.raw.jsonl",
+        0,
+        "initial-to-compaction",
+        [safe_event],
+        reference_session_dir=reference,
+        literal_policy=policy,
+    )
+    module.write_segment(
+        fast,
+        "raw/session.raw.jsonl",
+        0,
+        "initial-to-compaction",
+        [safe_event],
+        reference_session_dir=reference,
+        literal_policy=policy,
+        classification_metadata_pre_redacted=True,
+    )
+
+    standard_bytes = (
+        standard / "segments/000__initial-to-compaction.index.json"
+    ).read_bytes()
+    fast_bytes = (
+        fast / "segments/000__initial-to-compaction.index.json"
+    ).read_bytes()
+    standard_index = json.loads(standard_bytes)
+    fast_index = json.loads(fast_bytes)
+    assert fast_bytes == standard_bytes
+    assert fast_index == standard_index
+    assert secret not in json.dumps(fast_index, ensure_ascii=False)
+    assert (
+        fast_index["token_accounting"]["observations"][0]["model_id"]
+        == module.DERIVED_TEXT_REDACTION_MARKER
+    )
+
+
 def test_session_sensitive_literal_policy_redacts_detached_values_without_persisting_them() -> None:
     bearer_secret = "".join(
         ["bearer", "abcdefghijklmnop", "qrstuvwxyz0123456789"]

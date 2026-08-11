@@ -4,6 +4,7 @@
 
 | Date | Decision | Status | Path |
 | --- | --- | --- | --- |
+| 2026-08-11 | [AOA-SM-D-0052 Generation-Bound Segment Privacy Admission](../AOA-SM-D-0052-generation-bound-segment-privacy-admission.md) | Accepted | `docs/decisions/AOA-SM-D-0052-generation-bound-segment-privacy-admission.md` |
 | 2026-08-10 | [AOA-SM-D-0051 Transactional Component Outbox and Vector Freshness](../AOA-SM-D-0051-transactional-component-outbox-and-vector-freshness.md) | Accepted | `docs/decisions/AOA-SM-D-0051-transactional-component-outbox-and-vector-freshness.md` |
 | 2026-08-10 | [AOA-SM-D-0050 Manifest-First Session Components and Lazy Review Rendering](../AOA-SM-D-0050-manifest-first-session-components-and-lazy-review-rendering.md) | Accepted | `docs/decisions/AOA-SM-D-0050-manifest-first-session-components-and-lazy-review-rendering.md` |
 | 2026-08-10 | [AOA-SM-D-0049 Append-Only Raw Capture Ledger and Persistent Live-Tail Overlay](../AOA-SM-D-0049-append-only-raw-capture-ledger-and-persistent-live-tail-overlay.md) | Accepted | `docs/decisions/AOA-SM-D-0049-append-only-raw-capture-ledger-and-persistent-live-tail-overlay.md` |

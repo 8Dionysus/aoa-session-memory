@@ -767,7 +767,13 @@ their raw digest or classifier/privacy generation changes. The persisted cache
 excludes raw text, parsed payloads, and exact sensitive literals; deterministic
 artifacts also carry mergeable raw-free typed counts, route counts, compaction
 markers, and correlation frontier metadata. Spawned segment workers are
-bounded block/range consumers. On an admitted ordinary append the parent
+bounded block/range consumers. After exact cache generation, block identity,
+artifact receipt, and payload shape are admitted, a segment worker may reuse
+the cache's completed privacy projection for classification metadata. Values
+newly derived from parsed raw, including token observations, are redacted
+before admission; context-sensitive facet maps and unattested writer calls
+retain the complete policy pass. This changes only the segment producer
+generation, not the reusable classification generation. On an admitted ordinary append the parent
 selects the previous open segment and episode frontier, materializes only that
 bounded raw tail, and merges historical summaries; it does not allocate a
 `RawEvent` object for every historical line. Cold, incompatible, small-frontier,

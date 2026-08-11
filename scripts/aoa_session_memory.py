@@ -21471,6 +21471,7 @@ def event_index_record(
     literal_policy: DerivedSessionSensitiveLiteralPolicy | None = None,
     token_observations: list[dict[str, Any]] | None = None,
     markdown_anchor_materialized: bool = True,
+    redact_output: bool = True,
 ) -> dict[str, Any]:
     observed_tokens = (
         token_accounting_for_event(event)
@@ -21525,6 +21526,8 @@ def event_index_record(
                 "generated body omitted; open raw_ref for evidence"
             ),
         }
+    if not redact_output:
+        return record
     return redact_derived_value(
         record,
         literal_policy=literal_policy,
@@ -22200,6 +22203,7 @@ def write_segment(
     publish_identity: dict[str, Any] | None = None,
     literal_policy: DerivedSessionSensitiveLiteralPolicy | None = None,
     markdown_render_mode: str = "index_first_compact_v1",
+    classification_metadata_pre_redacted: bool = False,
 ) -> dict[str, Any]:
     segment_id = f"{segment_no:03d}"
     md_name = f"{segment_id}__{role}.md"
@@ -22387,6 +22391,15 @@ def write_segment(
     records: list[dict[str, Any]] = []
     for event in events:
         event_token_observations = token_accounting_for_event(event)
+        if classification_metadata_pre_redacted:
+            # Classification metadata came from an integrity-checked cache
+            # whose generation identity includes the active privacy policy.
+            # Token observations are derived from parsed raw at rehydration
+            # time, so sanitize that one non-cache subtree before admission.
+            event_token_observations = redact_derived_value(
+                event_token_observations,
+                literal_policy=literal_policy,
+            )
         token_observations.extend(event_token_observations)
         records.append(
             event_index_record(
@@ -22399,6 +22412,11 @@ def write_segment(
                     full_markdown_render
                     or event.event_id in compact_review_event_ids
                 ),
+                # The complete segment envelope is redacted exactly once at
+                # the write boundary below.  Redacting every event here and
+                # then recursively redacting the containing envelope repeats
+                # the dominant privacy scan without changing its output.
+                redact_output=False,
             )
         )
     by_type: dict[str, list[str]] = defaultdict(list)
@@ -22513,6 +22531,10 @@ def write_segment(
         "source_range": source_range,
         "markdown": str(reference_md_path),
         "events": records,
+        # Facet maps remain in the enclosing privacy pass.  Their derived
+        # keys provide field context used by the established redaction policy,
+        # so skipping that pass could change navigation output even though the
+        # source classification values were already sanitized.
         "by_type": dict(sorted(by_type.items())),
         "by_tag": dict(sorted(by_tag.items())),
         "by_source_type": dict(sorted(by_source_type.items())),
@@ -22532,13 +22554,30 @@ def write_segment(
         "by_route_signal": dict(sorted(by_route_signal.items())),
         "token_accounting": token_accounting,
     }
-    write_json(
-        index_path,
-        redact_derived_value(
+    if classification_metadata_pre_redacted:
+        # These two complete containers are assembled only from the
+        # generation-bound classification projection plus token observations
+        # sanitized above.  Keep every contextual facet map in the ordinary
+        # policy pass because its derived keys affect field-aware redaction.
+        admitted_keys = {"events", "token_accounting"}
+        policy_scanned = redact_derived_value(
+            {
+                key: value
+                for key, value in index.items()
+                if key not in admitted_keys
+            },
+            literal_policy=literal_policy,
+        )
+        index_payload = {
+            key: index[key] if key in admitted_keys else policy_scanned[key]
+            for key in index
+        }
+    else:
+        index_payload = redact_derived_value(
             index,
             literal_policy=literal_policy,
-        ),
-    )
+        )
+    write_json(index_path, index_payload)
     artifact_receipts = {
         "markdown": immutable_component_artifact_receipt(md_path),
         "index": immutable_component_artifact_receipt(index_path),
@@ -23176,6 +23215,7 @@ def write_segment_process_task(
             reference_session_dir=reference_session_dir,
             publish_identity=publish_identity,
             literal_policy=literal_policy,
+            classification_metadata_pre_redacted=True,
         ),
     )
 
@@ -40175,6 +40215,7 @@ def reindex_session_from_raw(
                     reference_session_dir=session_dir,
                     publish_identity=publish_identity,
                     literal_policy=literal_policy,
+                    classification_metadata_pre_redacted=True,
                 )
                 record_segment_completion(
                     segment_no,

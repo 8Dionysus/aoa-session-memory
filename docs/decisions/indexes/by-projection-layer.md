@@ -536,6 +536,7 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0045 Block-Addressed Incremental Event Classification](../AOA-SM-D-0045-block-addressed-incremental-event-classification.md) | 2026-08-09 | Accepted | `docs/decisions/AOA-SM-D-0045-block-addressed-incremental-event-classification.md` |
+| [AOA-SM-D-0052 Generation-Bound Segment Privacy Admission](../AOA-SM-D-0052-generation-bound-segment-privacy-admission.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0052-generation-bound-segment-privacy-admission.md` |
 
 ## raw evidence
 
@@ -758,6 +759,7 @@
 | [AOA-SM-D-0045 Block-Addressed Incremental Event Classification](../AOA-SM-D-0045-block-addressed-incremental-event-classification.md) | 2026-08-09 | Accepted | `docs/decisions/AOA-SM-D-0045-block-addressed-incremental-event-classification.md` |
 | [AOA-SM-D-0047 Exclusive Heavy Projection Lane and Isolated Segment Workers](../AOA-SM-D-0047-exclusive-heavy-projection-lane-and-isolated-segment-workers.md) | 2026-08-09 | Accepted | `docs/decisions/AOA-SM-D-0047-exclusive-heavy-projection-lane-and-isolated-segment-workers.md` |
 | [AOA-SM-D-0048 Stage-Scoped Producer ABI and Guarded Predecessor Admission](../AOA-SM-D-0048-stage-scoped-producer-abi-and-guarded-predecessor-admission.md) | 2026-08-10 | Accepted | `docs/decisions/AOA-SM-D-0048-stage-scoped-producer-abi-and-guarded-predecessor-admission.md` |
+| [AOA-SM-D-0052 Generation-Bound Segment Privacy Admission](../AOA-SM-D-0052-generation-bound-segment-privacy-admission.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0052-generation-bound-segment-privacy-admission.md` |
 
 ## shortest path
 

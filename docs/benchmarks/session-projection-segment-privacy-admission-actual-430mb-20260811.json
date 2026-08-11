@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "artifact_type": "session_projection_segment_privacy_admission_benchmark",
+  "generated_at": "2026-08-11T09:28:35Z",
+  "fixture": {
+    "synthetic": false,
+    "source_kind": "read_only_captured_snapshot",
+    "fixture_alias": "event-dense-readonly-430mb",
+    "raw_bytes": 429811332,
+    "segment_event_count": 1610,
+    "segment_source_line_count": 1610
+  },
+  "measurement": {
+    "mode": "paired_same_process_segment_write",
+    "repetitions": 3,
+    "baseline_seconds": [
+      3.7366350939992117,
+      3.9103303589945426,
+      3.883126711996738
+    ],
+    "generation_bound_admission_seconds": [
+      1.0673644219932612,
+      1.0501098300010199,
+      1.0871409100072924
+    ],
+    "baseline_median_seconds": 3.883126711996738,
+    "generation_bound_admission_median_seconds": 1.0673644219932612,
+    "median_speedup": 3.6380514770626804,
+    "output_sha256_equal": true
+  },
+  "generation_scope": {
+    "classification_generation_unchanged": true,
+    "classification_generation_id": "511c2bb32d50f1f499cadfca390e3acf9852b56dee0d3efc99fd60ec6e53b67f",
+    "segment_generation_changed": true,
+    "segment_generation_id": "461859a08daf00413d0e2780b88d413694acb3b827bc7d1f5fe0bb718e90d72a"
+  },
+  "privacy": {
+    "classification_metadata_basis": "generation_bound_cache_redacted_under_current_whole_session_policy",
+    "raw_derived_token_observations_redacted_before_admission": true,
+    "contextual_facet_maps_full_policy_scanned": true,
+    "default_unattested_writer_full_policy_scanned": true,
+    "raw_text_persisted": false,
+    "host_paths_persisted": false
+  },
+  "truth_status": "paired_component_benchmark_not_cold_projection_slo",
+  "ok": true
+}

@@ -118,6 +118,15 @@ agent event, task episode, route signals, relationships, and token counts.
 These are deterministic projections and remain weaker than raw evidence and
 later reviewed owner records.
 
+The segment worker admits pre-redacted classification metadata only from an
+exact generation-bound cache record whose raw block identity and artifact
+receipt were verified. Fresh token observations derived from parsed raw are
+redacted separately before joining that container, and contextual facet maps
+still run through the established complete policy pass. A direct or unattested
+writer uses the complete pass for the whole index. The admission optimization
+belongs to the segment producer ABI and does not invalidate reusable
+classification blocks.
+
 ## 5. Session assembly
 
 The session manifest records archive identity, source state, segment topology,

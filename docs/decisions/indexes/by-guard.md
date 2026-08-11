@@ -260,6 +260,7 @@
 | [AOA-SM-D-0045 Block-Addressed Incremental Event Classification](../AOA-SM-D-0045-block-addressed-incremental-event-classification.md) | 2026-08-09 | Accepted | `docs/decisions/AOA-SM-D-0045-block-addressed-incremental-event-classification.md` |
 | [AOA-SM-D-0046 Content-Addressed Session-Index Components With Compatibility View](../AOA-SM-D-0046-content-addressed-session-index-components-with-compatibility-view.md) | 2026-08-09 | Accepted | `docs/decisions/AOA-SM-D-0046-content-addressed-session-index-components-with-compatibility-view.md` |
 | [AOA-SM-D-0050 Manifest-First Session Components and Lazy Review Rendering](../AOA-SM-D-0050-manifest-first-session-components-and-lazy-review-rendering.md) | 2026-08-10 | Accepted | `docs/decisions/AOA-SM-D-0050-manifest-first-session-components-and-lazy-review-rendering.md` |
+| [AOA-SM-D-0052 Generation-Bound Segment Privacy Admission](../AOA-SM-D-0052-generation-bound-segment-privacy-admission.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0052-generation-bound-segment-privacy-admission.md` |
 
 ## content-addressed capture
 
@@ -356,6 +357,12 @@
 | [AOA-SM-D-0045 Block-Addressed Incremental Event Classification](../AOA-SM-D-0045-block-addressed-incremental-event-classification.md) | 2026-08-09 | Accepted | `docs/decisions/AOA-SM-D-0045-block-addressed-incremental-event-classification.md` |
 | [AOA-SM-D-0046 Content-Addressed Session-Index Components With Compatibility View](../AOA-SM-D-0046-content-addressed-session-index-components-with-compatibility-view.md) | 2026-08-09 | Accepted | `docs/decisions/AOA-SM-D-0046-content-addressed-session-index-components-with-compatibility-view.md` |
 | [AOA-SM-D-0047 Exclusive Heavy Projection Lane and Isolated Segment Workers](../AOA-SM-D-0047-exclusive-heavy-projection-lane-and-isolated-segment-workers.md) | 2026-08-09 | Accepted | `docs/decisions/AOA-SM-D-0047-exclusive-heavy-projection-lane-and-isolated-segment-workers.md` |
+
+## deterministic parity
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0052 Generation-Bound Segment Privacy Admission](../AOA-SM-D-0052-generation-bound-segment-privacy-admission.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0052-generation-bound-segment-privacy-admission.md` |
 
 ## deterministic rebuild
 
@@ -769,6 +776,7 @@
 | [AOA-SM-D-0046 Content-Addressed Session-Index Components With Compatibility View](../AOA-SM-D-0046-content-addressed-session-index-components-with-compatibility-view.md) | 2026-08-09 | Accepted | `docs/decisions/AOA-SM-D-0046-content-addressed-session-index-components-with-compatibility-view.md` |
 | [AOA-SM-D-0047 Exclusive Heavy Projection Lane and Isolated Segment Workers](../AOA-SM-D-0047-exclusive-heavy-projection-lane-and-isolated-segment-workers.md) | 2026-08-09 | Accepted | `docs/decisions/AOA-SM-D-0047-exclusive-heavy-projection-lane-and-isolated-segment-workers.md` |
 | [AOA-SM-D-0050 Manifest-First Session Components and Lazy Review Rendering](../AOA-SM-D-0050-manifest-first-session-components-and-lazy-review-rendering.md) | 2026-08-10 | Accepted | `docs/decisions/AOA-SM-D-0050-manifest-first-session-components-and-lazy-review-rendering.md` |
+| [AOA-SM-D-0052 Generation-Bound Segment Privacy Admission](../AOA-SM-D-0052-generation-bound-segment-privacy-admission.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0052-generation-bound-segment-privacy-admission.md` |
 
 ## privacy-safe health
 
@@ -894,6 +902,7 @@
 | [AOA-SM-D-0045 Block-Addressed Incremental Event Classification](../AOA-SM-D-0045-block-addressed-incremental-event-classification.md) | 2026-08-09 | Accepted | `docs/decisions/AOA-SM-D-0045-block-addressed-incremental-event-classification.md` |
 | [AOA-SM-D-0046 Content-Addressed Session-Index Components With Compatibility View](../AOA-SM-D-0046-content-addressed-session-index-components-with-compatibility-view.md) | 2026-08-09 | Accepted | `docs/decisions/AOA-SM-D-0046-content-addressed-session-index-components-with-compatibility-view.md` |
 | [AOA-SM-D-0050 Manifest-First Session Components and Lazy Review Rendering](../AOA-SM-D-0050-manifest-first-session-components-and-lazy-review-rendering.md) | 2026-08-10 | Accepted | `docs/decisions/AOA-SM-D-0050-manifest-first-session-components-and-lazy-review-rendering.md` |
+| [AOA-SM-D-0052 Generation-Bound Segment Privacy Admission](../AOA-SM-D-0052-generation-bound-segment-privacy-admission.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0052-generation-bound-segment-privacy-admission.md` |
 
 ## raw evidence fallback
 
@@ -1074,6 +1083,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0017 Bounded Temporal Interval Reading Before Answer Admission](../AOA-SM-D-0017-bounded-temporal-interval-reading-before-answer-admission.md) | 2026-07-18 | Accepted | `docs/decisions/AOA-SM-D-0017-bounded-temporal-interval-reading-before-answer-admission.md` |
+
+## stage-scoped generation
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0052 Generation-Bound Segment Privacy Admission](../AOA-SM-D-0052-generation-bound-segment-privacy-admission.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0052-generation-bound-segment-privacy-admission.md` |
 
 ## stale abstention
 
