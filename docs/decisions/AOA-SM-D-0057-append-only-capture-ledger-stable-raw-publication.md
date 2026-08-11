@@ -53,6 +53,11 @@ the capture state, ledger epoch, materialization size, conventional digest, and
 publish identity to agree. Any mismatch falls back to the existing exact
 snapshot path or fails publication closed.
 
+Raw-block records retain `raw/session.raw.jsonl` as a stable logical authority
+ref. In ledger-backed mode its concrete bounded source is resolved through the
+manifest storage contract; changing physical capture layout is not a segment
+semantic ABI change.
+
 The prior `raw/session.raw.jsonl` is not deleted. It remains a readable
 last-good compatibility snapshot while owner readers migrate to the manifest's
 raw storage contract. Raw authority remains the captured transcript evidence;

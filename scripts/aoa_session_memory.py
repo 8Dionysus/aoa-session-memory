@@ -21730,7 +21730,7 @@ def write_raw_block_artifacts(
     reference_blocks_dir = reference_raw_dir / RAW_BLOCKS_DIR
     blocks_dir.mkdir(parents=True, exist_ok=True)
     block_records: list[dict[str, Any]] = [
-        {**dict(item), "source_raw": raw_rel}
+        dict(item)
         for item in (prefix_block_records or [])
         if isinstance(item, dict)
     ]
@@ -40892,11 +40892,10 @@ def reindex_session_from_raw(
             manifest["lineage"] = lineage
         else:
             manifest.pop("lineage", None)
-        raw_rel = (
-            str(Path("raw") / RAW_CAPTURES_DIR / raw_path.name)
-            if raw_capture_ledger_mode
-            else "raw/session.raw.jsonl"
-        )
+        # Raw block records keep one stable logical source ref.  The manifest
+        # raw storage contract resolves that ref to either the compatibility
+        # monolith or the exact capture-ledger watermark.
+        raw_rel = "raw/session.raw.jsonl"
         if streaming_incremental_mode:
             segment_events = [
                 event
