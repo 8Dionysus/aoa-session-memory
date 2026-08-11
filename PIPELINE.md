@@ -670,7 +670,7 @@ defers only its heavy candidate and continues toward ordinary bounded
 maintenance; it does not start a second memory-heavy build. Applying Codex
 sweeps use the same lease per selected raw source at or above the heavy
 threshold, including mirror-only capture; smaller sources in the sweep remain
-eligible. Segment
+eligible.
 
 The recurring catch-up resource wrapper has two freshness routes. A ready
 live-tail target keeps the bounded targeted command. When no live-tail target
@@ -680,7 +680,15 @@ attempt the global catch-up child and wait for resource denial. This preferred
 drip retains admission, the maintenance lock, dirty-first fairness, semantic
 progress receipts, and automatic retry. Its completion is bounded-scope
 completion only; backlog/deep remain responsible for global convergence.
-generation uses a deterministic process pool with a default of four workers
+
+The bounded drip publishes selected session rows into the monolith search
+store but does not rebuild the global search catalog or synchronize the global
+entity registry in its latency-critical process. It marks the catalog stale
+and forces shard readers to fall back to the now-current monolith, so selected
+evidence is immediately queryable without presenting stale shard topology as
+current. The maintenance result names these global derivatives as unresolved;
+backlog, deep, or the explicit catalog/registry routes own their convergence.
+Segment generation uses a deterministic process pool with a default of four workers
 and a bounded one-to-six range, falling back visibly to serial execution when
 the pool cannot start. Segment processes use the isolated `spawn` start method
 and receive immutable classification-block refs, exact line ranges, bounded

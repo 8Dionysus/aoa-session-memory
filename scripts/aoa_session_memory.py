@@ -1549,7 +1549,7 @@ AUTO_MAINTENANCE_PROFILES = {
         "deferred_graph_job_budget_seconds": 600,
         "resource_class": "medium",
         "resource_kind": "indexing",
-        "resource_demand_epoch": "v4",
+        "resource_demand_epoch": "v5",
         "automatic_heavy_projection_lane": False,
         "budget_seconds": 600,
         "hard_timeout_grace_seconds": 60,
@@ -53051,6 +53051,15 @@ def maintain_indexes(
             "diagnostics": ["index_maintenance_planning_budget_exhausted"],
         }
         entity_registry_repair_needed = False
+    elif bounded_discovery:
+        entity_registry_state = {
+            "status": "deferred_bounded_scope",
+            "needs_maintenance": None,
+            "reasons": ["global_registry_state_owned_by_backlog_or_deep_profile"],
+            "diagnostics": [],
+            "truth_status": "global_generated_registry_state_not_claimed_by_bounded_discovery",
+        }
+        entity_registry_repair_needed = False
     else:
         entity_registry_state = entity_registry_maintenance_status(aoa_root)
         entity_registry_repair_needed = bool(entity_registry_state.get("needs_maintenance"))
@@ -54341,11 +54350,22 @@ def maintain_indexes(
                     result.setdefault("diagnostics", []).extend(str(item) for item in shard_result.get("diagnostics", []) if item)
                 result["ok"] = bool(result.get("ok")) and bool(shard_result.get("ok"))
                 result["budget_exhausted"] = bool(result.get("budget_exhausted") or shard_result.get("budget_exhausted"))
-                catalog_refresh = build_search_catalog(
-                    aoa_root,
-                    write=True,
-                    selected_records=records,
-                    selected_projection_fingerprints=search_projection_fingerprints,
+                catalog_refresh = (
+                    defer_search_catalog_global_refresh(
+                        aoa_root,
+                        session_ids=[
+                            str(record.get("session_id") or "")
+                            for record in records
+                        ],
+                        reason="bounded_projection_state_refresh",
+                    )
+                    if bounded_discovery
+                    else build_search_catalog(
+                        aoa_root,
+                        write=True,
+                        selected_records=records,
+                        selected_projection_fingerprints=search_projection_fingerprints,
+                    )
                 )
                 result["search_catalog_refresh"] = search_catalog_summary(catalog_refresh)
                 if not catalog_refresh.get("ok"):
@@ -54467,6 +54487,7 @@ def maintain_indexes(
                             if search_source_set_replacement_required
                             else None
                         ),
+                        defer_global_derivatives=bounded_discovery,
                     )
                     note_dense_upstream_changes(result)
                     search_action["status"] = "applied" if result.get("ok") else ("deferred_budget_exhausted" if result.get("budget_exhausted") else "failed")
@@ -54492,6 +54513,8 @@ def maintain_indexes(
                             "source_set_tombstone_count",
                             "source_set_tombstones",
                             "source_set_tombstone_truth_status",
+                            "search_catalog",
+                            "global_derivatives",
                             "report_json",
                             "report_markdown",
                             "diagnostics",
@@ -54930,10 +54953,11 @@ def maintain_indexes(
                         selected_records=None if refreshed_search_rebuild_required else (refreshed_search_dirty_records or refreshed_records),
                         budget_seconds=budget_remaining(),
                         progress_every=progress_every,
+                        defer_global_derivatives=bounded_discovery,
                     )
                     note_dense_upstream_changes(result)
                     post_search_action["status"] = "applied" if result.get("ok") else ("deferred_budget_exhausted" if result.get("budget_exhausted") else "failed")
-                    post_search_action["result"] = {key: result.get(key) for key in ("ok", "selected_count", "processed_count", "completed_session_ids", "remaining_count", "budget_exhausted", "document_count", "removed_document_count", "report_json", "report_markdown", "diagnostics")}
+                    post_search_action["result"] = {key: result.get(key) for key in ("ok", "selected_count", "processed_count", "completed_session_ids", "remaining_count", "budget_exhausted", "document_count", "removed_document_count", "search_catalog", "global_derivatives", "report_json", "report_markdown", "diagnostics")}
                     action_results.append(post_search_action)
                     post_index_ran = post_index_ran or bool(result.get("selected_count") or result.get("processed_count"))
                     budget_exhausted = budget_exhausted or bool(result.get("budget_exhausted"))
@@ -55420,7 +55444,11 @@ def maintain_indexes(
             final_latest_source_mtime, final_latest_source_paths = latest_index_source_mtime(aoa_root, final_records)
             final_search_state = sqlite_search_index_state(aoa_root, final_latest_source_mtime, final_records)
             final_atlas_state = atlas_index_state(aoa_root, final_latest_source_mtime, final_records)
-            final_entity_registry_state = entity_registry_maintenance_status(aoa_root)
+            final_entity_registry_state = (
+                entity_registry_state
+                if bounded_discovery
+                else entity_registry_maintenance_status(aoa_root)
+            )
             final_episode_semantic_state = episode_semantic_projection_state(aoa_root, records=final_records)
             final_episode_posting_cardinality_state = episode_direct_relation_postings_cardinality(aoa_root)
             final_episode_dense_state = episode_dense_projection_state(aoa_root, records=final_records)
@@ -55613,6 +55641,25 @@ def maintain_indexes(
         "discovery_limit": discovery_limit,
         "selection_source": "provided_records" if selected_records is not None else "target_filters",
         "selection_scope": selection_scope or {},
+        "final_snapshot_scope": (
+            "selected_records_global_derivatives_unresolved"
+            if bounded_discovery
+            else "declared_selection_scope"
+        ),
+        "global_derivatives": (
+            {
+                "status": "deferred_bounded_scope",
+                "search_catalog": search_catalog_summary(
+                    read_search_catalog(aoa_root)
+                ),
+                "entity_registry": final_entity_registry_state,
+                "owner_profile": "backlog_or_deep",
+                "query_availability": "monolith_search_current_shard_routes_fail_closed_to_monolith",
+                "truth_status": "selected_search_projection_current_global_navigation_derivatives_unresolved",
+            }
+            if bounded_discovery
+            else {"status": "checked_by_declared_scope"}
+        ),
         "query_demand_observation_requested": bool(observe_query_demand),
         "query_demand": query_demand_payload,
         "query_demand_priority_session_ids": query_priority_session_ids,
@@ -55819,13 +55866,23 @@ def maintain_indexes(
         "actions": action_results,
         "diagnostics": diagnostics,
     }
-    if payload["ok"]:
+    if payload["ok"] and not bounded_discovery:
         payload["outbox_completions"] = (
             complete_entity_registry_outbox_consumers(
                 aoa_root,
                 limit=32,
             )
         )
+    elif payload["ok"] and bounded_discovery:
+        payload["outbox_completions"] = {
+            "ok": True,
+            "status": "deferred_bounded_scope",
+            "completed_count": 0,
+            "completions": [],
+            "deferred": [],
+            "owner_profile": "backlog_or_deep",
+            "truth_status": "global_registry_outbox_completion_not_claimed_by_bounded_discovery",
+        }
     else:
         payload["outbox_completions"] = {
             "ok": True,
@@ -72169,6 +72226,93 @@ def read_search_catalog(aoa_root: Path) -> dict[str, Any]:
     payload = dict(payload)
     payload["mutates"] = False
     return payload
+
+
+def defer_search_catalog_global_refresh(
+    aoa_root: Path,
+    *,
+    session_ids: Iterable[str] = (),
+    reason: str,
+) -> dict[str, Any]:
+    """Fail shard routing closed after a bounded monolith update.
+
+    Rebuilding the catalog verifies every archived projection and is therefore
+    intentionally owned by backlog/deep maintenance.  A bounded freshness tick
+    only needs to make the exact/lexical monolith current.  Persisting the
+    unresolved global derivative here prevents a reader from consulting stale
+    shard topology while keeping the newly indexed session immediately
+    available through the monolith fallback.
+    """
+
+    path = search_catalog_path(aoa_root)
+    payload = read_json(path, {})
+    if not isinstance(payload, dict) or payload.get("artifact_type") != "session_memory_search_catalog":
+        return {
+            "ok": True,
+            "status": "deferred_missing_catalog_monolith_only",
+            "path": str(path),
+            "catalog_path": str(path),
+            "reason": reason,
+            "session_ids": sorted({str(item) for item in session_ids if item}),
+            "diagnostics": [],
+        }
+    existing = (
+        payload.get("bounded_global_refresh_deferred")
+        if isinstance(payload.get("bounded_global_refresh_deferred"), dict)
+        else {}
+    )
+    deferred_ids = sorted(
+        {
+            *(
+                str(item)
+                for item in existing.get("session_ids", [])
+                if item
+            ),
+            *(str(item) for item in session_ids if item),
+        }
+    )
+    deferred_at = utc_now()
+    payload.update(
+        {
+            "status": "stale",
+            "active_projection": SEARCH_ACTIVE_PROJECTION_MONOLITH,
+            "bounded_global_refresh_deferred": {
+                "status": "pending_backlog_or_deep",
+                "reason": reason,
+                "deferred_at": deferred_at,
+                "session_ids": deferred_ids,
+                "session_count": len(deferred_ids),
+                "exact_next_command": (
+                    "python3 scripts/aoa_session_memory.py search-catalog "
+                    f"--aoa-root {shlex.quote(str(aoa_root))} --refresh"
+                ),
+                "truth_status": "generated_catalog_stale_monolith_search_remains_current",
+            },
+        }
+    )
+    diagnostics = [
+        str(item)
+        for item in payload.get("diagnostics", [])
+        if item and str(item) != "search_catalog_global_refresh_deferred_bounded_scope"
+    ]
+    diagnostics.append("search_catalog_global_refresh_deferred_bounded_scope")
+    payload["diagnostics"] = diagnostics
+    payload["semantic_digest"] = search_catalog_semantic_digest(
+        payload,
+        aoa_root=aoa_root,
+    )
+    write_json(path, payload)
+    return {
+        "ok": True,
+        "status": "deferred_bounded_scope",
+        "path": str(path),
+        "catalog_path": str(path),
+        "reason": reason,
+        "deferred_at": deferred_at,
+        "session_ids": deferred_ids,
+        "session_count": len(deferred_ids),
+        "diagnostics": [],
+    }
 
 
 def search_catalog_generation_state(
@@ -112445,10 +112589,14 @@ def search_index_sessions(
     projection_storage_mode: str | None = None,
     context_tail_omission_policy: str = SEARCH_CONTEXT_TAIL_OMISSION_POLICY_AUTO,
     source_scope_complete: bool | None = None,
+    defer_global_derivatives: bool = False,
 ) -> dict[str, Any]:
     now = utc_now()
     started = time.monotonic()
     deadline = started + budget_seconds if budget_seconds is not None and budget_seconds > 0 else None
+    if defer_global_derivatives:
+        refresh_catalog = False
+        include_entity_registry = False
     db_path = db_path_override or search_db_path(aoa_root)
     raw_lexical_policy = search_raw_lexical_policy(
         max_raw_bytes,
@@ -113436,6 +113584,25 @@ def search_index_sessions(
         if not catalog_refresh.get("ok"):
             payload["ok"] = False
             payload.setdefault("diagnostics", []).append(f"search_catalog_refresh_failed:{catalog_refresh.get('status')}")
+    elif payload["ok"] and defer_global_derivatives:
+        deferred_catalog = defer_search_catalog_global_refresh(
+            aoa_root,
+            session_ids=completed_session_ids,
+            reason="bounded_incremental_search_update",
+        )
+        payload["search_catalog"] = search_catalog_summary(
+            read_search_catalog(aoa_root)
+        )
+        payload["global_derivatives"] = {
+            "status": "deferred_bounded_scope",
+            "search_catalog": deferred_catalog,
+            "entity_registry": {
+                "status": "deferred_bounded_scope",
+                "reason": "global_registry_sync_owned_by_backlog_or_deep_profile",
+            },
+            "query_availability": "monolith_search_current_shard_routes_fail_closed_to_monolith",
+            "truth_status": "selected_search_projection_current_global_navigation_derivatives_unresolved",
+        }
     outbox_completions: list[dict[str, Any]] = []
     if payload["ok"]:
         result_by_session_id = {
@@ -115721,11 +115888,15 @@ def search_sessions_shard_fanout(
         aoa_root,
         catalog,
     )
-    if not catalog_generation["compatible"]:
+    catalog_status = str(catalog.get("status") or "")
+    if not catalog_generation["compatible"] or catalog_status != "current":
+        fallback_reason = (
+            "search_catalog_generation_incompatible_fallback_monolith"
+            if not catalog_generation["compatible"]
+            else "search_catalog_not_current_fallback_monolith"
+        )
         payload = search_shard_fanout_unavailable_payload(
-            reason=(
-                "search_catalog_generation_incompatible_fallback_monolith"
-            ),
+            reason=fallback_reason,
             aoa_root=aoa_root,
             query=query,
             limit=limit,
@@ -115768,6 +115939,9 @@ def search_sessions_shard_fanout(
         payload.setdefault("search_projection", {})[
             "catalog_generation"
         ] = catalog_generation
+        payload.setdefault("search_projection", {})[
+            "catalog_status"
+        ] = catalog_status
         return payload
     source_set_state = search_source_set_change_state(
         aoa_root=aoa_root,
@@ -120175,6 +120349,38 @@ def search_agent_event_documents_with_shards_structured_multi_class(
 ) -> dict[str, Any]:
     now = utc_now()
     catalog = read_search_catalog(aoa_root)
+    catalog_generation = search_catalog_generation_state(aoa_root, catalog)
+    catalog_status = str(catalog.get("status") or "")
+    if not catalog_generation.get("compatible") or catalog_status != "current":
+        fallback_reason = (
+            "search_catalog_generation_incompatible_fallback_monolith"
+            if not catalog_generation.get("compatible")
+            else "search_catalog_not_current_fallback_monolith"
+        )
+        payload = search_agent_event_documents(
+            aoa_root=aoa_root,
+            query=query,
+            limit=limit,
+            provider=provider,
+            session=session,
+            task_episode_id=task_episode_id,
+            agent_events=classes,
+            explain=explain,
+            include_stream_copies=include_stream_copies,
+            use_shards=False,
+            max_shards=max_shards,
+            query_timeout_ms=0,
+        )
+        payload["search_projection"] = {
+            "mode": SEARCH_ACTIVE_PROJECTION_MONOLITH,
+            "requested_mode": SEARCH_ACTIVE_PROJECTION_SHARD_FANOUT,
+            "fallback_reason": fallback_reason,
+            "fallback_db_path": str(search_db_path(aoa_root)),
+            "catalog_status": catalog_status,
+            "catalog_generation": catalog_generation,
+        }
+        payload.setdefault("diagnostics", []).append(fallback_reason)
+        return payload
     shards = catalog.get("shards") if isinstance(catalog.get("shards"), list) else []
     session_filter_column, session_filter_value = exact_session_filter_for_search(aoa_root, session)
     session_scope_shard = ""

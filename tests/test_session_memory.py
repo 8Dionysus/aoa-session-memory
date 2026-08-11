@@ -56368,7 +56368,7 @@ def test_catchup_auto_maintenance_resource_prefers_explicit_bounded_index_drip(
     assert len(calls) == 1
     assert calls[0][3:5] == ["--class", "probe"]
     assert calls[0][calls[0].index("--demand-key") + 1] == (
-        "aoa-session-memory:auto-maintenance:catchup:index-drip-v4"
+        "aoa-session-memory:auto-maintenance:catchup:index-drip-v5"
     )
     assert calls[0][calls[0].index("--demand-owner") + 1] == "aoa-session-memory"
     assert "index-maintenance" in calls[0]
@@ -56469,6 +56469,182 @@ def test_bounded_index_maintenance_discovery_is_dirty_first_and_fair(
     assert second_scope["cursor_before"] == first_scope["cursor_after"]
     assert second_scope["dirty_cursor_before"] == "session-080"
     assert second_scope["dirty_cursor_after"] == "session-081"
+
+
+def test_bounded_search_update_defers_global_derivatives_and_falls_back_to_monolith(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-07-02T00-00-00-bounded-search.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-07-02T00:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "bounded-search-session",
+                    "cwd": str(workspace),
+                },
+            },
+            {
+                "timestamp": "2026-07-02T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "bounded availability phrase",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "bounded-search-session",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    baseline = module.search_index_sessions(
+        aoa_root=aoa_root,
+        target="all",
+    )
+    assert baseline["ok"] is True
+    assert module.read_search_catalog(aoa_root)["status"] == "current"
+    record = module.resolve_session_record(aoa_root, "bounded-search-session")
+
+    def forbidden_global_derivative(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("bounded search update entered a global derivative")
+
+    monkeypatch.setattr(module, "build_search_catalog", forbidden_global_derivative)
+    monkeypatch.setattr(
+        module,
+        "entity_registry_maintenance_status",
+        forbidden_global_derivative,
+    )
+    incremental = module.search_index_sessions(
+        aoa_root=aoa_root,
+        target="all",
+        rebuild=False,
+        selected_records=[record],
+        defer_global_derivatives=True,
+    )
+
+    assert incremental["ok"] is True
+    assert incremental["processed_count"] == 1
+    assert incremental["global_derivatives"]["status"] == "deferred_bounded_scope"
+    catalog = module.read_search_catalog(aoa_root)
+    assert catalog["status"] == "stale"
+    assert catalog["bounded_global_refresh_deferred"]["session_ids"] == [
+        "bounded-search-session"
+    ]
+    routed = module.search_sessions_shard_fanout(
+        aoa_root=aoa_root,
+        query="bounded availability phrase",
+        limit=2,
+    )
+    assert routed["ok"] is True
+    assert routed["result_count"] >= 1
+    assert routed["search_projection"]["mode"] == module.SEARCH_ACTIVE_PROJECTION_MONOLITH
+    assert routed["search_projection"]["fallback_reason"] == (
+        "search_catalog_not_current_fallback_monolith"
+    )
+
+
+def test_bounded_maintenance_planning_never_reads_global_derivative_state(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    session_dir = aoa_root / "sessions" / "2026-07-02__001__bounded-plan"
+    session_dir.mkdir(parents=True)
+    record = {
+        "session_id": "bounded-plan-session",
+        "session_label": session_dir.name,
+        "session_dir": str(session_dir),
+        "display": {"path": str(session_dir)},
+    }
+
+    def forbidden_global_derivative(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("bounded planning entered a global derivative")
+
+    monkeypatch.setattr(
+        module,
+        "entity_registry_maintenance_status",
+        forbidden_global_derivative,
+    )
+    monkeypatch.setattr(module, "build_search_catalog", forbidden_global_derivative)
+    monkeypatch.setattr(
+        module,
+        "latest_index_source_mtime",
+        lambda _aoa_root, _records: (0.0, []),
+    )
+    monkeypatch.setattr(module, "route_index_drift_records", lambda _records: [])
+    monkeypatch.setattr(
+        module,
+        "sqlite_search_index_hot_state",
+        lambda _aoa_root: {"needs_refresh": False, "reasons": []},
+    )
+    monkeypatch.setattr(
+        module,
+        "atlas_index_hot_state",
+        lambda _aoa_root: {"status": "missing", "needs_refresh": False},
+    )
+    monkeypatch.setattr(
+        module,
+        "search_projection_fingerprints_for_records",
+        lambda _records: [],
+    )
+    monkeypatch.setattr(
+        module,
+        "sqlite_search_index_state",
+        lambda *_args, **_kwargs: {
+            "status": "missing",
+            "needs_refresh": False,
+            "dirty_session_ids": [],
+            "dirty_sessions": [],
+            "reasons": [],
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "graph_store_state",
+        lambda **_kwargs: {
+            "status": "deferred_not_checked",
+            "needs_maintenance": None,
+            "needs_full_rebuild": False,
+            "reasons": [],
+            "diagnostics": [],
+        },
+    )
+
+    planned = module.maintain_indexes(
+        aoa_root=aoa_root,
+        target="all",
+        selected_records=[record],
+        selection_scope={"global_scope_complete": False, "profile": "catchup"},
+        apply=False,
+        repair_token_accounting=False,
+        repair_graph=False,
+    )
+
+    assert planned["entity_registry"]["status"] == "deferred_bounded_scope"
+    assert planned["final_entity_registry"]["status"] == "deferred_bounded_scope"
+    assert planned["final_snapshot_scope"] == (
+        "selected_records_global_derivatives_unresolved"
+    )
+    assert planned["global_derivatives"]["status"] == "deferred_bounded_scope"
 
 
 def test_automatic_maintenance_profiles_bound_discovery() -> None:
