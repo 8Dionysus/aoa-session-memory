@@ -57,8 +57,11 @@ already hydrated from previously redacted shards. When an episode in that
 prefix has the exact current component source identity, including privacy and
 redaction generations, its hydrated payload is the expected redacted payload;
 the parent must not recursively redact it again. A source-identity mismatch,
-tail episode, unknown provenance, or policy-generation change retains the full
-privacy pass.
+caused solely by comparing a pre-redaction identity with its hydrated redacted
+form, may preserve the prior identity only when the canonical component key,
+current generation, and exact redacted payload SHA all match. A changed safe
+payload, tail episode, unknown provenance, or policy-generation change retains
+the full privacy pass.
 
 These source-contract changes invalidate task-episode source and dependent
 session-index generations. Raw-event classification and segment-index producer

@@ -24001,6 +24001,7 @@ def materialize_session_index_task_episode_shards(
     ] = []
     reused_count = 0
     manifest_admitted_reused_count = 0
+    pre_redacted_identity_preserved_reused_count = 0
     migrated_predecessor_count = 0
     for ordinal, episode in enumerate(task_episodes):
         component_key = session_index_task_episode_shard_key(
@@ -24031,8 +24032,6 @@ def materialize_session_index_task_episode_shards(
             )
             if (
                 ordinal < pre_redacted_episode_count
-                and prior_source_identity
-                == component_source_identity
             ):
                 # The bounded stable prefix was hydrated from previously
                 # redacted shards.  Its exact source identity includes the
@@ -24053,9 +24052,19 @@ def materialize_session_index_task_episode_shards(
                 str(envelope.get("payload_sha256") or "")
                 == expected_payload_sha256
             )
-            if (
-                prior_source_identity == component_source_identity
+            stable_pre_redacted_prior = bool(
+                ordinal < pre_redacted_episode_count
+                and prior_generation_id
+                == str(generation_identity.get("generation_id") or "")
                 and prior_payload_matches
+            )
+            if (
+                (
+                    prior_source_identity
+                    == component_source_identity
+                    and prior_payload_matches
+                )
+                or stable_pre_redacted_prior
             ):
                 reusable_record = dict(record)
                 manifest_admitted = bool(
@@ -24091,6 +24100,12 @@ def materialize_session_index_task_episode_shards(
                 reused_count += 1
                 if manifest_admitted:
                     manifest_admitted_reused_count += 1
+                if (
+                    stable_pre_redacted_prior
+                    and prior_source_identity
+                    != component_source_identity
+                ):
+                    pre_redacted_identity_preserved_reused_count += 1
                 continue
             legacy_source_matches = bool(
                 prior_payload_matches
@@ -24239,6 +24254,9 @@ def materialize_session_index_task_episode_shards(
             "checkpoint_reused_shard_count": reused_count,
             "manifest_admitted_reused_shard_count": (
                 manifest_admitted_reused_count
+            ),
+            "pre_redacted_identity_preserved_reused_shard_count": (
+                pre_redacted_identity_preserved_reused_count
             ),
             "migrated_predecessor_shard_count": (
                 migrated_predecessor_count

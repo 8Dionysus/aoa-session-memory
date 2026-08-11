@@ -92890,6 +92890,26 @@ def test_task_episode_shard_reuse_admits_published_manifest_without_content_read
             AssertionError("pre-redacted stable prefix re-redacted")
         ),
     )
+    original_component_identity = (
+        module.task_episode_component_source_identity
+    )
+
+    def changed_hydrated_component_identity(
+        episode: dict[str, Any],
+        *,
+        generation_identity: dict[str, Any],
+    ) -> dict[str, Any]:
+        identity = original_component_identity(
+            episode,
+            generation_identity=generation_identity,
+        )
+        return {**identity, "episode_source_sha256": "f" * 64}
+
+    monkeypatch.setattr(
+        module,
+        "task_episode_component_source_identity",
+        changed_hydrated_component_identity,
+    )
     reused = module.materialize_session_index_task_episode_shards(
         stage_dir,
         first["payloads"],
@@ -92909,6 +92929,9 @@ def test_task_episode_shard_reuse_admits_published_manifest_without_content_read
     assert reused["execution"]["pre_redacted_episode_count"] == len(
         episodes
     )
+    assert reused["execution"][
+        "pre_redacted_identity_preserved_reused_shard_count"
+    ] == len(episodes)
 
 
 def test_session_index_shard_manifest_validates_manifest_first_components(
