@@ -1473,7 +1473,7 @@ AUTO_MAINTENANCE_PROFILES = {
         "deferred_graph_job_budget_seconds": 120,
         "resource_class": "medium",
         "resource_kind": "indexing",
-        "resource_demand_epoch": "v3",
+        "resource_demand_epoch": "v4",
         "budget_seconds": 600,
         "hard_timeout_grace_seconds": 120,
         "timeout_sec": 900,
@@ -1507,7 +1507,7 @@ AUTO_MAINTENANCE_PROFILES = {
         "deferred_graph_job_budget_seconds": 600,
         "resource_class": "medium",
         "resource_kind": "indexing",
-        "resource_demand_epoch": "v3",
+        "resource_demand_epoch": "v4",
         "budget_seconds": 900,
         "hard_timeout_grace_seconds": 180,
         "timeout_sec": 3600,
@@ -1547,7 +1547,7 @@ AUTO_MAINTENANCE_PROFILES = {
         "deferred_graph_job_budget_seconds": 600,
         "resource_class": "medium",
         "resource_kind": "indexing",
-        "resource_demand_epoch": "v3",
+        "resource_demand_epoch": "v4",
         "budget_seconds": 600,
         "hard_timeout_grace_seconds": 60,
         "timeout_sec": 1800,
@@ -1587,7 +1587,7 @@ AUTO_MAINTENANCE_PROFILES = {
         "deferred_graph_job_budget_seconds": 1800,
         "resource_class": "heavy",
         "resource_kind": "indexing",
-        "resource_demand_epoch": "v3",
+        "resource_demand_epoch": "v4",
         "budget_seconds": 1200,
         "hard_timeout_grace_seconds": 300,
         "timeout_sec": 7200,
@@ -8324,6 +8324,64 @@ ENTITY_REGISTRY_SEMANTIC_DIGEST_VOLATILE_KEYS = frozenset(
         "producer_source_state",
     }
 )
+
+# One exact digest verification is sufficient for repeated status consumers in
+# the same process while the atomically published registry file is unchanged.
+# The identity includes ctime and inode, so replacing or rewriting the snapshot
+# invalidates the cache even when its semantic payload remains equivalent.
+_ENTITY_REGISTRY_SEMANTIC_DIGEST_PROCESS_CACHE: dict[
+    tuple[str, int, int, int, int, int],
+    dict[str, Any],
+] = {}
+
+
+def entity_registry_snapshot_file_identity(
+    path: Path,
+) -> tuple[str, int, int, int, int, int] | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (
+        str(path.resolve(strict=False)),
+        int(stat.st_dev),
+        int(stat.st_ino),
+        int(stat.st_size),
+        int(stat.st_mtime_ns),
+        int(stat.st_ctime_ns),
+    )
+
+
+def entity_registry_semantic_digest_for_unchanged_snapshot(
+    payload: dict[str, Any],
+    *,
+    aoa_root: Path,
+    path: Path,
+    identity_before_read: tuple[str, int, int, int, int, int] | None,
+) -> tuple[dict[str, Any], str]:
+    identity_after_read = entity_registry_snapshot_file_identity(path)
+    cache_key = (
+        identity_after_read
+        if identity_before_read is not None
+        and identity_before_read == identity_after_read
+        else None
+    )
+    if cache_key is not None:
+        cached = _ENTITY_REGISTRY_SEMANTIC_DIGEST_PROCESS_CACHE.get(
+            cache_key
+        )
+        if isinstance(cached, dict):
+            return dict(cached), "process_cache_exact_file_identity"
+    calculated = entity_registry_semantic_digest(
+        payload,
+        aoa_root=aoa_root,
+    )
+    if cache_key is not None:
+        _ENTITY_REGISTRY_SEMANTIC_DIGEST_PROCESS_CACHE.clear()
+        _ENTITY_REGISTRY_SEMANTIC_DIGEST_PROCESS_CACHE[cache_key] = dict(
+            calculated
+        )
+    return calculated, "recomputed_exact_semantic_digest"
 
 
 def entity_registry_semantic_digest_value(
@@ -60759,7 +60817,20 @@ def auto_maintenance_resource_launch(
         diagnostics.append("resource_launcher_no_json")
     fallback_index_drip: dict[str, Any] = {}
     if status == "resource_blocked" and effective_index_drip_on_block and apply and repair_indexes is not False:
-        fallback_demand_key = session_memory_resource_demand_key("auto-maintenance", profile, "index-drip")
+        fallback_demand_epoch = str(
+            settings.get("resource_demand_epoch") or ""
+        ).strip()
+        fallback_route = "index-drip"
+        if fallback_demand_epoch:
+            fallback_route = (
+                f"{fallback_route}-"
+                f"{safe_slug(fallback_demand_epoch, fallback='epoch')}"
+            )
+        fallback_demand_key = session_memory_resource_demand_key(
+            "auto-maintenance",
+            profile,
+            fallback_route,
+        )
         fallback_resource_demand_floor_resolution = (
             session_memory_resource_demand_floor_resolution(
                 resource_binary=resource_binary,
@@ -110836,7 +110907,21 @@ def search_document_existing_signatures(conn: sqlite3.Connection, *, doc_type: s
     return signatures
 
 
-def entity_registry_snapshot_signature(payload: dict[str, Any]) -> str:
+def entity_registry_snapshot_signature(
+    payload: dict[str, Any],
+    *,
+    verified_semantic_digest: dict[str, Any] | None = None,
+) -> str:
+    verified_sha256 = str(
+        (
+            verified_semantic_digest
+            if isinstance(verified_semantic_digest, dict)
+            else {}
+        ).get("sha256")
+        or ""
+    )
+    if verified_sha256:
+        return verified_sha256
     root_text = str(payload.get("aoa_root") or "")
     return str(
         entity_registry_semantic_digest(
@@ -110944,7 +111029,15 @@ def entity_registry_search_sync_current_noop(
     actual_count = int_value(conn.execute("SELECT COUNT(*) FROM documents WHERE doc_type = 'entity_registry'").fetchone()[0])
     if actual_count != entity_count:
         return None
-    signature = entity_registry_snapshot_signature(registry)
+    signature = entity_registry_snapshot_signature(
+        registry,
+        verified_semantic_digest=(
+            registry_state.get("semantic_digest")
+            if registry_state.get("semantic_digest_verified") is True
+            and isinstance(registry_state.get("semantic_digest"), dict)
+            else None
+        ),
+    )
     meta = entity_registry_search_sync_meta(conn)
     if meta.get("entity_registry_search_sync_version") != str(ENTITY_REGISTRY_SEARCH_SYNC_VERSION):
         return None
@@ -170650,6 +170743,9 @@ def entity_registry_maintenance_status(aoa_root: Path) -> dict[str, Any]:
             "diagnostics": ["entity_registry_missing"],
             "truth_status": "generated_entity_registry_navigation_not_source_truth",
         }
+    snapshot_identity_before_read = (
+        entity_registry_snapshot_file_identity(path)
+    )
     payload = read_json(path, {})
     diagnostics: list[str] = []
     if not isinstance(payload, dict):
@@ -170679,14 +170775,19 @@ def entity_registry_maintenance_status(aoa_root: Path) -> dict[str, Any]:
         if isinstance(payload.get("semantic_digest"), dict)
         else {}
     )
-    calculated_semantic_digest = (
-        entity_registry_semantic_digest(
+    semantic_digest_verification_mode = "not_checked"
+    if payload:
+        (
+            calculated_semantic_digest,
+            semantic_digest_verification_mode,
+        ) = entity_registry_semantic_digest_for_unchanged_snapshot(
             payload,
             aoa_root=aoa_root,
+            path=path,
+            identity_before_read=snapshot_identity_before_read,
         )
-        if payload
-        else {}
-    )
+    else:
+        calculated_semantic_digest = {}
     semantic_digest_verified = bool(
         str(stored_semantic_digest.get("sha256") or "")
         and str(stored_semantic_digest.get("sha256") or "")
@@ -170819,6 +170920,9 @@ def entity_registry_maintenance_status(aoa_root: Path) -> dict[str, Any]:
         "source_fingerprint": payload.get("source_fingerprint"),
         "semantic_digest": stored_semantic_digest,
         "semantic_digest_verified": semantic_digest_verified,
+        "semantic_digest_verification_mode": (
+            semantic_digest_verification_mode
+        ),
         "runtime_overlay_required": runtime_overlay_required,
         "runtime_overlay_state": runtime_overlay_state,
         "history_policy": payload.get("history_policy"),

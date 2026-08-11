@@ -27185,6 +27185,46 @@ def test_entity_registry_route_terms_use_transactional_dirty_marker(
     assert initial["observed_route_tracking"]["status"] == "current"
     assert initial["observed_route_tracking"]["dirty"] is False
 
+    module._ENTITY_REGISTRY_SEMANTIC_DIGEST_PROCESS_CACHE.clear()
+    original_semantic_digest = module.entity_registry_semantic_digest
+    semantic_digest_calls = 0
+
+    def counted_semantic_digest(*args: Any, **kwargs: Any) -> Any:
+        nonlocal semantic_digest_calls
+        semantic_digest_calls += 1
+        return original_semantic_digest(*args, **kwargs)
+
+    monkeypatch.setattr(
+        module,
+        "entity_registry_semantic_digest",
+        counted_semantic_digest,
+    )
+    first_status = module.entity_registry_maintenance_status(aoa_root)
+    second_status = module.entity_registry_maintenance_status(aoa_root)
+    assert first_status["semantic_digest_verification_mode"] == (
+        "recomputed_exact_semantic_digest"
+    )
+    assert second_status["semantic_digest_verification_mode"] == (
+        "process_cache_exact_file_identity"
+    )
+    assert semantic_digest_calls == 1
+
+    registry_path = aoa_root / module.ENTITY_REGISTRY_PATH
+    rewritten_registry = module.read_json(registry_path, {})
+    rewritten_registry["generated_at"] = "2026-08-11T00:00:01Z"
+    module.write_json(registry_path, rewritten_registry)
+    rewritten_status = module.entity_registry_maintenance_status(aoa_root)
+    assert rewritten_status["status"] == "current"
+    assert rewritten_status["semantic_digest_verification_mode"] == (
+        "recomputed_exact_semantic_digest"
+    )
+    assert semantic_digest_calls == 2
+    monkeypatch.setattr(
+        module,
+        "entity_registry_semantic_digest",
+        original_semantic_digest,
+    )
+
     original_entries = module.entity_registry_entries_from_route_terms
 
     def fail_full_route_scan(*_args: Any, **_kwargs: Any) -> Any:
@@ -54753,7 +54793,7 @@ def test_auto_maintenance_resource_launch_scopes_hot_demand_identity(tmp_path: P
 
     assert command[command.index("--class") + 1] == "medium"
     assert command[command.index("--demand-key") + 1] == (
-        "aoa-session-memory:auto-maintenance:hot:auto-maintenance-v3"
+        "aoa-session-memory:auto-maintenance:hot:auto-maintenance-v4"
     )
     assert command[command.index("--demand-owner") + 1] == "aoa-session-memory"
     assert command[command.index("--memory-demand-mib") + 1] == "3400"
@@ -54786,7 +54826,7 @@ def test_auto_maintenance_resource_demand_epoch_tracks_each_bounded_profile_enve
             profile,
         ]
         assert module.auto_maintenance_resource_demand_key(profile, child_command) == (
-            f"aoa-session-memory:auto-maintenance:{profile}:auto-maintenance-v3"
+            f"aoa-session-memory:auto-maintenance:{profile}:auto-maintenance-v4"
         )
 
 
@@ -55129,7 +55169,7 @@ def test_auto_maintenance_resource_launch_uses_live_tail_fast_path_for_catchup(t
     assert calls["command"][:3] == ["abyss-machine", "resource", "launch"]
     assert "--force" in calls["command"]
     assert calls["command"][calls["command"].index("--demand-key") + 1] == (
-        "aoa-session-memory:auto-maintenance:catchup:index-maintenance-v3"
+        "aoa-session-memory:auto-maintenance:catchup:index-maintenance-v4"
     )
     assert calls["command"][calls["command"].index("--demand-owner") + 1] == "aoa-session-memory"
     assert child[:4] == ["python3", str(Path(module.__file__).resolve()), "index-maintenance", session_label]
@@ -56333,7 +56373,7 @@ def test_catchup_auto_maintenance_resource_uses_explicit_index_drip_fallback(
     assert calls[0][3:5] == ["--class", "medium"]
     assert calls[1][3:5] == ["--class", "probe"]
     assert calls[1][calls[1].index("--demand-key") + 1] == (
-        "aoa-session-memory:auto-maintenance:catchup:index-drip"
+        "aoa-session-memory:auto-maintenance:catchup:index-drip-v4"
     )
     assert calls[1][calls[1].index("--demand-owner") + 1] == "aoa-session-memory"
     assert "index-maintenance" in calls[1]

@@ -644,6 +644,16 @@ snapshot, observed-source, history-policy, search-document, generation, count,
 and signature gates commit successfully. It is invalidation metadata, not
 dependency identity or freshness authority.
 
+Within one admitted process, repeated consumers of the same atomically
+published entity-registry snapshot reuse its already exact semantic digest
+only while device, inode, size, nanosecond mtime, and nanosecond ctime all
+remain identical. The first read recomputes the digest; any rewrite or
+replacement invalidates the bounded process cache. Search sync may reuse that
+same digest only when maintenance status has verified it against the snapshot's
+stored digest. Resource-demand keys carry a profile epoch, including the
+index-drip fallback, so a materially optimized execution shape starts a fresh
+bounded learner instead of inheriting obsolete peaks from an older algorithm.
+
 That fast path remains inside the selected profile's route-size envelope. An
 oversized live-tail target is deferred to an explicit heavy or resumable route,
 while ordinary bounded maintenance continues across the rest of the backlog;
