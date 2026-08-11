@@ -1555,6 +1555,8 @@ AUTO_MAINTENANCE_PROFILES = {
         "hard_timeout_grace_seconds": 60,
         "timeout_sec": 1800,
         "index_drip_on_block": False,
+        "index_drip_search_max_cost_class": "light",
+        "index_drip_route_max_raw_mb": 32,
         "graph_drip_on_block": True,
         "graph_drip_batch_limit": GRAPH_MAINTENANCE_HEAVY_TAIL_BATCH_LIMIT,
         "graph_drip_budget_seconds": 300,
@@ -60964,6 +60966,14 @@ def auto_maintenance_resource_launch(
             if bounded_index_drip_preferred
             else "index_drip_on_block"
         )
+        index_drip_search_max_cost_class = str(
+            settings.get("index_drip_search_max_cost_class")
+            or settings.get("search_max_cost_class")
+            or "auto"
+        )
+        index_drip_route_max_raw_mb = settings.get(
+            "index_drip_route_max_raw_mb"
+        )
         fallback_command = [
             resource_binary,
             "resource",
@@ -61007,6 +61017,8 @@ def auto_maintenance_resource_launch(
             ),
             "--skip-token-accounting",
             "--skip-graph-repair",
+            "--search-max-cost-class",
+            index_drip_search_max_cost_class,
             "--budget-seconds",
             str(max(1.0, float(index_drip_budget_seconds))),
             "--reason",
@@ -61014,6 +61026,13 @@ def auto_maintenance_resource_launch(
             f"{index_drip_route_reason}:{reason}",
             "--write-report",
         ]
+        if index_drip_route_max_raw_mb is not None:
+            fallback_command.extend(
+                [
+                    "--route-max-raw-mb",
+                    str(index_drip_route_max_raw_mb),
+                ]
+            )
         if selected_search_shard_repair_limit is not None:
             fallback_command.extend(
                 [
@@ -61141,6 +61160,8 @@ def auto_maintenance_resource_launch(
                 ),
             ),
             "search_shard_repair_limit": effective_search_shard_repair_limit,
+            "search_max_cost_class": index_drip_search_max_cost_class,
+            "route_max_raw_mb": index_drip_route_max_raw_mb,
             "budget_seconds": max(1.0, float(index_drip_budget_seconds)),
             "returncode": fallback_returncode,
             "elapsed_ms": fallback_elapsed_ms,

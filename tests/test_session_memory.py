@@ -56365,6 +56365,8 @@ def test_catchup_auto_maintenance_resource_prefers_explicit_bounded_index_drip(
     assert payload["fallback_index_drip"]["repair_limit"] == 12
     assert payload["search_shard_repair_limit"] == 24
     assert payload["fallback_index_drip"]["search_shard_repair_limit"] == 24
+    assert payload["fallback_index_drip"]["search_max_cost_class"] == "light"
+    assert payload["fallback_index_drip"]["route_max_raw_mb"] == 32
     assert len(calls) == 1
     assert calls[0][3:5] == ["--class", "probe"]
     assert calls[0][calls[0].index("--demand-key") + 1] == (
@@ -56377,6 +56379,8 @@ def test_catchup_auto_maintenance_resource_prefers_explicit_bounded_index_drip(
     assert calls[0][calls[0].index("--discovery-limit") + 1] == "24"
     assert "--skip-token-accounting" in calls[0]
     assert "--skip-graph-repair" in calls[0]
+    assert calls[0][calls[0].index("--search-max-cost-class") + 1] == "light"
+    assert calls[0][calls[0].index("--route-max-raw-mb") + 1] == "32"
     assert "--repair-limit" in calls[0]
     assert "12" in calls[0]
     assert calls[0][calls[0].index("--search-shard-repair-limit") + 1] == "24"
@@ -56469,6 +56473,39 @@ def test_bounded_index_maintenance_discovery_is_dirty_first_and_fair(
     assert second_scope["cursor_before"] == first_scope["cursor_after"]
     assert second_scope["dirty_cursor_before"] == "session-080"
     assert second_scope["dirty_cursor_after"] == "session-081"
+
+
+def test_light_freshness_selection_defers_priority_warm_session() -> None:
+    light_record = {
+        "session_id": "light-session",
+        "session_label": "2026-07-02__001__light-session",
+    }
+    warm_record = {
+        "session_id": "warm-session",
+        "session_label": "2026-07-02__002__warm-session",
+    }
+    selected, selection = module.search_repair_selection(
+        [warm_record, light_record],
+        dirty_sessions=[
+            {
+                **warm_record,
+                "estimated_raw_bytes": module.SEARCH_REPAIR_COST_WARM_RAW_BYTES,
+                "reasons": ["source_fingerprint_changed"],
+            },
+            {
+                **light_record,
+                "estimated_raw_bytes": 1024,
+                "reasons": ["source_fingerprint_changed"],
+            },
+        ],
+        limit=1,
+        max_cost_class="light",
+        priority_session_ids=["warm-session"],
+    )
+
+    assert [record["session_id"] for record in selected] == ["light-session"]
+    assert selection["deferred_priority_cost_session_ids"] == ["warm-session"]
+    assert selection["selected_cost_class_counts"] == {"light": 1}
 
 
 def test_bounded_search_update_defers_global_derivatives_and_falls_back_to_monolith(

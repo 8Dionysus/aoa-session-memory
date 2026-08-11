@@ -229,6 +229,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0063 Bounded Freshness Defers Global Derivatives](../AOA-SM-D-0063-bounded-freshness-defers-global-derivatives.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0063-bounded-freshness-defers-global-derivatives.md` |
 
+## bounded timer
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0064 Freshness Drip Admits Only Light Session Work](../AOA-SM-D-0064-freshness-drip-admits-only-light-session-work.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0064-freshness-drip-admits-only-light-session-work.md` |
+
 ## cache invalidation
 
 | Decision | Date | Status | Path |
@@ -356,6 +362,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0016 Quantitative Comparisons Require Correlated Count Evidence](../AOA-SM-D-0016-quantitative-comparisons-require-correlated-count-evidence.md) | 2026-07-17 | Accepted | `docs/decisions/AOA-SM-D-0016-quantitative-comparisons-require-correlated-count-evidence.md` |
+
+## cost-class admission
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0064 Freshness Drip Admits Only Light Session Work](../AOA-SM-D-0064-freshness-drip-admits-only-light-session-work.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0064-freshness-drip-admits-only-light-session-work.md` |
 
 ## crash recovery
 
@@ -572,6 +584,7 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0061 Freshness Profiles Do Not Own Heavy Tail](../AOA-SM-D-0061-freshness-profiles-do-not-own-heavy-tail.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0061-freshness-profiles-do-not-own-heavy-tail.md` |
 | [AOA-SM-D-0063 Bounded Freshness Defers Global Derivatives](../AOA-SM-D-0063-bounded-freshness-defers-global-derivatives.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0063-bounded-freshness-defers-global-derivatives.md` |
+| [AOA-SM-D-0064 Freshness Drip Admits Only Light Session Work](../AOA-SM-D-0064-freshness-drip-admits-only-light-session-work.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0064-freshness-drip-admits-only-light-session-work.md` |
 
 ## explicit literal evidence
 
@@ -1113,6 +1126,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0037 Evidence-Backed Representation Vectors for Dense Episode Retrieval](../AOA-SM-D-0037-evidence-backed-representation-vectors-for-dense-episode-retrieval.md) | 2026-07-29 | Accepted | `docs/decisions/AOA-SM-D-0037-evidence-backed-representation-vectors-for-dense-episode-retrieval.md` |
 | [AOA-SM-D-0038 Primary-Preserving Role-Diverse Dense Evidence Hydration](../AOA-SM-D-0038-primary-preserving-role-diverse-dense-evidence-hydration.md) | 2026-07-29 | Accepted | `docs/decisions/AOA-SM-D-0038-primary-preserving-role-diverse-dense-evidence-hydration.md` |
+
+## raw-size bound
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0064 Freshness Drip Admits Only Light Session Work](../AOA-SM-D-0064-freshness-drip-admits-only-light-session-work.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0064-freshness-drip-admits-only-light-session-work.md` |
 
 ## reader compatibility
 

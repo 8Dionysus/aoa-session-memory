@@ -688,6 +688,10 @@ and forces shard readers to fall back to the now-current monolith, so selected
 evidence is immediately queryable without presenting stale shard topology as
 current. The maintenance result names these global derivatives as unresolved;
 backlog, deep, or the explicit catalog/registry routes own their convergence.
+The recurring drip also admits only `light` search work and caps route raw
+repair at 32 MiB. Warm and heavy sessions remain explicit live-tail targets or
+backlog/deep work; a single old session cannot consume the freshness timer's
+entire wall-clock budget.
 Segment generation uses a deterministic process pool with a default of four workers
 and a bounded one-to-six range, falling back visibly to serial execution when
 the pool cannot start. Segment processes use the isolated `spawn` start method

@@ -469,6 +469,7 @@
 | [AOA-SM-D-0061 Freshness Profiles Do Not Own Heavy Tail](../AOA-SM-D-0061-freshness-profiles-do-not-own-heavy-tail.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0061-freshness-profiles-do-not-own-heavy-tail.md` |
 | [AOA-SM-D-0062 Catch-Up Prefers Bounded Index Drip](../AOA-SM-D-0062-catchup-prefers-bounded-index-drip.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0062-catchup-prefers-bounded-index-drip.md` |
 | [AOA-SM-D-0063 Bounded Freshness Defers Global Derivatives](../AOA-SM-D-0063-bounded-freshness-defers-global-derivatives.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0063-bounded-freshness-defers-global-derivatives.md` |
+| [AOA-SM-D-0064 Freshness Drip Admits Only Light Session Work](../AOA-SM-D-0064-freshness-drip-admits-only-light-session-work.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0064-freshness-drip-admits-only-light-session-work.md` |
 
 ## maintenance queue
 
@@ -627,6 +628,7 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0062 Catch-Up Prefers Bounded Index Drip](../AOA-SM-D-0062-catchup-prefers-bounded-index-drip.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0062-catchup-prefers-bounded-index-drip.md` |
+| [AOA-SM-D-0064 Freshness Drip Admits Only Light Session Work](../AOA-SM-D-0064-freshness-drip-admits-only-light-session-work.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0064-freshness-drip-admits-only-light-session-work.md` |
 
 ## route readiness
 
@@ -663,6 +665,7 @@
 | [AOA-SM-D-0061 Freshness Profiles Do Not Own Heavy Tail](../AOA-SM-D-0061-freshness-profiles-do-not-own-heavy-tail.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0061-freshness-profiles-do-not-own-heavy-tail.md` |
 | [AOA-SM-D-0062 Catch-Up Prefers Bounded Index Drip](../AOA-SM-D-0062-catchup-prefers-bounded-index-drip.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0062-catchup-prefers-bounded-index-drip.md` |
 | [AOA-SM-D-0063 Bounded Freshness Defers Global Derivatives](../AOA-SM-D-0063-bounded-freshness-defers-global-derivatives.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0063-bounded-freshness-defers-global-derivatives.md` |
+| [AOA-SM-D-0064 Freshness Drip Admits Only Light Session Work](../AOA-SM-D-0064-freshness-drip-admits-only-light-session-work.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0064-freshness-drip-admits-only-light-session-work.md` |
 
 ## search catalog
 
