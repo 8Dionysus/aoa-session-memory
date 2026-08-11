@@ -85965,6 +85965,17 @@ def test_session_projection_checkpoint_resumes_completed_segments_without_raw_mu
     assert calls == [0]
     assert module.sha256_file(raw_path) == raw_sha_before
     assert Path(interrupted["work_dir"]).is_dir()
+    work_checkpoint = module.read_json(
+        module.session_projection_work_checkpoint_path(
+            Path(interrupted["work_dir"])
+        ),
+        {},
+    )
+    assert work_checkpoint["raw_blocks"]["checkpoint_mode"] == (
+        "staged_index_component_receipts_v1"
+    )
+    assert "payload" not in work_checkpoint["raw_blocks"]
+    assert len(work_checkpoint["segments"]) == 1
 
     fake_clock[0] = 0.0
     calls.clear()
@@ -87136,13 +87147,32 @@ def test_captured_append_extends_classification_plan_from_attested_tail(
     )
 
     checkpoint_phases: list[str] = []
+    checkpoint_segment_counts: list[int] = []
     original_checkpoint_observer = (
         module.session_projection_checkpoint_observer
     )
+
+    def observe_checkpoint(*, phase: str, work_dir: Path) -> None:
+        checkpoint_phases.append(phase)
+        if phase == "segments_in_progress":
+            state = module.read_json(
+                module.session_projection_work_checkpoint_path(
+                    work_dir
+                ),
+                {},
+            )
+            checkpoint_segment_counts.append(
+                len(
+                    state.get("segments", {})
+                    if isinstance(state.get("segments"), dict)
+                    else {}
+                )
+            )
+
     monkeypatch.setattr(
         module,
         "session_projection_checkpoint_observer",
-        lambda *, phase, work_dir: checkpoint_phases.append(phase),
+        observe_checkpoint,
     )
     grown = module.reindex_session_from_raw(
         aoa_root, record, segment_workers=1
@@ -87234,6 +87264,9 @@ def test_captured_append_extends_classification_plan_from_attested_tail(
     ] == 0
     assert checkpoint_phases.count("segments_in_progress") <= (
         grown["segment_execution"]["rebuilt_segment_count"] + 1
+    )
+    assert max(checkpoint_segment_counts, default=0) <= (
+        grown["segment_execution"]["rebuilt_segment_count"]
     )
     snapshot_mode = grown["raw_snapshot_execution"]["mode"]
     assert snapshot_mode == (

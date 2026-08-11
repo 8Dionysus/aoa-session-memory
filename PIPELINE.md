@@ -287,6 +287,13 @@ compatible work and the published last-good generation. Source growth changes
 the umbrella raw identity, while a stage producer or policy change invalidates
 only that stage and its declared downstream checkpoints.
 
+The umbrella checkpoint carries control state only. Its classification entry
+references the compact cache index, its raw-block entry references the staged
+block index and small receipts, and its segment map contains only newly built
+tail components. Stable published segments are deliberately omitted and can be
+relinked again after interruption, preventing every later phase checkpoint from
+rewriting the historical component maps.
+
 The work identity follows the core producer DAG rather than a circular global
 source epoch: classification precedes segment and task-episode production, and
 the session index follows both. During the declared 0.7.0 transition, a cache

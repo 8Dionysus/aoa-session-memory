@@ -39772,6 +39772,104 @@ def sensitive_literal_candidate_ranges_task(
     }
 
 
+def compact_raw_blocks_work_checkpoint(
+    *,
+    stage_dir: Path,
+    raw_blocks: dict[str, Any],
+    execution: dict[str, Any],
+) -> dict[str, Any]:
+    index_path = stage_dir / "raw" / RAW_BLOCK_INDEX_JSON
+    compaction_path = stage_dir / "raw" / RAW_COMPACTION_EVENTS_JSONL
+    return {
+        "checkpoint_mode": "staged_index_component_receipts_v1",
+        "block_count": len(
+            raw_blocks.get("blocks", [])
+            if isinstance(raw_blocks.get("blocks"), list)
+            else []
+        ),
+        "index_receipt": session_projection_artifact_receipt(index_path),
+        "compaction_receipt": (
+            session_projection_artifact_receipt(compaction_path)
+            if compaction_path.is_file()
+            else {}
+        ),
+        "execution": dict(execution),
+    }
+
+
+def raw_blocks_from_compact_work_checkpoint(
+    *,
+    stage_dir: Path,
+    session_dir: Path,
+    checkpoint: Any,
+    publish_identity: dict[str, Any],
+) -> dict[str, Any] | None:
+    if (
+        not isinstance(checkpoint, dict)
+        or checkpoint.get("checkpoint_mode")
+        != "staged_index_component_receipts_v1"
+    ):
+        return None
+    index_receipt = checkpoint.get("index_receipt")
+    compaction_receipt = checkpoint.get("compaction_receipt")
+    if not session_projection_artifact_receipt_current(index_receipt):
+        return None
+    if compaction_receipt and not (
+        session_projection_artifact_receipt_current(compaction_receipt)
+    ):
+        return None
+    index_path = stage_dir / "raw" / RAW_BLOCK_INDEX_JSON
+    if Path(str(index_receipt.get("rel") or "")) != index_path:
+        return None
+    index = read_json(index_path, {})
+    blocks = (
+        index.get("blocks")
+        if isinstance(index.get("blocks"), list)
+        else []
+    )
+    if (
+        index.get("projection_publish") != publish_identity
+        or len(blocks) != int_value(checkpoint.get("block_count"), -1)
+    ):
+        return None
+    for block in blocks:
+        if not isinstance(block, dict):
+            return None
+        rel = str(block.get("plain_rel") or block.get("rel") or "")
+        artifact_path = stage_dir / rel
+        try:
+            artifact_path.relative_to(stage_dir / "raw" / RAW_BLOCKS_DIR)
+        except ValueError:
+            return None
+        receipt = (
+            block.get("artifact_receipts", {}).get("plain")
+            if isinstance(block.get("artifact_receipts"), dict)
+            and isinstance(
+                block.get("artifact_receipts", {}).get("plain"), dict
+            )
+            else {}
+        )
+        if not artifact_path.is_file():
+            return None
+        stat = artifact_path.stat()
+        if (
+            stat.st_size != int_value(block.get("bytes"), -1)
+            or stat.st_size != int_value(receipt.get("bytes"), -1)
+            or stat.st_mtime_ns
+            != int_value(receipt.get("mtime_ns"), -1)
+            or not str(receipt.get("sha256") or "")
+        ):
+            return None
+    return {
+        "index": str(session_dir / "raw" / RAW_BLOCK_INDEX_JSON),
+        "compaction_events": str(
+            session_dir / "raw" / RAW_COMPACTION_EVENTS_JSONL
+        ),
+        "projection_publish": publish_identity,
+        "blocks": [dict(block) for block in blocks],
+    }
+
+
 def session_projection_build_raw_path(
     *,
     session_dir: Path,
@@ -41301,21 +41399,36 @@ def reindex_session_from_raw(
             if isinstance(work_state.get("raw_blocks"), dict)
             else {}
         )
+        compact_checkpoint_raw_blocks = (
+            raw_blocks_from_compact_work_checkpoint(
+                stage_dir=stage_dir,
+                session_dir=session_dir,
+                checkpoint=raw_blocks_state,
+                publish_identity=publish_identity,
+            )
+        )
         raw_block_artifacts = (
             raw_blocks_state.get("artifacts")
             if isinstance(raw_blocks_state.get("artifacts"), list)
             else []
         )
         raw_blocks_current = bool(
-            raw_blocks_state.get("payload")
-            and raw_block_artifacts
-            and all(
-                session_projection_artifact_receipt_current(item)
-                for item in raw_block_artifacts
+            compact_checkpoint_raw_blocks is not None
+            or (
+                raw_blocks_state.get("payload")
+                and raw_block_artifacts
+                and all(
+                    session_projection_artifact_receipt_current(item)
+                    for item in raw_block_artifacts
+                )
             )
         )
         if raw_blocks_current:
-            raw_blocks = dict(raw_blocks_state["payload"])
+            raw_blocks = (
+                dict(compact_checkpoint_raw_blocks)
+                if compact_checkpoint_raw_blocks is not None
+                else dict(raw_blocks_state["payload"])
+            )
             work_state["raw_block_execution"] = (
                 raw_blocks_state.get("execution", {})
             )
@@ -41393,21 +41506,11 @@ def reindex_session_from_raw(
             raw_block_execution[
                 "attested_prefix_content_bytes_skipped"
             ] = attested_prefix_raw_content_bytes_skipped
-            work_state["raw_blocks"] = {
-                "payload": raw_blocks,
-                "artifacts": [
-                    session_projection_attested_artifact_receipt(
-                        path,
-                        sha256=attested_prefix_raw_sha_by_name[
-                            path.name
-                        ],
-                    )
-                    if path.name in attested_prefix_raw_sha_by_name
-                    else session_projection_artifact_receipt(path)
-                    for path in raw_artifact_paths
-                ],
-                "execution": raw_block_execution,
-            }
+            work_state["raw_blocks"] = compact_raw_blocks_work_checkpoint(
+                stage_dir=stage_dir,
+                raw_blocks=raw_blocks,
+                execution=raw_block_execution,
+            )
             work_state["raw_block_execution"] = (
                 raw_block_execution
             )
@@ -41480,6 +41583,7 @@ def reindex_session_from_raw(
             segment_payload: dict[str, Any],
             *,
             persist_work_state: bool = True,
+            checkpoint_completion: bool = True,
         ) -> None:
             nonlocal immutable_component_link_count
             nonlocal immutable_component_content_bytes_skipped
@@ -41526,10 +41630,11 @@ def reindex_session_from_raw(
                     session_projection_artifact_receipt(md_path),
                     session_projection_artifact_receipt(index_path),
                 ]
-            completed_segments[segment_id] = {
-                "payload": segment_payload,
-                "artifacts": artifacts,
-            }
+            if checkpoint_completion:
+                completed_segments[segment_id] = {
+                    "payload": segment_payload,
+                    "artifacts": artifacts,
+                }
             segment_payload_by_id[segment_id] = segment_payload
             if persist_work_state:
                 save_work_state("segments_in_progress")
@@ -41587,6 +41692,7 @@ def reindex_session_from_raw(
                     role,
                     reused_payload,
                     persist_work_state=False,
+                    checkpoint_completion=False,
                 )
                 reused_segment_checkpoint_dirty = True
                 reused_published_segment_count += 1
@@ -41834,28 +41940,6 @@ def reindex_session_from_raw(
             raw_block_index["projection_publish"] = publish_identity
             raw_block_index["blocks"] = raw_blocks.get("blocks", [])
             write_json(raw_block_index_path, raw_block_index)
-            raw_blocks_work_state = (
-                work_state.get("raw_blocks")
-                if isinstance(work_state.get("raw_blocks"), dict)
-                else {}
-            )
-            raw_blocks_work_state["payload"] = raw_blocks
-            raw_artifacts = (
-                raw_blocks_work_state.get("artifacts")
-                if isinstance(raw_blocks_work_state.get("artifacts"), list)
-                else []
-            )
-            raw_blocks_work_state["artifacts"] = [
-                session_projection_artifact_receipt(
-                    raw_block_index_path
-                )
-                if Path(str(item.get("rel") or ""))
-                == raw_block_index_path
-                else item
-                for item in raw_artifacts
-                if isinstance(item, dict)
-            ]
-            work_state["raw_blocks"] = raw_blocks_work_state
             raw_block_execution = work_state.get(
                 "raw_block_execution", {}
             )
@@ -41866,6 +41950,15 @@ def reindex_session_from_raw(
                 raw_block_execution[
                     "segment_summary_backfill_count"
                 ] = raw_block_token_backfill_count
+            work_state["raw_blocks"] = compact_raw_blocks_work_checkpoint(
+                stage_dir=stage_dir,
+                raw_blocks=raw_blocks,
+                execution=(
+                    raw_block_execution
+                    if isinstance(raw_block_execution, dict)
+                    else {}
+                ),
+            )
             save_work_state(
                 "raw_block_token_accounting_from_segments_complete"
             )

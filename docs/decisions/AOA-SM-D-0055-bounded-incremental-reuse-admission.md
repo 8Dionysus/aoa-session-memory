@@ -61,6 +61,15 @@ remain mandatory. Any missing or inconsistent manifest field falls
 back to full shard hashing and decoding. Deep audit continues to rehash every
 artifact independently.
 
+The umbrella checkpoint also excludes the stable published segment prefix and
+the complete raw-block payload/receipt map. Stable segment files are already
+owned by their immutable published components and can be relinked again after a
+crash; only newly built tail segments remain in the work checkpoint. Raw-block
+resume is owned by the staged block index plus small index/compaction receipts;
+the loader validates its exact publish identity and every referenced block's
+size/mtime/content-digest receipt before reuse. Drift falls back to deterministic
+raw-block reconstruction.
+
 ## Options Considered
 
 - Rehash and decode every historical artifact on every append. Rejected because
@@ -93,6 +102,8 @@ remain unchanged.
 - Classification-index publication size is independent of historical summary
   payload volume; hot aggregate reads are proportional to the appended tail.
 - Current task-episode shards avoid historical content reads on the fast path.
+- Umbrella checkpoint writes carry only delta segment completions and compact
+  raw-block index receipts rather than stable-prefix payload maps.
 - Receipt drift fails closed to the existing deep-read path, and scheduled deep
   audit remains the independent corruption detector.
 

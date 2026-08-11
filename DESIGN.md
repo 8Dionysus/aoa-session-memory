@@ -561,6 +561,13 @@ dependency recheck, atomic publish, registry update, and dirty propagation use
 the global writer boundary. Last-good remains the reader generation until that
 boundary succeeds.
 
+The umbrella checkpoint is a control receipt, not a second projection payload.
+Classification state is referenced through its compact cache index; raw-block
+state through the staged block index and its receipts; stable published segments
+are omitted and may be relinked again after interruption. Only newly completed
+tail segments remain inline for bounded resume, so phase checkpoint writes do
+not duplicate stable historical component maps.
+
 Segment input digests bind the bounded raw event range, role, raw-block content,
 and generation policies. An unchanged segment may be reused across growth of a
 live session; the changed tail and new segments are rebuilt. Deterministic
