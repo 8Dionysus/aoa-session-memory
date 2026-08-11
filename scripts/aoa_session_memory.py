@@ -14830,6 +14830,83 @@ def read_gzip_json(path: Path) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def event_classification_cache_record_summary(
+    *,
+    cache_root: Path,
+    block: dict[str, Any],
+    record: Any,
+) -> dict[str, Any]:
+    """Load one immutable block summary omitted from the compact index."""
+    if not isinstance(record, dict) or record.get("block") != block:
+        raise ValueError("classification_cache_summary_record_mismatch")
+    artifact_path = cache_root / str(record.get("artifact") or "")
+    artifact = read_gzip_json(artifact_path)
+    summary = (
+        artifact.get("summary")
+        if isinstance(artifact.get("summary"), dict)
+        else {}
+    )
+    line_range = (
+        summary.get("line_range")
+        if isinstance(summary.get("line_range"), dict)
+        else {}
+    )
+    if (
+        artifact.get("block") != block
+        or int_value(summary.get("schema_version")) != 1
+        or int_value(summary.get("event_count"))
+        != int_value(block.get("line_count"))
+        or int_value(line_range.get("from_line"))
+        != int_value(block.get("line_start"))
+        or int_value(line_range.get("to_line"))
+        != int_value(block.get("line_end"))
+    ):
+        raise ValueError(
+            "classification_cache_summary_missing_or_incompatible"
+        )
+    return dict(summary)
+
+
+def published_session_event_summary(
+    index: Any,
+    *,
+    prefix_line_count: int,
+) -> dict[str, Any] | None:
+    """Form the mergeable aggregate owned by an exact published prefix."""
+    scalar_keys = (
+        "event_counts",
+        "family_counts",
+        "phase_counts",
+        "actor_counts",
+        "outcome_counts",
+        "conversation_act_counts",
+        "session_act_counts",
+        "agent_event_counts",
+    )
+    if (
+        not isinstance(index, dict)
+        or prefix_line_count <= 0
+        or int_value(index.get("event_count")) != prefix_line_count
+        or any(not isinstance(index.get(key), dict) for key in scalar_keys)
+        or not isinstance(index.get("route_signal_counts"), dict)
+    ):
+        return None
+    return {
+        "schema_version": 1,
+        "event_count": prefix_line_count,
+        "line_range": {
+            "from_line": 1,
+            "to_line": prefix_line_count,
+        },
+        **{key: dict(index[key]) for key in scalar_keys},
+        "route_signal_counts": dict(index["route_signal_counts"]),
+        "raw_text_persisted": False,
+        "truth_status": (
+            "exact_published_session_aggregate_prefix_not_raw_authority"
+        ),
+    }
+
+
 def sanitize_event_classification_cache_artifact(
     *,
     artifact_path: Path,
@@ -22189,7 +22266,15 @@ def deep_audit_session_projection_artifacts(
             }
             if str(cache_index.get("records_root_sha256") or "") != (
                 event_classification_cache_records_root_sha256(
-                    normalized_records
+                    normalized_records,
+                    include_summaries=not bool(
+                        cache_index.get("summary_storage_mode")
+                        == "block_artifact_only_with_published_aggregate_v1"
+                    ),
+                    include_privacy_scan=bool(
+                        cache_index.get("records_root_mode")
+                        == "artifact_identity_plus_privacy_marker_v1"
+                    ),
                 )
             ):
                 diagnostics.append(
@@ -25052,6 +25137,14 @@ def write_session_index_impl(
         "classification_block_summary_merge_v1"
         if aggregate_mode
         else "full_event_reduction_v1"
+    )
+    execution_metrics["event_aggregate_source_mode"] = str(
+        aggregate.get("aggregation_mode")
+        or (
+            "classification_block_summary_merge_v1"
+            if aggregate_mode
+            else "full_event_reduction_v1"
+        )
     )
     phase_started = time.monotonic()
     task_episode_segments = (
@@ -28156,7 +28249,19 @@ def validate_staged_session_projection(
                     str(key): dict(value)
                     for key, value in classification_records.items()
                     if isinstance(value, dict)
-                }
+                },
+                include_summaries=not bool(
+                    classification_cache_index.get(
+                        "summary_storage_mode"
+                    )
+                    == "block_artifact_only_with_published_aggregate_v1"
+                ),
+                include_privacy_scan=bool(
+                    classification_cache_index.get(
+                        "records_root_mode"
+                    )
+                    == "artifact_identity_plus_privacy_marker_v1"
+                ),
             )
         )
         for cache_key, classification_record in (
@@ -28178,6 +28283,12 @@ def validate_staged_session_projection(
                 record=classification_record,
                 block=block,
                 verify_content=not metadata_reuse_admitted,
+                require_summary=not bool(
+                    classification_cache_index.get(
+                        "summary_storage_mode"
+                    )
+                    == "block_artifact_only_with_published_aggregate_v1"
+                ),
             ):
                 diagnostics.append(
                     "classification_cache_artifact_invalid:"
@@ -39230,6 +39341,7 @@ def event_classification_cache_record_current(
     record: Any,
     block: dict[str, Any],
     verify_content: bool = True,
+    require_summary: bool = True,
 ) -> bool:
     if (
         not isinstance(record, dict)
@@ -39252,7 +39364,10 @@ def event_classification_cache_record_current(
                 or int_value(record.get("ctime_ns"), -1)
                 == stat.st_ctime_ns
             )
-            and event_classification_cache_record_has_summary(record)
+            and (
+                not require_summary
+                or event_classification_cache_record_has_summary(record)
+            )
         )
     return sha256_file_exact(artifact) == str(
         record.get("sha256") or ""
@@ -39269,6 +39384,9 @@ def event_classification_cache_record_has_summary(record: Any) -> bool:
 
 def event_classification_cache_records_root_sha256(
     records: dict[str, dict[str, Any]],
+    *,
+    include_summaries: bool = True,
+    include_privacy_scan: bool = False,
 ) -> str:
     return hashlib.sha256(
         json.dumps(
@@ -39278,7 +39396,20 @@ def event_classification_cache_records_root_sha256(
                     "artifact": records[key].get("artifact"),
                     "bytes": records[key].get("bytes"),
                     "sha256": records[key].get("sha256"),
-                    "summary": records[key].get("summary"),
+                    **(
+                        {"summary": records[key].get("summary")}
+                        if include_summaries
+                        else {}
+                    ),
+                    **(
+                        {
+                            "privacy_scan": records[key].get(
+                                "privacy_scan"
+                            )
+                        }
+                        if include_privacy_scan
+                        else {}
+                    ),
                 }
                 for key in sorted(records)
             },
@@ -39295,8 +39426,20 @@ def write_event_classification_cache_index(
     generation_identity: dict[str, Any],
     records: dict[str, dict[str, Any]],
 ) -> None:
+    compact_records = {
+        key: {
+            record_key: record_value
+            for record_key, record_value in records[key].items()
+            if record_key != "summary"
+        }
+        for key in sorted(records)
+    }
     records_root_sha256 = (
-        event_classification_cache_records_root_sha256(records)
+        event_classification_cache_records_root_sha256(
+            compact_records,
+            include_summaries=False,
+            include_privacy_scan=True,
+        )
     )
     write_json(
         event_classification_cache_index_path(cache_root),
@@ -39309,12 +39452,18 @@ def write_event_classification_cache_index(
             "generation_identity": generation_identity,
             "block_count": len(records),
             "records_root_sha256": records_root_sha256,
+            "records_root_mode": (
+                "artifact_identity_plus_privacy_marker_v1"
+            ),
+            "summary_storage_mode": (
+                "block_artifact_only_with_published_aggregate_v1"
+            ),
             "artifact_admission": (
                 "exact_record_root_plus_size_mtime_ctime_with_deep_audit_v1"
             ),
             "blocks": {
-                key: records[key]
-                for key in sorted(records)
+                key: compact_records[key]
+                for key in sorted(compact_records)
             },
             "privacy": {
                 "raw_persisted": False,
@@ -39392,6 +39541,14 @@ def event_classification_cache_candidate_indexes(
             if isinstance(index.get("blocks"), dict)
             else {}
         )
+        summaries_compact = bool(
+            index.get("summary_storage_mode")
+            == "block_artifact_only_with_published_aggregate_v1"
+        )
+        privacy_scan_rooted = bool(
+            index.get("records_root_mode")
+            == "artifact_identity_plus_privacy_marker_v1"
+        )
         records_root_current = bool(
             str(index.get("records_root_sha256") or "")
             == event_classification_cache_records_root_sha256(
@@ -39399,7 +39556,9 @@ def event_classification_cache_candidate_indexes(
                     str(key): dict(value)
                     for key, value in records.items()
                     if isinstance(value, dict)
-                }
+                },
+                include_summaries=not summaries_compact,
+                include_privacy_scan=privacy_scan_rooted,
             )
         )
         records_metadata_current = bool(
@@ -39414,6 +39573,7 @@ def event_classification_cache_candidate_indexes(
                         else {}
                     ),
                     verify_content=False,
+                    require_summary=not summaries_compact,
                 )
                 for record in records.values()
             )
@@ -39427,6 +39587,7 @@ def event_classification_cache_candidate_indexes(
                     records_metadata_current
                 ),
                 "generation_admission": generation_admission,
+                "summaries_compact": summaries_compact,
             }
         )
         if (
@@ -39475,6 +39636,9 @@ def reusable_event_classification_cache_record(
             record=record,
             block=block,
             verify_content=not records_root_current,
+            require_summary=not bool(
+                candidate.get("summaries_compact")
+            ),
         ):
             return cache_root, {
                 **dict(record),
@@ -40385,8 +40549,7 @@ def reindex_session_from_raw(
                 record=prior_record,
                 block=block,
                 verify_content=False,
-            ) and event_classification_cache_record_has_summary(
-                prior_record
+                require_summary=False,
             ):
                 reusable_block_count += 1
                 continue
@@ -40421,11 +40584,8 @@ def reindex_session_from_raw(
                 source=source_artifact,
                 target=target_artifact,
             )
-            if (
-                not bool(generation_admission.get("requires_restamp"))
-                and event_classification_cache_record_has_summary(
-                    source_record
-                )
+            if not bool(
+                generation_admission.get("requires_restamp")
             ):
                 target_stat = target_artifact.stat()
                 completed_classification_blocks[cache_key] = {
@@ -40594,6 +40754,7 @@ def reindex_session_from_raw(
                     ),
                     block=block,
                     verify_content=False,
+                    require_summary=False,
                 ):
                     continue
                 classify_raw_event_block_task(
@@ -41865,16 +42026,99 @@ def reindex_session_from_raw(
             ),
         )
         session_index_execution: dict[str, Any] = {}
-        event_aggregate_summary = (
-            merge_event_classification_block_summaries(
-                completed_classification_blocks[
-                    str(block.get("cache_key") or "")
-                ]
-                for block in scan_blocks
+        event_aggregate_summary: dict[str, Any] | None = None
+        if streaming_incremental_mode:
+            prefix_line_count = int_value(
+                raw_scan.get("prefix_line_count_reused")
             )
-            if streaming_incremental_mode
-            else None
-        )
+            prefix_summary = published_session_event_summary(
+                previous_index_for_incremental,
+                prefix_line_count=prefix_line_count,
+            )
+            tail_blocks = [
+                block
+                for block in scan_blocks
+                if int_value(block.get("line_start"))
+                > prefix_line_count
+            ]
+
+            def summary_record_for_block(
+                block: dict[str, Any],
+            ) -> dict[str, Any]:
+                cache_key = str(block.get("cache_key") or "")
+                record = completed_classification_blocks.get(
+                    cache_key
+                )
+                summary = (
+                    record.get("summary")
+                    if isinstance(record, dict)
+                    and isinstance(record.get("summary"), dict)
+                    else None
+                )
+                if summary is None:
+                    summary = event_classification_cache_record_summary(
+                        cache_root=classification_cache_root,
+                        block=block,
+                        record=record,
+                    )
+                return {"summary": summary}
+
+            exact_tail = bool(
+                prefix_summary is not None
+                and tail_blocks
+                and int_value(tail_blocks[0].get("line_start"))
+                == prefix_line_count + 1
+                and int_value(tail_blocks[-1].get("line_end"))
+                == total_event_count
+                and all(
+                    int_value(current.get("line_start"))
+                    == int_value(previous.get("line_end")) + 1
+                    for previous, current in zip(
+                        tail_blocks,
+                        tail_blocks[1:],
+                        strict=False,
+                    )
+                )
+                and sum(
+                    int_value(block.get("line_count"))
+                    for block in tail_blocks
+                )
+                == total_event_count - prefix_line_count
+            )
+            if exact_tail:
+                event_aggregate_summary = (
+                    merge_event_classification_block_summaries(
+                        [
+                            {"summary": prefix_summary},
+                            *[
+                                summary_record_for_block(block)
+                                for block in tail_blocks
+                            ],
+                        ]
+                    )
+                )
+                event_aggregate_summary["source_block_count"] = len(
+                    scan_blocks
+                )
+                event_aggregate_summary["aggregation_mode"] = (
+                    "published_prefix_plus_classification_tail_v1"
+                )
+            else:
+                event_aggregate_summary = (
+                    merge_event_classification_block_summaries(
+                        summary_record_for_block(block)
+                        for block in scan_blocks
+                    )
+                )
+                event_aggregate_summary["aggregation_mode"] = (
+                    "full_classification_summary_fallback_v1"
+                )
+            if int_value(event_aggregate_summary.get("event_count")) != (
+                total_event_count
+            ):
+                raise ValueError(
+                    "classification_aggregate_event_count_mismatch"
+                )
         session_index_result = write_session_index(
             stage_dir,
             manifest,

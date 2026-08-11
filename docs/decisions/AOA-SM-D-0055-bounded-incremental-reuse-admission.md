@@ -38,11 +38,18 @@ a batch and the work checkpoint is persisted once per reuse batch; newly built
 worker waves retain their existing crash checkpoints.
 
 The generation-bound classification cache index is the sole resumable owner of
-completed block records and their mergeable summaries. The umbrella work
+completed block identities, artifact receipts, and privacy markers. Mergeable
+summaries remain inside their immutable block artifacts; the compact index must
+not duplicate them. Its aggregate root binds each artifact identity and privacy
+structural marker, so a marker cannot be altered independently of admission.
+The umbrella work
 checkpoint stores only its ref, generation, and completed count; it must not
 duplicate the complete classification map at every phase. Newly classified
 blocks publish that index once per bounded worker wave rather than once per
-individual completion.
+individual completion. On an exact append, the session aggregate is the
+previously published aggregate plus summaries loaded only from the new
+classification tail. An incompatible or non-contiguous prefix fails over to
+explicit full summary hydration.
 
 Task-episode shard reuse first admits the published component manifest. A shard
 may skip content I/O only when its content-addressed filename, component key,
@@ -83,6 +90,8 @@ remain unchanged.
   count; newly generated work remains checkpointed by worker wave.
 - Umbrella checkpoint size is independent of historical classification-summary
   volume; resume rehydrates the exact generation-bound cache index.
+- Classification-index publication size is independent of historical summary
+  payload volume; hot aggregate reads are proportional to the appended tail.
 - Current task-episode shards avoid historical content reads on the fast path.
 - Receipt drift fails closed to the existing deep-read path, and scheduled deep
   audit remains the independent corruption detector.
@@ -103,9 +112,9 @@ decisions and proof.
 
 ## Follow-Up Route
 
-Shard or aggregate the classification summary read model so an append no longer
-rewrites the complete summary map, then rerun the actual 430 MB no-swap growth
-benchmark.
+Rerun the actual 430 MB no-swap growth benchmark and compare classification
+index bytes, historical input reads, and aggregate semantic digest with the
+pre-compaction receipt.
 
 ## Verification
 
@@ -113,4 +122,7 @@ Focused tests prove one records-root computation across many lookups, bounded
 `segments_in_progress` checkpoints across captured growth, crash/resume parity,
 privacy-marker reuse from a root-valid current work view, classification resume
 without bulk records or literal values in the umbrella checkpoint, and
-task-shard reuse without reading or hashing published shard content.
+task-shard reuse without reading or hashing published shard content. Compact
+index tests additionally prove that summaries are absent from index records,
+exact-prefix aggregation reads only tail artifacts, semantic output matches a
+full replay, and deep audit still hashes block contents independently.

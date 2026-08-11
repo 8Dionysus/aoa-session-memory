@@ -86940,6 +86940,16 @@ def test_classification_candidate_index_root_is_validated_once_per_build(
         generation_identity=generation_identity,
         records=records,
     )
+    compact_index = module.read_json(
+        module.event_classification_cache_index_path(cache_root), {}
+    )
+    assert compact_index["summary_storage_mode"] == (
+        "block_artifact_only_with_published_aggregate_v1"
+    )
+    assert all(
+        "summary" not in record
+        for record in compact_index["blocks"].values()
+    )
     prior_work_dir = tmp_path / ".session.projection-work-prior"
     prior_work_cache = module.event_classification_cache_root(
         prior_work_dir
@@ -86951,10 +86961,13 @@ def test_classification_candidate_index_root_is_validated_once_per_build(
         module.event_classification_cache_records_root_sha256
     )
 
-    def counted_root(candidate_records: dict[str, Any]) -> str:
+    def counted_root(
+        candidate_records: dict[str, Any],
+        **kwargs: Any,
+    ) -> str:
         nonlocal root_calls
         root_calls += 1
-        return original_root(candidate_records)
+        return original_root(candidate_records, **kwargs)
 
     monkeypatch.setattr(
         module,
@@ -87191,6 +87204,22 @@ def test_captured_append_extends_classification_plan_from_attested_tail(
     assert grown["session_index_execution"][
         "event_aggregate_mode"
     ] == "classification_block_summary_merge_v1"
+    assert grown["session_index_execution"][
+        "event_aggregate_source_mode"
+    ] == "published_prefix_plus_classification_tail_v1"
+    compact_cache_index = module.read_json(
+        module.event_classification_cache_index_path(
+            published_cache_root
+        ),
+        {},
+    )
+    assert compact_cache_index["summary_storage_mode"] == (
+        "block_artifact_only_with_published_aggregate_v1"
+    )
+    assert all(
+        "summary" not in record
+        for record in compact_cache_index["blocks"].values()
+    )
     assert grown["raw_block_execution"][
         "attested_sealed_reused_block_count"
     ] >= 1

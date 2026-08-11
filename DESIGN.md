@@ -570,9 +570,13 @@ immutable classification-block refs, exact line ranges, bounded reconciliation
 patches, and raw-block refs; they do not receive serialized event slices or
 inherit a parent whole-session event graph. On an admitted append the parent
 hydrates only a bounded replay tail. Historical typed counts and route counts
-come from raw-free classification-block summaries; sealed raw blocks and
-segments cross the transaction by exact prefix attestation. Cold, migration,
-and small-frontier fallbacks remain explicit full reductions. Goal lifecycle
+come from the exact published session aggregate plus raw-free summaries loaded
+only for the appended classification tail. Block summaries live in immutable
+block artifacts; the compact classification index carries identities, receipts,
+and privacy markers without duplicating summary payloads. Sealed raw blocks and
+segments cross the transaction by exact prefix attestation. A non-contiguous or
+incompatible aggregate prefix uses explicit full summary hydration. Cold,
+migration, and small-frontier fallbacks remain explicit full reductions. Goal lifecycle
 state carries line ranges, so an open lifecycle crossing the append boundary
 expands only the bounded replay tail and merges with stable prior lifecycles.
 Token-only accounting drift is a projection metadata transition, not
@@ -809,7 +813,9 @@ are content-addressed, checkpointed before segment work, and rebuilt only when
 their raw digest or classifier/privacy generation changes. The persisted cache
 excludes raw text, parsed payloads, and exact sensitive literals; deterministic
 artifacts also carry mergeable raw-free typed counts, route counts, compaction
-markers, and correlation frontier metadata. Spawned segment workers are
+markers, and correlation frontier metadata. Those summaries remain block-local;
+the cache index is a compact admission map rather than a growing summary read
+model. Spawned segment workers are
 bounded block/range consumers. After exact cache generation, block identity,
 artifact receipt, and payload shape are admitted, a segment worker may reuse
 the cache's completed privacy projection for classification metadata. Values

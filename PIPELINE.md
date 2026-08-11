@@ -267,9 +267,13 @@ Each completed block is checkpointed, so a cooperative deadline can preserve
 progress before segment generation and a growing session can reuse its sealed
 prefix. The cache stores derived classification fields and mergeable raw-free
 block summaries only: raw text, parsed payloads, and exact sensitive literals
-remain excluded. On an ordinary append, rehydration materializes only a bounded
-raw/classification tail, merges historical block summaries in canonical order,
-and reuses attested sealed raw blocks and segment topology. Cold migration or
+remain excluded. The compact cache index stores block identities, receipts, and
+privacy markers; summaries stay in immutable block artifacts rather than being
+duplicated into the growing index. On an ordinary append, rehydration
+materializes only a bounded raw/classification tail and merges its block
+summaries with the exact previously published session aggregate. A broken or
+incompatible prefix explicitly hydrates all block summaries. The hot path also
+reuses attested sealed raw blocks and segment topology. Cold migration or
 small-session compatibility selects the explicit full-replay fallback. A goal
 signal expands the bounded replay frontier to the start of the crossing open
 lifecycle, then merges rebuilt tail lifecycles with stable prior ranges.
