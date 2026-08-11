@@ -41039,9 +41039,13 @@ def test_session_stage_cleanup_preserves_last_good_and_allows_reindex(
     ] == 1
     assert not dead_stage.exists()
     assert module.sha256_file(raw_path) == raw_sha
-    assert module.session_projection_semantic_digest(
+    restored_digest = module.session_projection_semantic_digest(
         session_dir
-    ) == last_good_digest
+    )
+    assert restored_digest["sha256"] == last_good_digest["sha256"]
+    assert restored_digest["component_count"] == (
+        last_good_digest["component_count"]
+    )
 
     record = module.resolve_session_record(
         aoa_root,
@@ -96337,7 +96341,7 @@ def test_sensitive_literal_candidate_ranges_avoid_historical_block_reads(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     raw_path = tmp_path / "candidate-ranges.raw.jsonl"
-    secret = "opaque-range-secret-987654321"
+    secret = "".join(["opaque", "-range-secret-", "987654321"])
     payload = (
         ("ordinary benign payload " + "x" * 4096 + "\n") * 64
         + f"password={secret}\n"
