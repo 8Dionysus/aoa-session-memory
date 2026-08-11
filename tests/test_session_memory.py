@@ -70891,22 +70891,14 @@ def test_core_generation_dag_is_stage_scoped_and_acyclic(
 def test_projection_predecessor_admission_is_exact_and_restamp_only() -> None:
     projection = "raw_event_classification_cache"
     expected = module.event_classification_generation_identity()
-    predecessor = next(
-        iter(
-            module.DECLARED_PROJECTION_PREDECESSOR_GENERATION_IDS[
-                projection
-            ]
-        )
+    predecessor = (
+        "bbe6dcc2fd98e1db25ea866eafbf79b242b0caf06ffbc05274f0f2c0ccfa7644"
     )
     predecessor_identity = {
         "schema_version": module.EVENT_CLASSIFICATION_CACHE_SCHEMA_VERSION,
         "projection": projection,
-        "segment_index_generation_id": next(
-            iter(
-                module.DECLARED_PROJECTION_PREDECESSOR_GENERATION_IDS[
-                    "segment_index"
-                ]
-            )
+        "segment_index_generation_id": (
+            "0b23900190fd835ee724c548900dc5984bc0aa1f03c1cbcd395a4bf09c18a6d5"
         ),
         "derived_text_privacy_policy_version": (
             module.DERIVED_TEXT_PRIVACY_POLICY_VERSION
@@ -70953,6 +70945,53 @@ def test_projection_predecessor_admission_is_exact_and_restamp_only() -> None:
     assert forged_current["diagnostics"] == [
         "generation_identity_payload_mismatch"
     ]
+
+
+def test_prior_broad_classification_contract_is_exact_predecessor() -> None:
+    stored = {
+        "schema_version": 1,
+        "projection": "raw_event_classification_cache",
+        "generation_dag_version": 2,
+        "derived_text_privacy_policy_version": 1,
+        "derived_text_redaction_policy_version": 5,
+        "normalization": (
+            "content_addressed_line_blocks_without_raw_or_parsed_payload_v1"
+        ),
+        "dependency_generations": {},
+        "producer": "aoa_session_memory.py",
+        "producer_identity_mode": (
+            "projection_source_contract_ranges_v1"
+        ),
+        "producer_sha256": (
+            "ee9a714dd7af97699c59df61be06e3cd4d08b07721d3713e53802cc001f66dcf"
+        ),
+        "producer_contract_version": 1,
+        "producer_contract_status": "current",
+        "producer_contract_chunks": [
+            {
+                "ordinal": 0,
+                "start_anchor": "def command_classifier(",
+                "end_anchor": "def event_msg_type(",
+                "byte_count": 140067,
+                "sha256": (
+                    "757def05695e202e7ded46c7237158c247b98c0ac26d354aaee8d10d5ce96f80"
+                ),
+            }
+        ],
+        "generation_id": (
+            "511c2bb32d50f1f499cadfca390e3acf9852b56dee0d3efc99fd60ec6e53b67f"
+        ),
+    }
+
+    admission = module.projection_generation_admission(
+        projection="raw_event_classification_cache",
+        stored_identity=stored,
+        expected_identity=module.event_classification_generation_identity(),
+    )
+
+    assert admission["status"] == "declared_predecessor"
+    assert admission["compatible"] is True
+    assert admission["requires_restamp"] is True
 
 
 def test_predecessor_migration_receipt_is_exact_and_content_addressed() -> None:
@@ -71039,22 +71078,14 @@ def test_classification_predecessor_cache_is_restamped_without_payload_change(
         "cache_key": "block-one",
         "line_count": 1,
     }
-    predecessor = next(
-        iter(
-            module.DECLARED_PROJECTION_PREDECESSOR_GENERATION_IDS[
-                "raw_event_classification_cache"
-            ]
-        )
+    predecessor = (
+        "bbe6dcc2fd98e1db25ea866eafbf79b242b0caf06ffbc05274f0f2c0ccfa7644"
     )
     predecessor_identity = {
         "schema_version": module.EVENT_CLASSIFICATION_CACHE_SCHEMA_VERSION,
         "projection": "raw_event_classification_cache",
-        "segment_index_generation_id": next(
-            iter(
-                module.DECLARED_PROJECTION_PREDECESSOR_GENERATION_IDS[
-                    "segment_index"
-                ]
-            )
+        "segment_index_generation_id": (
+            "0b23900190fd835ee724c548900dc5984bc0aa1f03c1cbcd395a4bf09c18a6d5"
         ),
         "derived_text_privacy_policy_version": (
             module.DERIVED_TEXT_PRIVACY_POLICY_VERSION
@@ -71223,7 +71254,29 @@ def test_raw_capture_replays_uncommitted_tail_after_ledger_write_crash(
     assert len(epoch["blocks"]) == 1
 
 
-def test_large_raw_capture_defers_continuation_without_historical_append_read(
+def test_native_sha256_exports_portable_aligned_continuation_state() -> None:
+    prefix = (b"native-portable-state" * 65539) + b"tail"
+    suffix = b"append-only-delta"
+    native = module.native_persistable_sha256()
+    if native is None:
+        pytest.skip("optional OpenSSL SHA256_CTX accelerator unavailable")
+
+    native.update(prefix)
+    assert native.hexdigest() == hashlib.sha256(prefix).hexdigest()
+    payload = native.aligned_state_payload()
+    assert payload["pending_hex"] == ""
+    assert payload["total_bytes"] == len(prefix) - (len(prefix) % 64)
+
+    portable = module.PersistableSha256.from_payload(payload)
+    resumed = module.native_persistable_sha256(state=portable)
+    assert resumed is not None
+    resumed.update(prefix[portable.total_bytes :] + suffix)
+    assert resumed.hexdigest() == hashlib.sha256(
+        prefix + suffix
+    ).hexdigest()
+
+
+def test_large_raw_capture_uses_native_portable_continuation_when_available(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -71250,7 +71303,7 @@ def test_large_raw_capture_defers_continuation_without_historical_append_read(
     assert first["raw_digest_status"] == "complete_sha256"
     assert first["raw_sha256"] == hashlib.sha256(initial).hexdigest()
     assert first["sha256_continuation_mode"] == (
-        "native_exact_snapshot_sha256_without_continuation_v1"
+        "native_portable_aligned_sha256_v1"
     )
     with transcript.open("ab") as handle:
         handle.write(appended)
@@ -71265,17 +71318,19 @@ def test_large_raw_capture_defers_continuation_without_historical_append_read(
     )
     current_bytes = len(initial + appended)
     current_sha256 = hashlib.sha256(initial + appended).hexdigest()
-    assert second["raw_digest_status"] == "deferred_to_projection"
-    assert second["raw_sha256"] == ""
-    assert second["sha256_state_bootstrap_bytes_read"] == 0
+    assert second["raw_digest_status"] == "complete_sha256"
+    assert second["raw_sha256"] == current_sha256
+    assert second["sha256_state_bootstrap_bytes_read"] < 64
     assert second["sha256_delta_bytes_hashed"] == len(appended)
     assert second["sha256_continuation_mode"] == (
-        "block_chain_current_exact_sha256_deferred_v1"
+        "native_portable_aligned_sha256_v1"
     )
     ledger = module.read_json(
         module.raw_capture_ledger_path(session_dir), {}
     )
-    assert "full_raw_sha256_state" not in ledger["epochs"][-1]
+    continuation = ledger["epochs"][-1]["full_raw_sha256_state"]
+    assert continuation["pending_hex"] == ""
+    assert continuation["total_bytes"] % 64 == 0
 
     attested = module.attest_raw_capture_projection_digest(
         session_dir=session_dir,
@@ -71315,7 +71370,99 @@ def test_large_raw_capture_defers_continuation_without_historical_append_read(
     assert prefix["matches"] is True
     assert prefix["sha256"] == current_sha256
     assert prefix["source_bytes_read"] == 0
-    assert third["sha256_state_bootstrap_bytes_read"] == 0
+    assert third["sha256_state_bootstrap_bytes_read"] < 64
+    assert third["sha256_delta_bytes_hashed"] == len(final_delta)
+
+
+def test_projection_attestation_migrates_deferred_large_capture_to_portable_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        module,
+        "RAW_CAPTURE_PERSISTABLE_SHA256_MAX_BYTES",
+        1,
+    )
+    native_factory = module.native_persistable_sha256
+    monkeypatch.setattr(
+        module,
+        "native_persistable_sha256",
+        lambda **_kwargs: None,
+    )
+    session_dir = tmp_path / ".aoa" / "sessions" / "deferred-migration"
+    transcript = tmp_path / "deferred-migration.jsonl"
+    initial = (b'{"row":"deferred migration"}\n' * 3)
+    delta = b'{"row":"first delta"}\n'
+    final_delta = b'{"row":"second delta"}\n'
+    transcript.write_bytes(initial)
+
+    first = module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id="deferred-migration",
+        transcript_path=transcript,
+        manifest={},
+        hook_event_name="PostToolUse",
+        now="2026-08-10T00:00:00Z",
+    )
+    with transcript.open("ab") as handle:
+        handle.write(delta)
+    second = module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id="deferred-migration",
+        transcript_path=transcript,
+        manifest={},
+        hook_event_name="PostToolUse",
+        now="2026-08-10T00:01:00Z",
+    )
+    assert first["raw_digest_status"] == "complete_sha256"
+    assert second["raw_digest_status"] == "deferred_to_projection"
+
+    current = initial + delta
+    portable = module.PersistableSha256()
+    portable.update(current)
+    attested = module.attest_raw_capture_projection_digest(
+        session_dir=session_dir,
+        session_id="deferred-migration",
+        capture_path=Path(second["capture_path"]),
+        raw_sha256=hashlib.sha256(current).hexdigest(),
+        raw_bytes=len(current),
+        now="2026-08-10T00:01:30Z",
+        raw_sha256_continuation_state=(
+            portable.aligned_state_payload()
+        ),
+    )
+    assert attested["status"] == "attested"
+    assert attested["continuation_state_added"] is True
+    assert 0 <= attested["source_bytes_read"] < 64
+
+    monkeypatch.setattr(
+        module,
+        "native_persistable_sha256",
+        native_factory,
+    )
+    with transcript.open("ab") as handle:
+        handle.write(final_delta)
+    third = module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id="deferred-migration",
+        transcript_path=transcript,
+        manifest={
+            "archive_status": "indexed",
+            "raw": {
+                "indexing_status": "indexed",
+                "bytes": len(current),
+                "line_count": 4,
+                "sha256": hashlib.sha256(current).hexdigest(),
+            },
+        },
+        hook_event_name="PostToolUse",
+        now="2026-08-10T00:02:00Z",
+    )
+    assert third["raw_digest_status"] == "complete_sha256"
+    assert third["raw_sha256"] == hashlib.sha256(
+        current + final_delta
+    ).hexdigest()
+    assert third["sha256_state_bootstrap_bytes_read"] < 64
     assert third["sha256_delta_bytes_hashed"] == len(final_delta)
 
 
@@ -86552,6 +86699,11 @@ def test_captured_append_extends_classification_plan_from_attested_tail(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        module,
+        "RAW_CAPTURE_PERSISTABLE_SHA256_MAX_BYTES",
+        1,
+    )
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
     transcript = tmp_path / "captured-plan-growth.jsonl"
@@ -86651,10 +86803,22 @@ def test_captured_append_extends_classification_plan_from_attested_tail(
     )
 
     assert capture["appended_bytes"] == len(appended)
-    assert capture["sha256_state_bootstrap_bytes_read"] == 0
+    assert capture["sha256_state_bootstrap_bytes_read"] < 64
+    assert capture["sha256_delta_bytes_hashed"] == len(appended)
+    assert capture["sha256_continuation_mode"] == (
+        "native_portable_aligned_sha256_v1"
+    )
     assert capture["raw_sha256"] == hashlib.sha256(
         transcript.read_bytes()
     ).hexdigest()
+    capture_ledger = module.read_json(
+        module.raw_capture_ledger_path(session_dir), {}
+    )
+    capture_continuation = capture_ledger["epochs"][-1][
+        "full_raw_sha256_state"
+    ]
+    assert capture_continuation["pending_hex"] == ""
+    assert capture_continuation["total_bytes"] % 64 == 0
     assert grown["status"] == "reindexed", grown.get("diagnostics")
     assert grown["raw_scan_execution"]["scan_mode"] == (
         "attested_prefix_plus_captured_tail_v1"
@@ -96103,6 +96267,43 @@ def test_projection_producer_contract_is_bounded_and_change_sensitive() -> None:
     assert (
         graph_before["sha256"]
         != graph_after_materializer_change["sha256"]
+    )
+
+
+def test_capture_handoff_change_does_not_invalidate_classification() -> None:
+    source = SCRIPT.read_bytes()
+    capture_before = module.projection_producer_contract_from_source_bytes(
+        source,
+        "raw_capture",
+    )
+    classification_before = (
+        module.projection_producer_contract_from_source_bytes(
+            source,
+            "raw_event_classification_cache",
+        )
+    )
+    needle = b"openssl_public_ctx_to_portable_aligned_state_v1"
+    assert source.count(needle) == 1
+    changed = source.replace(
+        needle,
+        b"openssl_public_ctx_to_portable_aligned_state_v2",
+        1,
+    )
+    capture_after = module.projection_producer_contract_from_source_bytes(
+        changed,
+        "raw_capture",
+    )
+    classification_after = (
+        module.projection_producer_contract_from_source_bytes(
+            changed,
+            "raw_event_classification_cache",
+        )
+    )
+
+    assert capture_before["sha256"] != capture_after["sha256"]
+    assert (
+        classification_before["sha256"]
+        == classification_after["sha256"]
     )
 
 

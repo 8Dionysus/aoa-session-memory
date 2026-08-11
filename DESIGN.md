@@ -300,18 +300,21 @@ coverage start; it never relabels bounded recent coverage as global recall.
 Stable projection and raw verification retain responsibility for older
 evidence, while later live appends remain proportional to their delta.
 
-For bounded epochs, or epochs that already have a valid continuation payload,
-the ledger carries serializable SHA-256 state and hashes only appended bytes.
-A first large capture instead computes an exact digest with native SHA-256 in
-the required delta pass and omits the expensive portable continuation state.
-Its next append is authoritative through immutable block hashes and the
-predecessor chain; the conventional full-stream digest is visibly deferred
-until stable projection or audit binds an exact digest to that watermark.
-That attestation reads zero source bytes and does not invent continuation
-state. A bounded watch frontier records hook-observed sources. The ordinary
-hot timer stats that frontier and reads explicit outbox readiness; unchanged
-sources cost zero raw bytes and a missed hook is recovered without archive
-rediscovery.
+The ledger carries portable SHA-256 continuation state and hashes only appended
+bytes. Small epochs derive it with the portable implementation. On supported
+Linux hosts, a first large capture uses the public OpenSSL `SHA256_CTX` during
+the already-required delta pass, self-tests its layout and continuation, and
+exports only the block-aligned eight-word state into the same portable schema.
+No OpenSSL object or pending raw bytes are persisted. The next append rereads
+at most the 63-byte alignment gap, then hashes only the new tail. If the native
+accelerator is unavailable or fails its self-test, capture preserves the exact
+block chain and snapshot digest but visibly defers conventional digest
+continuation instead of weakening verification. An already-required stable
+full scan may migrate such an older deferred epoch by binding its exact digest
+and aligned portable state to the identical watermark. A bounded watch frontier
+records hook-observed sources. The ordinary hot timer stats that frontier and
+reads explicit outbox readiness; unchanged sources cost zero raw bytes and a
+missed hook is recovered without archive rediscovery.
 
 Physical topology may evolve, but migrations must preserve stable identity,
 evidence refs, source provenance, rebuildability, and rollback.

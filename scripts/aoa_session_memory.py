@@ -5,6 +5,8 @@ import argparse
 import array
 import ast
 import base64
+import ctypes
+import ctypes.util
 import difflib
 import fcntl
 import gzip
@@ -99,25 +101,51 @@ DECLARED_PROJECTION_PREDECESSOR_GENERATION_IDS: dict[
     # dependency DAG was corrected.  These are a bounded transition allowlist,
     # not schema-level compatibility claims.
     "raw_event_classification_cache": frozenset(
-        {"bbe6dcc2fd98e1db25ea866eafbf79b242b0caf06ffbc05274f0f2c0ccfa7644"}
+        {
+            "bbe6dcc2fd98e1db25ea866eafbf79b242b0caf06ffbc05274f0f2c0ccfa7644",
+            "511c2bb32d50f1f499cadfca390e3acf9852b56dee0d3efc99fd60ec6e53b67f",
+        }
     ),
     "segment_index": frozenset(
-        {"0b23900190fd835ee724c548900dc5984bc0aa1f03c1cbcd395a4bf09c18a6d5"}
+        {
+            "0b23900190fd835ee724c548900dc5984bc0aa1f03c1cbcd395a4bf09c18a6d5",
+            "461859a08daf00413d0e2780b88d413694acb3b827bc7d1f5fe0bb718e90d72a",
+        }
     ),
     "task_episode_source": frozenset(
-        {"496c751411bc10da537166036c0665c7b8518be76d0b5073527a4211e3ee3d7f"}
+        {
+            "496c751411bc10da537166036c0665c7b8518be76d0b5073527a4211e3ee3d7f",
+            "6eeec4c0f1c84c088b9f5458aabe857bc70ea3f21e6b76ebfc32198e4c6cf119",
+        }
     ),
     "session_index": frozenset(
-        {"10decaa465e6cb12cc50839be886d509a74f49f1c0112d1e34b8e3ae098b8842"}
+        {
+            "10decaa465e6cb12cc50839be886d509a74f49f1c0112d1e34b8e3ae098b8842",
+            "0a2b22c8cf143506746c5d93d1d7385fe49d12802dd60e7f97a7fbbaed0ef6bf",
+        }
     ),
 }
 PROJECTION_PRODUCER_SOURCE_RANGES: dict[
     str,
     tuple[tuple[str, str], ...],
 ] = {
+    "raw_capture": (
+        (
+            "def scan_raw_event_classification_blocks(",
+            "def incremental_raw_event_classification_scan(",
+        ),
+        (
+            "def raw_capture_epoch_id(",
+            "def indexed_archive_freshness(",
+        ),
+    ),
     "raw_event_classification_cache": (
         (
             "def command_classifier(",
+            "def event_classification_generation_identity(",
+        ),
+        (
+            "def raw_event_classification_payload(",
             "def event_msg_type(",
         ),
     ),
@@ -14109,6 +14137,21 @@ def event_classification_generation_identity() -> dict[str, Any]:
     )
 
 
+def raw_capture_generation_identity() -> dict[str, Any]:
+    """Bind append capture, its chain, and conventional digest continuation."""
+    return canonical_generation_identity(
+        {
+            "schema_version": RAW_CAPTURE_STATE_SCHEMA_VERSION,
+            "projection": "raw_capture",
+            "ledger_schema_version": RAW_CAPTURE_LEDGER_SCHEMA_VERSION,
+            "continuation_contract": (
+                "optional_native_to_portable_aligned_sha256_v1"
+            ),
+            "dependency_generations": {},
+        }
+    )
+
+
 def scan_raw_event_classification_blocks(
     raw_path: Path,
     *,
@@ -14135,6 +14178,8 @@ def scan_raw_event_classification_blocks(
         ),
     )
     source_sha256 = hashlib.sha256()
+    source_sha256_continuation = native_persistable_sha256()
+    continuation_buffer = bytearray()
     blocks: list[dict[str, Any]] = []
     total_bytes = 0
     line_count = 0
@@ -14181,6 +14226,13 @@ def scan_raw_event_classification_blocks(
     with raw_path.open("rb") as handle:
         for line_no, raw_line in enumerate(handle, start=1):
             source_sha256.update(raw_line)
+            if source_sha256_continuation is not None:
+                continuation_buffer.extend(raw_line)
+                if len(continuation_buffer) >= 1024 * 1024:
+                    source_sha256_continuation.update(
+                        continuation_buffer
+                    )
+                    continuation_buffer.clear()
             block_sha256.update(raw_line)
             line_bytes = len(raw_line)
             total_bytes += line_bytes
@@ -14201,7 +14253,10 @@ def scan_raw_event_classification_blocks(
             ):
                 finish_block()
     finish_block()
-    return {
+    if source_sha256_continuation is not None and continuation_buffer:
+        source_sha256_continuation.update(continuation_buffer)
+        continuation_buffer.clear()
+    result = {
         "schema_version": EVENT_CLASSIFICATION_CACHE_SCHEMA_VERSION,
         "artifact_type": "raw_event_classification_plan",
         "raw_path": str(raw_path),
@@ -14215,6 +14270,18 @@ def scan_raw_event_classification_blocks(
         "block_target_bytes": bounded_target_bytes,
         "blocks": blocks,
     }
+    if source_sha256_continuation is not None:
+        result.update(
+            {
+                "raw_sha256_continuation_mode": (
+                    "openssl_public_ctx_to_portable_aligned_state_v1"
+                ),
+                "raw_sha256_continuation_state": (
+                    source_sha256_continuation.aligned_state_payload()
+                ),
+            }
+        )
+    return result
 
 
 def incremental_raw_event_classification_scan(
@@ -26531,7 +26598,7 @@ def session_projection_stage_work_identities(
 
     capture = identity(
         "capture",
-        producer={"generation_id": "append-capture-v1"},
+        producer=raw_capture_generation_identity(),
         upstream={},
         contracts={
             "ledger_schema": RAW_CAPTURE_LEDGER_SCHEMA_VERSION,
@@ -30361,6 +30428,13 @@ class PersistableSha256:
             "hexdigest": self.hexdigest(),
         }
 
+    def aligned_state_payload(self) -> dict[str, Any]:
+        return PersistableSha256(
+            words=self.words,
+            total_bytes=self.total_bytes - len(self.pending),
+            pending=b"",
+        ).state_payload()
+
     @classmethod
     def from_payload(cls, payload: Any) -> "PersistableSha256":
         if not isinstance(payload, dict) or payload.get("algorithm") != "sha256":
@@ -30373,6 +30447,163 @@ class PersistableSha256:
         if instance.hexdigest() != str(payload.get("hexdigest") or ""):
             raise ValueError("sha256_state_digest_mismatch")
         return instance
+
+
+class _OpenSslSha256Context(ctypes.Structure):
+    """Public SHA256_CTX layout used by OpenSSL 1.1 and 3.x."""
+
+    _fields_ = [
+        ("h", ctypes.c_uint32 * 8),
+        ("Nl", ctypes.c_uint32),
+        ("Nh", ctypes.c_uint32),
+        ("data", ctypes.c_uint32 * 16),
+        ("num", ctypes.c_uint),
+        ("md_len", ctypes.c_uint),
+    ]
+
+
+_NATIVE_SHA256_LIBRARY: Any = None
+_NATIVE_SHA256_PROBED = False
+_NATIVE_SHA256_PROBE_LOCK = threading.Lock()
+
+
+class NativePersistableSha256:
+    """C-speed SHA-256 whose state is exported through the portable schema."""
+
+    def __init__(
+        self,
+        library: Any,
+        *,
+        state: PersistableSha256 | None = None,
+    ) -> None:
+        self._library = library
+        self._context_value = _OpenSslSha256Context()
+        self._context = ctypes.pointer(self._context_value)
+        if self._library.SHA256_Init(self._context) != 1:
+            raise ValueError("native_sha256_init_failed")
+        if state is not None:
+            if state.pending:
+                raise ValueError("native_sha256_state_must_be_block_aligned")
+            context = self._context.contents
+            for ordinal, word in enumerate(state.words):
+                context.h[ordinal] = int(word)
+            bit_count = int(state.total_bytes) * 8
+            context.Nl = bit_count & 0xFFFFFFFF
+            context.Nh = (bit_count >> 32) & 0xFFFFFFFF
+            context.num = 0
+            context.md_len = 32
+
+    def update(self, payload: bytes) -> None:
+        value = bytes(payload)
+        if not value:
+            return
+        if self._library.SHA256_Update(
+            self._context,
+            value,
+            len(value),
+        ) != 1:
+            raise ValueError("native_sha256_update_failed")
+
+    def portable_state(self) -> PersistableSha256:
+        context = self._context.contents
+        bit_count = (int(context.Nh) << 32) | int(context.Nl)
+        if bit_count % 8:
+            raise ValueError("native_sha256_bit_count_invalid")
+        pending_count = int(context.num)
+        if not 0 <= pending_count < 64:
+            raise ValueError("native_sha256_pending_count_invalid")
+        pending = ctypes.string_at(
+            ctypes.addressof(context.data),
+            pending_count,
+        )
+        return PersistableSha256(
+            words=list(context.h),
+            total_bytes=bit_count // 8,
+            pending=pending,
+        )
+
+    def hexdigest(self) -> str:
+        return self.portable_state().hexdigest()
+
+    @property
+    def total_bytes(self) -> int:
+        return self.portable_state().total_bytes
+
+    def state_payload(self) -> dict[str, Any]:
+        return self.portable_state().state_payload()
+
+    def aligned_state_payload(self) -> dict[str, Any]:
+        current = self.portable_state()
+        return current.aligned_state_payload()
+
+
+def native_persistable_sha256(
+    *,
+    state: PersistableSha256 | None = None,
+) -> NativePersistableSha256 | None:
+    """Return a self-tested optional native accelerator without changing ABI."""
+    global _NATIVE_SHA256_LIBRARY, _NATIVE_SHA256_PROBED
+    if not _NATIVE_SHA256_PROBED:
+        with _NATIVE_SHA256_PROBE_LOCK:
+            if not _NATIVE_SHA256_PROBED:
+                library_name = ctypes.util.find_library("crypto")
+                if library_name:
+                    try:
+                        library = ctypes.CDLL(library_name)
+                        library.SHA256_Init.argtypes = [
+                            ctypes.POINTER(_OpenSslSha256Context)
+                        ]
+                        library.SHA256_Init.restype = ctypes.c_int
+                        library.SHA256_Update.argtypes = [
+                            ctypes.POINTER(_OpenSslSha256Context),
+                            ctypes.c_void_p,
+                            ctypes.c_size_t,
+                        ]
+                        library.SHA256_Update.restype = ctypes.c_int
+                        probe_prefix = (
+                            b"aoa-session-memory-native-sha256-probe"
+                            * 19
+                        ) + b"unaligned"
+                        probe_suffix = b"-continued"
+                        probe = NativePersistableSha256(library)
+                        probe.update(probe_prefix)
+                        portable = PersistableSha256.from_payload(
+                            probe.aligned_state_payload()
+                        )
+                        resumed = NativePersistableSha256(
+                            library,
+                            state=portable,
+                        )
+                        resumed.update(
+                            probe_prefix[portable.total_bytes :]
+                            + probe_suffix
+                        )
+                        if (
+                            probe.hexdigest()
+                            == hashlib.sha256(probe_prefix).hexdigest()
+                            and resumed.hexdigest()
+                            == hashlib.sha256(
+                                probe_prefix + probe_suffix
+                            ).hexdigest()
+                        ):
+                            _NATIVE_SHA256_LIBRARY = library
+                    except (
+                        AttributeError,
+                        OSError,
+                        TypeError,
+                        ValueError,
+                    ):
+                        _NATIVE_SHA256_LIBRARY = None
+                _NATIVE_SHA256_PROBED = True
+    if _NATIVE_SHA256_LIBRARY is None:
+        return None
+    try:
+        return NativePersistableSha256(
+            _NATIVE_SHA256_LIBRARY,
+            state=state,
+        )
+    except (TypeError, ValueError):
+        return None
 
 
 def append_raw_capture_ledger(
@@ -30514,8 +30745,11 @@ def append_raw_capture_ledger(
     appended_bytes = 0
     appended_blocks: list[dict[str, Any]] = []
     sha_state_bootstrap_bytes_read = 0
-    persistable_digest: PersistableSha256 | None = None
+    persistable_digest: (
+        PersistableSha256 | NativePersistableSha256 | None
+    ) = None
     native_snapshot_digest: Any = None
+    persist_aligned_state = False
     sha256_continuation_mode = ""
     if captured_bytes == 0 and snapshot_end <= (
         RAW_CAPTURE_PERSISTABLE_SHA256_MAX_BYTES
@@ -30523,18 +30757,63 @@ def append_raw_capture_ledger(
         persistable_digest = PersistableSha256()
         sha256_continuation_mode = "persistable_sha256_v1"
     elif captured_bytes == 0:
-        native_snapshot_digest = hashlib.sha256()
-        sha256_continuation_mode = (
-            "native_exact_snapshot_sha256_without_continuation_v1"
-        )
+        persistable_digest = native_persistable_sha256()
+        if persistable_digest is not None:
+            persist_aligned_state = True
+            sha256_continuation_mode = (
+                "native_portable_aligned_sha256_v1"
+            )
+        else:
+            native_snapshot_digest = hashlib.sha256()
+            sha256_continuation_mode = (
+                "native_exact_snapshot_sha256_without_continuation_v1"
+            )
     elif epoch.get("full_raw_sha256_state"):
         try:
-            persistable_digest = PersistableSha256.from_payload(
+            portable_state = PersistableSha256.from_payload(
                 epoch.get("full_raw_sha256_state")
             )
-            if persistable_digest.total_bytes != captured_bytes:
+            if not (
+                portable_state.total_bytes <= captured_bytes
+                and captured_bytes - portable_state.total_bytes < 64
+            ):
                 raise ValueError("sha256_state_watermark_mismatch")
-            sha256_continuation_mode = "persistable_sha256_v1"
+            persist_aligned_state = bool(
+                not portable_state.pending
+                and portable_state.total_bytes <= captured_bytes
+            )
+            persistable_digest = (
+                native_persistable_sha256(state=portable_state)
+                or portable_state
+            )
+            missing_state_bytes = (
+                captured_bytes - portable_state.total_bytes
+            )
+            if missing_state_bytes:
+                with materialization_path.open("rb") as prior:
+                    prior.seek(portable_state.total_bytes)
+                    pending_prefix = prior.read(missing_state_bytes)
+                if len(pending_prefix) != missing_state_bytes:
+                    raise ValueError("sha256_state_boundary_short_read")
+                persistable_digest.update(pending_prefix)
+                sha_state_bootstrap_bytes_read += len(pending_prefix)
+            expected_prefix_digest = str(
+                epoch.get("full_raw_sha256") or ""
+            )
+            if (
+                expected_prefix_digest
+                and persistable_digest.hexdigest()
+                != expected_prefix_digest
+            ):
+                raise ValueError("sha256_state_prefix_digest_mismatch")
+            sha256_continuation_mode = (
+                "native_portable_aligned_sha256_v1"
+                if isinstance(
+                    persistable_digest,
+                    NativePersistableSha256,
+                )
+                else "persistable_sha256_v1"
+            )
         except (TypeError, ValueError):
             persistable_digest = None
     if captured_bytes and persistable_digest is None:
@@ -30669,7 +30948,9 @@ def append_raw_capture_ledger(
         epoch["full_raw_sha256"] = persistable_digest.hexdigest()
         epoch["full_raw_sha256_bytes"] = materialized_size
         epoch["full_raw_sha256_state"] = (
-            persistable_digest.state_payload()
+            persistable_digest.aligned_state_payload()
+            if persist_aligned_state
+            else persistable_digest.state_payload()
         )
     elif native_snapshot_digest is not None:
         epoch["full_raw_sha256"] = native_snapshot_digest.hexdigest()
@@ -31068,6 +31349,7 @@ def attest_raw_capture_projection_digest(
     raw_sha256: str,
     raw_bytes: int,
     now: str,
+    raw_sha256_continuation_state: Any = None,
 ) -> dict[str, Any]:
     """Bind a verified stable projection digest to its exact capture epoch."""
     if not raw_sha256 or raw_bytes < 0:
@@ -31130,6 +31412,58 @@ def attest_raw_capture_projection_digest(
                 "status": "not_attested",
                 "reason": "projection_capture_digest_conflict",
             }
+        continuation_state_added = False
+        continuation_source_bytes_read = 0
+        if isinstance(raw_sha256_continuation_state, dict):
+            try:
+                portable_state = PersistableSha256.from_payload(
+                    raw_sha256_continuation_state
+                )
+                if portable_state.pending:
+                    raise ValueError(
+                        "sha256_continuation_state_not_aligned"
+                    )
+                missing_state_bytes = (
+                    raw_bytes - portable_state.total_bytes
+                )
+                if not 0 <= missing_state_bytes < 64:
+                    raise ValueError(
+                        "sha256_continuation_state_watermark_mismatch"
+                    )
+                verifier = (
+                    native_persistable_sha256(state=portable_state)
+                    or portable_state
+                )
+                if missing_state_bytes:
+                    with capture_path.open("rb") as source_handle:
+                        source_handle.seek(portable_state.total_bytes)
+                        pending_prefix = source_handle.read(
+                            missing_state_bytes
+                        )
+                    if len(pending_prefix) != missing_state_bytes:
+                        raise ValueError(
+                            "sha256_continuation_boundary_short_read"
+                        )
+                    verifier.update(pending_prefix)
+                    continuation_source_bytes_read = len(
+                        pending_prefix
+                    )
+                if verifier.hexdigest() != raw_sha256:
+                    raise ValueError(
+                        "sha256_continuation_digest_mismatch"
+                    )
+            except (OSError, TypeError, ValueError):
+                return {
+                    "status": "not_attested",
+                    "reason": "continuation_state_invalid",
+                }
+            epoch["full_raw_sha256_state"] = dict(
+                raw_sha256_continuation_state
+            )
+            epoch["full_raw_sha256_mode"] = (
+                "projection_attested_portable_aligned_sha256_v1"
+            )
+            continuation_state_added = True
         epoch["full_raw_sha256"] = raw_sha256
         epoch["full_raw_sha256_bytes"] = raw_bytes
         if not epoch.get("full_raw_sha256_state"):
@@ -31149,7 +31483,7 @@ def attest_raw_capture_projection_digest(
             "admission": (
                 "stable_projection_digest_at_exact_capture_watermark"
             ),
-            "source_bytes_read": 0,
+            "source_bytes_read": continuation_source_bytes_read,
         }
         epoch["archive_prefixes"] = archive_prefixes
         ledger["epochs"] = epochs
@@ -31158,8 +31492,8 @@ def attest_raw_capture_projection_digest(
         return {
             "status": "attested",
             "raw_bytes": raw_bytes,
-            "source_bytes_read": 0,
-            "continuation_state_added": False,
+            "source_bytes_read": continuation_source_bytes_read,
+            "continuation_state_added": continuation_state_added,
         }
 
 
@@ -40891,6 +41225,9 @@ def reindex_session_from_raw(
                 raw_sha256=str(raw_scan.get("raw_sha256") or ""),
                 raw_bytes=int_value(raw_scan.get("raw_bytes")),
                 now=now,
+                raw_sha256_continuation_state=raw_scan.get(
+                    "raw_sha256_continuation_state"
+                ),
             )
             if raw_source_mode == "preserved_capture_ahead"
             else {

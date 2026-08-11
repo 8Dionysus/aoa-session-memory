@@ -243,3 +243,13 @@ admit an exact ordered capture-ledger identity as a first-class source identity,
 or another portable continuation contract must be proved. Re-reading the old
 99% on every projection, pretending the block-chain head is a conventional
 SHA-256, or weakening raw validation are not accepted resolutions.
+
+## Review Amendment — 2026-08-11 (Portable Large-Epoch Continuation)
+
+AOA-SM-D-0054 resolves the handoff defect with the second accepted route. The
+large capture now exports a self-tested native SHA-256 context into the existing
+portable, block-aligned continuation schema during its already-required read.
+The next append rereads at most the 63-byte alignment gap and hashes only its
+delta. Stable full scans can migrate older deferred epochs at the exact capture
+watermark. The conventional SHA-256, block-chain authority, and fail-closed
+fallback remain unchanged.
