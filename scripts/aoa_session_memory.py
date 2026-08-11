@@ -116,6 +116,7 @@ DECLARED_PROJECTION_PREDECESSOR_GENERATION_IDS: dict[
         {
             "496c751411bc10da537166036c0665c7b8518be76d0b5073527a4211e3ee3d7f",
             "6eeec4c0f1c84c088b9f5458aabe857bc70ea3f21e6b76ebfc32198e4c6cf119",
+            "8670e45ec88cd97f817d02782a1b85328d2db1ad6d5e70f089622b51de43011d",
         }
     ),
     "session_index": frozenset(
@@ -177,7 +178,7 @@ PROJECTION_PRODUCER_SOURCE_RANGES: dict[
         ),
         (
             "def task_episode_component_source_identity(",
-            "def write_session_index_impl(",
+            "def write_session_index_component_shard(",
         ),
     ),
     "goal_lifecycles": (
@@ -24843,6 +24844,30 @@ def incremental_task_episodes_for_events(
     )
 
 
+def task_episode_incremental_replay_admitted(
+    session_index: Any,
+) -> bool:
+    if not isinstance(session_index, dict):
+        return False
+    dependencies = session_index.get(
+        "dependency_generation_identities"
+    )
+    stored_generation = (
+        dependencies.get("task_episode_source")
+        if isinstance(dependencies, dict)
+        else {}
+    )
+    return bool(
+        projection_generation_admission(
+            projection="task_episode_source",
+            stored_identity=stored_generation,
+            expected_identity=(
+                task_episode_source_generation_identity()
+            ),
+        ).get("compatible")
+    )
+
+
 def task_episode_builder_state_payload(
     *,
     episodes: list[dict[str, Any]],
@@ -40350,10 +40375,16 @@ def reindex_session_from_raw(
                 parent_tail_replay_from_line,
             )
         )
+        task_episode_tail_incremental_ready = (
+            task_episode_incremental_replay_admitted(
+                previous_index_for_incremental_goal
+            )
+        )
         streaming_incremental_mode = bool(
             parent_tail_replay_from_line > 0
             and segment_tail_plan.get("admitted")
             and goal_tail_incremental_ready
+            and task_episode_tail_incremental_ready
         )
         if streaming_incremental_mode:
             events = tail_events
@@ -40438,6 +40469,8 @@ def reindex_session_from_raw(
             "streaming_fallback_reason": (
                 "goal_lifecycle_incremental_state_unavailable"
                 if not goal_tail_incremental_ready
+                else "task_episode_generation_incompatible"
+                if not task_episode_tail_incremental_ready
                 else str(segment_tail_plan.get("reason") or "")
                 if not streaming_incremental_mode
                 else ""

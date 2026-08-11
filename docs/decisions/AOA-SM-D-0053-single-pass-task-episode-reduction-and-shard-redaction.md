@@ -64,6 +64,15 @@ These source-contract changes invalidate task-episode source and dependent
 session-index generations. Raw-event classification and segment-index producer
 contracts remain byte-identical and their generations remain reusable.
 
+Task-episode semantic producer identity covers episode construction and shard
+envelope semantics, not shard materialization/reuse orchestration. Streaming
+tail mode is fail-closed on task-episode generation admission as well as segment
+topology and goal-lifecycle frontier admission. An incompatible task-episode
+generation therefore reconstructs the complete episode set from classification
+metadata instead of publishing a tail-only compatibility view. The exact
+pre-split generation `8670e45e...11d` is a declared reuse-then-restamp
+predecessor; unknown generations are not admitted.
+
 ## Rationale
 
 The reducer already owns one event observation, the segment manifest already
@@ -79,6 +88,9 @@ persisting a new cache, weakening redaction, or changing evidence authority.
 - Positive: one paired 311-shard publication improves from `95.127284 s` to
   `33.562716 s` (`2.834x`) with exact payload SHA-256 parity.
 - Positive: classification and segment checkpoints survive this change.
+- Positive: an orchestration-only optimization no longer invalidates episode
+  semantics, and an actual semantic incompatibility cannot silently truncate
+  the historical episode projection to its replay tail.
 - Tradeoff: ordered-range lookup relies on the generated segment-manifest
   ordering contract; malformed external lists fail to match rather than being
   searched exhaustively.

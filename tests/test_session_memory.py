@@ -96618,6 +96618,60 @@ def test_projection_producer_contract_is_bounded_and_change_sensitive() -> None:
     )
 
 
+def test_task_episode_materializer_change_is_not_episode_semantic_abi() -> None:
+    source = SCRIPT.read_bytes()
+    task_before = module.projection_producer_contract_from_source_bytes(
+        source,
+        "task_episode_source",
+    )
+    session_before = (
+        module.projection_producer_contract_from_source_bytes(
+            source,
+            "session_index",
+        )
+    )
+    needle = b'"pre_redacted_episode_count": min('
+    assert source.count(needle) == 1
+    changed = source.replace(
+        needle,
+        b'"pre_redacted_episode_count_v2": min(',
+        1,
+    )
+
+    task_after = module.projection_producer_contract_from_source_bytes(
+        changed,
+        "task_episode_source",
+    )
+    session_after = (
+        module.projection_producer_contract_from_source_bytes(
+            changed,
+            "session_index",
+        )
+    )
+
+    assert task_before["sha256"] == task_after["sha256"]
+    assert session_before["sha256"] != session_after["sha256"]
+
+
+def test_task_episode_streaming_replay_fails_closed_on_generation() -> None:
+    current = module.task_episode_source_generation_identity()
+    assert module.task_episode_incremental_replay_admitted(
+        {
+            "dependency_generation_identities": {
+                "task_episode_source": current,
+            }
+        }
+    ) is True
+    assert module.task_episode_incremental_replay_admitted(
+        {
+            "dependency_generation_identities": {
+                "task_episode_source": {"generation_id": "f" * 64},
+            }
+        }
+    ) is False
+    assert module.task_episode_incremental_replay_admitted({}) is False
+
+
 def test_capture_handoff_change_does_not_invalidate_classification() -> None:
     source = SCRIPT.read_bytes()
     capture_before = module.projection_producer_contract_from_source_bytes(
