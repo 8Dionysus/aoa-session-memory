@@ -176,6 +176,45 @@ def test_session_projection_benchmark_uses_stable_read_only_snapshot(
     assert hashlib.sha256(source.read_bytes()).hexdigest() == source_before
 
 
+def test_session_projection_benchmark_supports_parallel_only_repetitions(
+    tmp_path: Path,
+) -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(BENCHMARK_SCRIPT),
+            "--segments",
+            "2",
+            "--payload-bytes",
+            "32",
+            "--workers",
+            "2",
+            "--fresh-segments",
+            "1",
+            "--growth-segments",
+            "1",
+            "--serial-repetitions",
+            "0",
+            "--parallel-repetitions",
+            "2",
+            "--temp-root",
+            str(tmp_path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(completed.stdout)
+
+    assert completed.returncode == 0, completed.stderr
+    assert payload["ok"] is True
+    assert payload["cold_serial"] is None
+    assert payload["cold_serial_summary"]["run_count"] == 0
+    assert payload["cold_parallel_summary"]["run_count"] == 2
+    assert payload["serial_parallel_semantic_parity"] is None
+    assert payload["parallel_internal_semantic_parity"] is True
+
+
 def test_best_effort_progress_emitter_quarantines_broken_pipe() -> None:
     class BrokenPipeStream:
         def write(self, _text: str) -> int:

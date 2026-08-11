@@ -313,6 +313,8 @@ def benchmark_receipt_base(
         "fresh_segments": args.fresh_segments,
         "growth_segments": args.growth_segments,
         "repetitions": args.repetitions,
+        "serial_repetitions": args.serial_repetitions,
+        "parallel_repetitions": args.parallel_repetitions,
     }
     if source_transcript:
         fixture["snapshot_copy"] = dict(
@@ -411,7 +413,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         parallel_runs: list[dict[str, Any]] = []
         completed_runs: dict[str, Any] = {}
         parallel_record = serial_record
-        for _repetition in range(args.repetitions):
+        for _repetition in range(args.serial_repetitions):
             # Reset only the benchmark-owned temporary projection root so
             # every run starts from the exact same captured authority and
             # metadata at the same logical paths.
@@ -434,6 +436,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                 completed_runs=completed_runs,
             )
 
+        for _repetition in range(args.parallel_repetitions):
             shutil.rmtree(benchmark_root)
             shutil.copytree(baseline_snapshot, benchmark_root)
             parallel_record = session_memory.resolve_session_record(
@@ -452,7 +455,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                 raw_bytes=raw_bytes,
                 completed_runs=completed_runs,
             )
-        serial = serial_runs[0]
+        serial = serial_runs[0] if serial_runs else None
         parallel = parallel_runs[0]
 
         fresh_transcript = root / "fresh.jsonl"
@@ -551,22 +554,41 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     speedup = (
         float(serial_summary["wall_seconds_p50"])
         / float(parallel_summary["wall_seconds_p50"])
-        if float(parallel_summary["wall_seconds_p50"]) > 0
+        if serial_runs
+        and float(parallel_summary["wall_seconds_p50"]) > 0
         else 0.0
+    )
+    parallel_internal_parity = bool(
+        parallel_digest and len(parallel_digests) == 1
+    )
+    serial_parallel_parity = (
+        bool(
+            serial_digest
+            and serial_digests == parallel_digests
+            and len(serial_digests) == 1
+        )
+        if serial_runs
+        else None
     )
     return {
         **benchmark_receipt_base(args, raw_bytes=raw_bytes),
         "ok": bool(
-            all(run.get("status") == "reindexed" for run in serial_runs)
+            (not serial_runs or all(
+                run.get("status") == "reindexed"
+                for run in serial_runs
+            ))
             and all(
                 run.get("status") == "reindexed"
                 for run in parallel_runs
             )
             and fresh.get("status") == "reindexed"
             and growing.get("status") == "reindexed"
-            and serial_digest
-            and serial_digests == parallel_digests
-            and len(serial_digests) == 1
+            and parallel_internal_parity
+            and (
+                serial_parallel_parity is True
+                if serial_runs
+                else True
+            )
             and all(
                 run.get("raw_unchanged") is True
                 for run in serial_runs + parallel_runs
@@ -581,11 +603,8 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         "cold_parallel_summary": parallel_summary,
         "fresh_session": fresh,
         "growing_session": growing,
-        "serial_parallel_semantic_parity": bool(
-            serial_digests
-            and serial_digests == parallel_digests
-            and len(serial_digests) == 1
-        ),
+        "serial_parallel_semantic_parity": serial_parallel_parity,
+        "parallel_internal_semantic_parity": parallel_internal_parity,
         "parallel_speedup": round(speedup, 4),
     }
 
@@ -599,6 +618,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fresh-segments", type=int, default=2)
     parser.add_argument("--growth-segments", type=int, default=2)
     parser.add_argument("--repetitions", type=int, default=1)
+    parser.add_argument(
+        "--serial-repetitions",
+        type=int,
+        help="Override cold serial repetitions; zero admits parallel-only receipts.",
+    )
+    parser.add_argument(
+        "--parallel-repetitions",
+        type=int,
+        help="Override cold worker-pool repetitions; must remain positive.",
+    )
     parser.add_argument(
         "--source-transcript",
         help=(
@@ -618,11 +647,23 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
+    args.serial_repetitions = (
+        args.repetitions
+        if args.serial_repetitions is None
+        else args.serial_repetitions
+    )
+    args.parallel_repetitions = (
+        args.repetitions
+        if args.parallel_repetitions is None
+        else args.parallel_repetitions
+    )
     if (
         args.segments < 1
         or args.fresh_segments < 1
         or args.events_per_segment < 1
         or args.repetitions < 1
+        or args.serial_repetitions < 0
+        or args.parallel_repetitions < 1
     ):
         raise SystemExit("segment counts must be positive")
     if args.payload_bytes < 0 or not 1 <= args.workers <= 6:
