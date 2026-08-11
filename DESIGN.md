@@ -258,6 +258,7 @@ sessions/
       capture-ledger.json
       live-tail.index.json
       live-tail.postings.json
+      live-tail-postings/
       capture-blocks/
       captures/
       blocks/
@@ -280,11 +281,13 @@ only the newly observed byte suffix in one hash-chained source epoch. The
 ledger records device/inode identity, byte and line watermarks, boundary
 completeness, and source-epoch transitions. A persistent live-tail index binds
 the current chain head and any archived-prefix attestation. A sibling redacted
-postings frontier advances across new complete lines and maintains a redacted
-inverted token map to exact entry positions and byte ranges. Candidate
-selection intersects that map without walking the tail, and a positive
-candidate is reverified against only those raw ranges; a miss cannot prove
-global absence. Together they allow
+postings frontier advances across new complete lines as bounded immutable
+shards. Its compact manifest binds exact shard receipts and no-false-negative
+filters over already-redacted safe tokens; each shard owns its local inverted
+map to exact entry positions and byte ranges. Ordinary append replaces only an
+open-shard revision and the compact manifest. Candidate selection filters
+shards, intersects only selected local maps, and reverifies a positive candidate
+against those raw ranges; a miss cannot prove global absence. Together they allow
 bounded positive raw-tail retrieval without a repeated whole-prefix scan. The concatenated
 capture file is a rebuildable compatibility view, not a stronger authority
 than the ledger blocks.

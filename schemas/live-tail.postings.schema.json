@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "AoA persistent live-tail postings",
+  "title": "AoA persistent live-tail postings manifest",
   "type": "object",
   "required": [
     "schema_version",
@@ -15,26 +15,21 @@
     "projection_raw_bytes",
     "projection_raw_line_count",
     "pending_incomplete_bytes",
+    "storage_mode",
+    "shard_max_entries",
+    "shard_count",
     "entry_count",
-    "entries",
     "token_count",
-    "token_postings",
+    "shards",
     "privacy",
     "authority"
   ],
   "properties": {
-    "schema_version": {"const": 2},
+    "schema_version": {"const": 3},
     "artifact_type": {"const": "persistent_live_tail_postings"},
     "session_id": {"type": "string", "minLength": 1},
     "epoch_id": {"type": "string", "pattern": "^[a-f0-9]{24}$"},
-    "generation_identity": {
-      "type": "object",
-      "required": ["generation_id"],
-      "properties": {
-        "generation_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
-      },
-      "additionalProperties": true
-    },
+    "generation_identity": {"$ref": "#/$defs/generationIdentity"},
     "updated_at": {"type": "string", "minLength": 1},
     "processed_bytes": {"type": "integer", "minimum": 0},
     "processed_line_count": {"type": "integer", "minimum": 0},
@@ -42,20 +37,46 @@
     "projection_raw_bytes": {"type": "integer", "minimum": 0},
     "projection_raw_line_count": {"type": "integer", "minimum": 0},
     "pending_incomplete_bytes": {"type": "integer", "minimum": 0},
+    "storage_mode": {"const": "bounded_json_shards_v1"},
+    "shard_max_entries": {"type": "integer", "minimum": 1},
+    "shard_count": {"type": "integer", "minimum": 0},
     "entry_count": {"type": "integer", "minimum": 0},
-    "entries": {
-      "type": "array",
-      "items": {"$ref": "#/$defs/posting"}
-    },
     "token_count": {"type": "integer", "minimum": 0},
-    "token_postings": {
+    "shards": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/shardDescriptor"}
+    },
+    "privacy": {"$ref": "#/$defs/privacy"},
+    "migration_receipt": {
       "type": "object",
-      "propertyNames": {"type": "string", "minLength": 2},
-      "additionalProperties": {
-        "type": "array",
-        "items": {"type": "integer", "minimum": 0},
-        "uniqueItems": true
-      }
+      "required": [
+        "status",
+        "from_generation_id",
+        "to_generation_id",
+        "raw_authority_changed",
+        "unknown_generation_admission"
+      ],
+      "properties": {
+        "status": {"const": "exact_predecessor_linked_without_raw_rebuild"},
+        "from_generation_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "to_generation_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "raw_authority_changed": {"const": false},
+        "unknown_generation_admission": {"const": false}
+      },
+      "additionalProperties": false
+    },
+    "authority": {
+      "const": "derived_navigation_with_typed_refs_raw_capture_is_authority"
+    }
+  },
+  "$defs": {
+    "generationIdentity": {
+      "type": "object",
+      "required": ["generation_id"],
+      "properties": {
+        "generation_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+      },
+      "additionalProperties": true
     },
     "privacy": {
       "type": "object",
@@ -69,61 +90,68 @@
       },
       "additionalProperties": true
     },
-    "authority": {
-      "const": "derived_navigation_with_typed_refs_raw_capture_is_authority"
-    }
-  },
-  "$defs": {
-    "posting": {
+    "shardDescriptor": {
       "type": "object",
       "required": [
-        "event_id",
-        "line",
-        "byte_offset",
-        "byte_count",
-        "event_type",
-        "source_type",
-        "route_signals",
-        "preview",
-        "tokens",
-        "raw_ref",
-        "capture_ref"
+        "format",
+        "ordinal",
+        "rel",
+        "from_line",
+        "to_line",
+        "from_byte",
+        "to_byte",
+        "entry_count",
+        "token_count",
+        "bytes",
+        "sha256",
+        "mtime_ns",
+        "ctime_ns",
+        "sealed"
       ],
       "properties": {
-        "event_id": {"type": "string", "minLength": 1},
-        "line": {"type": "integer", "minimum": 1},
-        "byte_offset": {"type": "integer", "minimum": 0},
-        "byte_count": {"type": "integer", "minimum": 1},
-        "event_type": {"type": "string", "minLength": 1},
-        "source_type": {"type": "string", "minLength": 1},
-        "timestamp": {"type": "string"},
-        "family": {"type": "string"},
-        "phase": {"type": "string"},
-        "actor": {"type": "string"},
-        "action": {"type": "string"},
-        "outcome": {"type": "string"},
-        "correlation_id": {"type": "string"},
-        "route_signals": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "required": ["layer", "key"],
-            "properties": {
-              "layer": {"type": "string", "minLength": 1},
-              "key": {"type": "string", "minLength": 1}
-            },
-            "additionalProperties": false
-          }
+        "format": {"enum": ["sharded_postings_v1", "legacy_monolith_v2_link"]},
+        "ordinal": {"type": "integer", "minimum": 0},
+        "rel": {"type": "string", "minLength": 1},
+        "from_line": {"type": "integer", "minimum": 1},
+        "to_line": {"type": "integer", "minimum": 1},
+        "from_byte": {"type": "integer", "minimum": 0},
+        "to_byte": {"type": "integer", "minimum": 1},
+        "entry_count": {"type": "integer", "minimum": 1},
+        "token_count": {"type": "integer", "minimum": 0},
+        "token_filter": {
+          "type": "object",
+          "required": [
+            "algorithm",
+            "bit_count",
+            "hash_count",
+            "encoded_bits",
+            "false_negative_contract"
+          ],
+          "properties": {
+            "algorithm": {"const": "sha256_double_hash_bloom_v1"},
+            "bit_count": {"type": "integer", "minimum": 1024, "maximum": 1048576},
+            "hash_count": {"type": "integer", "minimum": 1, "maximum": 16},
+            "encoded_bits": {"type": "string", "minLength": 1},
+            "false_negative_contract": {"const": "none_for_writer_emitted_tokens"}
+          },
+          "additionalProperties": false
         },
-        "preview": {"type": "string"},
-        "tokens": {
-          "type": "array",
-          "items": {"type": "string", "minLength": 2},
-          "uniqueItems": true
-        },
-        "raw_ref": {"type": "string", "pattern": "^raw:line:[1-9][0-9]*$"},
-        "capture_ref": {"type": "string", "minLength": 1}
+        "bytes": {"type": "integer", "minimum": 1},
+        "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "mtime_ns": {"type": "integer", "minimum": 0},
+        "ctime_ns": {"type": "integer", "minimum": 0},
+        "sealed": {"type": "boolean"},
+        "predecessor_generation_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
       },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"format": {"const": "sharded_postings_v1"}},
+            "required": ["format"]
+          },
+          "then": {"required": ["token_filter"]}
+        }
+      ],
       "additionalProperties": false
     }
   },

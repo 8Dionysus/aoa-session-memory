@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import array
 import ast
+import base64
 import difflib
 import fcntl
 import gzip
@@ -496,7 +497,15 @@ RAW_CAPTURE_BLOCK_TARGET_BYTES = 4 * 1024 * 1024
 PERSISTENT_LIVE_TAIL_INDEX_JSON = "live-tail.index.json"
 PERSISTENT_LIVE_TAIL_INDEX_SCHEMA_VERSION = 1
 PERSISTENT_LIVE_TAIL_POSTINGS_JSON = "live-tail.postings.json"
-PERSISTENT_LIVE_TAIL_POSTINGS_SCHEMA_VERSION = 2
+PERSISTENT_LIVE_TAIL_POSTINGS_SCHEMA_VERSION = 3
+PERSISTENT_LIVE_TAIL_POSTINGS_SHARD_SCHEMA_VERSION = 1
+PERSISTENT_LIVE_TAIL_POSTINGS_SHARD_DIR = "live-tail-postings"
+PERSISTENT_LIVE_TAIL_POSTINGS_SHARD_MAX_ENTRIES = 1024
+PERSISTENT_LIVE_TAIL_POSTINGS_PREDECESSOR_GENERATION_IDS = frozenset(
+    {
+        "1c98093643270c9b57c0deef5e97560e97d5b6fb2260513d6a7d57b310a97e62",
+    }
+)
 CAPTURE_WATCH_STATE_JSON = "capture-watch-state.json"
 CAPTURE_WATCH_STATE_LOCK = "capture-watch-state.lock"
 CAPTURE_WATCH_STATE_SCHEMA_VERSION = 1
@@ -28342,6 +28351,36 @@ def persistent_live_tail_postings_path(session_dir: Path) -> Path:
     return session_dir / "raw" / PERSISTENT_LIVE_TAIL_POSTINGS_JSON
 
 
+def persistent_live_tail_postings_shard_root(
+    session_dir: Path,
+    *,
+    epoch_id: str,
+    generation_id: str,
+) -> Path:
+    return (
+        session_dir
+        / "raw"
+        / PERSISTENT_LIVE_TAIL_POSTINGS_SHARD_DIR
+        / epoch_id
+        / generation_id[:16]
+    )
+
+
+def persistent_live_tail_postings_shard_path(
+    session_dir: Path,
+    *,
+    epoch_id: str,
+    generation_id: str,
+    ordinal: int,
+    revision_id: str,
+) -> Path:
+    return persistent_live_tail_postings_shard_root(
+        session_dir,
+        epoch_id=epoch_id,
+        generation_id=generation_id,
+    ) / f"{ordinal:06d}-{revision_id[:16]}.json"
+
+
 def capture_watch_state_path(aoa_root: Path) -> Path:
     return aoa_root / DIAGNOSTICS_ROOT / CAPTURE_WATCH_STATE_JSON
 
@@ -28653,7 +28692,8 @@ def persistent_live_tail_postings_generation_identity() -> dict[str, Any]:
                 DERIVED_TEXT_REDACTION_POLICY_VERSION
             ),
             "storage_contract": (
-                "redacted_inverted_token_postings_and_typed_raw_refs_v2"
+                "bounded_redacted_posting_shards_with_token_bloom_and_"
+                "typed_raw_refs_v3"
             ),
             "dependency_generations": {
                 "event_classification": (
@@ -28704,6 +28744,426 @@ def persistent_live_tail_inverted_token_postings(
     }
 
 
+def persistent_live_tail_token_filter(
+    tokens: Iterable[str],
+) -> dict[str, Any]:
+    normalized = sorted({str(token).casefold() for token in tokens if token})
+    target_bits = max(1024, len(normalized) * 10)
+    bit_count = min(
+        1 << 20,
+        1 << max(10, (target_bits - 1).bit_length()),
+    )
+    hash_count = 7
+    bits = bytearray(bit_count // 8)
+    for token in normalized:
+        digest = hashlib.sha256(token.encode("utf-8")).digest()
+        first = int.from_bytes(digest[:8], "big")
+        step = int.from_bytes(digest[8:16], "big") | 1
+        for ordinal in range(hash_count):
+            bit = (first + ordinal * step) & (bit_count - 1)
+            bits[bit // 8] |= 1 << (bit % 8)
+    return {
+        "algorithm": "sha256_double_hash_bloom_v1",
+        "bit_count": bit_count,
+        "hash_count": hash_count,
+        "encoded_bits": base64.b64encode(bits).decode("ascii"),
+        "false_negative_contract": "none_for_writer_emitted_tokens",
+    }
+
+
+def persistent_live_tail_token_filter_might_contain(
+    token_filter: Any,
+    tokens: Iterable[str],
+) -> bool:
+    if not isinstance(token_filter, dict):
+        return True
+    if token_filter.get("algorithm") != "sha256_double_hash_bloom_v1":
+        return True
+    bit_count = int_value(token_filter.get("bit_count"))
+    hash_count = int_value(token_filter.get("hash_count"))
+    if (
+        bit_count < 1024
+        or bit_count > 1 << 20
+        or bit_count & (bit_count - 1)
+        or hash_count < 1
+        or hash_count > 16
+    ):
+        return True
+    try:
+        bits = base64.b64decode(
+            str(token_filter.get("encoded_bits") or ""),
+            validate=True,
+        )
+    except (ValueError, TypeError):
+        return True
+    if len(bits) != bit_count // 8:
+        return True
+    for token in {str(item).casefold() for item in tokens if item}:
+        digest = hashlib.sha256(token.encode("utf-8")).digest()
+        first = int.from_bytes(digest[:8], "big")
+        step = int.from_bytes(digest[8:16], "big") | 1
+        if any(
+            not bits[
+                ((first + ordinal * step) & (bit_count - 1)) // 8
+            ]
+            & (
+                1
+                << (((first + ordinal * step) & (bit_count - 1)) % 8)
+            )
+            for ordinal in range(hash_count)
+        ):
+            return False
+    return True
+
+
+def persistent_live_tail_postings_complete_end(
+    path: Path,
+    *,
+    start_offset: int,
+) -> int:
+    """Return the captured offset through the last complete JSONL line."""
+    size = path.stat().st_size
+    if size <= start_offset:
+        return start_offset
+    with path.open("rb") as handle:
+        handle.seek(size - 1)
+        if handle.read(1) == b"\n":
+            return size
+        cursor = size
+        while cursor > start_offset:
+            chunk_start = max(start_offset, cursor - 65536)
+            handle.seek(chunk_start)
+            payload = handle.read(cursor - chunk_start)
+            boundary = payload.rfind(b"\n")
+            if boundary >= 0:
+                return chunk_start + boundary + 1
+            cursor = chunk_start
+    return start_offset
+
+
+def iter_persistent_live_tail_complete_lines(
+    path: Path,
+    *,
+    start_offset: int,
+    end_offset: int,
+) -> Iterator[tuple[int, bytes, str]]:
+    with path.open("rb") as handle:
+        handle.seek(start_offset)
+        while handle.tell() < end_offset:
+            byte_offset = handle.tell()
+            raw_line = handle.readline(end_offset - byte_offset)
+            if not raw_line or not raw_line.endswith(b"\n"):
+                break
+            yield (
+                byte_offset,
+                raw_line,
+                raw_line.decode(
+                    "utf-8", errors="replace"
+                ).rstrip("\r\n"),
+            )
+
+
+def persistent_live_tail_posting_entry(
+    *,
+    raw_line: bytes,
+    raw_text: str,
+    byte_offset: int,
+    line_no: int,
+    epoch_id: str,
+    literal_policy: DerivedSessionSensitiveLiteralPolicy,
+) -> dict[str, Any]:
+    try:
+        loaded = json.loads(raw_text)
+        parsed = loaded if isinstance(loaded, dict) else None
+    except json.JSONDecodeError:
+        parsed = None
+    event = classify_raw_event(raw_text, parsed, line_no)
+    semantic = event_semantic_text(event) or event.title
+    preview_projection = derived_text_privacy_projection(
+        semantic,
+        max_chars=700,
+    )
+    preview = redact_derived_text(
+        str(preview_projection.get("text") or ""),
+        literal_policy=literal_policy,
+    )
+    route_signals = [
+        {
+            "layer": str(item.get("layer") or ""),
+            "key": str(item.get("key") or ""),
+        }
+        for item in event_route_signals(event)
+        if str(item.get("layer") or "")
+        and str(item.get("key") or "")
+    ]
+    return redact_derived_value(
+        {
+            "event_id": event.event_id,
+            "line": line_no,
+            "byte_offset": byte_offset,
+            "byte_count": len(raw_line),
+            "event_type": event.event_type,
+            "source_type": event.source_type,
+            "timestamp": event.timestamp or "",
+            "family": event.family,
+            "phase": event.phase,
+            "actor": event.actor,
+            "action": event.action,
+            "outcome": event.outcome,
+            "correlation_id": event.correlation_id or "",
+            "route_signals": route_signals,
+            "preview": preview,
+            "tokens": persistent_live_tail_safe_tokens(
+                preview
+            ),
+            "raw_ref": f"raw:line:{line_no}",
+            "capture_ref": (
+                f"raw-ledger:{epoch_id}:line:{line_no}"
+            ),
+        },
+        literal_policy=literal_policy,
+    )
+
+
+def persistent_live_tail_postings_shard_payload(
+    *,
+    session_id: str,
+    epoch_id: str,
+    generation_identity: dict[str, Any],
+    ordinal: int,
+    entries: list[dict[str, Any]],
+    now: str,
+) -> dict[str, Any]:
+    if not entries:
+        raise ValueError("live_tail_postings_empty_shard")
+    token_postings = persistent_live_tail_inverted_token_postings(
+        entries
+    )
+    return {
+        "schema_version": (
+            PERSISTENT_LIVE_TAIL_POSTINGS_SHARD_SCHEMA_VERSION
+        ),
+        "artifact_type": "persistent_live_tail_postings_shard",
+        "session_id": session_id,
+        "epoch_id": epoch_id,
+        "generation_identity": generation_identity,
+        "ordinal": ordinal,
+        "updated_at": now,
+        "from_line": int_value(entries[0].get("line")),
+        "to_line": int_value(entries[-1].get("line")),
+        "from_byte": int_value(entries[0].get("byte_offset")),
+        "to_byte": int_value(entries[-1].get("byte_offset"))
+        + int_value(entries[-1].get("byte_count")),
+        "entry_count": len(entries),
+        "entries": entries,
+        "token_count": len(token_postings),
+        "token_postings": token_postings,
+        "privacy": {
+            "raw_text_persisted": False,
+            "reversible_literal_digests_persisted": False,
+        },
+        "authority": (
+            "derived_navigation_with_typed_refs_raw_capture_is_authority"
+        ),
+    }
+
+
+def write_persistent_live_tail_postings_shard(
+    *,
+    session_dir: Path,
+    session_id: str,
+    epoch_id: str,
+    generation_identity: dict[str, Any],
+    ordinal: int,
+    entries: list[dict[str, Any]],
+    now: str,
+) -> dict[str, Any]:
+    payload = persistent_live_tail_postings_shard_payload(
+        session_id=session_id,
+        epoch_id=epoch_id,
+        generation_identity=generation_identity,
+        ordinal=ordinal,
+        entries=entries,
+        now=now,
+    )
+    revision_id = hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    path = persistent_live_tail_postings_shard_path(
+        session_dir,
+        epoch_id=epoch_id,
+        generation_id=str(
+            generation_identity.get("generation_id") or ""
+        ),
+        ordinal=ordinal,
+        revision_id=revision_id,
+    )
+    write_json_durable(path, payload)
+    stat = path.stat()
+    token_postings = payload["token_postings"]
+    return {
+        "format": "sharded_postings_v1",
+        "ordinal": ordinal,
+        "rel": path.relative_to(session_dir).as_posix(),
+        "from_line": payload["from_line"],
+        "to_line": payload["to_line"],
+        "from_byte": payload["from_byte"],
+        "to_byte": payload["to_byte"],
+        "entry_count": payload["entry_count"],
+        "token_count": payload["token_count"],
+        "token_filter": persistent_live_tail_token_filter(
+            token_postings
+        ),
+        "bytes": stat.st_size,
+        "sha256": sha256_file_exact(path),
+        "mtime_ns": stat.st_mtime_ns,
+        "ctime_ns": stat.st_ctime_ns,
+        "sealed": len(entries)
+        >= PERSISTENT_LIVE_TAIL_POSTINGS_SHARD_MAX_ENTRIES,
+    }
+
+
+def persistent_live_tail_postings_descriptor_path(
+    session_dir: Path,
+    descriptor: dict[str, Any],
+) -> Path:
+    relative = Path(str(descriptor.get("rel") or ""))
+    if not relative or relative.is_absolute() or ".." in relative.parts:
+        raise ValueError("live_tail_postings_shard_ref_invalid")
+    return session_dir / relative
+
+
+def read_persistent_live_tail_postings_descriptor(
+    *,
+    session_dir: Path,
+    session_id: str,
+    epoch_id: str,
+    generation_identity: dict[str, Any],
+    descriptor: dict[str, Any],
+) -> dict[str, Any]:
+    path = persistent_live_tail_postings_descriptor_path(
+        session_dir,
+        descriptor,
+    )
+    if not path.is_file():
+        raise ValueError("live_tail_postings_shard_missing")
+    stat = path.stat()
+    if (
+        stat.st_size != int_value(descriptor.get("bytes"), -1)
+        or sha256_file_exact(path)
+        != str(descriptor.get("sha256") or "")
+    ):
+        raise ValueError("live_tail_postings_shard_receipt_mismatch")
+    payload = read_json(path, {})
+    legacy = descriptor.get("format") == (
+        "legacy_monolith_v2_link"
+    )
+    if legacy:
+        if not (
+            isinstance(payload, dict)
+            and int_value(payload.get("schema_version")) == 2
+            and payload.get("artifact_type")
+            == "persistent_live_tail_postings"
+            and str(payload.get("session_id") or "") == session_id
+            and str(payload.get("epoch_id") or "") == epoch_id
+            and str(
+                (
+                    payload.get("generation_identity")
+                    if isinstance(
+                        payload.get("generation_identity"), dict
+                    )
+                    else {}
+                ).get("generation_id")
+                or ""
+            )
+            in PERSISTENT_LIVE_TAIL_POSTINGS_PREDECESSOR_GENERATION_IDS
+        ):
+            raise ValueError(
+                "live_tail_postings_legacy_shard_invalid"
+            )
+        return payload
+    if not (
+        isinstance(payload, dict)
+        and int_value(payload.get("schema_version"))
+        == PERSISTENT_LIVE_TAIL_POSTINGS_SHARD_SCHEMA_VERSION
+        and payload.get("artifact_type")
+        == "persistent_live_tail_postings_shard"
+        and str(payload.get("session_id") or "") == session_id
+        and str(payload.get("epoch_id") or "") == epoch_id
+        and payload.get("generation_identity")
+        == generation_identity
+        and int_value(payload.get("ordinal"), -1)
+        == int_value(descriptor.get("ordinal"), -2)
+    ):
+        raise ValueError("live_tail_postings_shard_invalid")
+    return payload
+
+
+def link_legacy_persistent_live_tail_postings(
+    *,
+    session_dir: Path,
+    source_path: Path,
+    session_id: str,
+    epoch_id: str,
+    generation_identity: dict[str, Any],
+    predecessor: dict[str, Any],
+    projection_raw_bytes: int,
+    projection_raw_line_count: int,
+) -> dict[str, Any]:
+    root = persistent_live_tail_postings_shard_root(
+        session_dir,
+        epoch_id=epoch_id,
+        generation_id=str(
+            generation_identity.get("generation_id") or ""
+        ),
+    )
+    root.mkdir(parents=True, exist_ok=True)
+    target = root / "legacy-v2.json"
+    source_sha256 = sha256_file_exact(source_path)
+    if target.is_file():
+        if sha256_file_exact(target) != source_sha256:
+            raise ValueError(
+                "live_tail_postings_legacy_link_conflict"
+            )
+    else:
+        os.link(source_path, target)
+        fsync_parent_directory(target)
+    stat = target.stat()
+    return {
+        "format": "legacy_monolith_v2_link",
+        "ordinal": 0,
+        "rel": target.relative_to(session_dir).as_posix(),
+        "from_line": max(1, projection_raw_line_count + 1),
+        "to_line": int_value(
+            predecessor.get("processed_line_count")
+        ),
+        "from_byte": max(0, projection_raw_bytes),
+        "to_byte": int_value(predecessor.get("processed_bytes")),
+        "entry_count": int_value(predecessor.get("entry_count")),
+        "token_count": int_value(predecessor.get("token_count")),
+        "bytes": stat.st_size,
+        "sha256": source_sha256,
+        "mtime_ns": stat.st_mtime_ns,
+        "ctime_ns": stat.st_ctime_ns,
+        "sealed": True,
+        "predecessor_generation_id": str(
+            (
+                predecessor.get("generation_identity")
+                if isinstance(
+                    predecessor.get("generation_identity"), dict
+                )
+                else {}
+            ).get("generation_id")
+            or ""
+        ),
+    }
+
+
 def update_persistent_live_tail_postings(
     *,
     session_dir: Path,
@@ -28713,149 +29173,383 @@ def update_persistent_live_tail_postings(
     projection_raw_line_count: int,
     now: str,
 ) -> dict[str, Any]:
-    """Index only newly completed captured lines without retaining raw text."""
+    """Index new complete lines into bounded shards and a compact manifest."""
     path = persistent_live_tail_postings_path(session_dir)
     generation_identity = (
         persistent_live_tail_postings_generation_identity()
     )
     existing = read_json(path, {})
-    same_frontier = bool(
+    epoch_id = str(epoch.get("epoch_id") or "")
+    current_manifest = bool(
         isinstance(existing, dict)
         and int_value(existing.get("schema_version"))
         == PERSISTENT_LIVE_TAIL_POSTINGS_SCHEMA_VERSION
         and str(existing.get("session_id") or "") == session_id
         and str(existing.get("epoch_id") or "")
-        == str(epoch.get("epoch_id") or "")
+        == epoch_id
         and existing.get("generation_identity")
         == generation_identity
     )
+    legacy_predecessor = bool(
+        isinstance(existing, dict)
+        and int_value(existing.get("schema_version")) == 2
+        and existing.get("artifact_type")
+        == "persistent_live_tail_postings"
+        and str(existing.get("session_id") or "") == session_id
+        and str(existing.get("epoch_id") or "") == epoch_id
+        and str(
+            (
+                existing.get("generation_identity")
+                if isinstance(
+                    existing.get("generation_identity"), dict
+                )
+                else {}
+            ).get("generation_id")
+            or ""
+        )
+        in PERSISTENT_LIVE_TAIL_POSTINGS_PREDECESSOR_GENERATION_IDS
+    )
+    if (
+        isinstance(existing, dict)
+        and existing
+        and int_value(existing.get("schema_version")) == 2
+        and str(existing.get("epoch_id") or "") == epoch_id
+        and not legacy_predecessor
+    ):
+        raise ValueError(
+            "live_tail_postings_unknown_predecessor_fail_closed"
+        )
+    if (
+        isinstance(existing, dict)
+        and existing
+        and not current_manifest
+        and not legacy_predecessor
+        and str(existing.get("epoch_id") or "") == epoch_id
+        and int_value(existing.get("schema_version")) not in {2, 3}
+    ):
+        raise ValueError(
+            "live_tail_postings_unknown_generation_fail_closed"
+        )
     materialization_path = Path(
         str(epoch.get("materialization_path") or "")
     )
     if not materialization_path.is_file():
         raise ValueError("live_tail_postings_materialization_missing")
     materialized_bytes = materialization_path.stat().st_size
-    processed_bytes = (
-        int_value(existing.get("processed_bytes"))
-        if same_frontier
-        else max(0, min(projection_raw_bytes, materialized_bytes))
+    same_frontier = current_manifest or legacy_predecessor
+    processed_bytes = int_value(
+        existing.get("processed_bytes")
+    ) if same_frontier else max(
+        0, min(projection_raw_bytes, materialized_bytes)
     )
-    processed_line_count = (
-        int_value(existing.get("processed_line_count"))
-        if same_frontier
-        else max(0, projection_raw_line_count)
+    processed_line_count = int_value(
+        existing.get("processed_line_count")
+    ) if same_frontier else max(0, projection_raw_line_count)
+    descriptors = [
+        dict(item)
+        for item in (
+            existing.get("shards", [])
+            if current_manifest
+            and isinstance(existing.get("shards"), list)
+            else []
+        )
+        if isinstance(item, dict)
+    ]
+    migration_receipt: dict[str, Any] = (
+        dict(existing.get("migration_receipt"))
+        if current_manifest
+        and isinstance(existing.get("migration_receipt"), dict)
+        else {}
     )
-    entries = (
-        [
-            dict(item)
-            for item in existing.get("entries", [])
-            if isinstance(item, dict)
-            and int_value(item.get("line"))
-            > projection_raw_line_count
-        ]
-        if same_frontier
-        and isinstance(existing.get("entries"), list)
-        else []
-    )
+    if legacy_predecessor:
+        predecessor_generation_id = str(
+            existing["generation_identity"].get("generation_id")
+            or ""
+        )
+        descriptors = [
+            link_legacy_persistent_live_tail_postings(
+                session_dir=session_dir,
+                source_path=path,
+                session_id=session_id,
+                epoch_id=epoch_id,
+                generation_identity=generation_identity,
+                predecessor=existing,
+                projection_raw_bytes=projection_raw_bytes,
+                projection_raw_line_count=(
+                    projection_raw_line_count
+                ),
+            )
+        ] if int_value(existing.get("entry_count")) else []
+        migration_receipt = {
+            "status": "exact_predecessor_linked_without_raw_rebuild",
+            "from_generation_id": predecessor_generation_id,
+            "to_generation_id": str(
+                generation_identity.get("generation_id") or ""
+            ),
+            "raw_authority_changed": False,
+            "unknown_generation_admission": False,
+        }
     if processed_bytes > materialized_bytes:
         processed_bytes = max(
             0, min(projection_raw_bytes, materialized_bytes)
         )
         processed_line_count = max(0, projection_raw_line_count)
-        entries = []
+        descriptors = []
         same_frontier = False
-    with materialization_path.open("rb") as handle:
-        handle.seek(processed_bytes)
-        pending = handle.read()
-    complete_length = pending.rfind(b"\n") + 1
-    complete_payload = pending[:complete_length]
-    raw_lines = complete_payload.splitlines(keepends=True)
-    decoded_lines = [
-        raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
-        for raw_line in raw_lines
-    ]
+    if (
+        current_manifest
+        and projection_raw_line_count
+        < int_value(existing.get("projection_raw_line_count"))
+    ):
+        processed_bytes = max(
+            0, min(projection_raw_bytes, materialized_bytes)
+        )
+        processed_line_count = max(0, projection_raw_line_count)
+        descriptors = []
+        same_frontier = False
+    complete_end = persistent_live_tail_postings_complete_end(
+        materialization_path,
+        start_offset=processed_bytes,
+    )
+    unique_delta_bytes = max(0, complete_end - processed_bytes)
+    if (
+        current_manifest
+        and unique_delta_bytes == 0
+        and int_value(existing.get("source_captured_bytes"))
+        == materialized_bytes
+        and int_value(existing.get("projection_raw_bytes"))
+        == projection_raw_bytes
+        and int_value(existing.get("projection_raw_line_count"))
+        == projection_raw_line_count
+    ):
+        manifest_stat = path.stat()
+        return {
+            "path": str(path),
+            "generation_id": generation_identity["generation_id"],
+            "manifest_sha256": sha256_file_exact(path),
+            "manifest_bytes": manifest_stat.st_size,
+            "processed_bytes": processed_bytes,
+            "processed_line_count": processed_line_count,
+            "new_entry_count": 0,
+            "entry_count": int_value(existing.get("entry_count")),
+            "token_count": int_value(existing.get("token_count")),
+            "shard_count": int_value(existing.get("shard_count")),
+            "shards_read_for_update": 0,
+            "shards_written": 0,
+            "rewritten_entry_count": 0,
+            "dropped_descriptor_count": 0,
+            "privacy_resanitization": False,
+            "source_unique_bytes_read": 0,
+            "source_pass_bytes_read": 0,
+            "source_bytes_read": 0,
+            "historical_raw_bytes_read": 0,
+            "reused_frontier": True,
+            "pending_incomplete_bytes": (
+                materialized_bytes - processed_bytes
+            ),
+            "migration": (
+                dict(existing.get("migration_receipt"))
+                if isinstance(
+                    existing.get("migration_receipt"), dict
+                )
+                else {}
+            ),
+            "no_op": True,
+        }
     literal_values = derived_session_sensitive_literal_values_from_texts(
-        decoded_lines
+        raw_text
+        for _byte_offset, _raw_line, raw_text in (
+            iter_persistent_live_tail_complete_lines(
+                materialization_path,
+                start_offset=processed_bytes,
+                end_offset=complete_end,
+            )
+        )
     )
     literal_policy = DerivedSessionSensitiveLiteralPolicy(
         values_by_kind=literal_values
     )
-    # A value can become recognizable as sensitive in a later line.  Reapply
-    # the new process-local literal policy to retained derived entries.
-    sanitized_entries: list[dict[str, Any]] = []
-    for entry in entries:
-        sanitized = redact_derived_value(
-            entry,
-            literal_policy=literal_policy,
+    shards_read_for_update = 0
+    rewritten_entry_count = 0
+    dropped_descriptor_count = 0
+    descriptor_paths_to_unlink: list[Path] = []
+
+    def descriptor_entries(
+        descriptor: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        nonlocal shards_read_for_update
+        payload = read_persistent_live_tail_postings_descriptor(
+            session_dir=session_dir,
+            session_id=session_id,
+            epoch_id=epoch_id,
+            generation_identity=generation_identity,
+            descriptor=descriptor,
         )
-        preview = str(sanitized.get("preview") or "")
-        sanitized["tokens"] = persistent_live_tail_safe_tokens(
-            preview
-        )
-        sanitized_entries.append(sanitized)
-    entries = sanitized_entries
-    byte_offset = processed_bytes
-    next_line = processed_line_count + 1
-    for raw_line, raw_text in zip(
-        raw_lines, decoded_lines, strict=True
-    ):
-        try:
-            loaded = json.loads(raw_text)
-            parsed = loaded if isinstance(loaded, dict) else None
-        except json.JSONDecodeError:
-            parsed = None
-        event = classify_raw_event(raw_text, parsed, next_line)
-        semantic = event_semantic_text(event) or event.title
-        preview_projection = derived_text_privacy_projection(
-            semantic,
-            max_chars=700,
-        )
-        preview = redact_derived_text(
-            str(preview_projection.get("text") or ""),
-            literal_policy=literal_policy,
-        )
-        route_signals = [
-            {
-                "layer": str(item.get("layer") or ""),
-                "key": str(item.get("key") or ""),
-            }
-            for item in event_route_signals(event)
-            if str(item.get("layer") or "")
-            and str(item.get("key") or "")
+        shards_read_for_update += 1
+        return [
+            dict(item)
+            for item in payload.get("entries", [])
+            if isinstance(item, dict)
         ]
-        entry = redact_derived_value(
-            {
-                "event_id": event.event_id,
-                "line": next_line,
-                "byte_offset": byte_offset,
-                "byte_count": len(raw_line),
-                "event_type": event.event_type,
-                "source_type": event.source_type,
-                "timestamp": event.timestamp or "",
-                "family": event.family,
-                "phase": event.phase,
-                "actor": event.actor,
-                "action": event.action,
-                "outcome": event.outcome,
-                "correlation_id": event.correlation_id or "",
-                "route_signals": route_signals,
-                "preview": preview,
-                "tokens": persistent_live_tail_safe_tokens(preview),
-                "raw_ref": f"raw:line:{next_line}",
-                "capture_ref": (
-                    f"raw-ledger:{epoch.get('epoch_id')}:"
-                    f"line:{next_line}"
-                ),
-            },
-            literal_policy=literal_policy,
+
+    def new_entries() -> Iterator[dict[str, Any]]:
+        nonlocal new_entry_count
+        line_no = processed_line_count + 1
+        for byte_offset, raw_line, raw_text in (
+            iter_persistent_live_tail_complete_lines(
+                materialization_path,
+                start_offset=processed_bytes,
+                end_offset=complete_end,
+            )
+        ):
+            yield persistent_live_tail_posting_entry(
+                raw_line=raw_line,
+                raw_text=raw_text,
+                byte_offset=byte_offset,
+                line_no=line_no,
+                epoch_id=epoch_id,
+                literal_policy=literal_policy,
+            )
+            new_entry_count += 1
+            line_no += 1
+
+    new_entry_count = 0
+    privacy_resanitization = bool(
+        literal_policy.literal_count and descriptors
+    )
+    full_reshard = bool(
+        literal_policy.literal_count
+        or any(
+            int_value(item.get("from_line"))
+            <= projection_raw_line_count
+            < int_value(item.get("to_line"))
+            for item in descriptors
         )
-        entries.append(entry)
-        byte_offset += len(raw_line)
-        next_line += 1
-    processed_bytes += complete_length
-    processed_line_count += len(raw_lines)
-    token_postings = persistent_live_tail_inverted_token_postings(
-        entries
+    )
+    dropped_descriptors = [
+        item
+        for item in descriptors
+        if int_value(item.get("to_line"))
+        <= projection_raw_line_count
+    ]
+    retained_descriptors = [
+        item
+        for item in descriptors
+        if int_value(item.get("to_line"))
+        > projection_raw_line_count
+    ]
+    dropped_descriptor_count += len(descriptors) - len(
+        retained_descriptors
+    )
+    descriptor_paths_to_unlink.extend(
+        persistent_live_tail_postings_descriptor_path(
+            session_dir,
+            descriptor,
+        )
+        for descriptor in dropped_descriptors
+    )
+    descriptors = retained_descriptors
+    written_descriptors: list[dict[str, Any]] = []
+    shard_buffer: list[dict[str, Any]] = []
+    next_ordinal = 0
+
+    def flush_shard_buffer() -> None:
+        nonlocal shard_buffer, next_ordinal
+        if not shard_buffer:
+            return
+        written_descriptors.append(
+            write_persistent_live_tail_postings_shard(
+                session_dir=session_dir,
+                session_id=session_id,
+                epoch_id=epoch_id,
+                generation_identity=generation_identity,
+                ordinal=next_ordinal,
+                entries=shard_buffer,
+                now=now,
+            )
+        )
+        next_ordinal += 1
+        shard_buffer = []
+
+    if full_reshard:
+        for descriptor in descriptors:
+            descriptor_paths_to_unlink.append(
+                persistent_live_tail_postings_descriptor_path(
+                    session_dir,
+                    descriptor,
+                )
+            )
+            for entry in descriptor_entries(descriptor):
+                if int_value(entry.get("line")) <= (
+                    projection_raw_line_count
+                ):
+                    continue
+                sanitized = redact_derived_value(
+                    entry,
+                    literal_policy=literal_policy,
+                )
+                preview = str(sanitized.get("preview") or "")
+                sanitized["tokens"] = (
+                    persistent_live_tail_safe_tokens(preview)
+                )
+                shard_buffer.append(sanitized)
+                rewritten_entry_count += 1
+                if len(shard_buffer) >= (
+                    PERSISTENT_LIVE_TAIL_POSTINGS_SHARD_MAX_ENTRIES
+                ):
+                    flush_shard_buffer()
+        for entry in new_entries():
+            shard_buffer.append(entry)
+            if len(shard_buffer) >= (
+                PERSISTENT_LIVE_TAIL_POSTINGS_SHARD_MAX_ENTRIES
+            ):
+                flush_shard_buffer()
+        flush_shard_buffer()
+        descriptors = written_descriptors
+    else:
+        descriptors.sort(key=lambda item: int_value(item.get("ordinal")))
+        next_ordinal = (
+            max(
+                (int_value(item.get("ordinal"), -1) for item in descriptors),
+                default=-1,
+            )
+            + 1
+        )
+        if (
+            descriptors
+            and descriptors[-1].get("format")
+            == "sharded_postings_v1"
+            and int_value(descriptors[-1].get("entry_count"))
+            < PERSISTENT_LIVE_TAIL_POSTINGS_SHARD_MAX_ENTRIES
+        ):
+            open_descriptor = descriptors.pop()
+            shard_buffer = descriptor_entries(open_descriptor)
+            descriptor_paths_to_unlink.append(
+                persistent_live_tail_postings_descriptor_path(
+                    session_dir,
+                    open_descriptor,
+                )
+            )
+            next_ordinal = int_value(open_descriptor.get("ordinal"))
+        for entry in new_entries():
+            shard_buffer.append(entry)
+            if len(shard_buffer) >= (
+                PERSISTENT_LIVE_TAIL_POSTINGS_SHARD_MAX_ENTRIES
+            ):
+                flush_shard_buffer()
+        flush_shard_buffer()
+        descriptors.extend(written_descriptors)
+        descriptors.sort(key=lambda item: int_value(item.get("ordinal")))
+
+    processed_line_count += new_entry_count
+    processed_bytes = complete_end
+    entry_count = sum(
+        int_value(item.get("entry_count"))
+        for item in descriptors
+    )
+    token_count = sum(
+        int_value(item.get("token_count"))
+        for item in descriptors
     )
     payload = {
         "schema_version": (
@@ -28874,10 +29568,14 @@ def update_persistent_live_tail_postings(
         "pending_incomplete_bytes": (
             materialized_bytes - processed_bytes
         ),
-        "entry_count": len(entries),
-        "entries": entries,
-        "token_count": len(token_postings),
-        "token_postings": token_postings,
+        "storage_mode": "bounded_json_shards_v1",
+        "shard_max_entries": (
+            PERSISTENT_LIVE_TAIL_POSTINGS_SHARD_MAX_ENTRIES
+        ),
+        "shard_count": len(descriptors),
+        "entry_count": entry_count,
+        "token_count": token_count,
+        "shards": descriptors,
         "privacy": {
             **literal_policy.report(),
             "raw_text_persisted": False,
@@ -28887,19 +29585,55 @@ def update_persistent_live_tail_postings(
             "derived_navigation_with_typed_refs_raw_capture_is_authority"
         ),
     }
+    if migration_receipt:
+        payload["migration_receipt"] = migration_receipt
     write_json_durable(path, payload)
+    manifest_stat = path.stat()
+    manifest_sha256 = sha256_file_exact(path)
+    retained_paths = {
+        persistent_live_tail_postings_descriptor_path(
+            session_dir,
+            descriptor,
+        )
+        for descriptor in descriptors
+    }
+    cleaned_directory_witnesses: dict[Path, Path] = {}
+    for stale_path in descriptor_paths_to_unlink:
+        if stale_path in retained_paths:
+            continue
+        try:
+            stale_path.unlink(missing_ok=True)
+            cleaned_directory_witnesses[stale_path.parent] = stale_path
+        except OSError:
+            # The new manifest is authoritative and valid.  A stale shard is
+            # a safe orphan that a later bounded cleanup may remove.
+            continue
+    for witness in cleaned_directory_witnesses.values():
+        fsync_parent_directory(witness)
     return {
         "path": str(path),
         "generation_id": generation_identity["generation_id"],
+        "manifest_sha256": manifest_sha256,
+        "manifest_bytes": manifest_stat.st_size,
         "processed_bytes": processed_bytes,
         "processed_line_count": processed_line_count,
-        "new_entry_count": len(raw_lines),
-        "entry_count": len(entries),
-        "token_count": len(token_postings),
-        "source_bytes_read": len(pending),
+        "new_entry_count": new_entry_count,
+        "entry_count": entry_count,
+        "token_count": token_count,
+        "shard_count": len(descriptors),
+        "shards_read_for_update": shards_read_for_update,
+        "shards_written": len(written_descriptors),
+        "rewritten_entry_count": rewritten_entry_count,
+        "dropped_descriptor_count": dropped_descriptor_count,
+        "privacy_resanitization": privacy_resanitization,
+        "source_unique_bytes_read": unique_delta_bytes,
+        "source_pass_bytes_read": unique_delta_bytes * 2,
+        "source_bytes_read": unique_delta_bytes,
+        "historical_raw_bytes_read": 0,
         "reused_frontier": same_frontier,
         "pending_incomplete_bytes": materialized_bytes
         - processed_bytes,
+        "migration": migration_receipt,
     }
 
 
@@ -29510,6 +30244,12 @@ def append_raw_capture_ledger(
         "materialization_path": str(materialization_path),
         "block_count": len(blocks),
         "postings": postings,
+        "postings_manifest_sha256": str(
+            postings.get("manifest_sha256") or ""
+        ),
+        "postings_manifest_bytes": int_value(
+            postings.get("manifest_bytes")
+        ),
         "archive_prefixes": archive_prefixes,
         "source_stable_during_capture": source_stable,
         "authority": "captured_raw_evidence_overlay",
@@ -29664,6 +30404,12 @@ def _preserve_unindexed_raw_capture_locked(
         ),
         "persistent_live_tail_postings": str(
             persistent_live_tail_postings_path(session_dir)
+        ),
+        "persistent_live_tail_postings_sha256": str(
+            overlay.get("postings_manifest_sha256") or ""
+        ),
+        "persistent_live_tail_postings_bytes": int_value(
+            overlay.get("postings_manifest_bytes")
         ),
         "persistent_live_tail_index_written": True,
         "persistent_live_tail": overlay,
@@ -102615,6 +103361,12 @@ def persistent_live_tail_source_snapshot(
         "persistent_live_tail_postings": str(
             persistent_live_tail_postings_path(session_dir)
         ),
+        "persistent_live_tail_postings_sha256": str(
+            overlay.get("postings_manifest_sha256") or ""
+        ),
+        "persistent_live_tail_postings_bytes": int_value(
+            overlay.get("postings_manifest_bytes")
+        ),
         "ledger_epoch_id": overlay.get("epoch_id"),
         "ledger_chain_sha256": overlay.get(
             "ledger_chain_sha256"
@@ -104757,57 +105509,208 @@ def live_tail_exact_search_from_persistent_postings(
         str(snapshot.get("persistent_live_tail_postings") or "")
     )
     postings = read_json(path, {}) if path.is_file() else {}
-    if not (
+    session_id = str(snapshot.get("session_id") or "")
+    epoch_id = str(snapshot.get("ledger_epoch_id") or "")
+    generation_identity = (
+        persistent_live_tail_postings_generation_identity()
+    )
+    current_manifest = bool(
         isinstance(postings, dict)
         and int_value(postings.get("schema_version"))
         == PERSISTENT_LIVE_TAIL_POSTINGS_SCHEMA_VERSION
         and postings.get("artifact_type")
         == "persistent_live_tail_postings"
-        and str(postings.get("session_id") or "")
-        == str(snapshot.get("session_id") or "")
-        and str(postings.get("epoch_id") or "")
-        == str(snapshot.get("ledger_epoch_id") or "")
+        and str(postings.get("session_id") or "") == session_id
+        and str(postings.get("epoch_id") or "") == epoch_id
         and postings.get("generation_identity")
-        == persistent_live_tail_postings_generation_identity()
+        == generation_identity
         and int_value(postings.get("source_captured_bytes"))
         == int_value(snapshot.get("snapshot_end_offset"))
-    ):
-        return None
-    query_tokens = persistent_live_tail_safe_tokens(needle)
-    token_postings = postings.get("token_postings")
-    posting_entries = postings.get("entries")
-    if not (
-        query_tokens
-        and isinstance(token_postings, dict)
-        and isinstance(posting_entries, list)
-    ):
-        return None
-    candidate_positions: set[int] | None = None
-    for token in query_tokens:
-        positions = token_postings.get(token)
-        if not isinstance(positions, list):
-            return None
-        normalized_positions = {
-            int_value(position, -1)
-            for position in positions
-            if 0 <= int_value(position, -1) < len(posting_entries)
-        }
-        candidate_positions = (
-            normalized_positions
-            if candidate_positions is None
-            else candidate_positions & normalized_positions
+    )
+    predecessor_manifest = bool(
+        isinstance(postings, dict)
+        and int_value(postings.get("schema_version")) == 2
+        and postings.get("artifact_type")
+        == "persistent_live_tail_postings"
+        and str(postings.get("session_id") or "") == session_id
+        and str(postings.get("epoch_id") or "") == epoch_id
+        and str(
+            (
+                postings.get("generation_identity")
+                if isinstance(
+                    postings.get("generation_identity"), dict
+                )
+                else {}
+            ).get("generation_id")
+            or ""
         )
-        if not candidate_positions:
+        in PERSISTENT_LIVE_TAIL_POSTINGS_PREDECESSOR_GENERATION_IDS
+        and int_value(postings.get("source_captured_bytes"))
+        == int_value(snapshot.get("snapshot_end_offset"))
+    )
+    if not current_manifest and not predecessor_manifest:
+        return None
+    manifest_bytes = path.stat().st_size if path.is_file() else 0
+    if current_manifest:
+        expected_manifest_sha256 = str(
+            snapshot.get(
+                "persistent_live_tail_postings_sha256"
+            )
+            or ""
+        )
+        expected_manifest_bytes = int_value(
+            snapshot.get("persistent_live_tail_postings_bytes"),
+            -1,
+        )
+        if not (
+            expected_manifest_sha256
+            and expected_manifest_bytes == manifest_bytes
+            and sha256_file_exact(path)
+            == expected_manifest_sha256
+        ):
             return None
+    query_tokens = persistent_live_tail_safe_tokens(needle)
+    if not query_tokens:
+        return None
     archived_lines = int_value(snapshot.get("archived_line_count"))
-    entries = [
-        posting_entries[position]
-        for position in sorted(candidate_positions or set())
-        if isinstance(posting_entries[position], dict)
-        for item in [posting_entries[position]]
-        if isinstance(item, dict)
-        and int_value(item.get("line")) > archived_lines
-    ]
+    session_dir = path.parent.parent
+    descriptors = (
+        [
+            dict(item)
+            for item in postings.get("shards", [])
+            if isinstance(item, dict)
+        ]
+        if current_manifest
+        and isinstance(postings.get("shards"), list)
+        else []
+    )
+    shard_payloads: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    if predecessor_manifest:
+        shard_payloads.append(
+            (
+                {
+                    "format": "legacy_monolith_v2_inline",
+                    "ordinal": 0,
+                    "bytes": manifest_bytes,
+                },
+                postings,
+            )
+        )
+    entries: list[dict[str, Any]] = []
+    candidate_position_count = 0
+    shard_bytes_read = 0
+    shard_count_examined = 0
+    shard_descriptor_count_examined = 0
+    shard_count_filtered = 0
+    candidate_limit = max(32, max(1, limit) * 8)
+    descriptor_iter = sorted(
+        descriptors,
+        key=lambda item: int_value(item.get("ordinal")),
+        reverse=True,
+    )
+    for descriptor in descriptor_iter:
+        if int_value(descriptor.get("to_line")) <= archived_lines:
+            continue
+        shard_descriptor_count_examined += 1
+        if not persistent_live_tail_token_filter_might_contain(
+            descriptor.get("token_filter"),
+            query_tokens,
+        ):
+            shard_count_filtered += 1
+            continue
+        try:
+            payload = read_persistent_live_tail_postings_descriptor(
+                session_dir=session_dir,
+                session_id=session_id,
+                epoch_id=epoch_id,
+                generation_identity=generation_identity,
+                descriptor=descriptor,
+            )
+        except (OSError, ValueError):
+            return None
+        shard_payloads.append((descriptor, payload))
+        token_postings = payload.get("token_postings")
+        posting_entries = payload.get("entries")
+        if not (
+            isinstance(token_postings, dict)
+            and isinstance(posting_entries, list)
+        ):
+            return None
+        shard_count_examined += 1
+        shard_bytes_read += int_value(descriptor.get("bytes"))
+        candidate_positions: set[int] | None = None
+        for token in query_tokens:
+            positions = token_postings.get(token)
+            if not isinstance(positions, list):
+                candidate_positions = set()
+                break
+            normalized_positions = {
+                int_value(position, -1)
+                for position in positions
+                if 0
+                <= int_value(position, -1)
+                < len(posting_entries)
+            }
+            candidate_positions = (
+                normalized_positions
+                if candidate_positions is None
+                else candidate_positions & normalized_positions
+            )
+            if not candidate_positions:
+                break
+        candidate_position_count += len(candidate_positions or set())
+        for position in sorted(
+            candidate_positions or set(), reverse=True
+        ):
+            item = posting_entries[position]
+            if (
+                isinstance(item, dict)
+                and int_value(item.get("line")) > archived_lines
+            ):
+                entries.append(item)
+                if len(entries) >= candidate_limit:
+                    break
+        if len(entries) >= candidate_limit:
+            break
+    if predecessor_manifest:
+        descriptor, payload = shard_payloads[0]
+        token_postings = payload.get("token_postings")
+        posting_entries = payload.get("entries")
+        if not (
+            isinstance(token_postings, dict)
+            and isinstance(posting_entries, list)
+        ):
+            return None
+        shard_count_examined = 1
+        shard_bytes_read = manifest_bytes
+        candidate_positions: set[int] | None = None
+        for token in query_tokens:
+            positions = token_postings.get(token)
+            if not isinstance(positions, list):
+                candidate_positions = set()
+                break
+            normalized_positions = {
+                int_value(position, -1)
+                for position in positions
+                if 0 <= int_value(position, -1) < len(posting_entries)
+            }
+            candidate_positions = (
+                normalized_positions
+                if candidate_positions is None
+                else candidate_positions & normalized_positions
+            )
+            if not candidate_positions:
+                break
+        candidate_position_count = len(candidate_positions or set())
+        entries = [
+            posting_entries[position]
+            for position in sorted(
+                candidate_positions or set(), reverse=True
+            )
+            if isinstance(posting_entries[position], dict)
+            and int_value(posting_entries[position].get("line"))
+            > archived_lines
+        ][:candidate_limit]
     if not entries:
         return None
     source_path = Path(str(snapshot.get("live_source_path") or ""))
@@ -104819,7 +105722,7 @@ def live_tail_exact_search_from_persistent_postings(
     ordered_anchor = exact_raw_ordered_token_phrase_anchor(needle)
     results: list[dict[str, Any]] = []
     bytes_read = 0
-    for posting in reversed(entries):
+    for posting in entries:
         byte_offset = int_value(posting.get("byte_offset"), -1)
         byte_count = int_value(posting.get("byte_count"), 0)
         if (
@@ -104952,14 +105855,24 @@ def live_tail_exact_search_from_persistent_postings(
         "scan": {
             "status": "persistent_postings_selected_raw_verification",
             "bytes_read": bytes_read,
-            "posting_entry_count": len(
-                postings.get("entries", [])
-                if isinstance(postings.get("entries"), list)
-                else []
+            "posting_entry_count": int_value(
+                postings.get("entry_count")
             ),
             "posting_candidate_count": len(entries),
-            "posting_entries_examined": len(
-                candidate_positions or set()
+            "posting_entries_examined": candidate_position_count,
+            "posting_manifest_bytes_read": manifest_bytes,
+            "posting_shards_examined": shard_count_examined,
+            "posting_shard_descriptors_examined": (
+                shard_descriptor_count_examined
+            ),
+            "posting_shards_filtered_without_read": (
+                shard_count_filtered
+            ),
+            "posting_shard_bytes_read": shard_bytes_read,
+            "posting_storage_mode": (
+                "bounded_json_shards_v1"
+                if current_manifest
+                else "legacy_monolith_v2_predecessor"
             ),
             "posting_full_scan_performed": False,
             "candidate_selection": "inverted_token_intersection",
@@ -198662,6 +199575,7 @@ REQUIRED_ROOT_FILES = [
     "schemas/hook-receipt.schema.json",
     "schemas/incident.schema.json",
     "schemas/live-tail.postings.schema.json",
+    "schemas/live-tail.postings-shard.schema.json",
     "schemas/raw-capture-state.schema.json",
     "schemas/segment.index.schema.json",
     "schemas/session.manifest.schema.json",

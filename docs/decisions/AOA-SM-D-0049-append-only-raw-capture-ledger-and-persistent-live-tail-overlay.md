@@ -8,7 +8,7 @@ Accepted.
 
 - Decision ID: AOA-SM-D-0049
 - Original date: 2026-08-10
-- Owner surfaces: `scripts/aoa_session_memory.py`, `schemas/raw-capture-state.schema.json`, `DESIGN.md`, `PIPELINE.md`, `tests/test_session_memory.py`, `docs/decisions/`
+- Owner surfaces: `scripts/aoa_session_memory.py`, `schemas/raw-capture-state.schema.json`, `schemas/live-tail.postings.schema.json`, `schemas/live-tail.postings-shard.schema.json`, `DESIGN.md`, `PIPELINE.md`, `tests/test_session_memory.py`, `docs/decisions/`
 - Surface classes: raw capture, live-tail retrieval, incremental maintenance, storage
 - Projection layers: raw evidence, persistent live-tail overlay
 - Guard families: append-only capture, source epoch, content address, hash chain, prefix attestation, last-good preservation
@@ -64,8 +64,9 @@ state use temp-file fsync, atomic rename, and parent-directory fsync. This
 durability cost is paid only on changed capture or queue state, never by an
 unchanged hot probe.
 
-The hook also atomically publishes `raw/live-tail.index.json` and a redacted
-`raw/live-tail.postings.json`. The index binds the
+The hook also atomically publishes `raw/live-tail.index.json`, a compact
+redacted `raw/live-tail.postings.json` manifest, and bounded immutable posting
+revisions under `raw/live-tail-postings/`. The index binds the
 current epoch and chain head, source identity and captured watermark, complete
 line state, compatibility materialization, and any archived-prefix digest
 measured while the source was already being captured. A live-tail reader may
@@ -74,17 +75,32 @@ ledger epoch, chain head, materialization size, last block receipt, and exact
 archived-prefix attestation all match. Otherwise it falls back to the existing
 bounded direct-source validation or fails closed.
 
-The postings frontier advances only across newly completed captured lines and
-stores typed fields, redacted previews, safe tokens, an inverted token-to-entry
-map, exact byte ranges, and raw or capture refs; it stores neither raw line
-bodies nor reversible secret digests. If a later line makes an earlier repeated
-literal recognizable as a sensitive assignment value, retained postings are
-re-sanitized and the inverted map is rebuilt before atomic publication. A
-positive lookup intersects token postings without scanning every entry, then
-verifies only the selected raw byte ranges. It can therefore prove the returned
-evidence current while still reporting `global_recall_complete=false`. A miss
-or a query that cannot be represented by safe tokens is never an exhaustive
-negative claim and may route to the existing bounded raw fallback.
+The postings frontier advances only across newly completed captured lines. A
+native shard stores typed fields, redacted previews, safe tokens, a local
+inverted token-to-entry map, exact byte ranges, and raw or capture refs; it
+stores neither raw line bodies nor reversible secret digests. The compact
+manifest stores exact shard byte receipts and a no-false-negative Bloom filter
+over the shard's already-redacted safe tokens. Ordinary append reads at most
+the last open shard, writes a new immutable revision for it or a new shard, and
+publishes the manifest last. The prior manifest and its shard revision remain
+valid until publication; stale revisions are removed only afterward.
+
+If a later line makes an earlier repeated literal recognizable as a sensitive
+assignment value, retained derived shards are re-sanitized and re-sharded
+before atomic publication. This exceptional privacy repair reads derived
+postings, never historical raw. A positive lookup rejects irrelevant shards
+through manifest filters, intersects local token postings in selected shards,
+then verifies only the selected raw byte ranges. It can therefore prove the
+returned evidence current while still reporting
+`global_recall_complete=false`. A miss or a query that cannot be represented by
+safe tokens is never an exhaustive negative claim and may route to the
+existing bounded raw fallback.
+
+The schema-2 monolithic postings packet is admitted only when its exact
+predecessor generation is allowlisted. It is hard-linked as a sealed legacy
+shard without reading historical raw, and the manifest records the migration.
+An unknown predecessor fails closed. Native readers retain the legacy path
+until the guarded bridge is no longer needed.
 
 Every hook-observed source is also registered in a compact capture-watch
 frontier. The ordinary hot timer stats only a bounded set of known paths,
@@ -126,14 +142,17 @@ as part of capture, so it adds no second read of historical bytes.
   parsing the complete unarchived JSONL suffix.
 - Positive: incomplete final-line state and source-epoch transitions are
   explicit.
-- Tradeoff: the mutable ledger and overlay indexes grow with block metadata and
-  must be compactly rendered or sharded if a session accumulates many blocks.
-- Tradeoff: the current postings packet is still atomically rewritten as one
-  JSON object; lookup candidate selection is inverted and bounded, but a
-  sharded or transactional store is required before claiming delta-only write
-  cost for an indefinitely large unarchived tail.
+- Tradeoff: the mutable ledger and compact postings manifest still grow with
+  block and shard metadata; they do not embed historical entries or global
+  token postings, but a later hierarchical catalog may be warranted for much
+  larger shard counts.
+- Tradeoff: recognition of a new sensitive literal deliberately re-sanitizes
+  retained derived shards. This is a privacy repair exception to the ordinary
+  one-open-shard append bound and still reads zero historical raw bytes.
 - Tradeoff: an unreferenced block may remain after a crash and requires a
-  bounded garbage-collection route after receipt reconciliation.
+  bounded garbage-collection route after receipt reconciliation; the same is
+  true for an immutable shard revision written before a failed manifest
+  publication.
 - Follow-up: let projection assembly consume ledger blocks directly, publish
   archive-prefix attestations when a new projection catches up, and remove the
   monolithic compatibility materialization after all readers are manifest
@@ -153,6 +172,8 @@ bytes. This decision does not authorize live `.aoa` deployment.
 
 - `scripts/aoa_session_memory.py`
 - `schemas/raw-capture-state.schema.json`
+- `schemas/live-tail.postings.schema.json`
+- `schemas/live-tail.postings-shard.schema.json`
 - `tests/test_session_memory.py`
 - `DESIGN.md`
 - `PIPELINE.md`
@@ -168,11 +189,22 @@ validated.
 ## Verification
 
 Focused tests cover append-only byte cost, exact persisted SHA continuation,
-immutable prior blocks, idempotent
+immutable prior blocks and posting revisions, idempotent
 capture, crash-before-commit preservation, source rewrite epoch separation,
 zero-read watermark attestation, missed-hook timer recovery without archive
-rediscovery, inverted-posting candidate selection, persistent-posting positive
-verification, later sensitive-literal recognition, and existing
+rediscovery, bounded-shard candidate selection, exact predecessor migration,
+unknown-predecessor refusal, retry after manifest publication failure,
+persistent-posting positive verification, later sensitive-literal recognition,
+and existing
 deferred-capture behavior. Source validation, schema validation, growth
 benchmarks, portable export, and installed-surface proof remain required before
 rollout.
+
+## Review Amendment — 2026-08-11
+
+The first accepted implementation proved delta raw capture but kept all live
+postings in one JSON object. Event-dense evidence showed that this object grew
+past 500 MB and was fully re-sanitized and rewritten on every append. The
+bounded immutable shard plus compact manifest protocol above closes that
+specific scaling defect while preserving the original raw-authority,
+privacy-repair, last-good, and non-exhaustive-recall boundaries.

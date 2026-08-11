@@ -12,6 +12,10 @@ or naming semantics by themselves.
 - `atlas-route-entry.schema.json` describes generated atlas route entries.
 - `hook-receipt.schema.json` describes persisted hook receipts.
 - `incident.schema.json` describes diagnostic incidents.
+- `live-tail.postings.schema.json` describes the compact manifest for bounded
+  persistent live-tail posting shards.
+- `live-tail.postings-shard.schema.json` describes one bounded, redacted
+  posting shard used for exact candidate selection before raw verification.
 - `raw-capture-state.schema.json` distinguishes preserved-but-unindexed raw
   evidence from a capture committed with one session projection generation.
 - `segment.index.schema.json` describes generated segment event indexes.

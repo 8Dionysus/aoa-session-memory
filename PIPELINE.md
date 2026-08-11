@@ -38,7 +38,9 @@ Capture and indexing advance independently. When bounded foreground work
 cannot publish a complete session generation, it appends only new bytes to
 immutable content-addressed blocks, advances a hash-chained source epoch in
 `raw/capture-ledger.json`, and atomically advances `raw/capture.latest.json` plus
-`raw/live-tail.index.json` and a redacted `raw/live-tail.postings.json`.
+`raw/live-tail.index.json`, a compact redacted
+`raw/live-tail.postings.json` manifest, and bounded immutable posting revisions
+under `raw/live-tail-postings/`.
 New block bytes and the compatibility suffix are fsynced before the ledger
 watermark is replaced and its parent directory is fsynced. A process crash
 before that replacement leaves the old watermark authoritative; retry truncates
@@ -53,12 +55,17 @@ payload. Operational hook observations remain outside the semantic projection.
 The live-tail reader may use the persistent overlay only when its source
 identity and captured size, ledger epoch and chain head, compatibility-view
 size, last immutable block receipt, and archived-prefix attestation all match.
-The postings frontier consumes only newly completed captured lines, persists
-safe tokens, an inverted token-to-entry map, redacted previews, typed fields,
-and exact byte ranges, and never
-persists raw line bodies or reversible secret digests. A positive posting hit
-intersects the map, then reads and reclassifies only the selected raw ranges
-before returning evidence.
+The postings frontier consumes only newly completed captured lines. Ordinary
+append reads at most one open posting shard, writes an immutable replacement
+revision or new shard, and publishes its compact manifest last. Each shard
+persists safe tokens, a local inverted token-to-entry map, redacted previews,
+typed fields, and exact byte ranges, and never persists raw line bodies or
+reversible secret digests. Manifest Bloom filters reject irrelevant shards
+without opening them. A positive posting hit intersects the selected local map,
+then reads and reclassifies only the selected raw ranges before returning
+evidence. An exact allowlisted schema-2 predecessor may be linked as a sealed
+legacy shard; unknown predecessors fail closed. A newly recognized sensitive
+literal re-sanitizes retained derived shards but reads no historical raw.
 A miss falls back to bounded direct-source validation or remains unresolved;
 it cannot support an exhaustive negative claim, and the overlay never upgrades
 semantic projections by itself.

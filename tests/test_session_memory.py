@@ -71433,12 +71433,559 @@ def test_persistent_live_tail_postings_never_persist_sensitive_literals(
         persisted
     )
     postings = module.read_json(postings_path, {})
+    shard_paths = [
+        session_dir / str(descriptor["rel"])
+        for descriptor in postings["shards"]
+        if descriptor["format"] == "sharded_postings_v1"
+    ]
+    shard_texts = [
+        shard_path.read_text(encoding="utf-8")
+        for shard_path in shard_paths
+    ]
+    shards = [module.read_json(shard_path, {}) for shard_path in shard_paths]
+
     assert postings["entry_count"] == 2
-    assert postings["token_count"] == len(postings["token_postings"])
+    assert postings["shard_count"] == 1
+    assert postings["token_count"] == sum(
+        shard["token_count"] for shard in shards
+    )
+    assert all(sensitive not in shard_text for shard_text in shard_texts)
+    assert all(
+        hashlib.sha256(sensitive.encode("utf-8")).hexdigest()
+        not in shard_text
+        for shard_text in shard_texts
+    )
     assert postings["privacy"]["raw_text_persisted"] is False
     assert postings["privacy"][
         "reversible_literal_digests_persisted"
     ] is False
+    assert all(
+        shard["privacy"]["raw_text_persisted"] is False
+        and shard["privacy"][
+            "reversible_literal_digests_persisted"
+        ]
+        is False
+        for shard in shards
+    )
+
+
+def test_persistent_live_tail_postings_append_is_bounded_and_noop_is_zero_work(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        module,
+        "PERSISTENT_LIVE_TAIL_POSTINGS_SHARD_MAX_ENTRIES",
+        3,
+    )
+    session_dir = tmp_path / ".aoa" / "sessions" / "bounded-tail"
+    transcript = tmp_path / "bounded-tail.jsonl"
+
+    def row(ordinal: int, text: str) -> dict[str, Any]:
+        return {
+            "timestamp": f"2026-08-10T00:00:{ordinal:02d}Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": text}],
+            },
+        }
+
+    write_jsonl(
+        transcript,
+        [row(ordinal, f"bounded seed {ordinal}") for ordinal in range(7)],
+    )
+    first = module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id="bounded-tail",
+        transcript_path=transcript,
+        manifest={},
+        hook_event_name="PostToolUse",
+        now="2026-08-10T00:01:00Z",
+    )
+    postings_path = module.persistent_live_tail_postings_path(session_dir)
+    first_manifest = module.read_json(postings_path, {})
+    sealed = [
+        descriptor
+        for descriptor in first_manifest["shards"]
+        if descriptor["sealed"]
+    ]
+    sealed_receipts = {
+        descriptor["rel"]: (
+            descriptor["sha256"],
+            (session_dir / descriptor["rel"]).read_bytes(),
+        )
+        for descriptor in sealed
+    }
+    before_size = transcript.stat().st_size
+    appended = row(8, "newest bounded exact anchor")
+    with transcript.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(appended) + "\n")
+    appended_bytes = transcript.stat().st_size - before_size
+
+    second = module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id="bounded-tail",
+        transcript_path=transcript,
+        manifest={},
+        hook_event_name="PostToolUse",
+        now="2026-08-10T00:01:01Z",
+    )
+    metrics = second["persistent_live_tail"]["postings"]
+    second_manifest = module.read_json(postings_path, {})
+
+    assert metrics["source_bytes_read"] == appended_bytes
+    assert metrics["source_unique_bytes_read"] == appended_bytes
+    assert metrics["historical_raw_bytes_read"] == 0
+    assert metrics["shards_read_for_update"] == 1
+    assert metrics["shards_written"] == 1
+    assert metrics["rewritten_entry_count"] == 0
+    assert "entries" not in second_manifest
+    assert "token_postings" not in second_manifest
+    for relative, (expected_sha256, expected_bytes) in sealed_receipts.items():
+        shard_path = session_dir / relative
+        assert shard_path.is_file()
+        assert module.sha256_file_exact(shard_path) == expected_sha256
+        assert shard_path.read_bytes() == expected_bytes
+
+    snapshot = {
+        "session_id": "bounded-tail",
+        "session_label": "bounded-tail",
+        "session_title": "Bounded tail",
+        "session_date": "2026-08-10",
+        "ledger_epoch_id": second["ledger_epoch_id"],
+        "persistent_live_tail_postings": str(postings_path),
+        "persistent_live_tail_postings_sha256": second[
+            "persistent_live_tail_postings_sha256"
+        ],
+        "persistent_live_tail_postings_bytes": second[
+            "persistent_live_tail_postings_bytes"
+        ],
+        "live_source_path": second["capture_path"],
+        "archived_line_count": 0,
+        "scan_start_offset": 0,
+        "snapshot_end_offset": second["raw_bytes"],
+    }
+    exact = module.live_tail_exact_search_from_persistent_postings(
+        snapshot=snapshot,
+        needle="newest bounded exact anchor",
+        limit=5,
+        event_id_before=None,
+        event_type=None,
+        family=None,
+        outcome=None,
+        date_from=None,
+        date_to=None,
+        exclude_agent_event_stream_copies=False,
+    )
+    assert exact is not None
+    assert len(exact["results"]) == 1
+    assert exact["scan"]["posting_shards_examined"] == 1
+    assert exact["scan"]["global_recall_complete"] is False
+
+    before_noop_receipts = [
+        (descriptor["rel"], descriptor["sha256"])
+        for descriptor in second_manifest["shards"]
+    ]
+    third = module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id="bounded-tail",
+        transcript_path=transcript,
+        manifest={},
+        hook_event_name="PostToolUse",
+        now="2026-08-10T00:01:02Z",
+    )
+    noop = third["persistent_live_tail"]["postings"]
+    after_noop_manifest = module.read_json(postings_path, {})
+    assert noop["no_op"] is True
+    assert noop["source_bytes_read"] == 0
+    assert noop["shards_read_for_update"] == 0
+    assert noop["shards_written"] == 0
+    assert [
+        (descriptor["rel"], descriptor["sha256"])
+        for descriptor in after_noop_manifest["shards"]
+    ] == before_noop_receipts
+
+
+def test_persistent_live_tail_postings_resanitizes_prior_shards_from_new_literal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        module,
+        "PERSISTENT_LIVE_TAIL_POSTINGS_SHARD_MAX_ENTRIES",
+        1,
+    )
+    session_dir = tmp_path / ".aoa" / "sessions" / "resanitize-tail"
+    transcript = tmp_path / "resanitize-tail.jsonl"
+    sensitive = "late-private-live-value-123456789"
+    first_row = {
+        "timestamp": "2026-08-10T00:00:00Z",
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_text",
+                    "text": f"initially unlabelled {sensitive}",
+                }
+            ],
+        },
+    }
+    write_jsonl(transcript, [first_row])
+    module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id="resanitize-tail",
+        transcript_path=transcript,
+        manifest={},
+        hook_event_name="PostToolUse",
+        now="2026-08-10T00:01:00Z",
+    )
+    second_row = {
+        "timestamp": "2026-08-10T00:00:01Z",
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_text",
+                    "text": f"access_token={sensitive}",
+                }
+            ],
+        },
+    }
+    with transcript.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(second_row) + "\n")
+
+    second = module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id="resanitize-tail",
+        transcript_path=transcript,
+        manifest={},
+        hook_event_name="PostToolUse",
+        now="2026-08-10T00:01:01Z",
+    )
+    metrics = second["persistent_live_tail"]["postings"]
+    postings_path = module.persistent_live_tail_postings_path(session_dir)
+    manifest = module.read_json(postings_path, {})
+    persisted = postings_path.read_text(encoding="utf-8") + "".join(
+        (session_dir / descriptor["rel"]).read_text(encoding="utf-8")
+        for descriptor in manifest["shards"]
+    )
+
+    assert metrics["privacy_resanitization"] is True
+    assert metrics["rewritten_entry_count"] == 1
+    assert metrics["shards_read_for_update"] == 1
+    assert metrics["historical_raw_bytes_read"] == 0
+    assert sensitive not in persisted
+    assert hashlib.sha256(sensitive.encode("utf-8")).hexdigest() not in persisted
+    assert sensitive in Path(second["capture_path"]).read_text(encoding="utf-8")
+
+
+def test_persistent_live_tail_postings_migrates_exact_v2_predecessor_without_raw_rebuild(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        module,
+        "PERSISTENT_LIVE_TAIL_POSTINGS_SHARD_MAX_ENTRIES",
+        2,
+    )
+    session_dir = tmp_path / ".aoa" / "sessions" / "legacy-tail"
+    transcript = tmp_path / "legacy-tail.jsonl"
+    first_row = {
+        "timestamp": "2026-08-10T00:00:00Z",
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "legacy exact anchor"}
+            ],
+        },
+    }
+    write_jsonl(transcript, [first_row])
+    first = module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id="legacy-tail",
+        transcript_path=transcript,
+        manifest={},
+        hook_event_name="PostToolUse",
+        now="2026-08-10T00:01:00Z",
+    )
+    postings_path = module.persistent_live_tail_postings_path(session_dir)
+    current = module.read_json(postings_path, {})
+    entries = []
+    for descriptor in current["shards"]:
+        shard = module.read_json(session_dir / descriptor["rel"], {})
+        entries.extend(shard["entries"])
+    token_postings = module.persistent_live_tail_inverted_token_postings(entries)
+    predecessor_generation_id = next(
+        iter(module.PERSISTENT_LIVE_TAIL_POSTINGS_PREDECESSOR_GENERATION_IDS)
+    )
+    predecessor = {
+        "schema_version": 2,
+        "artifact_type": "persistent_live_tail_postings",
+        "session_id": "legacy-tail",
+        "epoch_id": current["epoch_id"],
+        "generation_identity": {"generation_id": predecessor_generation_id},
+        "updated_at": "2026-08-10T00:01:00Z",
+        "processed_bytes": current["processed_bytes"],
+        "processed_line_count": current["processed_line_count"],
+        "source_captured_bytes": current["source_captured_bytes"],
+        "projection_raw_bytes": 0,
+        "projection_raw_line_count": 0,
+        "pending_incomplete_bytes": 0,
+        "entry_count": len(entries),
+        "entries": entries,
+        "token_count": len(token_postings),
+        "token_postings": token_postings,
+        "privacy": current["privacy"],
+        "authority": current["authority"],
+    }
+    module.write_json_durable(postings_path, predecessor)
+    predecessor_bytes = postings_path.read_bytes()
+    before_size = transcript.stat().st_size
+    second_row = {
+        "timestamp": "2026-08-10T00:00:01Z",
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "native exact anchor"}
+            ],
+        },
+    }
+    with transcript.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(second_row) + "\n")
+    appended_bytes = transcript.stat().st_size - before_size
+
+    migrated = module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id="legacy-tail",
+        transcript_path=transcript,
+        manifest={},
+        hook_event_name="PostToolUse",
+        now="2026-08-10T00:01:01Z",
+    )
+    metrics = migrated["persistent_live_tail"]["postings"]
+    manifest = module.read_json(postings_path, {})
+
+    assert manifest["schema_version"] == 3
+    assert [descriptor["format"] for descriptor in manifest["shards"]] == [
+        "legacy_monolith_v2_link",
+        "sharded_postings_v1",
+    ]
+    assert metrics["source_bytes_read"] == appended_bytes
+    assert metrics["historical_raw_bytes_read"] == 0
+    assert metrics["shards_read_for_update"] == 0
+    assert metrics["migration"] == {
+        "status": "exact_predecessor_linked_without_raw_rebuild",
+        "from_generation_id": predecessor_generation_id,
+        "to_generation_id": module.persistent_live_tail_postings_generation_identity()[
+            "generation_id"
+        ],
+        "raw_authority_changed": False,
+        "unknown_generation_admission": False,
+    }
+    assert (
+        session_dir / manifest["shards"][0]["rel"]
+    ).read_bytes() == predecessor_bytes
+    assert first["ledger_epoch_id"] == migrated["ledger_epoch_id"]
+    snapshot = {
+        "session_id": "legacy-tail",
+        "session_label": "legacy-tail",
+        "session_title": "Legacy tail",
+        "session_date": "2026-08-10",
+        "ledger_epoch_id": migrated["ledger_epoch_id"],
+        "persistent_live_tail_postings": str(postings_path),
+        "persistent_live_tail_postings_sha256": migrated[
+            "persistent_live_tail_postings_sha256"
+        ],
+        "persistent_live_tail_postings_bytes": migrated[
+            "persistent_live_tail_postings_bytes"
+        ],
+        "live_source_path": migrated["capture_path"],
+        "archived_line_count": 0,
+        "scan_start_offset": 0,
+        "snapshot_end_offset": migrated["raw_bytes"],
+    }
+    for needle in ("legacy exact anchor", "native exact anchor"):
+        exact = module.live_tail_exact_search_from_persistent_postings(
+            snapshot=snapshot,
+            needle=needle,
+            limit=5,
+            event_id_before=None,
+            event_type=None,
+            family=None,
+            outcome=None,
+            date_from=None,
+            date_to=None,
+            exclude_agent_event_stream_copies=False,
+        )
+        assert exact is not None
+        assert len(exact["results"]) == 1
+
+
+def test_persistent_live_tail_postings_manifest_failure_retries_without_duplicate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        module,
+        "PERSISTENT_LIVE_TAIL_POSTINGS_SHARD_MAX_ENTRIES",
+        3,
+    )
+    session_dir = tmp_path / ".aoa" / "sessions" / "retry-tail"
+    transcript = tmp_path / "retry-tail.jsonl"
+    rows = [
+        {
+            "timestamp": "2026-08-10T00:00:00Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "retry seed"}
+                ],
+            },
+        }
+    ]
+    write_jsonl(transcript, rows)
+    module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id="retry-tail",
+        transcript_path=transcript,
+        manifest={},
+        hook_event_name="PostToolUse",
+        now="2026-08-10T00:01:00Z",
+    )
+    postings_path = module.persistent_live_tail_postings_path(session_dir)
+    old_manifest_bytes = postings_path.read_bytes()
+    old_manifest = module.read_json(postings_path, {})
+    old_shard_paths = [
+        session_dir / descriptor["rel"]
+        for descriptor in old_manifest["shards"]
+    ]
+    rows.append(
+        {
+            "timestamp": "2026-08-10T00:00:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "retry once exact anchor",
+                    }
+                ],
+            },
+        }
+    )
+    write_jsonl(transcript, rows)
+    real_write_json_durable = module.write_json_durable
+    failed = False
+
+    def fail_manifest_once(path: Path, payload: Any) -> None:
+        nonlocal failed
+        if Path(path) == postings_path and not failed:
+            failed = True
+            raise OSError("simulated_manifest_publish_failure")
+        real_write_json_durable(path, payload)
+
+    monkeypatch.setattr(module, "write_json_durable", fail_manifest_once)
+    with pytest.raises(OSError, match="simulated_manifest_publish_failure"):
+        module.preserve_unindexed_raw_capture(
+            session_dir=session_dir,
+            session_id="retry-tail",
+            transcript_path=transcript,
+            manifest={},
+            hook_event_name="PostToolUse",
+            now="2026-08-10T00:01:01Z",
+        )
+    assert postings_path.read_bytes() == old_manifest_bytes
+    assert all(path.is_file() for path in old_shard_paths)
+
+    monkeypatch.setattr(module, "write_json_durable", real_write_json_durable)
+    retried = module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id="retry-tail",
+        transcript_path=transcript,
+        manifest={},
+        hook_event_name="PostToolUse",
+        now="2026-08-10T00:01:02Z",
+    )
+    manifest = module.read_json(postings_path, {})
+    shard_entries = [
+        entry
+        for descriptor in manifest["shards"]
+        for entry in module.read_json(
+            session_dir / descriptor["rel"], {}
+        )["entries"]
+    ]
+    assert retried["persistent_live_tail"]["postings"]["new_entry_count"] == 1
+    assert manifest["entry_count"] == 2
+    assert len(shard_entries) == 2
+    assert sum(
+        "retry once exact anchor" in entry["preview"]
+        for entry in shard_entries
+    ) == 1
+
+
+def test_persistent_live_tail_postings_unknown_v2_predecessor_fails_closed(
+    tmp_path: Path,
+) -> None:
+    session_dir = tmp_path / ".aoa" / "sessions" / "unknown-v2-tail"
+    transcript = tmp_path / "unknown-v2-tail.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-08-10T00:00:00Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "unknown v2 seed"}
+                    ],
+                },
+            }
+        ],
+    )
+    module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id="unknown-v2-tail",
+        transcript_path=transcript,
+        manifest={},
+        hook_event_name="PostToolUse",
+        now="2026-08-10T00:01:00Z",
+    )
+    postings_path = module.persistent_live_tail_postings_path(session_dir)
+    unknown = module.read_json(postings_path, {})
+    unknown["schema_version"] = 2
+    unknown["generation_identity"] = {"generation_id": "f" * 64}
+    module.write_json_durable(postings_path, unknown)
+    last_good = postings_path.read_bytes()
+
+    with pytest.raises(
+        ValueError,
+        match="live_tail_postings_unknown_predecessor_fail_closed",
+    ):
+        module.preserve_unindexed_raw_capture(
+            session_dir=session_dir,
+            session_id="unknown-v2-tail",
+            transcript_path=transcript,
+            manifest={},
+            hook_event_name="PostToolUse",
+            now="2026-08-10T00:01:01Z",
+        )
+    assert postings_path.read_bytes() == last_good
 
 
 def test_live_tail_snapshot_uses_persistent_ledger_without_prefix_rescan(
@@ -88690,6 +89237,23 @@ def test_generated_session_projection_validates_against_json_schemas(
             / module.PERSISTENT_LIVE_TAIL_POSTINGS_JSON,
         ),
     ]
+    postings_manifest = module.read_json(
+        session_dir
+        / "raw"
+        / module.PERSISTENT_LIVE_TAIL_POSTINGS_JSON,
+        {},
+    )
+    contracts.extend(
+        (
+            source_root
+            / "schemas"
+            / "live-tail.postings-shard.schema.json",
+            session_dir / str(shard["rel"]),
+        )
+        for shard in postings_manifest.get("shards", [])
+        if isinstance(shard, dict)
+        and shard.get("format") == "sharded_postings_v1"
+    )
     manifest = module.read_json(
         session_dir / "session.manifest.json",
         {},
@@ -88742,6 +89306,9 @@ def test_install_portable_bundle_creates_clean_target(tmp_path: Path) -> None:
     assert (aoa_root / "schemas" / "atlas-route-entry.schema.json").exists()
     assert (aoa_root / "schemas" / "raw-capture-state.schema.json").exists()
     assert (aoa_root / "schemas" / "live-tail.postings.schema.json").exists()
+    assert (
+        aoa_root / "schemas" / "live-tail.postings-shard.schema.json"
+    ).exists()
     assert (aoa_root / "schemas" / "projection-outbox.schema.json").exists()
     assert (aoa_root / "scripts" / "AGENTS.md").exists()
     assert (aoa_root / "scripts" / "build_capability_projection.py").exists()

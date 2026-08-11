@@ -256,6 +256,12 @@ manifest shards needed for the requested result window. Heavy repair remains an
 explicit bounded maintenance route, not a prerequisite for live capture or
 ordinary recent-session access.
 
+Live exact retrieval uses a compact receipt-bound manifest plus bounded
+immutable posting shards. A normal append reads only the new complete JSONL
+lines and, when needed, the last open shard; it does not re-sanitize or rewrite
+all historical live postings. Returned candidates are still reverified against
+their exact raw byte ranges, and a miss remains non-exhaustive.
+
 Private session archives, generated runtime databases, diagnostics, secrets, and
 host-specific configuration are excluded from the normal portable source.
 
