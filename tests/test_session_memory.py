@@ -86845,11 +86845,19 @@ def test_classification_candidate_index_root_is_validated_once_per_build(
                 artifact_path=artifact_path,
             )
         )
+        records[block["cache_key"]]["metadata_mode"] = (
+            "size_mtime_v1"
+        )
     module.write_event_classification_cache_index(
         cache_root=cache_root,
         generation_identity=generation_identity,
         records=records,
     )
+    prior_work_dir = tmp_path / ".session.projection-work-prior"
+    prior_work_cache = module.event_classification_cache_root(
+        prior_work_dir
+    )
+    shutil.copytree(cache_root, prior_work_cache)
 
     root_calls = 0
     original_root = (
@@ -86872,6 +86880,7 @@ def test_classification_candidate_index_root_is_validated_once_per_build(
         generation_identity=generation_identity,
     )
     assert root_calls == 1
+    assert candidates[0]["cache_root"] == prior_work_cache
 
     for block in blocks:
         reusable = module.reusable_event_classification_cache_record(
@@ -86954,6 +86963,33 @@ def test_captured_append_extends_classification_plan_from_attested_tail(
         aoa_root, record, segment_workers=1
     )
     assert first["status"] == "reindexed"
+    published_cache_root = (
+        module.event_classification_cache_root(session_dir)
+    )
+    prior_work_dir = (
+        session_dir.parent
+        / f".{session_dir.name}.projection-work-prior-current"
+    )
+    shutil.copytree(
+        published_cache_root,
+        module.event_classification_cache_root(prior_work_dir),
+    )
+    published_cache_index = module.read_json(
+        module.event_classification_cache_index_path(
+            published_cache_root
+        ),
+        {},
+    )
+    published_records = published_cache_index["blocks"]
+    for published_record in published_records.values():
+        published_record.pop("privacy_scan", None)
+    module.write_event_classification_cache_index(
+        cache_root=published_cache_root,
+        generation_identity=(
+            module.event_classification_generation_identity()
+        ),
+        records=published_records,
+    )
     current_manifest = module.read_json(
         session_dir / "session.manifest.json", {}
     )

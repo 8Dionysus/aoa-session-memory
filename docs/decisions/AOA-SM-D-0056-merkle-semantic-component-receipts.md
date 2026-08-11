@@ -38,6 +38,12 @@ Markdown already has the required exact content SHA-256. The v2 session digest
 combines the canonical roots for the manifest, raw metadata, and session index
 with ordered, named segment-index semantic roots and Markdown content roots.
 
+The segment producer identity covers segment semantics and rendering inputs,
+but excludes the generic immutable-receipt and deep-audit implementation that
+only validates publication. Changing receipt plumbing therefore invalidates
+semantic receipts without needlessly restamping every segment payload; changing
+segment construction still changes the segment generation.
+
 An unchanged component root is admitted only when the existing exact artifact
 receipt remains current by size, mtime, and ctime. A legacy receipt without a
 semantic root, or any metadata drift, causes that component to be opened and

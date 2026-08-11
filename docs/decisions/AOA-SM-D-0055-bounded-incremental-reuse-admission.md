@@ -26,9 +26,13 @@ already validated manifest-first receipt.
 
 One projection build validates each candidate classification index and its
 records root once, then performs block lookup against that admitted immutable
-view. Reused published segments are recorded in memory as a batch and the work
-checkpoint is persisted once per reuse batch; newly built worker waves retain
-their existing crash checkpoints.
+view. Candidate work roots are inspected newest first; the first complete,
+exact-current, root-valid view terminates the search so abandoned work history
+cannot amplify every append. Its privacy structural markers are admitted before
+the sensitive-literal pass, but only for blocks under the attested published
+prefix. Reused published segments are recorded in memory as a batch and the
+work checkpoint is persisted once per reuse batch; newly built worker waves
+retain their existing crash checkpoints.
 
 Task-episode shard reuse first admits the published component manifest. A shard
 may skip content I/O only when its content-addressed filename, component key,
@@ -59,6 +63,9 @@ remain unchanged.
 
 - Stable classification reuse is linear in candidate indexes plus block count,
   rather than block count multiplied by complete index size.
+- An exact-current resumable work view prevents historical raw blocks from
+  being rescanned when the published cache needs a bounded predecessor
+  migration; tail blocks remain selected for scanning.
 - Reused segment checkpoint writes are bounded by reuse batches, not segment
   count; newly generated work remains checkpointed by worker wave.
 - Current task-episode shards avoid historical content reads on the fast path.
@@ -89,4 +96,5 @@ then rerun the actual 430 MB no-swap growth benchmark.
 
 Focused tests prove one records-root computation across many lookups, bounded
 `segments_in_progress` checkpoints across captured growth, crash/resume parity,
-and task-shard reuse without reading or hashing published shard content.
+privacy-marker reuse from a root-valid current work view, and task-shard reuse
+without reading or hashing published shard content.

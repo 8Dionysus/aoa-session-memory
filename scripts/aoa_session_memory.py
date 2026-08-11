@@ -151,7 +151,14 @@ PROJECTION_PRODUCER_SOURCE_RANGES: dict[
     ),
     "segment_index": (
         ("def event_msg_type(", "def task_episode_lineage_for_range("),
-        ("def event_index_record(", "def render_segment_markdown_on_demand("),
+        (
+            "def event_index_record(",
+            "def immutable_component_artifact_receipt(",
+        ),
+        (
+            "def write_segment(",
+            "def render_segment_markdown_on_demand(",
+        ),
         (
             "def reuse_published_session_segment(",
             "def task_episode_component_source_identity(",
@@ -38972,7 +38979,7 @@ def event_classification_cache_candidate_roots(
     session_dir: Path,
     stage_dir: Path,
 ) -> list[Path]:
-    roots = [event_classification_cache_root(session_dir)]
+    work_roots: list[Path] = []
     work_prefix = f".{session_dir.name}.projection-work-"
     for candidate in sorted(session_dir.parent.iterdir()):
         if (
@@ -38981,8 +38988,19 @@ def event_classification_cache_candidate_roots(
             or not candidate.name.startswith(work_prefix)
         ):
             continue
-        roots.append(event_classification_cache_root(candidate))
-    return roots
+        work_roots.append(event_classification_cache_root(candidate))
+    work_roots.sort(
+        key=lambda root: (
+            event_classification_cache_index_path(root).stat().st_mtime_ns
+            if event_classification_cache_index_path(root).is_file()
+            else -1
+        ),
+        reverse=True,
+    )
+    return [
+        *work_roots,
+        event_classification_cache_root(session_dir),
+    ]
 
 
 def event_classification_cache_candidate_indexes(
@@ -39033,6 +39051,18 @@ def event_classification_cache_candidate_indexes(
                 "generation_admission": generation_admission,
             }
         )
+        if (
+            records_root_current
+            and not generation_admission.get("requires_restamp")
+            and int_value(index.get("block_count"), -1)
+            == len(records)
+        ):
+            # The newest exact-current work root is the strongest reusable
+            # view. Older roots cannot contain a source-tail block absent
+            # from a newer capture watermark, and inspecting their complete
+            # JSON indexes would make admission proportional to abandoned
+            # work history.
+            break
     return candidates
 
 
@@ -39711,33 +39741,46 @@ def reindex_session_from_raw(
             for item in raw_scan.get("blocks", [])
             if isinstance(item, dict)
         ]
+        classification_cache_candidates = (
+            event_classification_cache_candidate_indexes(
+                session_dir=session_dir,
+                stage_dir=stage_dir,
+                generation_identity=classification_generation,
+            )
+        )
         phase_started = time.monotonic()
         sensitive_values_by_kind: dict[str, set[str]] = {}
         privacy_markers_by_key: dict[str, dict[str, Any]] = {}
         sensitive_scan_fallback_reason = ""
-        published_classification_index = read_json(
-            event_classification_cache_index_path(
-                event_classification_cache_root(session_dir)
-            ),
-            {},
-        )
-        published_classification_records = (
-            published_classification_index.get("blocks")
-            if isinstance(
-                published_classification_index.get("blocks"), dict
-            )
-            else {}
-        )
 
         def structural_marker_for_block(
             block: dict[str, Any],
         ) -> dict[str, Any]:
             cache_key = str(block.get("cache_key") or "")
-            candidates = (
-                completed_classification_blocks.get(cache_key),
-                published_classification_records.get(cache_key),
-            )
-            for record_candidate in candidates:
+            record_candidates: list[Any] = [
+                completed_classification_blocks.get(cache_key)
+            ]
+            for candidate in classification_cache_candidates:
+                generation_admission = candidate.get(
+                    "generation_admission"
+                )
+                records = candidate.get("records")
+                if not (
+                    candidate.get("records_root_current") is True
+                    and isinstance(generation_admission, dict)
+                    and not generation_admission.get(
+                        "requires_restamp"
+                    )
+                    and isinstance(records, dict)
+                ):
+                    continue
+                record_candidate = records.get(cache_key)
+                if (
+                    isinstance(record_candidate, dict)
+                    and record_candidate.get("block") == block
+                ):
+                    record_candidates.append(record_candidate)
+            for record_candidate in record_candidates:
                 privacy_scan = (
                     record_candidate.get("privacy_scan")
                     if isinstance(record_candidate, dict)
@@ -39818,16 +39861,17 @@ def reindex_session_from_raw(
                     type(exc).__name__
                 )
                 sensitive_values_by_kind = {}
-                privacy_markers_by_key = {
-                    str(block.get("cache_key") or ""):
-                    structural_marker_for_block(block)
-                    for block in scan_blocks
-                    if structural_marker_for_block(block).get(
-                        "candidate_present"
-                    ) is False
-                    and int_value(block.get("line_end"))
-                    <= prefix_line_count
-                }
+                privacy_markers_by_key = {}
+                for block in scan_blocks:
+                    marker = structural_marker_for_block(block)
+                    if (
+                        marker.get("candidate_present") is False
+                        and int_value(block.get("line_end"))
+                        <= prefix_line_count
+                    ):
+                        privacy_markers_by_key[
+                            str(block.get("cache_key") or "")
+                        ] = marker
         if (
             actual_sensitive_scan_workers <= 1
             or sensitive_scan_fallback_reason
@@ -39892,13 +39936,6 @@ def reindex_session_from_raw(
             ).get("migrated_predecessor_block_count")
         )
         pending_classification_blocks: list[dict[str, Any]] = []
-        classification_cache_candidates = (
-            event_classification_cache_candidate_indexes(
-                session_dir=session_dir,
-                stage_dir=stage_dir,
-                generation_identity=classification_generation,
-            )
-        )
         for block in scan_blocks:
             cache_key = str(block.get("cache_key") or "")
             prior_record = completed_classification_blocks.get(
