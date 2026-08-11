@@ -66,17 +66,30 @@ then reads and reclassifies only the selected raw ranges before returning
 evidence. An exact allowlisted schema-2 predecessor may be linked as a sealed
 legacy shard; unknown predecessors fail closed. A newly recognized sensitive
 literal re-sanitizes retained derived shards but reads no historical raw.
+A first capture with a very large unprojected backlog bootstraps only a bounded
+recent complete-line window. Capture-block newline receipts recover exact raw
+line numbers with at most one bounded block read; the manifest records omitted
+bytes and lines explicitly. Raw remains complete authority and stable
+projection owns older navigation, so this window cannot support exhaustive
+negative claims. Later appends continue from its exact frontier and do not
+revisit the omitted prefix.
 A miss falls back to bounded direct-source validation or remains unresolved;
 it cannot support an exhaustive negative claim, and the overlay never upgrades
 semantic projections by itself.
 
-The capture ledger persists portable SHA-256 continuation state. Appending a
-delta hashes only that delta while retaining the exact conventional digest of
-the complete captured stream. Hook-observed paths enter a bounded capture-watch
-frontier. An ordinary hot timer reads this frontier and component-outbox
-readiness only; it performs no archive discovery and no raw read for an
-unchanged watched source. Catchup, deep, and audit remain the global
-reconciliation routes.
+The capture ledger persists portable SHA-256 continuation state for bounded
+epochs and for epochs that already carry valid continuation state. A first
+large capture uses native SHA-256 during the required delta read and records an
+exact snapshot digest without paying a second pure-Python history pass. Later
+large appends remain current through immutable block hashes and the predecessor
+chain while the conventional full-stream SHA-256 is explicitly deferred to
+stable projection or audit. A successful stable projection may bind its exact
+digest back to the same capture watermark without reading source bytes; it does
+not synthesize continuation state. Hook-observed paths enter a bounded
+capture-watch frontier. An ordinary hot timer reads this frontier and
+component-outbox readiness only; it performs no archive discovery and no raw
+read for an unchanged watched source. Catchup, deep, and audit remain the
+global reconciliation routes.
 
 Raw preservation is append-oriented. Repair may regenerate derived material,
 but ordinary cleanup never deletes raw session evidence.

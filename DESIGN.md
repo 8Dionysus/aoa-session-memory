@@ -292,11 +292,26 @@ bounded positive raw-tail retrieval without a repeated whole-prefix scan. The co
 capture file is a rebuildable compatibility view, not a stronger authority
 than the ledger blocks.
 
-The ledger carries a serializable SHA-256 continuation state, so every append
-still reports the conventional full-stream digest while hashing only new bytes.
-A bounded watch frontier records hook-observed sources. The ordinary hot timer
-stats that frontier and reads explicit outbox readiness; unchanged sources cost
-zero raw bytes and a missed hook is recovered without archive rediscovery.
+When an unprojected backlog exceeds the live bootstrap budget, postings begin
+at the first complete line in a bounded recent byte window. Immutable capture
+block receipts provide the exact count of preceding lines with at most one
+bounded partial-block read. The manifest exposes the omitted prefix and the
+coverage start; it never relabels bounded recent coverage as global recall.
+Stable projection and raw verification retain responsibility for older
+evidence, while later live appends remain proportional to their delta.
+
+For bounded epochs, or epochs that already have a valid continuation payload,
+the ledger carries serializable SHA-256 state and hashes only appended bytes.
+A first large capture instead computes an exact digest with native SHA-256 in
+the required delta pass and omits the expensive portable continuation state.
+Its next append is authoritative through immutable block hashes and the
+predecessor chain; the conventional full-stream digest is visibly deferred
+until stable projection or audit binds an exact digest to that watermark.
+That attestation reads zero source bytes and does not invent continuation
+state. A bounded watch frontier records hook-observed sources. The ordinary
+hot timer stats that frontier and reads explicit outbox readiness; unchanged
+sources cost zero raw bytes and a missed hook is recovered without archive
+rediscovery.
 
 Physical topology may evolve, but migrations must preserve stable identity,
 evidence refs, source provenance, rebuildability, and rollback.

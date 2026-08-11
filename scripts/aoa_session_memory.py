@@ -494,6 +494,7 @@ RAW_CAPTURE_LEDGER_JSON = "capture-ledger.json"
 RAW_CAPTURE_LEDGER_SCHEMA_VERSION = 1
 RAW_CAPTURE_BLOCKS_DIR = "capture-blocks"
 RAW_CAPTURE_BLOCK_TARGET_BYTES = 4 * 1024 * 1024
+RAW_CAPTURE_PERSISTABLE_SHA256_MAX_BYTES = 64 * 1024 * 1024
 PERSISTENT_LIVE_TAIL_INDEX_JSON = "live-tail.index.json"
 PERSISTENT_LIVE_TAIL_INDEX_SCHEMA_VERSION = 1
 PERSISTENT_LIVE_TAIL_POSTINGS_JSON = "live-tail.postings.json"
@@ -501,6 +502,7 @@ PERSISTENT_LIVE_TAIL_POSTINGS_SCHEMA_VERSION = 3
 PERSISTENT_LIVE_TAIL_POSTINGS_SHARD_SCHEMA_VERSION = 1
 PERSISTENT_LIVE_TAIL_POSTINGS_SHARD_DIR = "live-tail-postings"
 PERSISTENT_LIVE_TAIL_POSTINGS_SHARD_MAX_ENTRIES = 1024
+PERSISTENT_LIVE_TAIL_POSTINGS_BOOTSTRAP_MAX_BYTES = 8 * 1024 * 1024
 PERSISTENT_LIVE_TAIL_POSTINGS_PREDECESSOR_GENERATION_IDS = frozenset(
     {
         "1c98093643270c9b57c0deef5e97560e97d5b6fb2260513d6a7d57b310a97e62",
@@ -28863,6 +28865,119 @@ def iter_persistent_live_tail_complete_lines(
             )
 
 
+def raw_capture_epoch_line_count_before_offset(
+    *,
+    epoch: dict[str, Any],
+    materialization_path: Path,
+    byte_offset: int,
+) -> tuple[int, int] | None:
+    """Count prefix newlines from capture receipts plus at most one block read."""
+    if byte_offset < 0:
+        return None
+    if byte_offset == 0:
+        return 0, 0
+    blocks = epoch.get("blocks")
+    if not isinstance(blocks, list):
+        return None
+    expected_start = 0
+    line_count = 0
+    for block in blocks:
+        if not isinstance(block, dict):
+            return None
+        block_start = int_value(block.get("byte_start"), -1)
+        block_end = int_value(block.get("byte_end"), -1)
+        if block_start != expected_start or block_end < block_start:
+            return None
+        expected_start = block_end
+        if byte_offset >= block_end:
+            line_count += int_value(block.get("newline_count"), 0)
+            if byte_offset == block_end:
+                return line_count, 0
+            continue
+        if byte_offset < block_start:
+            return None
+        with materialization_path.open("rb") as handle:
+            handle.seek(block_start)
+            prefix = handle.read(byte_offset - block_start)
+        if len(prefix) != byte_offset - block_start:
+            return None
+        return line_count + prefix.count(b"\n"), len(prefix)
+    return (line_count, 0) if byte_offset == expected_start else None
+
+
+def persistent_live_tail_bootstrap_frontier(
+    *,
+    materialization_path: Path,
+    epoch: dict[str, Any],
+    projection_raw_bytes: int,
+    projection_raw_line_count: int,
+    complete_end: int,
+) -> dict[str, Any]:
+    """Choose a recent complete-line window without scanning old raw history."""
+    available_bytes = max(0, complete_end - projection_raw_bytes)
+    if available_bytes <= PERSISTENT_LIVE_TAIL_POSTINGS_BOOTSTRAP_MAX_BYTES:
+        return {
+            "start_byte": projection_raw_bytes,
+            "prefix_line_count": projection_raw_line_count,
+            "applied": False,
+            "omitted_bytes": 0,
+            "omitted_line_count": 0,
+        }
+    candidate = max(
+        projection_raw_bytes,
+        complete_end - PERSISTENT_LIVE_TAIL_POSTINGS_BOOTSTRAP_MAX_BYTES,
+    )
+    with materialization_path.open("rb") as handle:
+        if candidate:
+            handle.seek(candidate - 1)
+            begins_on_boundary = handle.read(1) == b"\n"
+        else:
+            begins_on_boundary = True
+        if begins_on_boundary:
+            start_byte = candidate
+        else:
+            handle.seek(candidate)
+            handle.readline(max(0, complete_end - candidate))
+            start_byte = handle.tell()
+    if start_byte >= complete_end:
+        return {
+            "start_byte": projection_raw_bytes,
+            "prefix_line_count": projection_raw_line_count,
+            "applied": False,
+            "omitted_bytes": 0,
+            "omitted_line_count": 0,
+            "fallback_reason": "recent_window_has_no_complete_line",
+        }
+    prefix_receipt = raw_capture_epoch_line_count_before_offset(
+        epoch=epoch,
+        materialization_path=materialization_path,
+        byte_offset=start_byte,
+    )
+    prefix_line_count = prefix_receipt[0] if prefix_receipt else None
+    if (
+        prefix_line_count is None
+        or prefix_line_count < projection_raw_line_count
+    ):
+        return {
+            "start_byte": projection_raw_bytes,
+            "prefix_line_count": projection_raw_line_count,
+            "applied": False,
+            "omitted_bytes": 0,
+            "omitted_line_count": 0,
+            "fallback_reason": "capture_block_line_receipts_unavailable",
+        }
+    return {
+        "start_byte": start_byte,
+        "prefix_line_count": prefix_line_count,
+        "applied": True,
+        "omitted_bytes": start_byte - projection_raw_bytes,
+        "omitted_line_count": (
+            prefix_line_count - projection_raw_line_count
+        ),
+        "line_count_source_bytes_read": prefix_receipt[1],
+    }
+
+
 def persistent_live_tail_posting_entry(
     *,
     raw_line: bytes,
@@ -29311,7 +29426,49 @@ def update_persistent_live_tail_postings(
         materialization_path,
         start_offset=processed_bytes,
     )
+    bootstrap = {
+        "start_byte": int_value(
+            existing.get("coverage_start_byte"), processed_bytes
+        )
+        if same_frontier
+        else processed_bytes,
+        "prefix_line_count": int_value(
+            existing.get("coverage_start_line"), processed_line_count + 1
+        )
+        - 1
+        if same_frontier
+        else processed_line_count,
+        "applied": bool(
+            same_frontier
+            and int_value(existing.get("bootstrap_omitted_bytes")) > 0
+        ),
+        "omitted_bytes": int_value(
+            existing.get("bootstrap_omitted_bytes")
+        )
+        if same_frontier
+        else 0,
+        "omitted_line_count": int_value(
+            existing.get("bootstrap_omitted_line_count")
+        )
+        if same_frontier
+        else 0,
+    }
+    if not same_frontier and not descriptors:
+        bootstrap = persistent_live_tail_bootstrap_frontier(
+            materialization_path=materialization_path,
+            epoch=epoch,
+            projection_raw_bytes=processed_bytes,
+            projection_raw_line_count=processed_line_count,
+            complete_end=complete_end,
+        )
+        processed_bytes = int_value(bootstrap.get("start_byte"))
+        processed_line_count = int_value(
+            bootstrap.get("prefix_line_count")
+        )
     unique_delta_bytes = max(0, complete_end - processed_bytes)
+    bootstrap_history_bytes_read = int_value(
+        bootstrap.get("line_count_source_bytes_read")
+    )
     if (
         current_manifest
         and unique_delta_bytes == 0
@@ -29346,6 +29503,21 @@ def update_persistent_live_tail_postings(
             "reused_frontier": True,
             "pending_incomplete_bytes": (
                 materialized_bytes - processed_bytes
+            ),
+            "coverage_start_byte": int_value(
+                existing.get("coverage_start_byte"), processed_bytes
+            ),
+            "coverage_start_line": int_value(
+                existing.get(
+                    "coverage_start_line", processed_line_count + 1
+                )
+            ),
+            "bootstrap_window_applied": bool(bootstrap.get("applied")),
+            "bootstrap_omitted_bytes": int_value(
+                bootstrap.get("omitted_bytes")
+            ),
+            "bootstrap_omitted_line_count": int_value(
+                bootstrap.get("omitted_line_count")
             ),
             "migration": (
                 dict(existing.get("migration_receipt"))
@@ -29565,6 +29737,16 @@ def update_persistent_live_tail_postings(
         "source_captured_bytes": materialized_bytes,
         "projection_raw_bytes": projection_raw_bytes,
         "projection_raw_line_count": projection_raw_line_count,
+        "coverage_start_byte": int_value(bootstrap.get("start_byte")),
+        "coverage_start_line": (
+            int_value(bootstrap.get("prefix_line_count")) + 1
+        ),
+        "bootstrap_omitted_bytes": int_value(
+            bootstrap.get("omitted_bytes")
+        ),
+        "bootstrap_omitted_line_count": int_value(
+            bootstrap.get("omitted_line_count")
+        ),
         "pending_incomplete_bytes": (
             materialized_bytes - processed_bytes
         ),
@@ -29627,12 +29809,27 @@ def update_persistent_live_tail_postings(
         "dropped_descriptor_count": dropped_descriptor_count,
         "privacy_resanitization": privacy_resanitization,
         "source_unique_bytes_read": unique_delta_bytes,
-        "source_pass_bytes_read": unique_delta_bytes * 2,
-        "source_bytes_read": unique_delta_bytes,
-        "historical_raw_bytes_read": 0,
+        "source_pass_bytes_read": (
+            unique_delta_bytes * 2 + bootstrap_history_bytes_read
+        ),
+        "source_bytes_read": (
+            unique_delta_bytes + bootstrap_history_bytes_read
+        ),
+        "historical_raw_bytes_read": bootstrap_history_bytes_read,
         "reused_frontier": same_frontier,
         "pending_incomplete_bytes": materialized_bytes
         - processed_bytes,
+        "coverage_start_byte": int_value(bootstrap.get("start_byte")),
+        "coverage_start_line": (
+            int_value(bootstrap.get("prefix_line_count")) + 1
+        ),
+        "bootstrap_window_applied": bool(bootstrap.get("applied")),
+        "bootstrap_omitted_bytes": int_value(
+            bootstrap.get("omitted_bytes")
+        ),
+        "bootstrap_omitted_line_count": int_value(
+            bootstrap.get("omitted_line_count")
+        ),
         "migration": migration_receipt,
     }
 
@@ -30025,19 +30222,35 @@ def append_raw_capture_ledger(
     appended_bytes = 0
     appended_blocks: list[dict[str, Any]] = []
     sha_state_bootstrap_bytes_read = 0
-    if captured_bytes == 0:
-        full_digest = PersistableSha256()
-    else:
+    persistable_digest: PersistableSha256 | None = None
+    native_snapshot_digest: Any = None
+    sha256_continuation_mode = ""
+    if captured_bytes == 0 and snapshot_end <= (
+        RAW_CAPTURE_PERSISTABLE_SHA256_MAX_BYTES
+    ):
+        persistable_digest = PersistableSha256()
+        sha256_continuation_mode = "persistable_sha256_v1"
+    elif captured_bytes == 0:
+        native_snapshot_digest = hashlib.sha256()
+        sha256_continuation_mode = (
+            "native_exact_snapshot_sha256_without_continuation_v1"
+        )
+    elif epoch.get("full_raw_sha256_state"):
         try:
-            full_digest = PersistableSha256.from_payload(
+            persistable_digest = PersistableSha256.from_payload(
                 epoch.get("full_raw_sha256_state")
             )
-            if full_digest.total_bytes != captured_bytes:
+            if persistable_digest.total_bytes != captured_bytes:
                 raise ValueError("sha256_state_watermark_mismatch")
+            sha256_continuation_mode = "persistable_sha256_v1"
         except (TypeError, ValueError):
-            # One-time compatibility migration for an older ledger. New
-            # captures persist continuation state and never repeat this read.
-            full_digest = PersistableSha256()
+            persistable_digest = None
+    if captured_bytes and persistable_digest is None:
+        if captured_bytes <= RAW_CAPTURE_PERSISTABLE_SHA256_MAX_BYTES:
+            # One-time compatibility migration remains bounded. Larger
+            # epochs keep block-chain currentness and defer a conventional
+            # whole-stream digest to stable projection/audit.
+            persistable_digest = PersistableSha256()
             with materialization_path.open("rb") as prior_materialization:
                 while True:
                     prior_chunk = prior_materialization.read(
@@ -30045,8 +30258,13 @@ def append_raw_capture_ledger(
                     )
                     if not prior_chunk:
                         break
-                    full_digest.update(prior_chunk)
+                    persistable_digest.update(prior_chunk)
                     sha_state_bootstrap_bytes_read += len(prior_chunk)
+            sha256_continuation_mode = "persistable_sha256_v1"
+        else:
+            sha256_continuation_mode = (
+                "block_chain_current_exact_sha256_deferred_v1"
+            )
     archive_prefix_digest = (
         hashlib.sha256()
         if captured_bytes == 0
@@ -30124,7 +30342,10 @@ def append_raw_capture_ledger(
                 blocks.append(record)
                 appended_blocks.append(record)
                 materialized.write(payload)
-                full_digest.update(payload)
+                if persistable_digest is not None:
+                    persistable_digest.update(payload)
+                if native_snapshot_digest is not None:
+                    native_snapshot_digest.update(payload)
                 if archive_prefix_digest is not None and offset < projection_raw_bytes:
                     archive_prefix_digest.update(
                         payload[: max(0, projection_raw_bytes - offset)]
@@ -30150,11 +30371,23 @@ def append_raw_capture_ledger(
         with materialization_path.open("rb") as handle:
             handle.seek(-1, os.SEEK_END)
             has_incomplete_tail = handle.read(1) != b"\n"
-    if full_digest.total_bytes != materialized_size:
-        raise ValueError("raw_capture_sha256_state_size_mismatch")
-    epoch["full_raw_sha256"] = full_digest.hexdigest()
-    epoch["full_raw_sha256_bytes"] = materialized_size
-    epoch["full_raw_sha256_state"] = full_digest.state_payload()
+    if persistable_digest is not None:
+        if persistable_digest.total_bytes != materialized_size:
+            raise ValueError("raw_capture_sha256_state_size_mismatch")
+        epoch["full_raw_sha256"] = persistable_digest.hexdigest()
+        epoch["full_raw_sha256_bytes"] = materialized_size
+        epoch["full_raw_sha256_state"] = (
+            persistable_digest.state_payload()
+        )
+    elif native_snapshot_digest is not None:
+        epoch["full_raw_sha256"] = native_snapshot_digest.hexdigest()
+        epoch["full_raw_sha256_bytes"] = materialized_size
+        epoch.pop("full_raw_sha256_state", None)
+    else:
+        epoch["full_raw_sha256"] = ""
+        epoch["full_raw_sha256_bytes"] = 0
+        epoch.pop("full_raw_sha256_state", None)
+    epoch["full_raw_sha256_mode"] = sha256_continuation_mode
     epoch.update(
         {
             "captured_bytes": materialized_size,
@@ -30270,6 +30503,12 @@ def append_raw_capture_ledger(
             sha_state_bootstrap_bytes_read
         ),
         "sha256_delta_bytes_hashed": appended_bytes,
+        "sha256_continuation_mode": sha256_continuation_mode,
+        "full_raw_sha256_current": bool(
+            epoch.get("full_raw_sha256")
+            and int_value(epoch.get("full_raw_sha256_bytes"), -1)
+            == materialized_size
+        ),
         "source_snapshot_before": {
             "path": str(transcript_path),
             "size": int(source_stat_before.st_size),
@@ -30396,6 +30635,12 @@ def _preserve_unindexed_raw_capture_locked(
         "sha256_delta_bytes_hashed": int_value(
             capture.get("sha256_delta_bytes_hashed")
         ),
+        "sha256_continuation_mode": str(
+            capture.get("sha256_continuation_mode") or ""
+        ),
+        "full_raw_sha256_current": bool(
+            capture.get("full_raw_sha256_current")
+        ),
         "has_incomplete_tail": bool(
             epoch.get("has_incomplete_tail")
         ),
@@ -30521,6 +30766,109 @@ def indexed_raw_capture_state(
         "projection_authority": False,
         "next_route": "",
     }
+
+
+def attest_raw_capture_projection_digest(
+    *,
+    session_dir: Path,
+    session_id: str,
+    capture_path: Path,
+    raw_sha256: str,
+    raw_bytes: int,
+    now: str,
+) -> dict[str, Any]:
+    """Bind a verified stable projection digest to its exact capture epoch."""
+    if not raw_sha256 or raw_bytes < 0:
+        return {"status": "not_attested", "reason": "digest_missing"}
+    lock_path = session_dir / "raw" / ".capture.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("w", encoding="utf-8") as lock_handle:
+        fcntl.flock(lock_handle, fcntl.LOCK_EX)
+        ledger_path = raw_capture_ledger_path(session_dir)
+        ledger = read_json(ledger_path, {})
+        epochs = (
+            ledger.get("epochs")
+            if isinstance(ledger, dict)
+            and isinstance(ledger.get("epochs"), list)
+            else []
+        )
+        epoch = next(
+            (
+                item
+                for item in reversed(epochs)
+                if isinstance(item, dict)
+                and str(item.get("epoch_id") or "")
+                == str(ledger.get("current_epoch_id") or "")
+            ),
+            None,
+        )
+        if not isinstance(epoch, dict):
+            return {
+                "status": "not_attested",
+                "reason": "capture_epoch_missing",
+            }
+        materialization = Path(
+            str(epoch.get("materialization_path") or "")
+        )
+        try:
+            same_capture = (
+                materialization.resolve() == capture_path.resolve()
+            )
+        except OSError:
+            same_capture = False
+        if not (
+            same_capture
+            and int_value(epoch.get("captured_bytes"), -1)
+            == raw_bytes
+        ):
+            return {
+                "status": "not_attested",
+                "reason": "projection_not_exact_capture_watermark",
+            }
+        prior_digest = str(epoch.get("full_raw_sha256") or "")
+        prior_digest_bytes = int_value(
+            epoch.get("full_raw_sha256_bytes"), -1
+        )
+        if (
+            prior_digest
+            and prior_digest_bytes == raw_bytes
+            and prior_digest != raw_sha256
+        ):
+            return {
+                "status": "not_attested",
+                "reason": "projection_capture_digest_conflict",
+            }
+        epoch["full_raw_sha256"] = raw_sha256
+        epoch["full_raw_sha256_bytes"] = raw_bytes
+        if not epoch.get("full_raw_sha256_state"):
+            epoch["full_raw_sha256_mode"] = (
+                "projection_attested_exact_sha256_without_continuation_v1"
+            )
+        archive_prefixes = (
+            epoch.get("archive_prefixes")
+            if isinstance(epoch.get("archive_prefixes"), dict)
+            else {}
+        )
+        archive_prefixes[str(raw_bytes)] = {
+            "sha256": raw_sha256,
+            "expected_sha256": raw_sha256,
+            "matches": True,
+            "observed_at": now,
+            "admission": (
+                "stable_projection_digest_at_exact_capture_watermark"
+            ),
+            "source_bytes_read": 0,
+        }
+        epoch["archive_prefixes"] = archive_prefixes
+        ledger["epochs"] = epochs
+        ledger["updated_at"] = now
+        write_json_durable(ledger_path, ledger)
+        return {
+            "status": "attested",
+            "raw_bytes": raw_bytes,
+            "source_bytes_read": 0,
+            "continuation_state_added": False,
+        }
 
 
 def indexed_archive_freshness(
@@ -40238,6 +40586,25 @@ def reindex_session_from_raw(
             session_dir=session_dir,
             publish_identity=publish_identity,
         )
+        projection_capture_attestation = (
+            attest_raw_capture_projection_digest(
+                session_dir=session_dir,
+                session_id=str(
+                    manifest.get("session_id")
+                    or record.get("session_id")
+                    or ""
+                ),
+                capture_path=raw_path,
+                raw_sha256=str(raw_scan.get("raw_sha256") or ""),
+                raw_bytes=int_value(raw_scan.get("raw_bytes")),
+                now=now,
+            )
+            if raw_source_mode == "preserved_capture_ahead"
+            else {
+                "status": "not_applicable",
+                "reason": raw_source_mode,
+            }
+        )
         phase_timings_ms["validate_and_atomic_publish"] = int(
             (time.monotonic() - phase_started) * 1000
         )
@@ -40341,6 +40708,9 @@ def reindex_session_from_raw(
         ),
         "predecessor_migration_receipt": work_state.get(
             "predecessor_migration_receipt", {}
+        ),
+        "projection_capture_attestation": (
+            projection_capture_attestation
         ),
         "sensitive_literal_execution": work_state.get(
             "sensitive_literal_execution", {}

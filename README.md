@@ -261,6 +261,14 @@ immutable posting shards. A normal append reads only the new complete JSONL
 lines and, when needed, the last open shard; it does not re-sanitize or rewrite
 all historical live postings. Returned candidates are still reverified against
 their exact raw byte ranges, and a miss remains non-exhaustive.
+For a very large unprojected first capture, the live layer indexes a bounded
+recent complete-line window and records the omitted prefix explicitly; raw and
+the later stable projection retain the complete history.
+
+Large capture epochs also avoid a second whole-history SHA pass: their initial
+exact digest is computed natively during capture, later appends remain current
+through immutable block-chain evidence, and stable projection/audit supplies a
+conventional full-stream digest at an exact watermark without changing raw.
 
 Private session archives, generated runtime databases, diagnostics, secrets, and
 host-specific configuration are excluded from the normal portable source.

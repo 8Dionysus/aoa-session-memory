@@ -96,6 +96,16 @@ returned evidence current while still reporting
 safe tokens is never an exhaustive negative claim and may route to the
 existing bounded raw fallback.
 
+An initial unprojected backlog larger than the live bootstrap budget does not
+delay recent availability by parsing all history. The writer selects a bounded
+recent complete-line window, derives its exact starting line from immutable
+capture-block newline receipts with at most one partial-block read, and records
+the omitted byte and line counts in the manifest. This is explicitly partial
+navigation: raw remains complete authority, stable projection owns older
+coverage, and negative global claims remain inadmissible. Subsequent appends
+continue from the exact processed frontier without revisiting the omitted
+prefix.
+
 The schema-2 monolithic postings packet is admitted only when its exact
 predecessor generation is allowlisted. It is hard-linked as a sealed legacy
 shard without reading historical raw, and the manifest records the migration.
@@ -113,13 +123,18 @@ explicit global reconciliation routes.
 
 The compatibility materialization is a rebuildable append-only view needed by
 existing projection builders. Immutable ledger blocks and raw source evidence
-are stronger than that view. The ledger persists a portable SHA-256 continuation
-state. Each append hashes only new bytes while still emitting the exact
-conventional SHA-256 of the complete captured stream. Older ledgers pay one
-explicit compatibility bootstrap read; later appends do not rehash historical
-bytes. When a published archive watermark exactly equals a previously captured
-watermark, its prefix attestation is derived from that persisted exact state
-with zero source bytes read.
+are stronger than that view. Bounded epochs and epochs already carrying valid
+state persist portable SHA-256 continuation state, so each append hashes only
+new bytes while retaining the conventional full-stream digest. A first large
+capture instead computes its exact snapshot digest with native SHA-256 during
+the required delta read and deliberately omits the expensive pure-Python
+continuation payload. Later appends to such an epoch stay exact and current
+through immutable block hashes and the predecessor chain; the conventional
+full-stream SHA-256 is explicitly deferred rather than obtained by rereading
+history. Stable projection or audit may bind its verified exact digest back to
+the identical capture watermark with zero source bytes read, without inventing
+continuation state. Older bounded ledgers may pay one explicit compatibility
+bootstrap read; large ledgers do not.
 
 ## Rationale
 
@@ -189,6 +204,9 @@ validated.
 ## Verification
 
 Focused tests cover append-only byte cost, exact persisted SHA continuation,
+large-capture native snapshot hashing and deferred continuation,
+zero-read stable-projection digest attestation,
+bounded recent bootstrap with exact raw line coordinates,
 immutable prior blocks and posting revisions, idempotent
 capture, crash-before-commit preservation, source rewrite epoch separation,
 zero-read watermark attestation, missed-hook timer recovery without archive

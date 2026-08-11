@@ -83,6 +83,7 @@ def test_session_projection_benchmark_smoke_proves_parity_and_reuse(
     assert payload["initial_capture_execution"]["postings"][
         "historical_raw_bytes_read"
     ] == 0
+    assert payload["initial_history_read_gate"]["ok"] is True
     assert payload["live_route"]["ok"] is True
     assert payload["live_route"]["run_count"] == 3
     assert payload["live_route"]["overlay_p95_within_30_seconds"] is True
@@ -342,6 +343,58 @@ def test_session_projection_benchmark_summarizes_cgroup_swap_gate() -> None:
     assert summary["cgroup_swap_max_bytes"] == 0
     assert summary["cgroup_swap_disabled"] is True
     assert summary["cgroup_swap_observed"] is False
+
+
+def test_session_projection_benchmark_capture_only_proves_live_route(
+    tmp_path: Path,
+) -> None:
+    receipt_path = tmp_path / "capture-only-receipt.json"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(BENCHMARK_SCRIPT),
+            "--segments",
+            "3",
+            "--payload-bytes",
+            "64",
+            "--capture-only",
+            "--live-route-repetitions",
+            "3",
+            "--temp-root",
+            str(tmp_path),
+            "--output",
+            str(receipt_path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(completed.stdout)
+
+    assert completed.returncode == 0, completed.stderr
+    assert payload["ok"] is True
+    assert payload["status"] == "capture_only_complete"
+    assert json.loads(receipt_path.read_text(encoding="utf-8")) == payload
+    assert payload["initial_capture_execution"]["raw_bytes"] == payload[
+        "fixture"
+    ]["raw_bytes"]
+    assert payload["initial_capture_execution"]["postings"][
+        "processed_bytes"
+    ] == payload["fixture"]["raw_bytes"]
+    assert payload["initial_capture_execution"]["postings"][
+        "historical_raw_bytes_read"
+    ] == 0
+    assert payload["initial_capture_execution"]["cgroup_memory"][
+        "available"
+    ] in {True, False}
+    assert payload["live_route"]["ok"] is True
+    assert payload["live_route"]["run_count"] == 3
+    assert payload["live_route"][
+        "event_availability_p95_within_5_seconds"
+    ] is True
+    assert payload["live_route"]["historical_raw_bytes_read"] == 0
+    assert payload["live_route"]["max_shards_read_for_update"] <= 1
+    assert payload["live_route"]["max_posting_shards_examined"] <= 1
 
 
 def test_best_effort_progress_emitter_quarantines_broken_pipe() -> None:
@@ -71094,6 +71147,102 @@ def test_raw_capture_replays_uncommitted_tail_after_ledger_write_crash(
     assert len(epoch["blocks"]) == 1
 
 
+def test_large_raw_capture_defers_continuation_without_historical_append_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        module,
+        "RAW_CAPTURE_PERSISTABLE_SHA256_MAX_BYTES",
+        1,
+    )
+    session_dir = tmp_path / ".aoa" / "sessions" / "large-digest"
+    transcript = tmp_path / "large-digest.jsonl"
+    initial = b'{"row":"initial large capture"}\n'
+    appended = b'{"row":"delta one"}\n'
+    final_delta = b'{"row":"delta two"}\n'
+    transcript.write_bytes(initial)
+
+    first = module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id="large-digest",
+        transcript_path=transcript,
+        manifest={},
+        hook_event_name="PostToolUse",
+        now="2026-08-10T00:00:00Z",
+    )
+    assert first["raw_digest_status"] == "complete_sha256"
+    assert first["raw_sha256"] == hashlib.sha256(initial).hexdigest()
+    assert first["sha256_continuation_mode"] == (
+        "native_exact_snapshot_sha256_without_continuation_v1"
+    )
+    with transcript.open("ab") as handle:
+        handle.write(appended)
+
+    second = module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id="large-digest",
+        transcript_path=transcript,
+        manifest={},
+        hook_event_name="PostToolUse",
+        now="2026-08-10T00:01:00Z",
+    )
+    current_bytes = len(initial + appended)
+    current_sha256 = hashlib.sha256(initial + appended).hexdigest()
+    assert second["raw_digest_status"] == "deferred_to_projection"
+    assert second["raw_sha256"] == ""
+    assert second["sha256_state_bootstrap_bytes_read"] == 0
+    assert second["sha256_delta_bytes_hashed"] == len(appended)
+    assert second["sha256_continuation_mode"] == (
+        "block_chain_current_exact_sha256_deferred_v1"
+    )
+    ledger = module.read_json(
+        module.raw_capture_ledger_path(session_dir), {}
+    )
+    assert "full_raw_sha256_state" not in ledger["epochs"][-1]
+
+    attested = module.attest_raw_capture_projection_digest(
+        session_dir=session_dir,
+        session_id="large-digest",
+        capture_path=Path(second["capture_path"]),
+        raw_sha256=current_sha256,
+        raw_bytes=current_bytes,
+        now="2026-08-10T00:01:30Z",
+    )
+    assert attested == {
+        "status": "attested",
+        "raw_bytes": current_bytes,
+        "source_bytes_read": 0,
+        "continuation_state_added": False,
+    }
+    with transcript.open("ab") as handle:
+        handle.write(final_delta)
+    third = module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id="large-digest",
+        transcript_path=transcript,
+        manifest={
+            "archive_status": "indexed",
+            "raw": {
+                "indexing_status": "indexed",
+                "bytes": current_bytes,
+                "line_count": 2,
+                "sha256": current_sha256,
+            },
+        },
+        hook_event_name="PostToolUse",
+        now="2026-08-10T00:02:00Z",
+    )
+    prefix = third["persistent_live_tail"]["archive_prefixes"][
+        str(current_bytes)
+    ]
+    assert prefix["matches"] is True
+    assert prefix["sha256"] == current_sha256
+    assert prefix["source_bytes_read"] == 0
+    assert third["sha256_state_bootstrap_bytes_read"] == 0
+    assert third["sha256_delta_bytes_hashed"] == len(final_delta)
+
+
 def test_raw_capture_ledger_starts_new_epoch_on_boundary_rewrite(
     tmp_path: Path,
 ) -> None:
@@ -71620,6 +71769,89 @@ def test_persistent_live_tail_postings_append_is_bounded_and_noop_is_zero_work(
         (descriptor["rel"], descriptor["sha256"])
         for descriptor in after_noop_manifest["shards"]
     ] == before_noop_receipts
+
+
+def test_persistent_live_tail_bootstrap_indexes_recent_bounded_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        module,
+        "PERSISTENT_LIVE_TAIL_POSTINGS_BOOTSTRAP_MAX_BYTES",
+        700,
+    )
+    monkeypatch.setattr(module, "RAW_CAPTURE_BLOCK_TARGET_BYTES", 256)
+    session_dir = tmp_path / ".aoa" / "sessions" / "recent-bootstrap"
+    transcript = tmp_path / "recent-bootstrap.jsonl"
+
+    def row(ordinal: int) -> dict[str, Any]:
+        return {
+            "timestamp": f"2026-08-10T00:00:{ordinal:02d}Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": f"bootstrap anchor {ordinal:02d} " + "x" * 80,
+                    }
+                ],
+            },
+        }
+
+    write_jsonl(transcript, [row(ordinal) for ordinal in range(20)])
+    first = module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id="recent-bootstrap",
+        transcript_path=transcript,
+        manifest={},
+        hook_event_name="PostToolUse",
+        now="2026-08-10T00:01:00Z",
+    )
+    metrics = first["persistent_live_tail"]["postings"]
+    manifest = module.read_json(
+        module.persistent_live_tail_postings_path(session_dir), {}
+    )
+    entries = [
+        entry
+        for descriptor in manifest["shards"]
+        for entry in module.read_json(
+            session_dir / descriptor["rel"], {}
+        )["entries"]
+    ]
+
+    assert metrics["bootstrap_window_applied"] is True
+    assert metrics["bootstrap_omitted_bytes"] > 0
+    assert metrics["bootstrap_omitted_line_count"] > 0
+    assert metrics["source_unique_bytes_read"] <= 900
+    assert metrics["historical_raw_bytes_read"] <= 256
+    assert manifest["coverage_start_byte"] > 0
+    assert manifest["coverage_start_line"] > 1
+    assert manifest["processed_line_count"] == 20
+    assert entries[-1]["line"] == 20
+    assert all(entry["line"] >= manifest["coverage_start_line"] for entry in entries)
+    assert not any("bootstrap anchor 00" in entry["preview"] for entry in entries)
+    assert any("bootstrap anchor 19" in entry["preview"] for entry in entries)
+
+    before_size = transcript.stat().st_size
+    with transcript.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row(20)) + "\n")
+    appended_bytes = transcript.stat().st_size - before_size
+    second = module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id="recent-bootstrap",
+        transcript_path=transcript,
+        manifest={},
+        hook_event_name="PostToolUse",
+        now="2026-08-10T00:01:01Z",
+    )["persistent_live_tail"]["postings"]
+
+    assert second["source_unique_bytes_read"] == appended_bytes
+    assert second["historical_raw_bytes_read"] == 0
+    assert second["bootstrap_omitted_bytes"] == metrics[
+        "bootstrap_omitted_bytes"
+    ]
 
 
 def test_persistent_live_tail_postings_resanitizes_prior_shards_from_new_literal(

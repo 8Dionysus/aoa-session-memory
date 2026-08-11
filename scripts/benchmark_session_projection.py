@@ -125,6 +125,8 @@ def mirror_session(
     transcript: Path,
     session_id: str,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    usage_before = usage_snapshot()
+    cgroup_before = cgroup_memory_snapshot()
     started = time.monotonic()
     mirrored = session_memory.mirror_transcript_without_indexing(
         aoa_root=aoa_root,
@@ -140,14 +142,37 @@ def mirror_session(
         registry_lock_timeout_sec=0.0,
     )
     wall_seconds = time.monotonic() - started
+    usage_after = usage_snapshot()
+    cgroup_after = cgroup_memory_snapshot()
     capture = (
         mirrored.get("capture")
         if isinstance(mirrored.get("capture"), dict)
         else {}
     )
+    summary = capture_execution_summary(capture, wall_seconds=wall_seconds)
+    summary.update(
+        {
+            "cpu_seconds": round(
+                max(
+                    0.0,
+                    usage_after["cpu_seconds"]
+                    - usage_before["cpu_seconds"],
+                ),
+                6,
+            ),
+            "self_max_rss_kib": int(usage_after["self_max_rss_kib"]),
+            "child_max_rss_kib": int(usage_after["child_max_rss_kib"]),
+            "swap_delta": int(
+                usage_after["swaps"] - usage_before["swaps"]
+            ),
+            "cgroup_memory": cgroup_memory_delta(
+                cgroup_before, cgroup_after
+            ),
+        }
+    )
     return (
         session_memory.resolve_session_record(aoa_root, session_id),
-        capture_execution_summary(capture, wall_seconds=wall_seconds),
+        summary,
     )
 
 
@@ -179,6 +204,12 @@ def capture_execution_summary(
         "sha256_delta_bytes_hashed": int(
             capture.get("sha256_delta_bytes_hashed") or 0
         ),
+        "sha256_continuation_mode": str(
+            capture.get("sha256_continuation_mode") or ""
+        ),
+        "full_raw_sha256_current": bool(
+            capture.get("full_raw_sha256_current")
+        ),
         "postings": {
             key: postings.get(key)
             for key in (
@@ -199,6 +230,11 @@ def capture_execution_summary(
                 "source_bytes_read",
                 "historical_raw_bytes_read",
                 "pending_incomplete_bytes",
+                "coverage_start_byte",
+                "coverage_start_line",
+                "bootstrap_window_applied",
+                "bootstrap_omitted_bytes",
+                "bootstrap_omitted_line_count",
                 "no_op",
             )
             if key in postings
@@ -718,6 +754,7 @@ def benchmark_receipt_base(
         "serial_repetitions": args.serial_repetitions,
         "parallel_repetitions": args.parallel_repetitions,
         "live_route_repetitions": args.live_route_repetitions,
+        "capture_only": bool(args.capture_only),
     }
     if source_transcript:
         fixture["snapshot_copy"] = dict(
@@ -810,6 +847,67 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             transcript=transcript,
             session_id=session_id,
         )
+        if args.capture_only:
+            capture_session_dir = session_memory.session_dir_from_record(
+                serial_record
+            )
+            live_route = (
+                benchmark_live_route_probes(
+                    aoa_root=benchmark_root,
+                    session_dir=capture_session_dir,
+                    transcript=transcript,
+                    session_id=session_id,
+                    repetitions=args.live_route_repetitions,
+                )
+                if args.live_route_repetitions
+                else {
+                    "ok": True,
+                    "run_count": 0,
+                    "status": "not_requested",
+                }
+            )
+            initial_postings = initial_capture.get("postings", {})
+            initial_historical_raw_bytes_read = int(
+                initial_postings.get("historical_raw_bytes_read") or 0
+            )
+            initial_history_read_bounded = bool(
+                initial_historical_raw_bytes_read == 0
+                or (
+                    initial_postings.get("bootstrap_window_applied") is True
+                    and initial_historical_raw_bytes_read
+                    <= session_memory.RAW_CAPTURE_BLOCK_TARGET_BYTES
+                )
+            )
+            return {
+                **benchmark_receipt_base(args, raw_bytes=raw_bytes),
+                "ok": bool(
+                    int(initial_postings.get("processed_bytes") or 0)
+                    == raw_bytes
+                    and initial_history_read_bounded
+                    and live_route.get("ok") is True
+                ),
+                "status": "capture_only_complete",
+                "initial_capture_execution": initial_capture,
+                "initial_history_read_gate": {
+                    "ok": initial_history_read_bounded,
+                    "historical_raw_bytes_read": (
+                        initial_historical_raw_bytes_read
+                    ),
+                    "maximum_admitted_bytes": (
+                        session_memory.RAW_CAPTURE_BLOCK_TARGET_BYTES
+                        if initial_postings.get(
+                            "bootstrap_window_applied"
+                        )
+                        is True
+                        else 0
+                    ),
+                    "policy": (
+                        "zero_or_one_bounded_capture_block_for_exact_"
+                        "bootstrap_line_coordinates_v1"
+                    ),
+                },
+                "live_route": live_route,
+            }
         baseline_snapshot = root / "cold-baseline-snapshot"
         shutil.copytree(benchmark_root, baseline_snapshot)
         serial_runs: list[dict[str, Any]] = []
@@ -1047,6 +1145,14 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Append unique complete events after stable projection and "
             "measure capture plus verified persistent live-route latency."
+        ),
+    )
+    parser.add_argument(
+        "--capture-only",
+        action="store_true",
+        help=(
+            "Measure initial append-ledger/overlay construction and optional "
+            "live-route probes without running stable projection builds."
         ),
     )
     parser.add_argument(
