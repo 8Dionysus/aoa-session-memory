@@ -1549,7 +1549,7 @@ AUTO_MAINTENANCE_PROFILES = {
         "deferred_graph_job_budget_seconds": 600,
         "resource_class": "medium",
         "resource_kind": "indexing",
-        "resource_demand_epoch": "v5",
+        "resource_demand_epoch": "v6",
         "automatic_heavy_projection_lane": False,
         "budget_seconds": 600,
         "hard_timeout_grace_seconds": 60,

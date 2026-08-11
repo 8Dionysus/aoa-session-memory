@@ -39,7 +39,9 @@ from session-registry raw bytes, event count, and segment count before opening
 projection payloads. The persistent discovery cursor advances across the
 original window. Records above the requested light or warm ceiling remain
 visible as deferred work, while semantic fingerprinting and dirty-state
-classification continue unchanged for admitted records.
+classification continue unchanged for admitted records. The index-drip
+resource-demand epoch advances so peaks learned from the former pre-admission
+shape do not govern the new route.
 
 ## Rationale
 
@@ -55,6 +57,8 @@ semantic fingerprints as the authority for the smaller admitted subset.
   latency merely to be rejected later.
 - Positive: the cursor still advances, so warm and heavy debt remains visible
   and can converge through targeted, backlog, or deep owners.
+- Positive: resource admission learns from receipts produced by the new
+  bounded shape rather than its multi-gigabyte predecessor.
 - Tradeoff: registry metadata can conservatively defer a record whose eventual
   semantic work would be cheaper; larger profiles remain its recovery route.
 - Follow-up: calibrate thresholds from consecutive complete live receipts.

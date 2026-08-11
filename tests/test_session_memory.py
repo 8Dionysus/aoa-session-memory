@@ -56370,7 +56370,7 @@ def test_catchup_auto_maintenance_resource_prefers_explicit_bounded_index_drip(
     assert len(calls) == 1
     assert calls[0][3:5] == ["--class", "probe"]
     assert calls[0][calls[0].index("--demand-key") + 1] == (
-        "aoa-session-memory:auto-maintenance:catchup:index-drip-v5"
+        "aoa-session-memory:auto-maintenance:catchup:index-drip-v6"
     )
     assert calls[0][calls[0].index("--demand-owner") + 1] == "aoa-session-memory"
     assert "index-maintenance" in calls[0]

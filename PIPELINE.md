@@ -700,6 +700,8 @@ still advances across the original window and the deferral remains visible.
 Semantic fingerprints then provide authoritative dirty-state classification
 only for the admitted subset. Registry pre-admission is a resource guard, not
 freshness proof; incomplete cheap metadata is admitted rather than trusted.
+The materially changed index-drip execution shape uses a fresh resource-demand
+epoch so obsolete learned peaks cannot silently restore the old admission cost.
 Segment generation uses a deterministic process pool with a default of four workers
 and a bounded one-to-six range, falling back visibly to serial execution when
 the pool cannot start. Segment processes use the isolated `spawn` start method
