@@ -23773,6 +23773,7 @@ def write_session_index_component_shard(
                 "sha256": artifact_sha256,
                 "mtime_ns": final_stat.st_mtime_ns,
                 "ctime_ns": final_stat.st_ctime_ns,
+                "metadata_mode": "size_mtime_v1",
             },
         }
     finally:
@@ -23865,17 +23866,15 @@ def staged_session_index_task_episode_shards(
             ):
                 manifest_valid = False
                 break
-            artifact_stat = artifact_path.stat()
             if not (
                 int_value(record.get("bytes"), -1)
-                == artifact_stat.st_size
                 == int_value(receipt.get("bytes"), -2)
                 and str(receipt.get("sha256") or "")
                 == artifact_sha256
-                and int_value(receipt.get("mtime_ns"), -1)
-                == artifact_stat.st_mtime_ns
-                and int_value(receipt.get("ctime_ns"), -1)
-                == artifact_stat.st_ctime_ns
+                and immutable_component_artifact_receipt_metadata_current(
+                    artifact_path,
+                    receipt,
+                )
                 and isinstance(record.get("source_identity"), dict)
             ):
                 manifest_valid = False
@@ -24092,6 +24091,7 @@ def materialize_session_index_task_episode_shards(
                     ),
                     "mtime_ns": target_stat.st_mtime_ns,
                     "ctime_ns": target_stat.st_ctime_ns,
+                    "metadata_mode": "size_mtime_v1",
                 }
                 payloads[ordinal] = (
                     dict(expected_payload)

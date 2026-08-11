@@ -254,8 +254,9 @@ size/mtime attestation and relinks the immutable file without opening it;
 periodic `doctor --deep-projection-artifacts` bypasses the stat-keyed digest
 cache and re-hashes every admitted classification, segment, and task-episode
 artifact. Task-episode component publication uses the same exact SHA plus
-size/mtime/ctime gate and falls back to full content validation whenever its
-receipt is absent or stale. Alongside those gates, the v2 session semantic
+size/mtime gate and mandatory digest filename. Ctime may change during the
+attested hardlink publication lifecycle. It falls back to full content
+validation whenever its receipt is absent or stale. Alongside those gates, the v2 session semantic
 receipt combines named per-component roots. A current
 segment-index receipt supplies its canonical semantic SHA and a current
 Markdown receipt supplies its content SHA without reopening either artifact;

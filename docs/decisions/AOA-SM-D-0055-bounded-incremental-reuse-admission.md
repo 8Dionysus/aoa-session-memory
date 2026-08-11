@@ -46,8 +46,11 @@ individual completion.
 
 Task-episode shard reuse first admits the published component manifest. A shard
 may skip content I/O only when its content-addressed filename, component key,
-source identity, payload digest, byte count, and exact size/mtime/ctime receipt
-are structurally current. Any missing or inconsistent manifest field falls
+source identity, payload digest, byte count, exact size/mtime receipt, and,
+where stable, ctime receipt are structurally current. After an attested hardlink publication, ctime may
+drift because link-count changes are non-semantic; the receipt then uses
+explicit `size_mtime_v1`, while the content-addressed filename and stored SHA
+remain mandatory. Any missing or inconsistent manifest field falls
 back to full shard hashing and decoding. Deep audit continues to rehash every
 artifact independently.
 
