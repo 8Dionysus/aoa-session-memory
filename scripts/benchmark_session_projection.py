@@ -441,6 +441,14 @@ def benchmark_build(
         "session_index_execution": result.get(
             "session_index_execution", {}
         ),
+        "projection_validation": {
+            "raw_validation_mode": validation.get(
+                "raw_validation_mode"
+            ),
+            "raw_block_validation": validation.get(
+                "raw_block_validation", {}
+            ),
+        },
         "semantic_digest": validation.get("semantic_digest", {}),
         "raw_sha256_before": raw_sha_before,
         "raw_sha256_after": session_memory.sha256_file(raw_path),

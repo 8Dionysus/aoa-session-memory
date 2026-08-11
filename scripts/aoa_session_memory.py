@@ -18484,6 +18484,22 @@ def token_accounting_empty_summary(*, scope: dict[str, Any]) -> dict[str, Any]:
     return token_accounting_summary_for_observations([], scope=scope)
 
 
+def token_accounting_rescope_summary(
+    summary: dict[str, Any],
+    *,
+    scope: dict[str, Any],
+) -> dict[str, Any]:
+    """Reuse aggregate counts under an equivalent component scope."""
+    return {
+        **{
+            key: value
+            for key, value in summary.items()
+            if key not in {"scope", "observations"}
+        },
+        "scope": scope,
+    }
+
+
 def token_accounting_merge_summaries(summaries: Iterable[dict[str, Any]], *, scope: dict[str, Any]) -> dict[str, Any]:
     totals_by_basis: dict[str, dict[str, int]] = {}
     count_by_basis: Counter[str] = Counter()
@@ -21533,6 +21549,7 @@ def write_raw_block_artifacts(
     execution_metrics_out: dict[str, Any] | None = None,
     segment_no_offset: int = 0,
     prefix_block_records: list[dict[str, Any]] | None = None,
+    defer_token_accounting: bool = False,
 ) -> dict[str, Any]:
     raw_dir = session_dir / "raw"
     reference_raw_dir = (
@@ -21551,6 +21568,7 @@ def write_raw_block_artifacts(
     reused_block_count = len(block_records)
     attested_sealed_reused_block_count = len(block_records)
     rebuilt_block_count = 0
+    deferred_token_accounting_block_count = 0
     prior_blocks_by_segment = {
         str(item.get("segment_id") or ""): item
         for item in (
@@ -21685,6 +21703,9 @@ def write_raw_block_artifacts(
             prior_summary
         ):
             block_token_accounting = prior_summary
+        elif defer_token_accounting:
+            block_token_accounting = None
+            deferred_token_accounting_block_count += 1
         else:
             block_token_accounting = token_accounting_summary_for_events(
                 block_events,
@@ -21697,6 +21718,7 @@ def write_raw_block_artifacts(
                 include_observations=False,
             )
         token_accounting_seconds += time.monotonic() - token_started
+        block_stat = block_path.stat()
         record = {
             "block_id": segment_id,
             "segment_id": segment_id,
@@ -21714,8 +21736,17 @@ def write_raw_block_artifacts(
             "sha256": block_sha256,
             "closed_by_compaction": bool(boundary_events),
             "boundary_event_ids": [event.event_id for event in boundary_events],
-            "token_accounting": block_token_accounting,
+            "artifact_receipts": {
+                "plain": {
+                    "bytes": block_stat.st_size,
+                    "sha256": block_sha256,
+                    "mtime_ns": block_stat.st_mtime_ns,
+                    "ctime_ns": block_stat.st_ctime_ns,
+                },
+            },
         }
+        if block_token_accounting is not None:
+            record["token_accounting"] = block_token_accounting
         block_records.append(record)
         for event in boundary_events:
             compaction_records.append(
@@ -21760,6 +21791,14 @@ def write_raw_block_artifacts(
                 "rebuilt_block_count": rebuilt_block_count,
                 "token_accounting_ms": int(
                     token_accounting_seconds * 1000
+                ),
+                "token_accounting_mode": (
+                    "deferred_to_segment_components_v1"
+                    if deferred_token_accounting_block_count
+                    else "raw_block_event_reduction_v1"
+                ),
+                "deferred_token_accounting_block_count": (
+                    deferred_token_accounting_block_count
                 ),
             }
         )
@@ -22317,6 +22356,21 @@ def write_segment(
         scope={"kind": "segment", "segment_id": segment_id, "segment_role": role},
         include_observations=False,
     )
+    if isinstance(raw_block, dict) and not token_accounting_summary_schema_current(
+        raw_block.get("token_accounting")
+    ):
+        raw_block = {
+            **raw_block,
+            "token_accounting": token_accounting_rescope_summary(
+                compact_token_accounting,
+                scope={
+                    "kind": "raw_block",
+                    "block_id": segment_id,
+                    "segment_id": segment_id,
+                    "role": role,
+                },
+            ),
+        }
     generation_identity = segment_index_generation_identity()
     source_range = {"from_line": first_line, "to_line": last_line}
     component_identity = segment_component_identity(
@@ -27031,7 +27085,7 @@ def validate_staged_session_projection(
             )
         else:
             raw_validation_mode = "full_sha256_v1"
-            staged_raw_sha256 = sha256_file(staged_raw_path)
+            staged_raw_sha256 = sha256_file_exact(staged_raw_path)
             if staged_raw_sha256 != expected_raw_sha256:
                 diagnostics.append("staged_raw_sha256_mismatch")
     elif expected_raw_sha256 and not (
@@ -27181,6 +27235,9 @@ def validate_staged_session_projection(
         )
         if isinstance(item, dict) and str(item.get("block_id") or "")
     }
+    raw_block_metadata_admitted_count = 0
+    raw_block_reused_last_good_count = 0
+    raw_block_full_sha256_count = 0
     if projection_publish_id(raw_block_index) != expected_publish_id:
         diagnostics.append("raw_block_index_publish_id_mismatch")
     for block in (
@@ -27238,18 +27295,44 @@ def validate_staged_session_projection(
             and published_plain_path.is_file()
             and os.path.samefile(staged_plain_path, published_plain_path)
         )
+        block_artifact_receipts = (
+            block.get("artifact_receipts")
+            if isinstance(block.get("artifact_receipts"), dict)
+            else {}
+        )
+        plain_artifact_receipt = (
+            block_artifact_receipts.get("plain")
+            if isinstance(block_artifact_receipts.get("plain"), dict)
+            else {}
+        )
+        metadata_receipt_admitted = bool(
+            str(
+                plain_artifact_receipt.get("sha256")
+                or ""
+            )
+            == expected_uncompressed_sha256
+            and immutable_component_artifact_receipt_metadata_current(
+                staged_plain_path,
+                plain_artifact_receipt,
+            )
+        )
         if not plain_removed:
             if not staged_plain_path.is_file():
                 diagnostics.append(
                     f"staged_raw_block_missing:{block_id}"
                 )
-            elif not reused_last_good_plain and (
-                expected_uncompressed_sha256
-                != sha256_file(staged_plain_path)
-            ):
-                diagnostics.append(
-                    f"staged_raw_block_digest_mismatch:{block_id}"
-                )
+            elif reused_last_good_plain:
+                raw_block_reused_last_good_count += 1
+            elif metadata_receipt_admitted:
+                raw_block_metadata_admitted_count += 1
+            else:
+                raw_block_full_sha256_count += 1
+                if expected_uncompressed_sha256 != sha256_file_exact(
+                    staged_plain_path
+                ):
+                    diagnostics.append(
+                        f"staged_raw_block_digest_mismatch:{block_id}"
+                    )
         if storage_mode == RAW_BLOCK_STORAGE_MODE_GZIP:
             if not staged_compressed_path.is_file():
                 diagnostics.append(
@@ -27262,7 +27345,7 @@ def validate_staged_session_projection(
                 if (
                     not expected_compressed_sha256
                     or expected_compressed_sha256
-                    != sha256_file(staged_compressed_path)
+                    != sha256_file_exact(staged_compressed_path)
                 ):
                     diagnostics.append(
                         "staged_compressed_raw_block_digest_mismatch:"
@@ -27574,6 +27657,18 @@ def validate_staged_session_projection(
         ),
         "diagnostics": diagnostics,
         "raw_validation_mode": raw_validation_mode,
+        "raw_block_validation": {
+            "metadata_receipt_admitted_count": (
+                raw_block_metadata_admitted_count
+            ),
+            "reused_last_good_count": (
+                raw_block_reused_last_good_count
+            ),
+            "full_sha256_count": raw_block_full_sha256_count,
+            "policy": (
+                "metadata_receipt_or_samefile_reuse_else_full_sha256_v1"
+            ),
+        },
         "producer_source_state": producer_source_state,
         "semantic_digest": (
             session_projection_semantic_digest(stage_dir)
@@ -38428,6 +38523,7 @@ def reindex_session_from_raw(
                     if streaming_incremental_mode
                     else None
                 ),
+                defer_token_accounting=True,
             )
             raw_artifact_paths = sorted(
                 path
@@ -38842,6 +38938,89 @@ def reindex_session_from_raw(
             segment_payload_by_id[f"{segment_no:03d}"]
             for segment_no in range(total_segment_count)
         ]
+        raw_block_token_backfill_count = 0
+        for segment_payload in segment_payloads:
+            if not isinstance(segment_payload, dict):
+                continue
+            segment_id = str(segment_payload.get("segment_id") or "")
+            block_record = raw_blocks_by_segment.get(segment_id)
+            if not isinstance(block_record, dict):
+                continue
+            if token_accounting_summary_schema_current(
+                block_record.get("token_accounting")
+            ):
+                continue
+            payload_block = (
+                segment_payload.get("raw_block")
+                if isinstance(segment_payload.get("raw_block"), dict)
+                else {}
+            )
+            summary = payload_block.get("token_accounting")
+            if not token_accounting_summary_schema_current(summary):
+                summary = segment_payload.get("token_accounting")
+            if not token_accounting_summary_schema_current(summary):
+                raise ValueError(
+                    "segment_token_accounting_backfill_missing:"
+                    f"{segment_id}"
+                )
+            block_record["token_accounting"] = (
+                token_accounting_rescope_summary(
+                    summary,
+                    scope={
+                        "kind": "raw_block",
+                        "block_id": segment_id,
+                        "segment_id": segment_id,
+                        "role": str(block_record.get("role") or ""),
+                    },
+                )
+            )
+            segment_payload["raw_block"] = dict(block_record)
+            raw_block_token_backfill_count += 1
+        if raw_block_token_backfill_count:
+            raw_block_index_path = (
+                stage_dir / "raw" / RAW_BLOCK_INDEX_JSON
+            )
+            raw_block_index = read_json(raw_block_index_path, {})
+            if not isinstance(raw_block_index, dict):
+                raw_block_index = {}
+            raw_block_index["projection_publish"] = publish_identity
+            raw_block_index["blocks"] = raw_blocks.get("blocks", [])
+            write_json(raw_block_index_path, raw_block_index)
+            raw_blocks_work_state = (
+                work_state.get("raw_blocks")
+                if isinstance(work_state.get("raw_blocks"), dict)
+                else {}
+            )
+            raw_blocks_work_state["payload"] = raw_blocks
+            raw_artifacts = (
+                raw_blocks_work_state.get("artifacts")
+                if isinstance(raw_blocks_work_state.get("artifacts"), list)
+                else []
+            )
+            raw_blocks_work_state["artifacts"] = [
+                session_projection_artifact_receipt(
+                    raw_block_index_path
+                )
+                if Path(str(item.get("rel") or ""))
+                == raw_block_index_path
+                else item
+                for item in raw_artifacts
+                if isinstance(item, dict)
+            ]
+            work_state["raw_blocks"] = raw_blocks_work_state
+            raw_block_execution = work_state.get(
+                "raw_block_execution", {}
+            )
+            if isinstance(raw_block_execution, dict):
+                raw_block_execution["token_accounting_mode"] = (
+                    "derived_from_segment_components_v1"
+                )
+                raw_block_execution[
+                    "segment_summary_backfill_count"
+                ] = raw_block_token_backfill_count
+            save_work_state(
+                "raw_block_token_accounting_from_segments_complete"
+            )
         phase_timings_ms["segment_generation"] = int(
             (time.monotonic() - phase_started) * 1000
         )

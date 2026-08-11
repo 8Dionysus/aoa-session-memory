@@ -100,6 +100,31 @@ def test_session_projection_benchmark_smoke_proves_parity_and_reuse(
     assert payload["growing_session"]["raw_block_execution"][
         "reused_block_count"
     ] >= 2
+    for cold_run in (
+        payload["cold_serial"],
+        payload["cold_parallel"],
+    ):
+        assert cold_run["raw_block_execution"][
+            "token_accounting_mode"
+        ] == "derived_from_segment_components_v1"
+        assert cold_run["raw_block_execution"][
+            "segment_summary_backfill_count"
+        ] == cold_run["segment_count"]
+        assert cold_run["raw_block_execution"][
+            "token_accounting_ms"
+        ] < 100
+        assert cold_run["projection_validation"][
+            "raw_block_validation"
+        ] == {
+            "metadata_receipt_admitted_count": cold_run[
+                "segment_count"
+            ],
+            "reused_last_good_count": 0,
+            "full_sha256_count": 0,
+            "policy": (
+                "metadata_receipt_or_samefile_reuse_else_full_sha256_v1"
+            ),
+        }
 
 
 def test_session_projection_benchmark_uses_stable_read_only_snapshot(
@@ -1303,6 +1328,114 @@ def test_segment_compact_markdown_is_bounded_but_index_remains_complete(
     )
     assert "Events omitted from synopsis:" in segment_markdown
     assert all("#" not in event["md_anchor"] for event in omitted)
+
+
+def test_raw_block_metadata_receipt_falls_back_to_digest_after_tamper(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "raw-block-receipt-session.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-08-10T12:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "raw-block-receipt",
+                    "cwd": str(workspace),
+                },
+            },
+            {
+                "timestamp": "2026-08-10T12:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "receipt task"}
+                    ],
+                },
+            },
+        ],
+    )
+    receipt = module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "raw-block-receipt",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    session_dir = Path(receipt["session_dir"])
+    manifest = module.read_json(
+        session_dir / "session.manifest.json", {}
+    )
+    publish_identity = manifest["index_schema"][
+        "projection_publish"
+    ]
+    stage_dir = module.stage_existing_session_projection(session_dir)
+    try:
+        raw_index = module.read_json(
+            stage_dir / "raw" / module.RAW_BLOCK_INDEX_JSON,
+            {},
+        )
+        block = raw_index["blocks"][0]
+        block_path = (
+            stage_dir
+            / "raw"
+            / module.RAW_BLOCKS_DIR
+            / Path(block["plain_path"]).name
+        )
+        original = block_path.read_bytes()
+        receipt_mtime_ns = block["artifact_receipts"]["plain"][
+            "mtime_ns"
+        ]
+        block_path.unlink()
+        block_path.write_bytes(original)
+        os.utime(
+            block_path,
+            ns=(receipt_mtime_ns, receipt_mtime_ns),
+        )
+        clean = module.validate_staged_session_projection(
+            stage_dir=stage_dir,
+            session_dir=session_dir,
+            publish_identity=publish_identity,
+        )
+        assert clean["ok"] is True
+        assert clean["raw_block_validation"][
+            "metadata_receipt_admitted_count"
+        ] == 0
+        assert clean["raw_block_validation"][
+            "full_sha256_count"
+        ] == 1
+
+        tampered = bytearray(original)
+        tampered[-2] = (tampered[-2] + 1) % 256
+        block_path.write_bytes(tampered)
+        os.utime(
+            block_path,
+            ns=(receipt_mtime_ns, receipt_mtime_ns),
+        )
+        assert module.sha256_file_exact(block_path) != block["sha256"]
+        rejected = module.validate_staged_session_projection(
+            stage_dir=stage_dir,
+            session_dir=session_dir,
+            publish_identity=publish_identity,
+        )
+        assert rejected["ok"] is False
+        assert "staged_raw_block_digest_mismatch:000" in rejected[
+            "diagnostics"
+        ]
+        assert rejected["raw_block_validation"][
+            "full_sha256_count"
+        ] == 1
+    finally:
+        module.remove_projection_publish_path(stage_dir)
 
 
 def test_outbox_consumers_complete_only_from_exact_committed_dependencies(
