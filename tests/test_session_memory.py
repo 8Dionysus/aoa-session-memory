@@ -86695,6 +86695,97 @@ def test_deep_projection_artifact_audit_rehashes_metadata_admitted_cache(
     ]
 
 
+def test_classification_candidate_index_root_is_validated_once_per_build(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_dir = tmp_path / "session"
+    stage_dir = tmp_path / ".session.projection-work-current"
+    cache_root = module.event_classification_cache_root(session_dir)
+    generation_identity = (
+        module.event_classification_generation_identity()
+    )
+    blocks: list[dict[str, Any]] = []
+    records: dict[str, dict[str, Any]] = {}
+    for ordinal in range(12):
+        block = {
+            "cache_key": f"block-{ordinal}",
+            "line_start": ordinal + 1,
+            "line_end": ordinal + 1,
+            "line_count": 1,
+            "byte_start": ordinal,
+            "byte_count": 1,
+            "raw_sha256": f"{ordinal:064x}",
+        }
+        artifact_path = (
+            module.event_classification_cache_artifact_path(
+                cache_root, block
+            )
+        )
+        module.write_deterministic_gzip_json(
+            artifact_path,
+            {
+                "schema_version": (
+                    module.EVENT_CLASSIFICATION_CACHE_SCHEMA_VERSION
+                ),
+                "artifact_type": "raw_event_classification_block",
+                "generation_identity": generation_identity,
+                "block": block,
+                "classifications": [{"line_no": ordinal + 1}],
+                "summary": {
+                    "schema_version": 1,
+                    "event_count": 1,
+                },
+            },
+        )
+        blocks.append(block)
+        records[block["cache_key"]] = (
+            module.event_classification_cache_record(
+                cache_root=cache_root,
+                block=block,
+                artifact_path=artifact_path,
+            )
+        )
+    module.write_event_classification_cache_index(
+        cache_root=cache_root,
+        generation_identity=generation_identity,
+        records=records,
+    )
+
+    root_calls = 0
+    original_root = (
+        module.event_classification_cache_records_root_sha256
+    )
+
+    def counted_root(candidate_records: dict[str, Any]) -> str:
+        nonlocal root_calls
+        root_calls += 1
+        return original_root(candidate_records)
+
+    monkeypatch.setattr(
+        module,
+        "event_classification_cache_records_root_sha256",
+        counted_root,
+    )
+    candidates = module.event_classification_cache_candidate_indexes(
+        session_dir=session_dir,
+        stage_dir=stage_dir,
+        generation_identity=generation_identity,
+    )
+    assert root_calls == 1
+
+    for block in blocks:
+        reusable = module.reusable_event_classification_cache_record(
+            session_dir=session_dir,
+            stage_dir=stage_dir,
+            block=block,
+            generation_identity=generation_identity,
+            candidate_indexes=candidates,
+        )
+        assert reusable is not None
+    assert root_calls == 1
+
+
 def test_captured_append_extends_classification_plan_from_attested_tail(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -86798,8 +86889,22 @@ def test_captured_append_extends_classification_plan_from_attested_tail(
         now="2026-08-10T01:02:01Z",
     )
 
+    checkpoint_phases: list[str] = []
+    original_checkpoint_observer = (
+        module.session_projection_checkpoint_observer
+    )
+    monkeypatch.setattr(
+        module,
+        "session_projection_checkpoint_observer",
+        lambda *, phase, work_dir: checkpoint_phases.append(phase),
+    )
     grown = module.reindex_session_from_raw(
         aoa_root, record, segment_workers=1
+    )
+    monkeypatch.setattr(
+        module,
+        "session_projection_checkpoint_observer",
+        original_checkpoint_observer,
     )
 
     assert capture["appended_bytes"] == len(appended)
@@ -86865,6 +86970,9 @@ def test_captured_append_extends_classification_plan_from_attested_tail(
     assert grown["segment_execution"][
         "migrated_component_restamp_count"
     ] == 0
+    assert checkpoint_phases.count("segments_in_progress") <= (
+        grown["segment_execution"]["rebuilt_segment_count"] + 1
+    )
     snapshot_mode = grown["raw_snapshot_execution"]["mode"]
     assert snapshot_mode in {"ficlone_snapshot_v1", "copy2_fallback"}
     validation_mode = grown["publish_result"]["validation"][
@@ -92548,6 +92656,89 @@ def test_cold_task_episode_shard_redacts_each_payload_once(
     assert result["payloads"][0]["semantic_text"] == (
         module.DERIVED_TEXT_REDACTION_MARKER
     )
+
+
+def test_task_episode_shard_reuse_admits_published_manifest_without_content_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    published_dir = tmp_path / "published"
+    stage_dir = tmp_path / "stage"
+    episodes = [
+        {
+            "episode_id": f"task-{ordinal:04d}",
+            "stable_id": f"session:task-{ordinal:04d}:event-{ordinal}",
+            "identity": {
+                "canonical_id": f"episode:canonical-{ordinal}"
+            },
+            "status": "closed",
+            "semantic_text": f"manifest admitted {ordinal}",
+            "event_range": {
+                "from_line": ordinal + 1,
+                "to_line": ordinal + 1,
+            },
+        }
+        for ordinal in range(8)
+    ]
+    publish_identity = {
+        "source": {
+            "raw_sha256": "a" * 64,
+            "raw_bytes": 800,
+            "raw_line_count": 8,
+        },
+        "publish_id": "b" * 64,
+    }
+    policy = module.DerivedSessionSensitiveLiteralPolicy(
+        values_by_kind={}
+    )
+    first = module.materialize_session_index_task_episode_shards(
+        published_dir,
+        episodes,
+        publish_identity=publish_identity,
+        literal_policy=policy,
+        workers=1,
+    )
+    module.write_session_index_shard_manifest(
+        published_dir,
+        publish_identity=publish_identity,
+        source_identity=first["source_identity"],
+        task_episode_records=first["records"],
+    )
+    published_shard_dir = (
+        published_dir
+        / module.SESSION_INDEX_SHARDS_DIR
+        / module.SESSION_INDEX_TASK_EPISODE_SHARDS_DIR
+    )
+    original_read_json = module.read_json
+    original_sha256_file = module.sha256_file
+
+    def guarded_read_json(path: Path, default: Any = None) -> Any:
+        if Path(path).parent == published_shard_dir:
+            raise AssertionError("published shard content reread")
+        return original_read_json(path, default)
+
+    def guarded_sha256_file(path: Path) -> str:
+        if Path(path).parent == published_shard_dir:
+            raise AssertionError("published shard content rehashed")
+        return original_sha256_file(path)
+
+    monkeypatch.setattr(module, "read_json", guarded_read_json)
+    monkeypatch.setattr(module, "sha256_file", guarded_sha256_file)
+    reused = module.materialize_session_index_task_episode_shards(
+        stage_dir,
+        episodes,
+        published_session_dir=published_dir,
+        publish_identity=publish_identity,
+        literal_policy=policy,
+        workers=1,
+    )
+
+    assert reused["complete"] is True
+    assert reused["payloads"] == first["payloads"]
+    assert reused["execution"][
+        "manifest_admitted_reused_shard_count"
+    ] == len(episodes)
+    assert reused["execution"]["rebuilt_shard_count"] == 0
 
 
 def test_session_index_shard_manifest_validates_manifest_first_components(

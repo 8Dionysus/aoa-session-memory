@@ -23753,6 +23753,107 @@ def staged_session_index_task_episode_shards(
     ] = {}
     if not shard_dir.is_dir():
         return current
+    manifest_path = (
+        session_dir
+        / SESSION_INDEX_SHARDS_DIR
+        / SESSION_INDEX_SHARD_MANIFEST_JSON
+    )
+    component_manifest = read_json(manifest_path, {})
+    manifest_records = (
+        component_manifest.get("components", {}).get(
+            "task_episodes"
+        )
+        if isinstance(component_manifest, dict)
+        and isinstance(component_manifest.get("components"), dict)
+        else None
+    )
+    if (
+        isinstance(component_manifest, dict)
+        and int_value(component_manifest.get("schema_version"))
+        == SESSION_INDEX_SHARD_SCHEMA_VERSION
+        and component_manifest.get("artifact_type")
+        == "session_index_shard_manifest"
+        and component_manifest.get("storage_mode")
+        == "content_addressed_components_manifest_first_v1"
+        and isinstance(manifest_records, list)
+        and int_value(
+            component_manifest.get("component_counts", {}).get(
+                "task_episodes"
+            )
+            if isinstance(
+                component_manifest.get("component_counts"), dict
+            )
+            else -1,
+            -1,
+        )
+        == len(manifest_records)
+    ):
+        admitted: dict[
+            str, tuple[dict[str, Any], dict[str, Any]]
+        ] = {}
+        manifest_valid = True
+        for raw_record in manifest_records:
+            if not isinstance(raw_record, dict):
+                manifest_valid = False
+                break
+            record = dict(raw_record)
+            component_key = str(record.get("component_key") or "")
+            artifact_sha256 = str(
+                record.get("artifact_sha256") or ""
+            )
+            payload_sha256 = str(
+                record.get("payload_sha256") or ""
+            )
+            relative_ref = Path(str(record.get("ref") or ""))
+            receipt = (
+                record.get("artifact_receipt")
+                if isinstance(record.get("artifact_receipt"), dict)
+                else {}
+            )
+            artifact_path = session_dir / relative_ref
+            if (
+                not component_key
+                or component_key in admitted
+                or len(artifact_sha256) != 64
+                or len(payload_sha256) != 64
+                or relative_ref.is_absolute()
+                or ".." in relative_ref.parts
+                or relative_ref.parent
+                != Path(SESSION_INDEX_SHARDS_DIR)
+                / SESSION_INDEX_TASK_EPISODE_SHARDS_DIR
+                or relative_ref.name != f"{artifact_sha256}.json"
+                or not artifact_path.is_file()
+            ):
+                manifest_valid = False
+                break
+            artifact_stat = artifact_path.stat()
+            if not (
+                int_value(record.get("bytes"), -1)
+                == artifact_stat.st_size
+                == int_value(receipt.get("bytes"), -2)
+                and str(receipt.get("sha256") or "")
+                == artifact_sha256
+                and int_value(receipt.get("mtime_ns"), -1)
+                == artifact_stat.st_mtime_ns
+                and int_value(receipt.get("ctime_ns"), -1)
+                == artifact_stat.st_ctime_ns
+                and isinstance(record.get("source_identity"), dict)
+            ):
+                manifest_valid = False
+                break
+            record["_artifact_path"] = str(artifact_path)
+            record["_manifest_admitted"] = True
+            admitted[component_key] = (
+                {
+                    "source_identity": dict(
+                        record["source_identity"]
+                    ),
+                    "payload_sha256": payload_sha256,
+                },
+                record,
+            )
+        if manifest_valid:
+            return admitted
     for path in sorted(shard_dir.glob("*.json")):
         if path.stem != sha256_file(path):
             continue
@@ -23862,6 +23963,7 @@ def materialize_session_index_task_episode_shards(
         ]
     ] = []
     reused_count = 0
+    manifest_admitted_reused_count = 0
     migrated_predecessor_count = 0
     for ordinal, episode in enumerate(task_episodes):
         component_key = session_index_task_episode_shard_key(
@@ -23908,6 +24010,9 @@ def materialize_session_index_task_episode_shards(
                 and prior_payload_matches
             ):
                 reusable_record = dict(record)
+                manifest_admitted = bool(
+                    reusable_record.pop("_manifest_admitted", False)
+                )
                 source_artifact = Path(
                     str(reusable_record.pop("_artifact_path", ""))
                 )
@@ -23928,9 +24033,16 @@ def materialize_session_index_task_episode_shards(
                     "mtime_ns": target_stat.st_mtime_ns,
                     "ctime_ns": target_stat.st_ctime_ns,
                 }
-                payloads[ordinal] = dict(envelope["payload"])
+                payloads[ordinal] = (
+                    dict(expected_payload)
+                    if manifest_admitted
+                    and isinstance(expected_payload, dict)
+                    else dict(envelope["payload"])
+                )
                 records[ordinal] = reusable_record
                 reused_count += 1
+                if manifest_admitted:
+                    manifest_admitted_reused_count += 1
                 continue
             legacy_source_matches = bool(
                 prior_payload_matches
@@ -24077,6 +24189,9 @@ def materialize_session_index_task_episode_shards(
             "planned_shard_count": len(task_episodes),
             "completed_shard_count": len(payloads),
             "checkpoint_reused_shard_count": reused_count,
+            "manifest_admitted_reused_shard_count": (
+                manifest_admitted_reused_count
+            ),
             "migrated_predecessor_shard_count": (
                 migrated_predecessor_count
             ),
@@ -38776,14 +38891,14 @@ def event_classification_cache_candidate_roots(
     return roots
 
 
-def reusable_event_classification_cache_record(
+def event_classification_cache_candidate_indexes(
     *,
     session_dir: Path,
     stage_dir: Path,
-    block: dict[str, Any],
     generation_identity: dict[str, Any],
-) -> tuple[Path, dict[str, Any]] | None:
-    cache_key = str(block.get("cache_key") or "")
+) -> list[dict[str, Any]]:
+    """Validate each candidate index root once for one projection build."""
+    candidates: list[dict[str, Any]] = []
     for cache_root in event_classification_cache_candidate_roots(
         session_dir=session_dir,
         stage_dir=stage_dir,
@@ -38795,10 +38910,10 @@ def reusable_event_classification_cache_record(
         if not isinstance(index, dict):
             continue
         generation_admission = projection_generation_admission(
-                projection="raw_event_classification_cache",
-                stored_identity=index.get("generation_identity"),
-                expected_identity=generation_identity,
-            )
+            projection="raw_event_classification_cache",
+            stored_identity=index.get("generation_identity"),
+            expected_identity=generation_identity,
+        )
         if not generation_admission.get("compatible"):
             continue
         records = (
@@ -38806,7 +38921,6 @@ def reusable_event_classification_cache_record(
             if isinstance(index.get("blocks"), dict)
             else {}
         )
-        record = records.get(cache_key)
         records_root_current = bool(
             str(index.get("records_root_sha256") or "")
             == event_classification_cache_records_root_sha256(
@@ -38817,6 +38931,42 @@ def reusable_event_classification_cache_record(
                 }
             )
         )
+        candidates.append(
+            {
+                "cache_root": cache_root,
+                "records": records,
+                "records_root_current": records_root_current,
+                "generation_admission": generation_admission,
+            }
+        )
+    return candidates
+
+
+def reusable_event_classification_cache_record(
+    *,
+    session_dir: Path,
+    stage_dir: Path,
+    block: dict[str, Any],
+    generation_identity: dict[str, Any],
+    candidate_indexes: list[dict[str, Any]] | None = None,
+) -> tuple[Path, dict[str, Any]] | None:
+    cache_key = str(block.get("cache_key") or "")
+    candidates = candidate_indexes
+    if candidates is None:
+        candidates = event_classification_cache_candidate_indexes(
+            session_dir=session_dir,
+            stage_dir=stage_dir,
+            generation_identity=generation_identity,
+        )
+    for candidate in candidates:
+        cache_root = candidate.get("cache_root")
+        records = candidate.get("records")
+        if not isinstance(cache_root, Path) or not isinstance(records, dict):
+            continue
+        record = records.get(cache_key)
+        records_root_current = bool(
+            candidate.get("records_root_current")
+        )
         if event_classification_cache_record_current(
             cache_root=cache_root,
             record=record,
@@ -38825,7 +38975,9 @@ def reusable_event_classification_cache_record(
         ):
             return cache_root, {
                 **dict(record),
-                "_generation_admission": generation_admission,
+                "_generation_admission": dict(
+                    candidate.get("generation_admission") or {}
+                ),
                 "_records_root_current": records_root_current,
             }
     return None
@@ -39646,6 +39798,13 @@ def reindex_session_from_raw(
             ).get("migrated_predecessor_block_count")
         )
         pending_classification_blocks: list[dict[str, Any]] = []
+        classification_cache_candidates = (
+            event_classification_cache_candidate_indexes(
+                session_dir=session_dir,
+                stage_dir=stage_dir,
+                generation_identity=classification_generation,
+            )
+        )
         for block in scan_blocks:
             cache_key = str(block.get("cache_key") or "")
             prior_record = completed_classification_blocks.get(
@@ -39666,6 +39825,7 @@ def reindex_session_from_raw(
                 stage_dir=stage_dir,
                 block=block,
                 generation_identity=classification_generation,
+                candidate_indexes=classification_cache_candidates,
             )
             if reusable is None:
                 completed_classification_blocks.pop(
@@ -40417,6 +40577,7 @@ def reindex_session_from_raw(
                 save_work_state("segments_in_progress")
 
         reused_published_segment_count = 0
+        reused_segment_checkpoint_dirty = False
         if streaming_incremental_mode:
             for segment_no in range(stable_segment_count):
                 segment_id = f"{segment_no:03d}"
@@ -40464,8 +40625,12 @@ def reindex_session_from_raw(
                         f"{segment_id}"
                     )
                 record_segment_completion(
-                    segment_no, role, reused_payload
+                    segment_no,
+                    role,
+                    reused_payload,
+                    persist_work_state=False,
                 )
+                reused_segment_checkpoint_dirty = True
                 reused_published_segment_count += 1
         build_pending_segments: list[
             tuple[int, int, int, str]
@@ -40496,8 +40661,12 @@ def reindex_session_from_raw(
                 segment_no,
                 role,
                 reused_payload,
+                persist_work_state=False,
             )
+            reused_segment_checkpoint_dirty = True
             reused_published_segment_count += 1
+        if reused_segment_checkpoint_dirty:
+            save_work_state("segments_in_progress")
         pending_segments = build_pending_segments
 
         parallel_fallback_reason = ""

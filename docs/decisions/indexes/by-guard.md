@@ -33,6 +33,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0010 Natural-Language Intent Before Literal Length](../AOA-SM-D-0010-natural-language-intent-before-literal-length.md) | 2026-07-16 | Accepted | `docs/decisions/AOA-SM-D-0010-natural-language-intent-before-literal-length.md` |
 
+## aggregate root
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0055 Bounded Incremental Reuse Admission](../AOA-SM-D-0055-bounded-incremental-reuse-admission.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0055-bounded-incremental-reuse-admission.md` |
+
 ## answer abstention
 
 | Decision | Date | Status | Path |
@@ -307,6 +313,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0016 Quantitative Comparisons Require Correlated Count Evidence](../AOA-SM-D-0016-quantitative-comparisons-require-correlated-count-evidence.md) | 2026-07-17 | Accepted | `docs/decisions/AOA-SM-D-0016-quantitative-comparisons-require-correlated-count-evidence.md` |
 
+## crash recovery
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0055 Bounded Incremental Reuse Admission](../AOA-SM-D-0055-bounded-incremental-reuse-admission.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0055-bounded-incremental-reuse-admission.md` |
+
 ## credential-value redaction
 
 | Decision | Date | Status | Path |
@@ -324,6 +336,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0004 Declared Incremental Search Schema Transitions](../AOA-SM-D-0004-declared-incremental-search-schema-transitions.md) | 2026-07-15 | Accepted | `docs/decisions/AOA-SM-D-0004-declared-incremental-search-schema-transitions.md` |
+
+## deep audit
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0055 Bounded Incremental Reuse Admission](../AOA-SM-D-0055-bounded-incremental-reuse-admission.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0055-bounded-incremental-reuse-admission.md` |
 
 ## deep rebuild fallback
 
@@ -704,6 +722,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0034 Bounded Dirty-First Automatic Index Discovery](../AOA-SM-D-0034-bounded-dirty-first-automatic-index-discovery.md) | 2026-07-28 | Accepted | `docs/decisions/AOA-SM-D-0034-bounded-dirty-first-automatic-index-discovery.md` |
+
+## metadata receipt
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0055 Bounded Incremental Reuse Admission](../AOA-SM-D-0055-bounded-incremental-reuse-admission.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0055-bounded-incremental-reuse-admission.md` |
 
 ## model contract
 

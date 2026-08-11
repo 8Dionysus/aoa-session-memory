@@ -63,6 +63,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0018 Owner Capability Home And Skill Evidence Lifecycle](../AOA-SM-D-0018-owner-capability-home-and-skill-evidence-lifecycle.md) | 2026-07-18 | Accepted | `docs/decisions/AOA-SM-D-0018-owner-capability-home-and-skill-evidence-lifecycle.md` |
 
+## checkpoints
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0055 Bounded Incremental Reuse Admission](../AOA-SM-D-0055-bounded-incremental-reuse-admission.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0055-bounded-incremental-reuse-admission.md` |
+
 ## compatibility
 
 | Decision | Date | Status | Path |
@@ -318,6 +324,7 @@
 | [AOA-SM-D-0052 Generation-Bound Segment Privacy Admission](../AOA-SM-D-0052-generation-bound-segment-privacy-admission.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0052-generation-bound-segment-privacy-admission.md` |
 | [AOA-SM-D-0053 Single-Pass Task-Episode Reduction and Shard Redaction](../AOA-SM-D-0053-single-pass-task-episode-reduction-and-shard-redaction.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0053-single-pass-task-episode-reduction-and-shard-redaction.md` |
 | [AOA-SM-D-0054 Native-Assisted Portable SHA-256 Continuation](../AOA-SM-D-0054-native-assisted-portable-sha256-continuation.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0054-native-assisted-portable-sha256-continuation.md` |
+| [AOA-SM-D-0055 Bounded Incremental Reuse Admission](../AOA-SM-D-0055-bounded-incremental-reuse-admission.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0055-bounded-incremental-reuse-admission.md` |
 
 ## index discovery
 
@@ -398,6 +405,7 @@
 | [AOA-SM-D-0052 Generation-Bound Segment Privacy Admission](../AOA-SM-D-0052-generation-bound-segment-privacy-admission.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0052-generation-bound-segment-privacy-admission.md` |
 | [AOA-SM-D-0053 Single-Pass Task-Episode Reduction and Shard Redaction](../AOA-SM-D-0053-single-pass-task-episode-reduction-and-shard-redaction.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0053-single-pass-task-episode-reduction-and-shard-redaction.md` |
 | [AOA-SM-D-0054 Native-Assisted Portable SHA-256 Continuation](../AOA-SM-D-0054-native-assisted-portable-sha256-continuation.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0054-native-assisted-portable-sha256-continuation.md` |
+| [AOA-SM-D-0055 Bounded Incremental Reuse Admission](../AOA-SM-D-0055-bounded-incremental-reuse-admission.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0055-bounded-incremental-reuse-admission.md` |
 
 ## physical storage transition
 
@@ -663,6 +671,7 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0054 Native-Assisted Portable SHA-256 Continuation](../AOA-SM-D-0054-native-assisted-portable-sha256-continuation.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0054-native-assisted-portable-sha256-continuation.md` |
+| [AOA-SM-D-0055 Bounded Incremental Reuse Admission](../AOA-SM-D-0055-bounded-incremental-reuse-admission.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0055-bounded-incremental-reuse-admission.md` |
 
 ## storage
 

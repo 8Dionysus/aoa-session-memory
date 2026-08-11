@@ -1,0 +1,92 @@
+# Bounded Incremental Reuse Admission
+
+## Status
+
+Accepted.
+
+## Index Metadata
+
+- Decision ID: AOA-SM-D-0055
+- Original date: 2026-08-11
+- Owner surfaces: `scripts/aoa_session_memory.py`, `tests/test_session_memory.py`, `docs/decisions/`
+- Surface classes: stable projection, incremental maintenance, checkpoints, performance
+- Projection layers: classification cache, segment projection, session component shards
+- Guard families: aggregate root, metadata receipt, deep audit, crash recovery
+- Posture: accepted
+
+## Context
+
+The actual 430 MB growth benchmark proved bounded raw scanning but exposed
+derived-work amplification. The classification records root was recomputed for
+every block lookup, every reused segment serialized the complete growing work
+checkpoint, and every task-episode shard was rehashed and decoded despite an
+already validated manifest-first receipt.
+
+## Decision
+
+One projection build validates each candidate classification index and its
+records root once, then performs block lookup against that admitted immutable
+view. Reused published segments are recorded in memory as a batch and the work
+checkpoint is persisted once per reuse batch; newly built worker waves retain
+their existing crash checkpoints.
+
+Task-episode shard reuse first admits the published component manifest. A shard
+may skip content I/O only when its content-addressed filename, component key,
+source identity, payload digest, byte count, and exact size/mtime/ctime receipt
+are structurally current. Any missing or inconsistent manifest field falls
+back to full shard hashing and decoding. Deep audit continues to rehash every
+artifact independently.
+
+## Options Considered
+
+- Rehash and decode every historical artifact on every append. Rejected because
+  it preserves correctness by making append cost proportional to total history.
+- Trust filenames or mtimes alone. Rejected because neither binds the component
+  generation, aggregate membership, payload identity, and content digest.
+- Remove checkpoints for reuse. Rejected because explicit recoverable progress
+  remains useful; the accepted design changes repetition granularity only.
+
+## Rationale
+
+The aggregate roots and receipts were already produced and validated at atomic
+publication. Rechecking them once per candidate generation preserves the same
+admission boundary while removing quadratic work. Batch checkpointing changes
+recovery granularity for reused immutable components, not correctness: a crash
+may repeat the batch, while last-good publication and content-addressed inputs
+remain unchanged.
+
+## Consequences
+
+- Stable classification reuse is linear in candidate indexes plus block count,
+  rather than block count multiplied by complete index size.
+- Reused segment checkpoint writes are bounded by reuse batches, not segment
+  count; newly generated work remains checkpointed by worker wave.
+- Current task-episode shards avoid historical content reads on the fast path.
+- Receipt drift fails closed to the existing deep-read path, and scheduled deep
+  audit remains the independent corruption detector.
+
+## Boundaries
+
+This does not make derived caches authoritative, replace deep audit, admit
+unknown generation identities, or remove crash recovery. It also does not by
+itself solve monolithic raw snapshot copying or full semantic projection
+validation; those require separate owner decisions and proof.
+
+## Source Surfaces
+
+- `scripts/aoa_session_memory.py`
+- `tests/test_session_memory.py`
+- `docs/decisions/AOA-SM-D-0053-single-pass-task-episode-reduction-and-shard-redaction.md`
+- `docs/decisions/AOA-SM-D-0054-native-assisted-portable-sha256-continuation.md`
+
+## Follow-Up Route
+
+Eliminate monolithic raw snapshot copying and make semantic validation consume
+component-root receipts without weakening last-good or deep-audit guarantees,
+then rerun the actual 430 MB no-swap growth benchmark.
+
+## Verification
+
+Focused tests prove one records-root computation across many lookups, bounded
+`segments_in_progress` checkpoints across captured growth, crash/resume parity,
+and task-shard reuse without reading or hashing published shard content.

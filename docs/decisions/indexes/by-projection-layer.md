@@ -68,6 +68,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0013 Indexed Graph Seed Before Retrieval Fallback](../AOA-SM-D-0013-indexed-graph-seed-before-retrieval-fallback.md) | 2026-07-17 | Accepted | `docs/decisions/AOA-SM-D-0013-indexed-graph-seed-before-retrieval-fallback.md` |
 
+## classification cache
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0055 Bounded Incremental Reuse Admission](../AOA-SM-D-0055-bounded-incremental-reuse-admission.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0055-bounded-incremental-reuse-admission.md` |
+
 ## compact retrieval route packet
 
 | Decision | Date | Status | Path |
@@ -658,6 +664,7 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0020 Preserved Capture and Last-Good Projection Publication](../AOA-SM-D-0020-preserved-capture-and-last-good-projection-publication.md) | 2026-07-18 | Accepted | `docs/decisions/AOA-SM-D-0020-preserved-capture-and-last-good-projection-publication.md` |
+| [AOA-SM-D-0055 Bounded Incremental Reuse Admission](../AOA-SM-D-0055-bounded-incremental-reuse-admission.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0055-bounded-incremental-reuse-admission.md` |
 
 ## segment relationships
 
@@ -702,6 +709,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0050 Manifest-First Session Components and Lazy Review Rendering](../AOA-SM-D-0050-manifest-first-session-components-and-lazy-review-rendering.md) | 2026-08-10 | Accepted | `docs/decisions/AOA-SM-D-0050-manifest-first-session-components-and-lazy-review-rendering.md` |
+
+## session component shards
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0055 Bounded Incremental Reuse Admission](../AOA-SM-D-0055-bounded-incremental-reuse-admission.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0055-bounded-incremental-reuse-admission.md` |
 
 ## session components
 
