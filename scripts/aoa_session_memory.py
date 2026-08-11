@@ -532,6 +532,9 @@ RAW_CAPTURE_LEDGER_SCHEMA_VERSION = 1
 RAW_CAPTURE_BLOCKS_DIR = "capture-blocks"
 RAW_CAPTURE_BLOCK_TARGET_BYTES = 4 * 1024 * 1024
 RAW_CAPTURE_PERSISTABLE_SHA256_MAX_BYTES = 64 * 1024 * 1024
+RAW_PROJECTION_STORAGE_CAPTURE_LEDGER = (
+    "append_only_capture_ledger_with_bounded_materialization_v1"
+)
 PERSISTENT_LIVE_TAIL_INDEX_JSON = "live-tail.index.json"
 PERSISTENT_LIVE_TAIL_INDEX_SCHEMA_VERSION = 1
 PERSISTENT_LIVE_TAIL_POSTINGS_JSON = "live-tail.postings.json"
@@ -21727,7 +21730,7 @@ def write_raw_block_artifacts(
     reference_blocks_dir = reference_raw_dir / RAW_BLOCKS_DIR
     blocks_dir.mkdir(parents=True, exist_ok=True)
     block_records: list[dict[str, Any]] = [
-        dict(item)
+        {**dict(item), "source_raw": raw_rel}
         for item in (prefix_block_records or [])
         if isinstance(item, dict)
     ]
@@ -27754,10 +27757,62 @@ def validate_staged_session_projection(
     diagnostics: list[str] = []
     session_index_shard_validation: dict[str, Any] = {}
     raw_validation_mode = "published_last_good_raw_v1"
+    staged_manifest = read_json(
+        stage_dir / "session.manifest.json",
+        {},
+    )
+    staged_raw = (
+        staged_manifest.get("raw")
+        if isinstance(staged_manifest, dict)
+        and isinstance(staged_manifest.get("raw"), dict)
+        else {}
+    )
+    raw_capture_state = read_json(
+        stage_dir / "raw" / RAW_CAPTURE_STATE_JSON,
+        {},
+    )
     staged_raw_path = (
         stage_dir / "raw" / "session.raw.jsonl"
     )
-    if staged_raw_path.is_file():
+    if (
+        str(staged_raw.get("storage_mode") or "")
+        == RAW_PROJECTION_STORAGE_CAPTURE_LEDGER
+    ):
+        raw_capture_receipt = raw_capture_ledger_projection_receipt(
+            session_dir=session_dir,
+            capture_state=(
+                raw_capture_state
+                if isinstance(raw_capture_state, dict)
+                else {}
+            ),
+            expected_raw_sha256=expected_raw_sha256,
+            expected_raw_bytes=expected_raw_bytes,
+        )
+        raw_validation_mode = RAW_PROJECTION_STORAGE_CAPTURE_LEDGER
+        diagnostics.extend(
+            f"staged_raw_capture_ledger:{reason}"
+            for reason in raw_capture_receipt.get("diagnostics", [])
+        )
+        capture_ledger_manifest = (
+            staged_raw.get("capture_ledger")
+            if isinstance(staged_raw.get("capture_ledger"), dict)
+            else {}
+        )
+        if not (
+            str(capture_ledger_manifest.get("epoch_id") or "")
+            == str(raw_capture_receipt.get("epoch_id") or "")
+            and str(capture_ledger_manifest.get("chain_sha256") or "")
+            == str(
+                raw_capture_receipt.get("ledger_chain_sha256") or ""
+            )
+            and int_value(
+                capture_ledger_manifest.get("processed_watermark_bytes"),
+                -1,
+            )
+            == expected_raw_bytes
+        ):
+            diagnostics.append("staged_raw_capture_ledger_manifest_mismatch")
+    elif staged_raw_path.is_file():
         if staged_raw_snapshot_receipt_current(
             stage_dir=stage_dir,
             staged_raw_path=staged_raw_path,
@@ -27776,10 +27831,6 @@ def validate_staged_session_projection(
         session_dir / "raw" / "session.raw.jsonl"
     ).is_file():
         diagnostics.append("staged_and_published_raw_missing")
-    staged_manifest = read_json(
-        stage_dir / "session.manifest.json",
-        {},
-    )
     staged_session_index = read_json(
         stage_dir / SESSION_INDEX_JSON,
         {},
@@ -28141,10 +28192,6 @@ def validate_staged_session_projection(
                     "classification_cache_payload_invalid:"
                     f"{cache_key}"
                 )
-    raw_capture_state = read_json(
-        stage_dir / "raw" / RAW_CAPTURE_STATE_JSON,
-        {},
-    )
     if (
         not isinstance(raw_capture_state, dict)
         or int_value(raw_capture_state.get("schema_version"))
@@ -30608,6 +30655,166 @@ def raw_capture_chain_sha256(
     ).hexdigest()
 
 
+def raw_capture_ledger_projection_receipt(
+    *,
+    session_dir: Path,
+    capture_state: dict[str, Any],
+    expected_raw_sha256: str,
+    expected_raw_bytes: int,
+) -> dict[str, Any]:
+    """Validate one exact capture watermark without reopening its prefix."""
+    diagnostics: list[str] = []
+    capture_path = Path(str(capture_state.get("capture_path") or ""))
+    ledger_path = Path(str(capture_state.get("ledger_path") or ""))
+    if not ledger_path.is_file():
+        ledger_path = raw_capture_ledger_path(session_dir)
+    ledger = read_json(ledger_path, {})
+    epochs = (
+        ledger.get("epochs")
+        if isinstance(ledger, dict)
+        and isinstance(ledger.get("epochs"), list)
+        else []
+    )
+    epoch_id = str(
+        capture_state.get("ledger_epoch_id")
+        or (ledger.get("current_epoch_id") if isinstance(ledger, dict) else "")
+        or ""
+    )
+    epoch = next(
+        (
+            item
+            for item in reversed(epochs)
+            if isinstance(item, dict)
+            and str(item.get("epoch_id") or "") == epoch_id
+        ),
+        None,
+    )
+    if (
+        str(capture_state.get("capture_mode") or "")
+        != "append_only_immutable_block_ledger_v1"
+    ):
+        diagnostics.append("capture_mode_not_append_only_ledger")
+    if not capture_path.is_file():
+        diagnostics.append("capture_materialization_missing")
+    elif capture_path.stat().st_size != expected_raw_bytes:
+        diagnostics.append("capture_materialization_watermark_mismatch")
+    if str(capture_state.get("raw_sha256") or "") != expected_raw_sha256:
+        diagnostics.append("capture_state_digest_mismatch")
+    if int_value(capture_state.get("raw_bytes"), -1) != expected_raw_bytes:
+        diagnostics.append("capture_state_watermark_mismatch")
+    if not isinstance(epoch, dict):
+        diagnostics.append("capture_ledger_epoch_missing")
+        epoch = {}
+    materialization_path = Path(
+        str(epoch.get("materialization_path") or "")
+    )
+    try:
+        same_materialization = bool(
+            capture_path.is_file()
+            and materialization_path.is_file()
+            and capture_path.resolve() == materialization_path.resolve()
+        )
+    except OSError:
+        same_materialization = False
+    if not same_materialization:
+        diagnostics.append("capture_ledger_materialization_mismatch")
+    if int_value(epoch.get("captured_bytes"), -1) != expected_raw_bytes:
+        diagnostics.append("capture_ledger_watermark_mismatch")
+    if not (
+        str(epoch.get("full_raw_sha256") or "") == expected_raw_sha256
+        and int_value(epoch.get("full_raw_sha256_bytes"), -1)
+        == expected_raw_bytes
+    ):
+        diagnostics.append("capture_ledger_digest_mismatch")
+
+    blocks = (
+        epoch.get("blocks")
+        if isinstance(epoch.get("blocks"), list)
+        else []
+    )
+    previous_chain = hashlib.sha256(b"").hexdigest()
+    expected_start = 0
+    for ordinal, block in enumerate(blocks):
+        if not isinstance(block, dict):
+            diagnostics.append(f"capture_block_record_invalid:{ordinal}")
+            continue
+        byte_start = int_value(block.get("byte_start"), -1)
+        byte_count = int_value(block.get("byte_count"), -1)
+        block_sha256 = str(block.get("sha256") or "")
+        expected_chain = raw_capture_chain_sha256(
+            previous_chain_sha256=previous_chain,
+            block_sha256=block_sha256,
+            byte_start=byte_start,
+            byte_count=byte_count,
+        )
+        if not (
+            int_value(block.get("ordinal"), -1) == ordinal
+            and byte_start == expected_start
+            and byte_count > 0
+            and int_value(block.get("byte_end"), -1)
+            == byte_start + byte_count
+            and str(block.get("previous_chain_sha256") or "")
+            == previous_chain
+            and str(block.get("chain_sha256") or "") == expected_chain
+        ):
+            diagnostics.append(f"capture_block_chain_invalid:{ordinal}")
+        block_path = Path(str(block.get("path") or ""))
+        if not block_path.is_file():
+            block_path = (
+                session_dir
+                / "raw"
+                / RAW_CAPTURE_BLOCKS_DIR
+                / block_path.name
+            )
+        if not (
+            block_path.is_file()
+            and block_path.stat().st_size == byte_count
+            and block_path.name == f"{block_sha256}.raw.part"
+        ):
+            diagnostics.append(f"capture_block_artifact_invalid:{ordinal}")
+        previous_chain = expected_chain
+        expected_start = byte_start + max(0, byte_count)
+    if expected_start != expected_raw_bytes:
+        diagnostics.append("capture_block_coverage_mismatch")
+    if previous_chain != str(epoch.get("chain_sha256") or ""):
+        diagnostics.append("capture_ledger_chain_root_mismatch")
+
+    last_block_bytes_read = 0
+    if blocks and isinstance(blocks[-1], dict):
+        last = blocks[-1]
+        last_path = Path(str(last.get("path") or ""))
+        if not last_path.is_file():
+            last_path = (
+                session_dir
+                / "raw"
+                / RAW_CAPTURE_BLOCKS_DIR
+                / last_path.name
+            )
+        if last_path.is_file():
+            last_block_bytes_read = last_path.stat().st_size
+            if sha256_file_exact(last_path) != str(last.get("sha256") or ""):
+                diagnostics.append("capture_ledger_last_block_digest_mismatch")
+    return {
+        "schema_version": 1,
+        "artifact_type": "session_projection_raw_capture_ledger_receipt",
+        "mode": RAW_PROJECTION_STORAGE_CAPTURE_LEDGER,
+        "ok": not diagnostics,
+        "diagnostics": diagnostics,
+        "expected_sha256": expected_raw_sha256,
+        "expected_bytes": expected_raw_bytes,
+        "capture_path": str(capture_path),
+        "ledger_path": str(ledger_path),
+        "epoch_id": epoch_id,
+        "ledger_chain_sha256": str(epoch.get("chain_sha256") or ""),
+        "block_count": len(blocks),
+        "source_bytes_read": last_block_bytes_read,
+        "target_bytes_written": 0,
+        "truth_status": (
+            "exact_watermark_bound_to_append_only_block_chain_and_tail_digest"
+        ),
+    }
+
+
 _SHA256_INITIAL_STATE = (
     0x6A09E667,
     0xBB67AE85,
@@ -31643,7 +31850,7 @@ def indexed_raw_capture_state(
         and source_snapshot_before.get("mtime_ns")
         == source_snapshot_after.get("mtime_ns")
     )
-    return {
+    state = {
         "schema_version": RAW_CAPTURE_STATE_SCHEMA_VERSION,
         "artifact_type": "raw_capture_state",
         "session_id": session_id,
@@ -31673,6 +31880,29 @@ def indexed_raw_capture_state(
         "projection_authority": False,
         "next_route": "",
     }
+    if (
+        str(prior_state.get("capture_mode") or "")
+        == "append_only_immutable_block_ledger_v1"
+        and str(prior_state.get("capture_path") or "")
+        == str(raw_path)
+        and int_value(prior_state.get("raw_bytes"), -1) == raw_bytes
+        and str(prior_state.get("raw_sha256") or "") == raw_sha256
+    ):
+        for key in (
+            "capture_mode",
+            "ledger_path",
+            "ledger_epoch_id",
+            "ledger_chain_sha256",
+            "ledger_block_count",
+            "raw_digest_status",
+            "full_raw_sha256_current",
+            "sha256_continuation_mode",
+            "persistent_live_tail_index",
+            "persistent_live_tail_postings",
+        ):
+            if key in prior_state:
+                state[key] = prior_state[key]
+    return state
 
 
 def attest_raw_capture_projection_digest(
@@ -40593,7 +40823,43 @@ def reindex_session_from_raw(
         staged_raw_path = (
             stage_dir / "raw" / "session.raw.jsonl"
         )
-        if not staged_raw_path.is_file():
+        capture_state_for_projection = raw_capture_state_for_session(
+            session_dir
+        )
+        raw_capture_ledger_receipt = (
+            raw_capture_ledger_projection_receipt(
+                session_dir=session_dir,
+                capture_state=capture_state_for_projection,
+                expected_raw_sha256=str(
+                    raw_scan.get("raw_sha256") or ""
+                ),
+                expected_raw_bytes=int_value(
+                    raw_scan.get("raw_bytes")
+                ),
+            )
+        )
+        raw_capture_ledger_mode = bool(
+            raw_capture_ledger_receipt.get("ok")
+            and Path(
+                str(
+                    raw_capture_ledger_receipt.get("capture_path")
+                    or ""
+                )
+            ).resolve()
+            == raw_path.resolve()
+        )
+        if raw_capture_ledger_mode:
+            # The capture layer already published this exact watermark as
+            # immutable content-addressed blocks plus an append-only bounded
+            # materialization.  Keep the prior monolithic projection as a
+            # compatibility fallback; do not rewrite it on stable append.
+            staged_raw_path.unlink(missing_ok=True)
+            work_state["raw_snapshot_execution"] = (
+                raw_capture_ledger_receipt
+            )
+            phase_timings_ms["raw_copy"] = 0
+            save_work_state("raw_copied")
+        elif not staged_raw_path.is_file():
             phase_started = time.monotonic()
             work_state["raw_snapshot_execution"] = stage_raw_snapshot(
                 source=raw_path,
@@ -40605,7 +40871,9 @@ def reindex_session_from_raw(
             )
             save_work_state("raw_copied")
         published_raw_path = (
-            session_dir / "raw" / "session.raw.jsonl"
+            raw_path
+            if raw_capture_ledger_mode
+            else session_dir / "raw" / "session.raw.jsonl"
         )
         lineage = (
             dict(manifest.get("lineage"))
@@ -40624,7 +40892,11 @@ def reindex_session_from_raw(
             manifest["lineage"] = lineage
         else:
             manifest.pop("lineage", None)
-        raw_rel = "raw/session.raw.jsonl"
+        raw_rel = (
+            str(Path("raw") / RAW_CAPTURES_DIR / raw_path.name)
+            if raw_capture_ledger_mode
+            else "raw/session.raw.jsonl"
+        )
         if streaming_incremental_mode:
             segment_events = [
                 event
@@ -41351,12 +41623,41 @@ def reindex_session_from_raw(
                 published_raw_path
             )
             manifest["raw"]["line_count"] = total_event_count
-            manifest["raw"]["bytes"] = (
-                staged_raw_path.stat().st_size
+            manifest["raw"]["bytes"] = int_value(
+                raw_scan.get("raw_bytes")
             )
             manifest["raw"]["sha256"] = str(
                 raw_scan.get("raw_sha256") or ""
             )
+            manifest["raw"]["storage_mode"] = (
+                RAW_PROJECTION_STORAGE_CAPTURE_LEDGER
+                if raw_capture_ledger_mode
+                else "monolithic_snapshot_v1"
+            )
+            if raw_capture_ledger_mode:
+                manifest["raw"]["capture_ledger"] = {
+                    "path": str(
+                        raw_capture_ledger_receipt.get("ledger_path")
+                        or ""
+                    ),
+                    "epoch_id": str(
+                        raw_capture_ledger_receipt.get("epoch_id") or ""
+                    ),
+                    "chain_sha256": str(
+                        raw_capture_ledger_receipt.get(
+                            "ledger_chain_sha256"
+                        )
+                        or ""
+                    ),
+                    "block_count": int_value(
+                        raw_capture_ledger_receipt.get("block_count")
+                    ),
+                    "processed_watermark_bytes": int_value(
+                        raw_scan.get("raw_bytes")
+                    ),
+                }
+            else:
+                manifest["raw"].pop("capture_ledger", None)
             manifest["raw"]["indexing_status"] = "indexed"
             manifest["raw"]["blocks_index"] = raw_blocks.get(
                 "index"
@@ -41490,7 +41791,7 @@ def reindex_session_from_raw(
                 raw_sha256=str(
                     manifest["raw"].get("sha256") or ""
                 ),
-                raw_bytes=staged_raw_path.stat().st_size,
+                raw_bytes=int_value(raw_scan.get("raw_bytes")),
                 raw_line_count=total_event_count,
                 source_path=capture_source_path,
                 source_snapshot_before=(

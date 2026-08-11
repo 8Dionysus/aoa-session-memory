@@ -525,11 +525,23 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0024 Semantic Generation Pins for Evaluation Admission](../AOA-SM-D-0024-semantic-generation-pins-for-evaluation-admission.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0024-semantic-generation-pins-for-evaluation-admission.md` |
 
+## raw block projection
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0057 Append-Only Capture Ledger Stable Raw Publication](../AOA-SM-D-0057-append-only-capture-ledger-stable-raw-publication.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0057-append-only-capture-ledger-stable-raw-publication.md` |
+
 ## raw blocks
 
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0044 Content-Addressed Resumable Projection Work](../AOA-SM-D-0044-content-addressed-resumable-projection-work.md) | 2026-08-08 | Accepted | `docs/decisions/AOA-SM-D-0044-content-addressed-resumable-projection-work.md` |
+
+## raw capture
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0057 Append-Only Capture Ledger Stable Raw Publication](../AOA-SM-D-0057-append-only-capture-ledger-stable-raw-publication.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0057-append-only-capture-ledger-stable-raw-publication.md` |
 
 ## raw capture state
 
@@ -754,6 +766,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0005 Provenance-Preserving Fork Lineage Consolidation](../AOA-SM-D-0005-provenance-preserving-fork-lineage-consolidation.md) | 2026-07-15 | Accepted | `docs/decisions/AOA-SM-D-0005-provenance-preserving-fork-lineage-consolidation.md` |
+
+## session manifest
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0057 Append-Only Capture Ledger Stable Raw Publication](../AOA-SM-D-0057-append-only-capture-ledger-stable-raw-publication.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0057-append-only-capture-ledger-stable-raw-publication.md` |
 
 ## session projection
 

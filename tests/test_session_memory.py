@@ -87194,14 +87194,18 @@ def test_captured_append_extends_classification_plan_from_attested_tail(
         grown["segment_execution"]["rebuilt_segment_count"] + 1
     )
     snapshot_mode = grown["raw_snapshot_execution"]["mode"]
-    assert snapshot_mode in {"ficlone_snapshot_v1", "copy2_fallback"}
+    assert snapshot_mode == (
+        module.RAW_PROJECTION_STORAGE_CAPTURE_LEDGER
+    )
+    assert grown["raw_snapshot_execution"]["target_bytes_written"] == 0
+    assert grown["raw_snapshot_execution"]["source_bytes_read"] < len(
+        transcript.read_bytes()
+    )
     validation_mode = grown["publish_result"]["validation"][
         "raw_validation_mode"
     ]
     assert validation_mode == (
-        "current_ficlone_snapshot_receipt_v1"
-        if snapshot_mode == "ficlone_snapshot_v1"
-        else "full_sha256_v1"
+        module.RAW_PROJECTION_STORAGE_CAPTURE_LEDGER
     )
     fast_session_index = module.read_json(
         session_dir / module.SESSION_INDEX_JSON, {}
@@ -87355,6 +87359,74 @@ def test_raw_snapshot_receipt_fails_closed_after_same_size_mutation(
         expected_raw_bytes=len(payload),
     ) is False
     assert module.sha256_file(target) != expected_sha256
+
+
+def test_capture_ledger_projection_receipt_fails_closed_on_tail_tamper(
+    tmp_path: Path,
+) -> None:
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    transcript = tmp_path / "source.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-08-11T00:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": "capture-ledger-receipt"},
+            },
+            {
+                "timestamp": "2026-08-11T00:00:01Z",
+                "type": "response_item",
+                "payload": {"type": "message", "role": "user"},
+            },
+        ],
+    )
+    module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id="capture-ledger-receipt",
+        transcript_path=transcript,
+        manifest={
+            "session_id": "capture-ledger-receipt",
+            "archive_status": "indexed",
+            "raw": {
+                "bytes": 0,
+                "line_count": 0,
+                "sha256": hashlib.sha256(b"").hexdigest(),
+                "indexing_status": "indexed",
+            },
+        },
+        hook_event_name="PostToolUse",
+        now="2026-08-11T00:00:02Z",
+    )
+    state = module.raw_capture_state_for_session(session_dir)
+    expected_sha256 = hashlib.sha256(transcript.read_bytes()).hexdigest()
+    current = module.raw_capture_ledger_projection_receipt(
+        session_dir=session_dir,
+        capture_state=state,
+        expected_raw_sha256=expected_sha256,
+        expected_raw_bytes=transcript.stat().st_size,
+    )
+    assert current["ok"] is True
+
+    ledger = module.read_json(
+        module.raw_capture_ledger_path(session_dir), {}
+    )
+    last_block = Path(ledger["epochs"][-1]["blocks"][-1]["path"])
+    payload = bytearray(last_block.read_bytes())
+    payload[len(payload) // 2] ^= 1
+    last_block.write_bytes(payload)
+
+    rejected = module.raw_capture_ledger_projection_receipt(
+        session_dir=session_dir,
+        capture_state=state,
+        expected_raw_sha256=expected_sha256,
+        expected_raw_bytes=transcript.stat().st_size,
+    )
+    assert rejected["ok"] is False
+    assert "capture_ledger_last_block_digest_mismatch" in rejected[
+        "diagnostics"
+    ]
 
 
 def test_goal_lifecycle_append_uses_bounded_tail_and_matches_full_replay(

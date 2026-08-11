@@ -71,6 +71,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0049 Append-Only Raw Capture Ledger and Persistent Live-Tail Overlay](../AOA-SM-D-0049-append-only-raw-capture-ledger-and-persistent-live-tail-overlay.md) | 2026-08-10 | Accepted | `docs/decisions/AOA-SM-D-0049-append-only-raw-capture-ledger-and-persistent-live-tail-overlay.md` |
 
+## append-only ledger
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0057 Append-Only Capture Ledger Stable Raw Publication](../AOA-SM-D-0057-append-only-capture-ledger-stable-raw-publication.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0057-append-only-capture-ledger-stable-raw-publication.md` |
+
 ## atomic publication
 
 | Decision | Date | Status | Path |
@@ -202,6 +208,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0007 Typed Graph Bridge Admission](../AOA-SM-D-0007-typed-graph-bridge-admission.md) | 2026-07-16 | Accepted | `docs/decisions/AOA-SM-D-0007-typed-graph-bridge-admission.md` |
+
+## chain receipt
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0057 Append-Only Capture Ledger Stable Raw Publication](../AOA-SM-D-0057-append-only-capture-ledger-stable-raw-publication.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0057-append-only-capture-ledger-stable-raw-publication.md` |
 
 ## circuit breaker
 
@@ -343,6 +355,7 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0055 Bounded Incremental Reuse Admission](../AOA-SM-D-0055-bounded-incremental-reuse-admission.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0055-bounded-incremental-reuse-admission.md` |
 | [AOA-SM-D-0056 Merkle Semantic Component Receipts](../AOA-SM-D-0056-merkle-semantic-component-receipts.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0056-merkle-semantic-component-receipts.md` |
+| [AOA-SM-D-0057 Append-Only Capture Ledger Stable Raw Publication](../AOA-SM-D-0057-append-only-capture-ledger-stable-raw-publication.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0057-append-only-capture-ledger-stable-raw-publication.md` |
 
 ## deep rebuild fallback
 
@@ -663,6 +676,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0013 Indexed Graph Seed Before Retrieval Fallback](../AOA-SM-D-0013-indexed-graph-seed-before-retrieval-fallback.md) | 2026-07-17 | Accepted | `docs/decisions/AOA-SM-D-0013-indexed-graph-seed-before-retrieval-fallback.md` |
 
+## last-good fallback
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0057 Append-Only Capture Ledger Stable Raw Publication](../AOA-SM-D-0057-append-only-capture-ledger-stable-raw-publication.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0057-append-only-capture-ledger-stable-raw-publication.md` |
+
 ## last-good preservation
 
 | Decision | Date | Status | Path |
@@ -831,6 +850,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0029 Warm-Budgeted Automatic Rerank Escalation](../AOA-SM-D-0029-warm-budgeted-automatic-rerank-escalation.md) | 2026-07-21 | Accepted | `docs/decisions/AOA-SM-D-0029-warm-budgeted-automatic-rerank-escalation.md` |
 | [AOA-SM-D-0040 Served-Request Health Is Distinct from Provider Availability](../AOA-SM-D-0040-served-request-health-is-distinct-from-provider-availability.md) | 2026-07-31 | Accepted | `docs/decisions/AOA-SM-D-0040-served-request-health-is-distinct-from-provider-availability.md` |
+
+## processed watermark
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0057 Append-Only Capture Ledger Stable Raw Publication](../AOA-SM-D-0057-append-only-capture-ledger-stable-raw-publication.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0057-append-only-capture-ledger-stable-raw-publication.md` |
 
 ## producer ABI
 

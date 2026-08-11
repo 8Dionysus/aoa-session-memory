@@ -326,6 +326,7 @@
 | [AOA-SM-D-0054 Native-Assisted Portable SHA-256 Continuation](../AOA-SM-D-0054-native-assisted-portable-sha256-continuation.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0054-native-assisted-portable-sha256-continuation.md` |
 | [AOA-SM-D-0055 Bounded Incremental Reuse Admission](../AOA-SM-D-0055-bounded-incremental-reuse-admission.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0055-bounded-incremental-reuse-admission.md` |
 | [AOA-SM-D-0056 Merkle Semantic Component Receipts](../AOA-SM-D-0056-merkle-semantic-component-receipts.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0056-merkle-semantic-component-receipts.md` |
+| [AOA-SM-D-0057 Append-Only Capture Ledger Stable Raw Publication](../AOA-SM-D-0057-append-only-capture-ledger-stable-raw-publication.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0057-append-only-capture-ledger-stable-raw-publication.md` |
 
 ## index discovery
 
@@ -408,6 +409,7 @@
 | [AOA-SM-D-0054 Native-Assisted Portable SHA-256 Continuation](../AOA-SM-D-0054-native-assisted-portable-sha256-continuation.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0054-native-assisted-portable-sha256-continuation.md` |
 | [AOA-SM-D-0055 Bounded Incremental Reuse Admission](../AOA-SM-D-0055-bounded-incremental-reuse-admission.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0055-bounded-incremental-reuse-admission.md` |
 | [AOA-SM-D-0056 Merkle Semantic Component Receipts](../AOA-SM-D-0056-merkle-semantic-component-receipts.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0056-merkle-semantic-component-receipts.md` |
+| [AOA-SM-D-0057 Append-Only Capture Ledger Stable Raw Publication](../AOA-SM-D-0057-append-only-capture-ledger-stable-raw-publication.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0057-append-only-capture-ledger-stable-raw-publication.md` |
 
 ## physical storage transition
 
@@ -519,6 +521,7 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0049 Append-Only Raw Capture Ledger and Persistent Live-Tail Overlay](../AOA-SM-D-0049-append-only-raw-capture-ledger-and-persistent-live-tail-overlay.md) | 2026-08-10 | Accepted | `docs/decisions/AOA-SM-D-0049-append-only-raw-capture-ledger-and-persistent-live-tail-overlay.md` |
 | [AOA-SM-D-0054 Native-Assisted Portable SHA-256 Continuation](../AOA-SM-D-0054-native-assisted-portable-sha256-continuation.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0054-native-assisted-portable-sha256-continuation.md` |
+| [AOA-SM-D-0057 Append-Only Capture Ledger Stable Raw Publication](../AOA-SM-D-0057-append-only-capture-ledger-stable-raw-publication.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0057-append-only-capture-ledger-stable-raw-publication.md` |
 
 ## raw evidence
 
@@ -675,6 +678,7 @@
 | [AOA-SM-D-0054 Native-Assisted Portable SHA-256 Continuation](../AOA-SM-D-0054-native-assisted-portable-sha256-continuation.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0054-native-assisted-portable-sha256-continuation.md` |
 | [AOA-SM-D-0055 Bounded Incremental Reuse Admission](../AOA-SM-D-0055-bounded-incremental-reuse-admission.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0055-bounded-incremental-reuse-admission.md` |
 | [AOA-SM-D-0056 Merkle Semantic Component Receipts](../AOA-SM-D-0056-merkle-semantic-component-receipts.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0056-merkle-semantic-component-receipts.md` |
+| [AOA-SM-D-0057 Append-Only Capture Ledger Stable Raw Publication](../AOA-SM-D-0057-append-only-capture-ledger-stable-raw-publication.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0057-append-only-capture-ledger-stable-raw-publication.md` |
 
 ## storage
 

@@ -94,6 +94,16 @@ source. Catchup, deep, and audit remain the global reconciliation routes.
 Raw preservation is append-oriented. Repair may regenerate derived material,
 but ordinary cleanup never deletes raw session evidence.
 
+Stable indexing does not recopy an exact ledger-backed capture. It publishes
+`append_only_capture_ledger_with_bounded_materialization_v1`, binding the
+processed byte/line watermark, conventional raw digest, epoch, chain root, and
+block count. Admission checks contiguous ledger coverage, content-addressed
+block metadata, the frontier-block digest, capture materialization size, and
+capture state. The stable manifest defines the readable upper bound when the
+append-only materialization later grows. `raw/session.raw.jsonl` remains as a
+last-good compatibility snapshot and is replaced only on the legacy or
+non-attested monolithic fallback route.
+
 ## 3. Compaction boundaries and blocks
 
 Native compaction markers divide a transcript into ordered intervals. The raw

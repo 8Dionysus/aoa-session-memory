@@ -292,6 +292,14 @@ bounded positive raw-tail retrieval without a repeated whole-prefix scan. The co
 capture file is a rebuildable compatibility view, not a stronger authority
 than the ledger blocks.
 
+Once a stable build binds an exact capture watermark, its raw storage contract
+may point to that append-only ledger and bounded materialization instead of
+recopying the entire materialization into `raw/session.raw.jsonl`. The manifest
+binds the processed byte/line watermark, conventional SHA-256, epoch, chain
+root, and block count. The prior monolithic file remains a readable last-good
+compatibility snapshot; readers of the ledger-backed mode must stop at the
+manifest watermark even if capture has already advanced.
+
 When an unprojected backlog exceeds the live bootstrap budget, postings begin
 at the first complete line in a bounded recent byte window. Immutable capture
 block receipts provide the exact count of preceding lines with at most one
@@ -595,6 +603,14 @@ raw authority and atomic publication. Privacy scanning likewise uses a
 necessary-label prefilter before the exact sensitive-assignment matcher; the
 prefilter is a semantic no-op and removes the dominant benign-input
 backtracking cost.
+
+Raw publication is independently componentized. If capture state and its
+content-addressed block ledger prove the exact build watermark, atomic stable
+publication records that chain receipt and writes zero historical raw bytes.
+Admission recomputes the record chain, verifies contiguous coverage and block
+metadata, and hashes the frontier block; a non-attested source keeps the exact
+monolithic snapshot fallback. Full historical content verification remains an
+explicit deep-audit responsibility.
 
 Session-index assembly is manifest first. Privacy-safe task episodes are
 immutable content-addressed component shards; their compact manifest binds
