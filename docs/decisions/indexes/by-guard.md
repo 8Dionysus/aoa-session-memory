@@ -150,6 +150,7 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0034 Bounded Dirty-First Automatic Index Discovery](../AOA-SM-D-0034-bounded-dirty-first-automatic-index-discovery.md) | 2026-07-28 | Accepted | `docs/decisions/AOA-SM-D-0034-bounded-dirty-first-automatic-index-discovery.md` |
+| [AOA-SM-D-0065 Registry Cost Admission Precedes Semantic Fingerprints](../AOA-SM-D-0065-registry-cost-admission-precedes-semantic-fingerprints.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0065-registry-cost-admission-precedes-semantic-fingerprints.md` |
 
 ## bounded exclusion
 
@@ -368,6 +369,7 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0064 Freshness Drip Admits Only Light Session Work](../AOA-SM-D-0064-freshness-drip-admits-only-light-session-work.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0064-freshness-drip-admits-only-light-session-work.md` |
+| [AOA-SM-D-0065 Registry Cost Admission Precedes Semantic Fingerprints](../AOA-SM-D-0065-registry-cost-admission-precedes-semantic-fingerprints.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0065-registry-cost-admission-precedes-semantic-fingerprints.md` |
 
 ## crash recovery
 
@@ -585,6 +587,7 @@
 | [AOA-SM-D-0061 Freshness Profiles Do Not Own Heavy Tail](../AOA-SM-D-0061-freshness-profiles-do-not-own-heavy-tail.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0061-freshness-profiles-do-not-own-heavy-tail.md` |
 | [AOA-SM-D-0063 Bounded Freshness Defers Global Derivatives](../AOA-SM-D-0063-bounded-freshness-defers-global-derivatives.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0063-bounded-freshness-defers-global-derivatives.md` |
 | [AOA-SM-D-0064 Freshness Drip Admits Only Light Session Work](../AOA-SM-D-0064-freshness-drip-admits-only-light-session-work.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0064-freshness-drip-admits-only-light-session-work.md` |
+| [AOA-SM-D-0065 Registry Cost Admission Precedes Semantic Fingerprints](../AOA-SM-D-0065-registry-cost-admission-precedes-semantic-fingerprints.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0065-registry-cost-admission-precedes-semantic-fingerprints.md` |
 
 ## explicit literal evidence
 
@@ -925,6 +928,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0058 Persisted Live-Tail State Precedes Resource Admission](../AOA-SM-D-0058-persisted-live-tail-state-precedes-resource-admission.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0058-persisted-live-tail-state-precedes-resource-admission.md` |
+
+## pre-admission
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0065 Registry Cost Admission Precedes Semantic Fingerprints](../AOA-SM-D-0065-registry-cost-admission-precedes-semantic-fingerprints.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0065-registry-cost-admission-precedes-semantic-fingerprints.md` |
 
 ## pre-admission boundedness
 

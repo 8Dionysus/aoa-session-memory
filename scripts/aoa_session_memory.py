@@ -52087,6 +52087,77 @@ def session_record_declared_raw_bytes(record: dict[str, Any]) -> int:
     )
 
 
+def session_record_declared_search_cost_class(record: dict[str, Any]) -> str:
+    """Classify a registry record without opening projection payloads.
+
+    This is a conservative pre-admission gate for bounded freshness workers.
+    The semantic fingerprint pass still performs the authoritative dirty-state
+    classification for admitted records.
+    """
+    raw_bytes = session_record_declared_raw_bytes(record)
+    event_count = int_value(record.get("event_count"))
+    segment_count = int_value(record.get("segment_count"))
+    if (
+        raw_bytes >= SEARCH_REPAIR_COST_HEAVY_RAW_BYTES
+        or event_count >= SEARCH_REPAIR_COST_HEAVY_DOCUMENT_COUNT
+        or segment_count >= SEARCH_REPAIR_COST_HEAVY_SOURCE_PATH_COUNT
+    ):
+        return "heavy"
+    if (
+        raw_bytes >= SEARCH_REPAIR_COST_WARM_RAW_BYTES
+        or event_count >= SEARCH_REPAIR_COST_WARM_DOCUMENT_COUNT
+        or segment_count >= SEARCH_REPAIR_COST_WARM_SOURCE_PATH_COUNT
+    ):
+        return "warm"
+    return "light"
+
+
+def bounded_search_cost_prefilter(
+    records: list[dict[str, Any]],
+    *,
+    max_cost_class: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    cost_rank = {"light": 0, "warm": 1, "heavy": 2}
+    normalized = str(max_cost_class or "auto").lower()
+    if normalized not in {"light", "warm"}:
+        return list(records), {
+            "enabled": False,
+            "max_cost_class": normalized,
+            "admitted_count": len(records),
+            "deferred_count": 0,
+            "deferred_sessions": [],
+        }
+    max_rank = cost_rank[normalized]
+    admitted: list[dict[str, Any]] = []
+    deferred: list[dict[str, Any]] = []
+    for record in records:
+        cost_class = session_record_declared_search_cost_class(record)
+        if cost_rank[cost_class] <= max_rank:
+            admitted.append(record)
+            continue
+        deferred.append(
+            {
+                "session_id": str(record.get("session_id") or ""),
+                "session_label": str(record.get("session_label") or ""),
+                "cost_class": cost_class,
+                "declared_raw_bytes": session_record_declared_raw_bytes(record),
+                "event_count": int_value(record.get("event_count")),
+                "segment_count": int_value(record.get("segment_count")),
+                "reason": "declared_cost_above_bounded_freshness_lane",
+            }
+        )
+    return admitted, {
+        "enabled": True,
+        "mode": "registry_metadata_pre_admission",
+        "max_cost_class": normalized,
+        "input_count": len(records),
+        "admitted_count": len(admitted),
+        "deferred_count": len(deferred),
+        "deferred_sessions": deferred,
+        "truth_status": "pre_admission_only_semantic_fingerprint_remains_authoritative_for_admitted_records",
+    }
+
+
 def bounded_index_maintenance_discovery_records(
     *,
     aoa_root: Path,
@@ -52800,6 +52871,22 @@ def maintain_indexes(
         isinstance(selection_scope, dict)
         and selection_scope.get("global_scope_complete") is False
     )
+    if bounded_discovery and repair_indexes:
+        records, bounded_cost_scope = bounded_search_cost_prefilter(
+            records,
+            max_cost_class=search_max_cost_class,
+        )
+        selection_scope = {
+            **(
+                selection_scope
+                if isinstance(selection_scope, dict)
+                else {}
+            ),
+            "bounded_search_cost_pre_admission": bounded_cost_scope,
+            "semantic_fingerprint_selected_count": len(records),
+        }
+        if int_value(bounded_cost_scope.get("deferred_count")) > 0:
+            diagnostics.append("bounded_search_cost_pre_admission_deferred")
     maintenance_profile = (
         str(selection_scope.get("profile") or "")
         if isinstance(selection_scope, dict)

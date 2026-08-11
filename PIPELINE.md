@@ -692,6 +692,14 @@ The recurring drip also admits only `light` search work and caps route raw
 repair at 32 MiB. Warm and heavy sessions remain explicit live-tail targets or
 backlog/deep work; a single old session cannot consume the freshness timer's
 entire wall-clock budget.
+
+For bounded freshness, the cost ceiling is applied twice. Session-registry raw
+bytes, event counts, and segment counts first reject obviously warm or heavy
+records before semantic projection files are opened. The discovery cursor
+still advances across the original window and the deferral remains visible.
+Semantic fingerprints then provide authoritative dirty-state classification
+only for the admitted subset. Registry pre-admission is a resource guard, not
+freshness proof; incomplete cheap metadata is admitted rather than trusted.
 Segment generation uses a deterministic process pool with a default of four workers
 and a bounded one-to-six range, falling back visibly to serial execution when
 the pool cannot start. Segment processes use the isolated `spawn` start method

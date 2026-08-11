@@ -56505,6 +56505,34 @@ def test_bounded_index_maintenance_discovery_is_dirty_first_and_fair(
     assert second_scope["dirty_cursor_after"] == "session-081"
 
 
+def test_bounded_search_cost_prefilter_rejects_heavy_registry_records_before_fingerprints() -> None:
+    light_record = {
+        "session_id": "light-session",
+        "session_label": "2026-07-02__001__light-session",
+        "event_count": 50,
+        "segment_count": 2,
+        "raw": {"bytes": 1024},
+    }
+    warm_record = {
+        "session_id": "warm-session",
+        "session_label": "2026-07-02__002__warm-session",
+        "event_count": 500,
+        "segment_count": 8,
+        "raw": {"bytes": module.SEARCH_REPAIR_COST_WARM_RAW_BYTES},
+    }
+    admitted, scope = module.bounded_search_cost_prefilter(
+        [warm_record, light_record],
+        max_cost_class="light",
+    )
+
+    assert [record["session_id"] for record in admitted] == ["light-session"]
+    assert scope["mode"] == "registry_metadata_pre_admission"
+    assert scope["admitted_count"] == 1
+    assert scope["deferred_count"] == 1
+    assert scope["deferred_sessions"][0]["session_id"] == "warm-session"
+    assert scope["deferred_sessions"][0]["cost_class"] == "warm"
+
+
 def test_light_freshness_selection_defers_priority_warm_session() -> None:
     light_record = {
         "session_id": "light-session",
@@ -56640,7 +56668,15 @@ def test_bounded_maintenance_planning_never_reads_global_derivative_state(
         "session_label": session_dir.name,
         "session_dir": str(session_dir),
         "display": {"path": str(session_dir)},
+        "raw": {"bytes": 1024},
     }
+    heavy_record = {
+        "session_id": "bounded-heavy-session",
+        "session_label": "2026-07-02__002__bounded-heavy",
+        "session_dir": str(aoa_root / "sessions" / "2026-07-02__002__bounded-heavy"),
+        "raw": {"bytes": module.SEARCH_REPAIR_COST_WARM_RAW_BYTES},
+    }
+    fingerprinted_session_ids: list[str] = []
 
     def forbidden_global_derivative(*_args: Any, **_kwargs: Any) -> Any:
         raise AssertionError("bounded planning entered a global derivative")
@@ -56667,10 +56703,16 @@ def test_bounded_maintenance_planning_never_reads_global_derivative_state(
         "atlas_index_hot_state",
         lambda _aoa_root: {"status": "missing", "needs_refresh": False},
     )
+    def fake_search_fingerprints(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        fingerprinted_session_ids.extend(
+            str(item.get("session_id") or "") for item in records
+        )
+        return []
+
     monkeypatch.setattr(
         module,
         "search_projection_fingerprints_for_records",
-        lambda _records: [],
+        fake_search_fingerprints,
     )
     monkeypatch.setattr(
         module,
@@ -56699,13 +56741,16 @@ def test_bounded_maintenance_planning_never_reads_global_derivative_state(
     planned = module.maintain_indexes(
         aoa_root=aoa_root,
         target="all",
-        selected_records=[record],
+        selected_records=[heavy_record, record],
         selection_scope={"global_scope_complete": False, "profile": "catchup"},
         apply=False,
         repair_token_accounting=False,
         repair_graph=False,
+        search_max_cost_class="light",
     )
 
+    assert fingerprinted_session_ids == ["bounded-plan-session"]
+    assert planned["selection_scope"]["bounded_search_cost_pre_admission"]["deferred_count"] == 1
     assert planned["entity_registry"]["status"] == "deferred_bounded_scope"
     assert planned["final_entity_registry"]["status"] == "deferred_bounded_scope"
     assert planned["final_snapshot_scope"] == (

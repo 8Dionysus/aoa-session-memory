@@ -470,6 +470,7 @@
 | [AOA-SM-D-0062 Catch-Up Prefers Bounded Index Drip](../AOA-SM-D-0062-catchup-prefers-bounded-index-drip.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0062-catchup-prefers-bounded-index-drip.md` |
 | [AOA-SM-D-0063 Bounded Freshness Defers Global Derivatives](../AOA-SM-D-0063-bounded-freshness-defers-global-derivatives.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0063-bounded-freshness-defers-global-derivatives.md` |
 | [AOA-SM-D-0064 Freshness Drip Admits Only Light Session Work](../AOA-SM-D-0064-freshness-drip-admits-only-light-session-work.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0064-freshness-drip-admits-only-light-session-work.md` |
+| [AOA-SM-D-0065 Registry Cost Admission Precedes Semantic Fingerprints](../AOA-SM-D-0065-registry-cost-admission-precedes-semantic-fingerprints.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0065-registry-cost-admission-precedes-semantic-fingerprints.md` |
 
 ## maintenance queue
 
@@ -629,6 +630,7 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0062 Catch-Up Prefers Bounded Index Drip](../AOA-SM-D-0062-catchup-prefers-bounded-index-drip.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0062-catchup-prefers-bounded-index-drip.md` |
 | [AOA-SM-D-0064 Freshness Drip Admits Only Light Session Work](../AOA-SM-D-0064-freshness-drip-admits-only-light-session-work.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0064-freshness-drip-admits-only-light-session-work.md` |
+| [AOA-SM-D-0065 Registry Cost Admission Precedes Semantic Fingerprints](../AOA-SM-D-0065-registry-cost-admission-precedes-semantic-fingerprints.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0065-registry-cost-admission-precedes-semantic-fingerprints.md` |
 
 ## route readiness
 
@@ -666,6 +668,7 @@
 | [AOA-SM-D-0062 Catch-Up Prefers Bounded Index Drip](../AOA-SM-D-0062-catchup-prefers-bounded-index-drip.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0062-catchup-prefers-bounded-index-drip.md` |
 | [AOA-SM-D-0063 Bounded Freshness Defers Global Derivatives](../AOA-SM-D-0063-bounded-freshness-defers-global-derivatives.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0063-bounded-freshness-defers-global-derivatives.md` |
 | [AOA-SM-D-0064 Freshness Drip Admits Only Light Session Work](../AOA-SM-D-0064-freshness-drip-admits-only-light-session-work.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0064-freshness-drip-admits-only-light-session-work.md` |
+| [AOA-SM-D-0065 Registry Cost Admission Precedes Semantic Fingerprints](../AOA-SM-D-0065-registry-cost-admission-precedes-semantic-fingerprints.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0065-registry-cost-admission-precedes-semantic-fingerprints.md` |
 
 ## search catalog
 
@@ -845,6 +848,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0046 Content-Addressed Session-Index Components With Compatibility View](../AOA-SM-D-0046-content-addressed-session-index-components-with-compatibility-view.md) | 2026-08-09 | Accepted | `docs/decisions/AOA-SM-D-0046-content-addressed-session-index-components-with-compatibility-view.md` |
 | [AOA-SM-D-0047 Exclusive Heavy Projection Lane and Isolated Segment Workers](../AOA-SM-D-0047-exclusive-heavy-projection-lane-and-isolated-segment-workers.md) | 2026-08-09 | Accepted | `docs/decisions/AOA-SM-D-0047-exclusive-heavy-projection-lane-and-isolated-segment-workers.md` |
+
+## session registry
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0065 Registry Cost Admission Precedes Semantic Fingerprints](../AOA-SM-D-0065-registry-cost-admission-precedes-semantic-fingerprints.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0065-registry-cost-admission-precedes-semantic-fingerprints.md` |
 
 ## session segments
 
