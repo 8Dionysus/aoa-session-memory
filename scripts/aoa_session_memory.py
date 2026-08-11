@@ -193895,6 +193895,11 @@ def command_index_maintenance(args: argparse.Namespace) -> int:
     root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
     since = since_date_from_args(args.since, args.since_days if args.since_days is not None else None)
     max_raw_bytes = int(args.max_raw_mb * 1024 * 1024) if args.max_raw_mb is not None else None
+    route_max_raw_bytes = (
+        int(args.route_max_raw_mb * 1024 * 1024)
+        if getattr(args, "route_max_raw_mb", None) is not None
+        else None
+    )
     token_max_raw_bytes = int(args.token_max_raw_mb * 1024 * 1024) if args.token_max_raw_mb is not None else None
     skip_token_accounting = bool(getattr(args, "skip_token_accounting", False))
 
@@ -193908,11 +193913,13 @@ def command_index_maintenance(args: argparse.Namespace) -> int:
             limit=args.limit,
             discovery_limit=getattr(args, "discovery_limit", None),
             repair_limit=getattr(args, "repair_limit", None),
+            search_max_cost_class=getattr(args, "search_max_cost_class", "auto"),
             search_shard_repair_limit=getattr(
                 args, "search_shard_repair_limit", None
             ),
             apply=args.apply,
             max_raw_bytes=max_raw_bytes,
+            route_max_raw_bytes=route_max_raw_bytes,
             token_max_raw_bytes=token_max_raw_bytes,
             sample_audit=args.sample_audit,
             sample_limit=args.sample_limit,
@@ -203831,12 +203838,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     index_maintenance.add_argument("--repair-limit", type=int, help="Limit dirty session repairs after full freshness detection; useful for recurring catch-up batches.")
     index_maintenance.add_argument(
+        "--search-max-cost-class",
+        choices=["auto", "light", "warm", "heavy"],
+        default="auto",
+        help="Maximum dirty search-session cost admitted in this run; recurring freshness workers use light.",
+    )
+    index_maintenance.add_argument(
         "--search-shard-repair-limit",
         type=int,
         help="Limit monthly search-shard repairs independently of route, monolith search, atlas, and episode repair batches; <=0 removes the shard-specific bound.",
     )
     index_maintenance.add_argument("--apply", action="store_true", help="Execute planned maintenance actions. Default only plans.")
     index_maintenance.add_argument("--max-raw-mb", type=float, default=16, help="Skip raw-text extraction/reindexing above this many MiB where supported.")
+    index_maintenance.add_argument(
+        "--route-max-raw-mb",
+        type=float,
+        help="Set an independent raw-size ceiling for route reindexing; omitted uses --max-raw-mb.",
+    )
     index_maintenance.add_argument(
         "--token-max-raw-mb",
         type=float,

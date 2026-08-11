@@ -56393,6 +56393,36 @@ def test_catchup_auto_maintenance_resource_prefers_explicit_bounded_index_drip(
     assert Path(payload["report_markdown"]).exists()
 
 
+def test_index_maintenance_cli_forwards_bounded_search_cost_controls(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir()
+    calls: dict[str, Any] = {}
+
+    def fake_maintain_indexes(**kwargs: Any) -> dict[str, Any]:
+        calls.update(kwargs)
+        return {"ok": True}
+
+    monkeypatch.setattr(module, "maintain_indexes", fake_maintain_indexes)
+    args = module.build_parser().parse_args(
+        [
+            "index-maintenance",
+            "all",
+            "--aoa-root",
+            str(aoa_root),
+            "--search-max-cost-class",
+            "light",
+            "--route-max-raw-mb",
+            "32",
+        ]
+    )
+
+    assert args.func(args) == 0
+    assert calls["search_max_cost_class"] == "light"
+    assert calls["route_max_raw_bytes"] == 32 * 1024 * 1024
+
+
 def test_bounded_index_maintenance_discovery_is_dirty_first_and_fair(
     tmp_path: Path,
 ) -> None:
