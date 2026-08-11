@@ -41069,23 +41069,47 @@ def test_session_projection_semantic_digest_matches_materialized_reference_witho
         "second segment\n",
         encoding="utf-8",
     )
-    materialized = module.session_projection_semantic_digest_value(
-        {
-            "manifest": payloads["manifest"],
-            "session_index": payloads["session_index"],
-            "raw_block_index": payloads["raw_block_index"],
-            "raw_source": payloads["raw_source"],
-            "raw_capture_state": payloads["raw_capture_state"],
-            "segment_indexes": payloads["segment_indexes"],
-            "segment_markdown_sha256": {
-                name: module.sha256_file(segments_dir / name)
-                for name in ("001.md", "002.md")
-            },
-        }
-    )
+    component_digests = {
+        "manifest": module.session_projection_json_semantic_sha256(
+            payloads["manifest"]
+        ),
+        "session_index": (
+            module.session_projection_json_semantic_sha256(
+                payloads["session_index"]
+            )
+        ),
+        "raw_block_index": (
+            module.session_projection_json_semantic_sha256(
+                payloads["raw_block_index"]
+            )
+        ),
+        "raw_source": module.session_projection_json_semantic_sha256(
+            payloads["raw_source"]
+        ),
+        "raw_capture_state": (
+            module.session_projection_json_semantic_sha256(
+                payloads["raw_capture_state"]
+            )
+        ),
+    }
+    for name, payload in payloads["segment_indexes"].items():
+        component_digests[f"segment_index:{name}"] = (
+            module.session_projection_json_semantic_sha256(payload)
+        )
+    for name in ("001.md", "002.md"):
+        component_digests[f"segment_markdown:{name}"] = (
+            module.sha256_file(segments_dir / name)
+        )
     expected_sha256 = hashlib.sha256(
         json.dumps(
-            materialized,
+            {
+                "schema_version": 2,
+                "mode": "merkle_component_semantic_roots_v1",
+                "components": {
+                    key: component_digests[key]
+                    for key in sorted(component_digests)
+                },
+            },
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
@@ -41104,8 +41128,83 @@ def test_session_projection_semantic_digest_matches_materialized_reference_witho
     )
 
     assert actual["sha256"] == expected_sha256
+    assert actual["version"] == 2
     assert actual["segment_index_count"] == 2
     assert actual["segment_markdown_count"] == 2
+
+
+def test_session_projection_semantic_digest_admits_current_segment_receipts_without_content_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "semantic-receipts.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-08-11T02:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "semantic-receipts",
+                    "cwd": str(workspace),
+                },
+            },
+            {
+                "timestamp": "2026-08-11T02:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "prove bounded semantic receipts",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    synced = module.sync_session_from_transcript(
+        aoa_root=aoa_root,
+        event={
+            "session_id": "semantic-receipts",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+        },
+        transcript_path=transcript,
+        hook_event_name="Stop",
+    )
+    session_dir = Path(synced["session_dir"])
+    segments_dir = session_dir / "segments"
+    original_read_json = module.read_json
+    original_sha256_file = module.sha256_file
+
+    def guarded_read_json(path: Path, default: Any = None) -> Any:
+        if Path(path).parent == segments_dir:
+            raise AssertionError("segment index content reread")
+        return original_read_json(path, default)
+
+    def guarded_sha256_file(path: Path) -> str:
+        if Path(path).parent == segments_dir:
+            raise AssertionError("segment content rehashed")
+        return original_sha256_file(path)
+
+    monkeypatch.setattr(module, "read_json", guarded_read_json)
+    monkeypatch.setattr(module, "sha256_file", guarded_sha256_file)
+    digest = module.session_projection_semantic_digest(session_dir)
+
+    assert digest["segment_index_count"] >= 1
+    assert digest["metadata_admitted_index_count"] == digest[
+        "segment_index_count"
+    ]
+    assert digest["metadata_admitted_markdown_count"] == digest[
+        "segment_markdown_count"
+    ]
+    assert digest["content_read_index_count"] == 0
+    assert digest["content_read_markdown_count"] == 0
 
 
 def test_maintenance_cleanup_clears_stale_active_job_and_orphaned_graph_tmp(tmp_path: Path, monkeypatch: Any) -> None:

@@ -578,6 +578,15 @@ acceleration receipt, not permanent content proof: `doctor
 such artifact, validates component identities and classification payloads, and
 detects same-size mutations even when modification time was restored.
 
+Atomic semantic validation is component-rooted rather than a hidden full-tree
+rescan. Segment-index receipts bind an exact artifact SHA and a canonical JSON
+semantic SHA excluding only the established projection-clock keys; Markdown
+uses its exact content SHA. The session v2 semantic receipt combines those
+named roots with the manifest, raw metadata, and compact session-index roots.
+Current size/mtime/ctime receipts admit unchanged components without opening
+them. A legacy or drifted receipt is recomputed once, while deep audit remains
+the independent full-content proof lane.
+
 Raw-block reuse is independently evidence-bearing. Current event bytes are
 hashed and compared with both the prior record and the actual published block
 before an immutable link is staged. This lets a growing projection reuse sealed
