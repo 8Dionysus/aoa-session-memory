@@ -709,6 +709,9 @@ def benchmark_build(
         "raw_snapshot_execution": result.get(
             "raw_snapshot_execution", {}
         ),
+        "sensitive_literal_execution": result.get(
+            "sensitive_literal_execution", {}
+        ),
         "parent_rehydration_execution": result.get(
             "parent_rehydration_execution", {}
         ),
