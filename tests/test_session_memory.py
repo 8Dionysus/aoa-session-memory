@@ -27136,6 +27136,136 @@ def test_entity_registry_freshness_tracks_observed_rollup_semantics(
     ] != dependency["semantic_sha256"]
 
 
+def test_entity_registry_route_terms_use_transactional_dirty_marker(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    monkeypatch.setattr(
+        module,
+        "entity_registry_runtime_source_entries",
+        lambda _aoa_root: [],
+    )
+    conn = module.init_search_db(module.search_db_path(aoa_root))
+    cursor = conn.execute(
+        "INSERT INTO documents(id, doc_type, session_id, session_label, "
+        "session_date, title, body, payload_json) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "observed-route-doc-1",
+            "event",
+            "observed-route-session-1",
+            "observed-route-session-1",
+            "2026-08-11",
+            "observed route one",
+            "observed route one",
+            "{}",
+        ),
+    )
+    conn.execute(
+        "INSERT INTO route_terms(layer, key, route_signal) VALUES (?, ?, ?)",
+        ("skill", "observed_route_one", "skill:observed_route_one"),
+    )
+    route_id = conn.execute(
+        "SELECT id FROM route_terms WHERE route_signal = ?",
+        ("skill:observed_route_one",),
+    ).fetchone()[0]
+    conn.execute(
+        "INSERT INTO document_routes(doc_rowid, route_id) VALUES (?, ?)",
+        (cursor.lastrowid, route_id),
+    )
+    conn.commit()
+    conn.close()
+
+    initial = module.refresh_entity_registry_search_documents_only(
+        aoa_root=aoa_root,
+        observed_source="route-terms",
+    )
+    assert initial["ok"] is True
+    assert initial["observed_route_tracking"]["status"] == "current"
+    assert initial["observed_route_tracking"]["dirty"] is False
+
+    original_entries = module.entity_registry_entries_from_route_terms
+
+    def fail_full_route_scan(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError(
+            "clean transactional marker must avoid route-term aggregation"
+        )
+
+    monkeypatch.setattr(
+        module,
+        "entity_registry_entries_from_route_terms",
+        fail_full_route_scan,
+    )
+    current = module.entity_registry_maintenance_status(aoa_root)
+    assert current["status"] == "current"
+    assert current["observed_route_tracking"]["status"] == "current"
+    assert current["observed_dependency_verification_mode"] == (
+        "persisted_semantic_dependency_with_clean_transactional_dirty_marker"
+    )
+
+    monkeypatch.setattr(
+        module,
+        "entity_registry_entries_from_route_terms",
+        original_entries,
+    )
+    conn = sqlite3.connect(str(module.search_db_path(aoa_root)))
+    cursor = conn.execute(
+        "INSERT INTO documents(id, doc_type, session_id, session_label, "
+        "session_date, title, body, payload_json) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "observed-route-doc-2",
+            "event",
+            "observed-route-session-2",
+            "observed-route-session-2",
+            "2026-08-11",
+            "observed route two",
+            "observed route two",
+            "{}",
+        ),
+    )
+    conn.execute(
+        "INSERT INTO route_terms(layer, key, route_signal) VALUES (?, ?, ?)",
+        ("skill", "observed_route_two", "skill:observed_route_two"),
+    )
+    route_id = conn.execute(
+        "SELECT id FROM route_terms WHERE route_signal = ?",
+        ("skill:observed_route_two",),
+    ).fetchone()[0]
+    conn.execute(
+        "INSERT INTO document_routes(doc_rowid, route_id) VALUES (?, ?)",
+        (cursor.lastrowid, route_id),
+    )
+    conn.commit()
+    conn.close()
+
+    dirty = module.entity_registry_maintenance_status(aoa_root)
+    assert dirty["observed_route_tracking"]["status"] == "dirty"
+    assert dirty["observed_dependency_verification_mode"] == (
+        "recomputed_from_selected_observed_projection"
+    )
+    assert dirty["needs_maintenance"] is True
+    assert (
+        "entity_registry_observed_dependency_changed"
+        in dirty["diagnostics"]
+    )
+
+    refreshed = module.refresh_entity_registry_search_documents_only(
+        aoa_root=aoa_root,
+        observed_source="route-terms",
+    )
+    assert refreshed["ok"] is True
+    assert refreshed["observed_route_tracking"]["status"] == "current"
+    monkeypatch.setattr(
+        module,
+        "entity_registry_entries_from_route_terms",
+        fail_full_route_scan,
+    )
+    final = module.entity_registry_maintenance_status(aoa_root)
+    assert final["status"] == "current"
+
+
 def test_auto_maintenance_refreshes_stale_entity_registry_search_docs(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"

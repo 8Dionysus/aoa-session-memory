@@ -753,8 +753,25 @@ ENTITY_REGISTRY_IDENTITY_REGISTRATION_SOURCE_TYPES = {
 ENTITY_REGISTRY_DIRECTORY_FINGERPRINT_MAX_FILES = 512
 ENTITY_REGISTRY_DIRECTORY_FINGERPRINT_MAX_BYTES = 32 * 1024 * 1024
 ENTITY_REGISTRY_CLI_CONTRACT_FINGERPRINT_VERSION = 1
-ENTITY_REGISTRY_SEARCH_SYNC_VERSION = 4
+ENTITY_REGISTRY_SEARCH_SYNC_VERSION = 5
 ENTITY_REGISTRY_OBSERVED_DEPENDENCY_VERSION = 1
+ENTITY_REGISTRY_OBSERVED_ROUTE_TRACKING_VERSION = 1
+ENTITY_REGISTRY_OBSERVED_ROUTE_TRACKING_META_KEY = (
+    "entity_registry_observed_route_tracking_version"
+)
+ENTITY_REGISTRY_OBSERVED_ROUTE_DIRTY_META_KEY = (
+    "entity_registry_observed_route_dirty"
+)
+ENTITY_REGISTRY_OBSERVED_ROUTE_TRIGGER_NAMES = (
+    "entity_registry_observed_route_documents_insert",
+    "entity_registry_observed_route_documents_update",
+    "entity_registry_observed_route_documents_delete",
+    "entity_registry_observed_route_document_routes_insert",
+    "entity_registry_observed_route_document_routes_update",
+    "entity_registry_observed_route_document_routes_delete",
+    "entity_registry_observed_route_terms_update",
+    "entity_registry_observed_route_terms_delete",
+)
 ENTITY_REGISTRY_HISTORY_POLICY_INCREMENTAL = (
     "bounded_previous_snapshot_history_v1"
 )
@@ -74650,6 +74667,241 @@ def clear_search_route_term_cache(conn: sqlite3.Connection) -> None:
     SEARCH_ROUTE_TERM_CACHE.pop(id(conn), None)
 
 
+def entity_registry_observed_route_tracking_state_from_connection(
+    conn: sqlite3.Connection,
+) -> dict[str, Any]:
+    meta_rows = conn.execute(
+        "SELECT key, value FROM meta WHERE key IN (?, ?)",
+        (
+            ENTITY_REGISTRY_OBSERVED_ROUTE_TRACKING_META_KEY,
+            ENTITY_REGISTRY_OBSERVED_ROUTE_DIRTY_META_KEY,
+        ),
+    ).fetchall()
+    meta = {str(row[0]): str(row[1]) for row in meta_rows}
+    trigger_rows = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'trigger' "
+        f"AND name IN ({','.join('?' for _ in ENTITY_REGISTRY_OBSERVED_ROUTE_TRIGGER_NAMES)})",
+        ENTITY_REGISTRY_OBSERVED_ROUTE_TRIGGER_NAMES,
+    ).fetchall()
+    installed_triggers = {str(row[0]) for row in trigger_rows}
+    missing_triggers = sorted(
+        set(ENTITY_REGISTRY_OBSERVED_ROUTE_TRIGGER_NAMES)
+        - installed_triggers
+    )
+    version_current = (
+        meta.get(ENTITY_REGISTRY_OBSERVED_ROUTE_TRACKING_META_KEY)
+        == str(ENTITY_REGISTRY_OBSERVED_ROUTE_TRACKING_VERSION)
+    )
+    dirty = ENTITY_REGISTRY_OBSERVED_ROUTE_DIRTY_META_KEY in meta
+    tracking_ready = bool(version_current and not missing_triggers)
+    return {
+        "schema_version": 1,
+        "artifact_type": (
+            "entity_registry_observed_route_tracking_state"
+        ),
+        "status": (
+            "current"
+            if tracking_ready and not dirty
+            else "dirty"
+            if tracking_ready
+            else "untracked"
+        ),
+        "tracking_version": meta.get(
+            ENTITY_REGISTRY_OBSERVED_ROUTE_TRACKING_META_KEY
+        ),
+        "expected_tracking_version": (
+            ENTITY_REGISTRY_OBSERVED_ROUTE_TRACKING_VERSION
+        ),
+        "tracking_ready": tracking_ready,
+        "dirty": dirty,
+        "installed_trigger_count": len(installed_triggers),
+        "expected_trigger_count": len(
+            ENTITY_REGISTRY_OBSERVED_ROUTE_TRIGGER_NAMES
+        ),
+        "missing_triggers": missing_triggers,
+        "source_scan": False,
+        "truth_status": (
+            "transactional_dirty_marker_for_generated_observed_route_"
+            "dependency_not_dependency_semantics"
+        ),
+    }
+
+
+def ensure_entity_registry_observed_route_tracking(
+    conn: sqlite3.Connection,
+) -> dict[str, Any]:
+    before = entity_registry_observed_route_tracking_state_from_connection(
+        conn
+    )
+    dirty_key = ENTITY_REGISTRY_OBSERVED_ROUTE_DIRTY_META_KEY
+    conn.executescript(
+        f"""
+        CREATE TRIGGER IF NOT EXISTS entity_registry_observed_route_documents_insert
+        AFTER INSERT ON documents
+        WHEN NEW.doc_type <> 'entity_registry'
+        BEGIN
+            INSERT OR IGNORE INTO meta(key, value)
+            VALUES ('{dirty_key}', '1');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS entity_registry_observed_route_documents_update
+        AFTER UPDATE OF doc_type, session_id, session_date ON documents
+        WHEN OLD.doc_type <> 'entity_registry' OR NEW.doc_type <> 'entity_registry'
+        BEGIN
+            INSERT OR IGNORE INTO meta(key, value)
+            VALUES ('{dirty_key}', '1');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS entity_registry_observed_route_documents_delete
+        AFTER DELETE ON documents
+        WHEN OLD.doc_type <> 'entity_registry'
+        BEGIN
+            INSERT OR IGNORE INTO meta(key, value)
+            VALUES ('{dirty_key}', '1');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS entity_registry_observed_route_document_routes_insert
+        AFTER INSERT ON document_routes
+        WHEN EXISTS (
+            SELECT 1 FROM documents
+            WHERE rowid = NEW.doc_rowid
+              AND doc_type <> 'entity_registry'
+        )
+        BEGIN
+            INSERT OR IGNORE INTO meta(key, value)
+            VALUES ('{dirty_key}', '1');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS entity_registry_observed_route_document_routes_update
+        AFTER UPDATE ON document_routes
+        WHEN EXISTS (
+            SELECT 1 FROM documents
+            WHERE rowid IN (OLD.doc_rowid, NEW.doc_rowid)
+              AND doc_type <> 'entity_registry'
+        )
+        BEGIN
+            INSERT OR IGNORE INTO meta(key, value)
+            VALUES ('{dirty_key}', '1');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS entity_registry_observed_route_document_routes_delete
+        AFTER DELETE ON document_routes
+        WHEN EXISTS (
+            SELECT 1 FROM documents
+            WHERE rowid = OLD.doc_rowid
+              AND doc_type <> 'entity_registry'
+        )
+        BEGIN
+            INSERT OR IGNORE INTO meta(key, value)
+            VALUES ('{dirty_key}', '1');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS entity_registry_observed_route_terms_update
+        AFTER UPDATE OF layer, key, route_signal ON route_terms
+        BEGIN
+            INSERT OR IGNORE INTO meta(key, value)
+            VALUES ('{dirty_key}', '1');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS entity_registry_observed_route_terms_delete
+        AFTER DELETE ON route_terms
+        BEGIN
+            INSERT OR IGNORE INTO meta(key, value)
+            VALUES ('{dirty_key}', '1');
+        END;
+        """
+    )
+    if not before.get("tracking_ready"):
+        conn.execute(
+            "INSERT OR IGNORE INTO meta(key, value) VALUES (?, '1')",
+            (ENTITY_REGISTRY_OBSERVED_ROUTE_DIRTY_META_KEY,),
+        )
+    conn.execute(
+        "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+        (
+            ENTITY_REGISTRY_OBSERVED_ROUTE_TRACKING_META_KEY,
+            str(ENTITY_REGISTRY_OBSERVED_ROUTE_TRACKING_VERSION),
+        ),
+    )
+    return entity_registry_observed_route_tracking_state_from_connection(
+        conn
+    )
+
+
+def clear_entity_registry_observed_route_dirty(
+    conn: sqlite3.Connection,
+) -> dict[str, Any]:
+    tracking = (
+        entity_registry_observed_route_tracking_state_from_connection(
+            conn
+        )
+    )
+    if not tracking.get("tracking_ready"):
+        return {
+            **tracking,
+            "cleared": False,
+            "diagnostics": [
+                "entity_registry_observed_route_tracking_not_ready"
+            ],
+        }
+    cursor = conn.execute(
+        "DELETE FROM meta WHERE key = ?",
+        (ENTITY_REGISTRY_OBSERVED_ROUTE_DIRTY_META_KEY,),
+    )
+    return {
+        **entity_registry_observed_route_tracking_state_from_connection(
+            conn
+        ),
+        "cleared": bool(cursor.rowcount),
+        "diagnostics": [],
+    }
+
+
+def entity_registry_observed_route_tracking_state(
+    aoa_root: Path,
+) -> dict[str, Any]:
+    db_path = search_db_path(aoa_root)
+    if not db_path.exists():
+        return {
+            "schema_version": 1,
+            "artifact_type": (
+                "entity_registry_observed_route_tracking_state"
+            ),
+            "status": "missing",
+            "tracking_ready": False,
+            "dirty": True,
+            "db_path": str(db_path),
+            "source_scan": False,
+            "diagnostics": ["search_index_missing"],
+        }
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = connect_existing_search_db(db_path)
+        return {
+            **entity_registry_observed_route_tracking_state_from_connection(
+                conn
+            ),
+            "db_path": str(db_path),
+            "diagnostics": [],
+        }
+    except sqlite3.Error as exc:
+        return {
+            "schema_version": 1,
+            "artifact_type": (
+                "entity_registry_observed_route_tracking_state"
+            ),
+            "status": "unavailable",
+            "tracking_ready": False,
+            "dirty": True,
+            "db_path": str(db_path),
+            "source_scan": False,
+            "diagnostics": [sqlite_error_diagnostic(exc)],
+        }
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def seed_search_freshness_state_from_session_index(conn: sqlite3.Connection, *, updated_at: str) -> None:
     has_session_state = bool(
         conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_index_state'").fetchone()
@@ -74813,6 +75065,7 @@ def init_search_db(
         ) WITHOUT ROWID
         """
     )
+    ensure_entity_registry_observed_route_tracking(conn)
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS document_bodies (
@@ -76026,6 +76279,12 @@ def refresh_search_entity_registry_documents(
         )
     record_phase("insert_changed_entity_registry_documents", insert_started, insert_count=len(docs_to_insert))
     snapshot_signature = entity_registry_snapshot_signature(registry_snapshot if isinstance(registry_snapshot, dict) else {})
+    observed_route_tracking = (
+        clear_entity_registry_observed_route_dirty(conn)
+        if str(registry_snapshot.get("observed_route_source") or "")
+        == "archived_route_terms"
+        else {}
+    )
     record_entity_registry_search_sync_meta(
         conn,
         snapshot_signature=snapshot_signature,
@@ -76048,6 +76307,7 @@ def refresh_search_entity_registry_documents(
         "observed_source": observed_source,
         "history_policy": history_policy,
         "observed_route_source": registry_snapshot.get("observed_route_source") if isinstance(registry_snapshot, dict) else None,
+        "observed_route_tracking": observed_route_tracking,
         "phase_timings": phase_timings,
     }
 
@@ -76194,6 +76454,7 @@ def refresh_entity_registry_search_documents_only(
         "observed_source": observed_source,
         "history_policy": history_policy,
         "observed_route_source": registry_refresh.get("observed_route_source") if "registry_refresh" in locals() and isinstance(registry_refresh, dict) else None,
+        "observed_route_tracking": registry_refresh.get("observed_route_tracking", {}) if "registry_refresh" in locals() and isinstance(registry_refresh, dict) else {},
         "budget_seconds": budget_seconds,
         "budget_exhausted": bool(budget_value is not None and elapsed_ms > int(budget_value * 1000)),
         "budget_policy": "soft_observed_atomic_sync_not_interrupted",
@@ -110703,6 +110964,14 @@ def entity_registry_search_sync_current_noop(
         return None
     if meta.get("entity_registry_search_snapshot_signature") != signature:
         return None
+    observed_route_tracking: dict[str, Any] = {}
+    if str(registry.get("observed_route_source") or "") == "archived_route_terms":
+        observed_route_tracking = (
+            clear_entity_registry_observed_route_dirty(conn)
+        )
+        if not observed_route_tracking.get("tracking_ready"):
+            return None
+        conn.commit()
     return {
         "inserted_count": 0,
         "updated_count": 0,
@@ -110714,6 +110983,7 @@ def entity_registry_search_sync_current_noop(
         "skipped": True,
         "skip_reason": "entity_registry_search_sync_current",
         "snapshot_signature": signature,
+        "observed_route_tracking": observed_route_tracking,
     }
 
 
@@ -170433,6 +170703,8 @@ def entity_registry_maintenance_status(aoa_root: Path) -> dict[str, Any]:
         else {}
     )
     current_observed_dependency: dict[str, Any] = {}
+    observed_route_tracking: dict[str, Any] = {}
+    observed_dependency_verification_mode = "not_checked"
     if (
         int_value(stored_observed_dependency.get("version"))
         != ENTITY_REGISTRY_OBSERVED_DEPENDENCY_VERSION
@@ -170445,19 +170717,46 @@ def entity_registry_maintenance_status(aoa_root: Path) -> dict[str, Any]:
             "entity_registry_observed_dependency_missing"
         )
     else:
-        try:
-            current_observed_dependency = (
-                entity_registry_current_observed_dependency(
-                    aoa_root,
-                    payload,
+        observed_route_source = str(
+            payload.get("observed_route_source") or "none"
+        )
+        if observed_route_source == "archived_route_terms":
+            observed_route_tracking = (
+                entity_registry_observed_route_tracking_state(
+                    aoa_root
                 )
             )
-        except (OSError, sqlite3.Error, ValueError) as exc:
-            current_observed_dependency = {
-                "diagnostics": [
-                    f"{type(exc).__name__}:{exc}"
-                ]
-            }
+        if (
+            observed_route_source == "archived_route_terms"
+            and observed_route_tracking.get("status") == "current"
+        ):
+            current_observed_dependency = dict(
+                stored_observed_dependency
+            )
+            observed_dependency_verification_mode = (
+                "persisted_semantic_dependency_with_clean_"
+                "transactional_dirty_marker"
+            )
+        else:
+            try:
+                current_observed_dependency = (
+                    entity_registry_current_observed_dependency(
+                        aoa_root,
+                        payload,
+                    )
+                )
+                observed_dependency_verification_mode = (
+                    "recomputed_from_selected_observed_projection"
+                )
+            except (OSError, sqlite3.Error, ValueError) as exc:
+                current_observed_dependency = {
+                    "diagnostics": [
+                        f"{type(exc).__name__}:{exc}"
+                    ]
+                }
+                observed_dependency_verification_mode = (
+                    "recompute_failed"
+                )
         dependency_diagnostics = (
             current_observed_dependency.get("diagnostics")
             if isinstance(
@@ -170531,6 +170830,10 @@ def entity_registry_maintenance_status(aoa_root: Path) -> dict[str, Any]:
         ),
         "current_observed_source_dependency": (
             current_observed_dependency
+        ),
+        "observed_route_tracking": observed_route_tracking,
+        "observed_dependency_verification_mode": (
+            observed_dependency_verification_mode
         ),
         "processed_watermark": payload.get("processed_watermark", {}),
         "entity_count": entity_count,

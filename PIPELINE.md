@@ -633,6 +633,17 @@ lease, checkpoint, and publication validation. The navigation packet declares
 that it performed no source scan and never upgrades persisted scheduling state
 to freshness truth.
 
+Inside an admitted incremental search cycle, archived route-term mutations
+set a versioned transactional entity-registry dependency marker in the same
+SQLite transaction. A clean marker lets repeated freshness and
+post-publication checks reuse the persisted observed semantic dependency
+without grouping the complete monolith again. Missing tracking, a missing
+trigger, or a dirty marker falls back to the exact observed-dependency
+recomputation. The marker is cleared only after the existing registry
+snapshot, observed-source, history-policy, search-document, generation, count,
+and signature gates commit successfully. It is invalidation metadata, not
+dependency identity or freshness authority.
+
 That fast path remains inside the selected profile's route-size envelope. An
 oversized live-tail target is deferred to an explicit heavy or resumable route,
 while ordinary bounded maintenance continues across the rest of the backlog;
