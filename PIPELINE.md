@@ -621,6 +621,18 @@ historical projection recommendation must not displace a ready recent-session
 catch-up; the shared lease, resource gate, and command-local guards still
 decide whether that bounded writer may run.
 
+Before host resource admission, that live-tail selection reads only persisted
+search freshness scheduling state and, when no search candidate exists, the
+generated graph hot state. It may recheck the named live transcript with one
+bounded filesystem stat for quiet-window truth. This pre-admission route does
+not run global maintenance status, rebuild observed entity-registry
+dependencies, classify cleanup candidates, hash projection stages, or parse
+raw evidence. Missing or insufficient scheduling state falls through to the
+ordinary host resource gate; the admitted child retains complete dependency,
+lease, checkpoint, and publication validation. The navigation packet declares
+that it performed no source scan and never upgrades persisted scheduling state
+to freshness truth.
+
 That fast path remains inside the selected profile's route-size envelope. An
 oversized live-tail target is deferred to an explicit heavy or resumable route,
 while ordinary bounded maintenance continues across the rest of the backlog;

@@ -56232,6 +56232,105 @@ def append_child_arg(command: list[str], flag: str, value: Any | None) -> None:
     command.extend([flag, str(value)])
 
 
+def session_memory_live_tail_fast_status(
+    *,
+    workspace_root: Path,
+    aoa_root: Path,
+) -> dict[str, Any]:
+    """Read only persisted live-tail scheduling state before admission.
+
+    The resource wrapper must not run the global maintenance status route: that
+    route intentionally validates registry dependencies and cleanup candidates
+    and may therefore read large generated stores or hash staged raw captures.
+    The admitted child owns those checks.  This pre-admission route reads the
+    persisted search freshness state first and consults the graph hot state
+    only when there is no search live-tail candidate.  Live transcript activity
+    is rechecked by the existing bounded ``stat`` path.
+    """
+
+    provider_status = search_provider_status_fast(
+        aoa_root=aoa_root,
+        provider_name="portable_sqlite",
+    )
+    search = search_maintenance_status_from_provider(provider_status)
+    graph: dict[str, Any] = {
+        "deferred_live_source_count": 0,
+        "deferred_live_sources_sample": [],
+    }
+    graph_status_loaded = False
+    if int_value(search.get("deferred_live_session_count")) <= 0:
+        graph = graph_maintenance_status_from_state(
+            graph_store_hot_state(aoa_root),
+            workspace_root=workspace_root,
+            aoa_root=aoa_root,
+        )
+        graph_status_loaded = True
+
+    live_tail = session_memory_live_tail_status(search=search, graph=graph)
+    catchup_route: dict[str, Any] = {}
+    if int_value(live_tail.get("deferred_count")) > 0:
+        catchup_route = session_memory_live_tail_catchup_route(
+            workspace_root=workspace_root,
+            aoa_root=aoa_root,
+            live_tail=live_tail,
+        )
+        live_tail["catchup_command"] = catchup_route.get("command", [])
+        live_tail["exact_catchup_command"] = shlex.join(
+            catchup_route.get("command", [])
+        )
+        live_tail["catchup_command_kind"] = catchup_route.get("command_kind")
+        live_tail["catchup_scope"] = catchup_route.get("scope")
+        live_tail["catchup_target"] = catchup_route.get("target")
+        live_tail["catchup_target_session_id"] = catchup_route.get(
+            "target_session_id"
+        )
+        live_tail["catchup_target_session_label"] = catchup_route.get(
+            "target_session_label"
+        )
+        live_tail["catchup_ready_to_run"] = bool(
+            catchup_route.get("ready_to_run")
+        )
+        live_tail["graph_followup"] = catchup_route.get("graph_followup")
+
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_live_tail_fast_status",
+        "generated_at": utc_now(),
+        "ok": bool(provider_status.get("ok")),
+        "mutates": False,
+        "status_mode": "persisted_scheduling_state_no_global_source_scan",
+        "source_scan": False,
+        "recommendation": (
+            "run_live_catchup"
+            if live_tail.get("status") == "ready_for_catchup"
+            else "wait_live_catchup"
+            if int_value(live_tail.get("deferred_count")) > 0
+            else "none"
+        ),
+        "search": search,
+        "graph": graph,
+        "graph_status_loaded": graph_status_loaded,
+        "live_tail": live_tail,
+        "catchup_route": catchup_route,
+        "diagnostics": [
+            *(
+                provider_status.get("diagnostics", [])
+                if isinstance(provider_status.get("diagnostics"), list)
+                else []
+            ),
+            *(
+                search.get("diagnostics", [])
+                if isinstance(search.get("diagnostics"), list)
+                else []
+            ),
+        ],
+        "truth_status": (
+            "pre_admission_navigation_from_persisted_search_or_graph_state_"
+            "plus_bounded_live_transcript_stat_not_global_freshness"
+        ),
+    }
+
+
 def auto_maintenance_live_tail_resource_route(
     *,
     workspace_root: Path,
@@ -56256,9 +56355,16 @@ def auto_maintenance_live_tail_resource_route(
     if repair_indexes is False:
         return {"used": False, "reason": "index_repair_disabled"}
     try:
-        status = session_memory_maintenance_status(workspace_root=workspace_root, aoa_root=aoa_root, include_timers=False)
+        status = session_memory_live_tail_fast_status(
+            workspace_root=workspace_root,
+            aoa_root=aoa_root,
+        )
     except Exception as exc:
-        return {"used": False, "reason": "maintenance_status_failed", "diagnostics": [f"live_tail_status_failed:{exc}"]}
+        return {
+            "used": False,
+            "reason": "live_tail_fast_status_failed",
+            "diagnostics": [f"live_tail_fast_status_failed:{exc}"],
+        }
     live_tail = status.get("live_tail") if isinstance(status.get("live_tail"), dict) else {}
     command = live_tail.get("catchup_command") if isinstance(live_tail.get("catchup_command"), list) else []
     command_kind = str(live_tail.get("catchup_command_kind") or "")
@@ -56343,6 +56449,8 @@ def auto_maintenance_live_tail_resource_route(
         "target_raw_bytes": target_raw_bytes,
         "route_max_raw_bytes": route_max_raw_bytes,
         "top_level_recommendation": top_level_recommendation,
+        "pre_admission_status_mode": status.get("status_mode"),
+        "pre_admission_source_scan": bool(status.get("source_scan")),
         "independent_of_top_level_recommendation": (
             top_level_recommendation != "run_live_catchup"
         ),

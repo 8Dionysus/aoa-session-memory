@@ -54834,6 +54834,76 @@ def test_auto_maintenance_resource_launch_reports_host_hard_timeout_and_retries(
     ).read_text(encoding="utf-8")
 
 
+def test_live_tail_fast_status_uses_persisted_search_state_before_graph_or_global_status(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    session_label = "2026-08-11__001__persisted-live-tail"
+
+    monkeypatch.setattr(
+        module,
+        "search_provider_status_fast",
+        lambda **_kwargs: {
+            "ok": True,
+            "status_mode": "fast_presence_probe",
+            "providers": {
+                "portable_sqlite": {
+                    "ok": True,
+                    "status": "ready_with_deferred_live_updates",
+                    "has_documents": True,
+                    "has_route_index": True,
+                    "has_route_terms": True,
+                    "count_mode": "not_counted_fast",
+                    "freshness": {
+                        "status": "current_with_deferred_live_updates",
+                        "source_scan": False,
+                        "deferred_live_session_count": 1,
+                        "deferred_live_sessions": [
+                            {
+                                "session_id": "live-fast-1",
+                                "session_label": session_label,
+                                "latest_source_mtime": 1.0,
+                            }
+                        ],
+                        "reasons": [
+                            "recent_live_projection_updates_deferred"
+                        ],
+                    },
+                    "diagnostics": [],
+                }
+            },
+            "diagnostics": [],
+        },
+    )
+
+    def fail_global_or_graph(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("pre-admission live-tail status must stay narrow")
+
+    monkeypatch.setattr(module, "session_memory_maintenance_status", fail_global_or_graph)
+    monkeypatch.setattr(module, "graph_store_hot_state", fail_global_or_graph)
+
+    payload = module.session_memory_live_tail_fast_status(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    assert payload["ok"] is True
+    assert payload["source_scan"] is False
+    assert payload["graph_status_loaded"] is False
+    assert payload["status_mode"] == (
+        "persisted_scheduling_state_no_global_source_scan"
+    )
+    assert payload["recommendation"] == "run_live_catchup"
+    assert payload["live_tail"]["catchup_ready_to_run"] is True
+    assert payload["live_tail"]["catchup_target"] == session_label
+    assert payload["live_tail"]["catchup_command_kind"] == (
+        "targeted_index_maintenance_without_graph"
+    )
+
+
 def test_auto_maintenance_resource_launch_uses_live_tail_fast_path_for_catchup(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
@@ -54845,6 +54915,8 @@ def test_auto_maintenance_resource_launch_uses_live_tail_fast_path_for_catchup(t
         return {
             "ok": False,
             "recommendation": "review_maintenance_cleanup",
+            "status_mode": "persisted_scheduling_state_no_global_source_scan",
+            "source_scan": False,
             "live_tail": {
                 "status": "ready_for_catchup",
                 "catchup_ready_to_run": True,
@@ -54886,7 +54958,7 @@ def test_auto_maintenance_resource_launch_uses_live_tail_fast_path_for_catchup(t
         )
         return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
 
-    monkeypatch.setattr(module, "session_memory_maintenance_status", fake_maintenance_status)
+    monkeypatch.setattr(module, "session_memory_live_tail_fast_status", fake_maintenance_status)
     monkeypatch.setattr(
         module,
         "resolve_session_record",
@@ -54920,6 +54992,10 @@ def test_auto_maintenance_resource_launch_uses_live_tail_fast_path_for_catchup(t
     assert payload["live_tail_fast_path"]["independent_of_top_level_recommendation"] is True
     assert payload["live_tail_fast_path"]["target_raw_bytes"] == 32 * 1024 * 1024
     assert payload["live_tail_fast_path"]["route_max_raw_bytes"] == 512 * 1024 * 1024
+    assert payload["live_tail_fast_path"]["pre_admission_status_mode"] == (
+        "persisted_scheduling_state_no_global_source_scan"
+    )
+    assert payload["live_tail_fast_path"]["pre_admission_source_scan"] is False
     assert calls["command"][:3] == ["abyss-machine", "resource", "launch"]
     assert "--force" in calls["command"]
     assert calls["command"][calls["command"].index("--demand-key") + 1] == (
@@ -55003,7 +55079,7 @@ def test_auto_maintenance_resource_launch_uses_graph_live_tail_fast_path_for_cat
         )
         return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
 
-    monkeypatch.setattr(module, "session_memory_maintenance_status", fake_maintenance_status)
+    monkeypatch.setattr(module, "session_memory_live_tail_fast_status", fake_maintenance_status)
     monkeypatch.setattr(module.subprocess, "run", fake_run)
 
     payload = module.auto_maintenance_resource_launch(
@@ -55059,7 +55135,7 @@ def test_auto_maintenance_resource_live_tail_fast_path_respects_explicit_graph_s
             },
         }
 
-    monkeypatch.setattr(module, "session_memory_maintenance_status", fake_maintenance_status)
+    monkeypatch.setattr(module, "session_memory_live_tail_fast_status", fake_maintenance_status)
 
     payload = module.auto_maintenance_live_tail_resource_route(
         workspace_root=workspace,
@@ -55094,7 +55170,7 @@ def test_auto_maintenance_resource_live_tail_fast_path_defers_oversized_session(
 
     monkeypatch.setattr(
         module,
-        "session_memory_maintenance_status",
+        "session_memory_live_tail_fast_status",
         lambda **_kwargs: {
             "ok": False,
             "recommendation": "run_live_catchup",
