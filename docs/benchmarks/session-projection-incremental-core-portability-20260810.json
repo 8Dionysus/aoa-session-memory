@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "artifact_type": "session_projection_incremental_core_portability_receipt",
-  "generated_at": "2026-08-11T02:27:46Z",
+  "generated_at": "2026-08-11T06:37:37Z",
   "truth_status": "clean_export_and_install_portability_proof_not_live_runtime_freshness",
   "source": {
     "branch": "agent/session-memory-incremental-core-20260810",
@@ -16,8 +16,8 @@
     "portable_public_safety": {
       "ok": true,
       "status": "current",
-      "scanned_files": 292,
-      "scanned_bytes": 14605736,
+      "scanned_files": 298,
+      "scanned_bytes": 14646897,
       "issue_count": 0,
       "truth_status": "bounded_portable_tree_audit_complete"
     }
@@ -59,8 +59,8 @@
   "installed_focused_tests": {
     "ok": true,
     "passed": 7,
-    "deselected": 1102,
-    "elapsed_seconds": 31.08,
+    "deselected": 0,
+    "elapsed_seconds": 29.15,
     "coverage": [
       "end_to_end_validation",
       "clean_portable_install",
