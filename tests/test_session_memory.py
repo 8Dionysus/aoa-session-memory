@@ -97,6 +97,85 @@ def test_session_projection_benchmark_smoke_proves_parity_and_reuse(
     ] >= 2
 
 
+def test_session_projection_benchmark_uses_stable_read_only_snapshot(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "owner-snapshot.raw.jsonl"
+    write_jsonl(
+        source,
+        [
+            {
+                "timestamp": "2026-08-08T12:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "private-source-id-not-in-receipt",
+                    "cwd": str(tmp_path / "owner"),
+                },
+            },
+            {
+                "timestamp": "2026-08-08T12:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "snapshot task"}
+                    ],
+                },
+            },
+            {
+                "timestamp": "2026-08-08T12:00:02Z",
+                "type": "turn_context",
+                "payload": {"summary": "snapshot boundary"},
+            },
+        ],
+    )
+    source_before = hashlib.sha256(source.read_bytes()).hexdigest()
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(BENCHMARK_SCRIPT),
+            "--source-transcript",
+            str(source),
+            "--fixture-alias",
+            "read-only-owner-snapshot",
+            "--payload-bytes",
+            "64",
+            "--workers",
+            "2",
+            "--fresh-segments",
+            "1",
+            "--growth-segments",
+            "1",
+            "--temp-root",
+            str(tmp_path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(completed.stdout)
+
+    assert completed.returncode == 0, completed.stderr
+    assert payload["ok"] is True
+    assert payload["fixture"]["synthetic"] is False
+    assert payload["fixture"]["source_kind"] == (
+        "read_only_captured_snapshot"
+    )
+    assert payload["fixture"]["snapshot_copy"] == {
+        "stable_during_copy": True,
+        "source_bytes": source.stat().st_size,
+        "snapshot_bytes": source.stat().st_size,
+        "source_unchanged": True,
+    }
+    assert payload["truth_status"] == (
+        "read_only_snapshot_measurement_not_live_runtime_mutation"
+    )
+    assert "private-source-id-not-in-receipt" not in completed.stdout
+    assert str(source) not in completed.stdout
+    assert hashlib.sha256(source.read_bytes()).hexdigest() == source_before
+
+
 def test_best_effort_progress_emitter_quarantines_broken_pipe() -> None:
     class BrokenPipeStream:
         def write(self, _text: str) -> int:

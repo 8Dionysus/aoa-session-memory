@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reproducible synthetic benchmark for incremental session projection work."""
+"""Reproducible synthetic or read-only snapshot projection benchmark."""
 
 from __future__ import annotations
 
@@ -73,6 +73,49 @@ def synthetic_rows(
             "type": "turn_context",
             "payload": {"summary": f"boundary {ordinal}"},
         }
+
+
+def transcript_session_id(path: Path) -> str:
+    """Read only the bounded transcript prefix needed for session identity."""
+    with path.open("r", encoding="utf-8") as handle:
+        for ordinal, line in enumerate(handle):
+            if ordinal >= 256:
+                break
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(row, dict) or row.get("type") != "session_meta":
+                continue
+            payload = row.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            session_id = str(payload.get("id") or "").strip()
+            if session_id:
+                return session_id
+    raise ValueError("source transcript has no session_meta id in first 256 rows")
+
+
+def copy_stable_source_snapshot(source: Path, target: Path) -> dict[str, Any]:
+    """Copy a read-only source while proving its identity did not drift."""
+    before = source.stat()
+    shutil.copyfile(source, target)
+    after = source.stat()
+    stable = (
+        before.st_dev == after.st_dev
+        and before.st_ino == after.st_ino
+        and before.st_size == after.st_size
+        and before.st_mtime_ns == after.st_mtime_ns
+    )
+    if not stable:
+        target.unlink(missing_ok=True)
+        raise RuntimeError("source transcript changed during snapshot copy")
+    return {
+        "stable_during_copy": True,
+        "source_bytes": int(before.st_size),
+        "snapshot_bytes": int(target.stat().st_size),
+        "source_unchanged": True,
+    }
 
 
 def mirror_session(
@@ -257,20 +300,37 @@ def benchmark_receipt_base(
     *,
     raw_bytes: int,
 ) -> dict[str, Any]:
+    source_transcript = bool(args.source_transcript)
+    fixture: dict[str, Any] = {
+        "synthetic": not source_transcript,
+        "source_kind": (
+            "read_only_captured_snapshot"
+            if source_transcript
+            else "synthetic_live_equivalent"
+        ),
+        "fixture_alias": str(args.fixture_alias or ""),
+        "raw_bytes": raw_bytes,
+        "fresh_segments": args.fresh_segments,
+        "growth_segments": args.growth_segments,
+        "repetitions": args.repetitions,
+    }
+    if source_transcript:
+        fixture["snapshot_copy"] = dict(
+            getattr(args, "source_snapshot", {}) or {}
+        )
+    else:
+        fixture.update(
+            {
+                "segments_requested": args.segments,
+                "payload_bytes_per_primary_event": args.payload_bytes,
+                "events_per_segment": args.events_per_segment,
+            }
+        )
     return {
         "schema_version": 1,
         "artifact_type": "session_projection_incremental_benchmark",
         "generated_at": session_memory.utc_now(),
-        "fixture": {
-            "synthetic": True,
-            "raw_bytes": raw_bytes,
-            "segments_requested": args.segments,
-            "payload_bytes_per_primary_event": args.payload_bytes,
-            "events_per_segment": args.events_per_segment,
-            "fresh_segments": args.fresh_segments,
-            "growth_segments": args.growth_segments,
-            "repetitions": args.repetitions,
-        },
+        "fixture": fixture,
         "host": {
             "cpu_count": os.cpu_count(),
             "affinity_cpu_count": (
@@ -281,7 +341,9 @@ def benchmark_receipt_base(
             "python": sys.version.split()[0],
         },
         "truth_status": (
-            "synthetic_target_host_measurement_not_live_archive_freshness"
+            "read_only_snapshot_measurement_not_live_runtime_mutation"
+            if source_transcript
+            else "synthetic_target_host_measurement_not_live_archive_freshness"
         ),
     }
 
@@ -316,16 +378,24 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         workspace = root / "AbyssOS"
         workspace.mkdir(parents=True)
         transcript = root / "representative.jsonl"
-        write_jsonl(
-            transcript,
-            synthetic_rows(
-                session_id="benchmark-representative",
-                cwd=workspace,
-                segments=args.segments,
-                payload_bytes=args.payload_bytes,
-                events_per_segment=args.events_per_segment,
-            ),
-        )
+        if args.source_transcript:
+            source = Path(args.source_transcript).resolve()
+            args.source_snapshot = copy_stable_source_snapshot(
+                source, transcript
+            )
+            session_id = transcript_session_id(transcript)
+        else:
+            session_id = "benchmark-representative"
+            write_jsonl(
+                transcript,
+                synthetic_rows(
+                    session_id=session_id,
+                    cwd=workspace,
+                    segments=args.segments,
+                    payload_bytes=args.payload_bytes,
+                    events_per_segment=args.events_per_segment,
+                ),
+            )
         raw_bytes = transcript.stat().st_size
 
         benchmark_root = workspace / "benchmark" / ".aoa"
@@ -333,7 +403,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             aoa_root=benchmark_root,
             workspace=workspace,
             transcript=transcript,
-            session_id="benchmark-representative",
+            session_id=session_id,
         )
         baseline_snapshot = root / "cold-baseline-snapshot"
         shutil.copytree(benchmark_root, baseline_snapshot)
@@ -348,7 +418,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             shutil.rmtree(benchmark_root)
             shutil.copytree(baseline_snapshot, benchmark_root)
             serial_record = session_memory.resolve_session_record(
-                benchmark_root, "benchmark-representative"
+                benchmark_root, session_id
             )
             serial_runs.append(
                 benchmark_build(
@@ -367,7 +437,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             shutil.rmtree(benchmark_root)
             shutil.copytree(baseline_snapshot, benchmark_root)
             parallel_record = session_memory.resolve_session_record(
-                benchmark_root, "benchmark-representative"
+                benchmark_root, session_id
             )
             parallel_runs.append(
                 benchmark_build(
@@ -442,7 +512,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         )
         capture = session_memory.preserve_unindexed_raw_capture(
             session_dir=parallel_session_dir,
-            session_id="benchmark-representative",
+            session_id=session_id,
             transcript_path=transcript,
             manifest=growth_manifest,
             hook_event_name="BenchmarkAppend",
@@ -529,6 +599,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fresh-segments", type=int, default=2)
     parser.add_argument("--growth-segments", type=int, default=2)
     parser.add_argument("--repetitions", type=int, default=1)
+    parser.add_argument(
+        "--source-transcript",
+        help=(
+            "Read-only raw JSONL source. The benchmark copies a stable "
+            "snapshot and never writes the supplied path."
+        ),
+    )
+    parser.add_argument(
+        "--fixture-alias",
+        default="",
+        help="Public-safe receipt label; source paths and session ids are omitted.",
+    )
     parser.add_argument("--temp-root")
     parser.add_argument("--output")
     return parser
@@ -545,6 +627,8 @@ def main() -> int:
         raise SystemExit("segment counts must be positive")
     if args.payload_bytes < 0 or not 1 <= args.workers <= 6:
         raise SystemExit("payload must be nonnegative and workers must be 1..6")
+    if args.source_transcript and not Path(args.source_transcript).is_file():
+        raise SystemExit("source transcript must be a readable file")
     payload = run_benchmark(args)
     text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
     if args.output:
