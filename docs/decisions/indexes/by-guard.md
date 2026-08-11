@@ -145,6 +145,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0034 Bounded Dirty-First Automatic Index Discovery](../AOA-SM-D-0034-bounded-dirty-first-automatic-index-discovery.md) | 2026-07-28 | Accepted | `docs/decisions/AOA-SM-D-0034-bounded-dirty-first-automatic-index-discovery.md` |
 
+## bounded exclusion
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0061 Freshness Profiles Do Not Own Heavy Tail](../AOA-SM-D-0061-freshness-profiles-do-not-own-heavy-tail.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0061-freshness-profiles-do-not-own-heavy-tail.md` |
+
 ## bounded fallback
 
 | Decision | Date | Status | Path |
@@ -530,6 +536,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0060 Bounded Process Digest Reuse and Resource Epochs](../AOA-SM-D-0060-bounded-process-digest-reuse-and-resource-epochs.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0060-bounded-process-digest-reuse-and-resource-epochs.md` |
 
+## explicit handoff
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0061 Freshness Profiles Do Not Own Heavy Tail](../AOA-SM-D-0061-freshness-profiles-do-not-own-heavy-tail.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0061-freshness-profiles-do-not-own-heavy-tail.md` |
+
 ## explicit literal evidence
 
 | Decision | Date | Status | Path |
@@ -671,6 +683,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0012 Bounded Background Graph Queue Reserve](../AOA-SM-D-0012-bounded-background-graph-queue-reserve.md) | 2026-07-17 | Accepted | `docs/decisions/AOA-SM-D-0012-bounded-background-graph-queue-reserve.md` |
 | [AOA-SM-D-0015 Deadline-Aware Cooperative Retry Dispatch](../AOA-SM-D-0015-deadline-aware-cooperative-retry-dispatch.md) | 2026-07-17 | Accepted | `docs/decisions/AOA-SM-D-0015-deadline-aware-cooperative-retry-dispatch.md` |
+
+## heavy-lane lease
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0061 Freshness Profiles Do Not Own Heavy Tail](../AOA-SM-D-0061-freshness-profiles-do-not-own-heavy-tail.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0061-freshness-profiles-do-not-own-heavy-tail.md` |
 
 ## heavy-work starvation
 
@@ -912,6 +930,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0025 Process-Loaded Producer Generation Identity](../AOA-SM-D-0025-process-loaded-producer-generation-identity.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0025-process-loaded-producer-generation-identity.md` |
+
+## profile ownership
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0061 Freshness Profiles Do Not Own Heavy Tail](../AOA-SM-D-0061-freshness-profiles-do-not-own-heavy-tail.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0061-freshness-profiles-do-not-own-heavy-tail.md` |
 
 ## progress honesty
 

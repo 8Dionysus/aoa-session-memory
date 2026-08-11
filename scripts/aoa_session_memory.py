@@ -1474,6 +1474,7 @@ AUTO_MAINTENANCE_PROFILES = {
         "resource_class": "medium",
         "resource_kind": "indexing",
         "resource_demand_epoch": "v4",
+        "automatic_heavy_projection_lane": False,
         "budget_seconds": 600,
         "hard_timeout_grace_seconds": 120,
         "timeout_sec": 900,
@@ -1508,6 +1509,7 @@ AUTO_MAINTENANCE_PROFILES = {
         "resource_class": "medium",
         "resource_kind": "indexing",
         "resource_demand_epoch": "v4",
+        "automatic_heavy_projection_lane": True,
         "budget_seconds": 900,
         "hard_timeout_grace_seconds": 180,
         "timeout_sec": 3600,
@@ -1548,6 +1550,7 @@ AUTO_MAINTENANCE_PROFILES = {
         "resource_class": "medium",
         "resource_kind": "indexing",
         "resource_demand_epoch": "v4",
+        "automatic_heavy_projection_lane": False,
         "budget_seconds": 600,
         "hard_timeout_grace_seconds": 60,
         "timeout_sec": 1800,
@@ -1588,6 +1591,7 @@ AUTO_MAINTENANCE_PROFILES = {
         "resource_class": "heavy",
         "resource_kind": "indexing",
         "resource_demand_epoch": "v4",
+        "automatic_heavy_projection_lane": True,
         "budget_seconds": 1200,
         "hard_timeout_grace_seconds": 300,
         "timeout_sec": 7200,
@@ -65116,6 +65120,9 @@ def auto_maintenance(
             if str(record.get("session_id") or "") == target
             or str(record.get("session_label") or "") == target
         ]
+    automatic_heavy_projection_lane = bool(
+        settings.get("automatic_heavy_projection_lane", False)
+    )
     if apply and heavy_candidates:
         # Every oversized deferred or generation-stale projection belongs to
         # the resumable lane,
@@ -65128,6 +65135,32 @@ def auto_maintenance(
             for record in heavy_candidates
             if str(record.get("session_id") or "")
         )
+    if (
+        apply
+        and heavy_candidates
+        and not automatic_heavy_projection_lane
+    ):
+        selection_scope["heavy_projection_lane"] = {
+            "status": "deferred_to_heavy_owner_profile",
+            "profile": profile,
+            "owner_profiles": ["backlog", "deep"],
+            "candidate_count": len(heavy_candidates),
+            "session_ids": sorted(heavy_lane_excluded_session_ids),
+            "global_lock_held_during_build": False,
+            "ordinary_bounded_maintenance_continues": True,
+            "truth_status": (
+                "heavy_projection_deferred_without_claiming_ordinary_"
+                "freshness_completion"
+            ),
+        }
+        diagnostics.append(
+            "heavy_projection_lane_deferred_to_backlog_or_deep"
+        )
+    if (
+        apply
+        and heavy_candidates
+        and automatic_heavy_projection_lane
+    ):
         prioritized_heavy = prioritize_session_records(
             heavy_candidates,
             query_priority_session_ids,

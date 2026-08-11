@@ -659,15 +659,18 @@ oversized live-tail target is deferred to an explicit heavy or resumable route,
 while ordinary bounded maintenance continues across the rest of the backlog;
 one large session must not monopolize recurring catch-up attempts.
 
-The automatic heavy lane advances at most one oversized deferred or
-generation-stale projection per
-bounded slice before ordinary maintenance acquires the global lease. All
-automatic oversized builders share a nonblocking heavy-lane lease across
-profiles. When it is held, another profile defers only its heavy candidate and
-continues toward ordinary bounded maintenance; it does not start a second
-memory-heavy build. Applying Codex sweeps use the same lease per selected raw
-source at or above the heavy threshold, including mirror-only capture; smaller
-sources in the sweep remain eligible. Segment
+The `hot` and `catchup` profiles never spend their bounded freshness window on
+an oversized deferred or generation-stale projection. They exclude every
+heavy candidate from ordinary repair, record a handoff to `backlog` or `deep`,
+and continue directly with recent bounded work. The `backlog` and `deep`
+profiles may advance at most one heavy projection per slice before their
+ordinary maintenance. All automatic oversized builders share a nonblocking
+heavy-lane lease across profiles. When it is held, another owner profile
+defers only its heavy candidate and continues toward ordinary bounded
+maintenance; it does not start a second memory-heavy build. Applying Codex
+sweeps use the same lease per selected raw source at or above the heavy
+threshold, including mirror-only capture; smaller sources in the sweep remain
+eligible. Segment
 generation uses a deterministic process pool with a default of four workers
 and a bounded one-to-six range, falling back visibly to serial execution when
 the pool cannot start. Segment processes use the isolated `spawn` start method

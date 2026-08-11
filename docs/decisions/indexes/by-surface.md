@@ -226,6 +226,7 @@
 | [AOA-SM-D-0058 Persisted Live-Tail State Precedes Resource Admission](../AOA-SM-D-0058-persisted-live-tail-state-precedes-resource-admission.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0058-persisted-live-tail-state-precedes-resource-admission.md` |
 | [AOA-SM-D-0059 Transactional Dirty Marker for Observed Route Dependency](../AOA-SM-D-0059-transactional-dirty-marker-for-observed-route-dependency.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0059-transactional-dirty-marker-for-observed-route-dependency.md` |
 | [AOA-SM-D-0060 Bounded Process Digest Reuse and Resource Epochs](../AOA-SM-D-0060-bounded-process-digest-reuse-and-resource-epochs.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0060-bounded-process-digest-reuse-and-resource-epochs.md` |
+| [AOA-SM-D-0061 Freshness Profiles Do Not Own Heavy Tail](../AOA-SM-D-0061-freshness-profiles-do-not-own-heavy-tail.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0061-freshness-profiles-do-not-own-heavy-tail.md` |
 
 ## freshness contract
 
@@ -334,6 +335,7 @@
 | [AOA-SM-D-0058 Persisted Live-Tail State Precedes Resource Admission](../AOA-SM-D-0058-persisted-live-tail-state-precedes-resource-admission.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0058-persisted-live-tail-state-precedes-resource-admission.md` |
 | [AOA-SM-D-0059 Transactional Dirty Marker for Observed Route Dependency](../AOA-SM-D-0059-transactional-dirty-marker-for-observed-route-dependency.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0059-transactional-dirty-marker-for-observed-route-dependency.md` |
 | [AOA-SM-D-0060 Bounded Process Digest Reuse and Resource Epochs](../AOA-SM-D-0060-bounded-process-digest-reuse-and-resource-epochs.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0060-bounded-process-digest-reuse-and-resource-epochs.md` |
+| [AOA-SM-D-0061 Freshness Profiles Do Not Own Heavy Tail](../AOA-SM-D-0061-freshness-profiles-do-not-own-heavy-tail.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0061-freshness-profiles-do-not-own-heavy-tail.md` |
 
 ## index discovery
 
@@ -420,6 +422,7 @@
 | [AOA-SM-D-0057 Append-Only Capture Ledger Stable Raw Publication](../AOA-SM-D-0057-append-only-capture-ledger-stable-raw-publication.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0057-append-only-capture-ledger-stable-raw-publication.md` |
 | [AOA-SM-D-0059 Transactional Dirty Marker for Observed Route Dependency](../AOA-SM-D-0059-transactional-dirty-marker-for-observed-route-dependency.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0059-transactional-dirty-marker-for-observed-route-dependency.md` |
 | [AOA-SM-D-0060 Bounded Process Digest Reuse and Resource Epochs](../AOA-SM-D-0060-bounded-process-digest-reuse-and-resource-epochs.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0060-bounded-process-digest-reuse-and-resource-epochs.md` |
+| [AOA-SM-D-0061 Freshness Profiles Do Not Own Heavy Tail](../AOA-SM-D-0061-freshness-profiles-do-not-own-heavy-tail.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0061-freshness-profiles-do-not-own-heavy-tail.md` |
 
 ## physical storage transition
 
@@ -619,6 +622,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0026 Best-Effort Progress Transport](../AOA-SM-D-0026-best-effort-progress-transport.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0026-best-effort-progress-transport.md` |
+
+## scheduling
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0061 Freshness Profiles Do Not Own Heavy Tail](../AOA-SM-D-0061-freshness-profiles-do-not-own-heavy-tail.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0061-freshness-profiles-do-not-own-heavy-tail.md` |
 
 ## search
 

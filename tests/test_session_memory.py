@@ -88177,7 +88177,7 @@ def test_fresh_session_publishes_while_heavy_session_build_is_active(
     ]
 
 
-def test_auto_maintenance_heavy_checkpoint_does_not_starve_fresh_scope(
+def test_auto_maintenance_catchup_defers_heavy_tail_without_starving_fresh_scope(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -88316,21 +88316,41 @@ def test_auto_maintenance_heavy_checkpoint_does_not_starve_fresh_scope(
         budget_seconds=900,
     )
 
-    assert heavy_calls == [["auto-heavy"]]
-    assert len(heavy_budgets) == 1
-    assert heavy_budgets[0] == pytest.approx(900.0, abs=0.1)
+    assert heavy_calls == []
+    assert heavy_budgets == []
     assert freshness_scopes == [["auto-fresh"]]
     assert payload["selection_scope"]["heavy_projection_lane"][
         "status"
-    ] == "checkpointed"
+    ] == "deferred_to_heavy_owner_profile"
     assert payload["selection_scope"]["heavy_projection_lane"][
-        "lease_status"
-    ] == "acquired"
+        "owner_profiles"
+    ] == ["backlog", "deep"]
+    assert payload["selection_scope"]["heavy_projection_lane"][
+        "ordinary_bounded_maintenance_continues"
+    ] is True
     assert payload["selection_scope"][
         "heavy_projection_lane_excluded_from_locked_maintenance"
     ] == ["auto-heavy", "auto-heavy-second"]
     assert payload["selection_scope"]["selected_count"] == 1
     assert payload["status"] == "nothing_to_do"
+
+    backlog = module.auto_maintenance(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        profile="backlog",
+        apply=True,
+        discovery_limit=0,
+        budget_seconds=900,
+    )
+    assert heavy_calls == [["auto-heavy"]]
+    assert len(heavy_budgets) == 1
+    assert heavy_budgets[0] == pytest.approx(900.0, abs=0.1)
+    assert backlog["selection_scope"]["heavy_projection_lane"][
+        "status"
+    ] == "checkpointed"
+    assert backlog["selection_scope"]["heavy_projection_lane"][
+        "lease_status"
+    ] == "acquired"
 
     heavy_calls.clear()
     heavy_lease_path = module.heavy_projection_lane_lock_path(aoa_root)
@@ -88348,7 +88368,7 @@ def test_auto_maintenance_heavy_checkpoint_does_not_starve_fresh_scope(
         deferred = module.auto_maintenance(
             workspace_root=workspace,
             aoa_root=aoa_root,
-            profile="catchup",
+            profile="backlog",
             apply=True,
             discovery_limit=0,
             budget_seconds=900,
