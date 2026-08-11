@@ -91,6 +91,7 @@ cold-projection latency or authorize live deployment.
 - `DESIGN.md`
 - `PIPELINE.md`
 - `docs/benchmarks/session-projection-segment-privacy-admission-actual-430mb-20260811.json`
+- `docs/benchmarks/session-projection-incremental-core-actual-430mb-stress-resume-20260811.json`
 - `docs/decisions/`
 
 ## Follow-Up Route
@@ -105,5 +106,8 @@ Regression tests compare ordinary and admitted segment JSON exactly, inject a
 credential-shaped value into classification metadata and raw-derived token
 accounting, and cover serial/parallel semantic parity plus classification-cache
 reuse. The paired actual-segment receipt records exact output SHA-256 parity,
-stage-scoped generation identity, and measured speedup. Full suite, clean cold
-SLO, portable export, and installation proof remain separate gates.
+stage-scoped generation identity, and measured speedup. A completed nonexclusive
+430 MB stress-resume additionally proves `455/455` classification-block reuse,
+full atomic publication, and zero cgroup swap, but exceeds the clean cold upper
+bound by `12.742 s`. Full suite, clean cold SLO, portable export, and
+installation proof remain separate gates.
