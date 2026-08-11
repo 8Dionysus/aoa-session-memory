@@ -102,13 +102,14 @@ cold-projection latency or authorize live deployment.
 - `PIPELINE.md`
 - `docs/benchmarks/session-projection-segment-privacy-admission-actual-430mb-20260811.json`
 - `docs/benchmarks/session-projection-incremental-core-actual-430mb-stress-resume-20260811.json`
+- `docs/benchmarks/session-projection-incremental-hot-append-actual-430mb-20260811.json`
 - `docs/decisions/`
 
 ## Follow-Up Route
 
-Run a migration append and a repeated steady-state append on the actual 430 MB
-fixture, recording candidate block bytes versus admitted candidate-line bytes,
-then use stage timings to choose the next bottleneck.
+The migration and repeated steady-state append are recorded. Continue reader
+componentization at the measured session-index root bottleneck rather than
+weakening privacy admission or increasing timeouts.
 
 ## Verification
 
@@ -121,3 +122,6 @@ stage-scoped generation identity, and measured speedup. A completed nonexclusive
 full atomic publication, and zero cgroup swap, but exceeds the clean cold upper
 bound by `12.742 s`. Full suite, clean cold SLO, portable export, and
 installation proof remain separate gates.
+The later hot receipt measures `310..351 ms` privacy reconstruction from
+`4,338,826` exact candidate-line bytes instead of `93,244,406` selected block
+bytes, with no persisted values or digests and explicit malformed-range fallback.

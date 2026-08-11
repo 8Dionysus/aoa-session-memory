@@ -123,9 +123,9 @@ decisions and proof.
 
 ## Follow-Up Route
 
-Rerun the actual 430 MB no-swap growth benchmark and compare classification
-index bytes, historical input reads, and aggregate semantic digest with the
-pre-compaction receipt.
+The actual 430 MB no-swap growth benchmark is recorded. Continue the separate
+session-index compatibility-root componentization identified by its stage
+timings; do not put stable component maps back into umbrella checkpoints.
 
 ## Verification
 
@@ -137,3 +137,7 @@ task-shard reuse without reading or hashing published shard content. Compact
 index tests additionally prove that summaries are absent from index records,
 exact-prefix aggregation reads only tail artifacts, semantic output matches a
 full replay, and deep audit still hashes block contents independently.
+The actual steady receipt records a `13.424337 s` four-sample interpolated p95,
+zero historical raw reads, zero monolithic raw writes, classification-index
+reduction from `33,085,064` to `576,042` bytes, and a dedicated
+`MemorySwapMax=0` run with zero swap growth.
