@@ -106,4 +106,8 @@ Focused regressions prove one semantic derivation per observed event, boundary-
 correct ordered range lookup, one cold top-level shard privacy pass, checkpoint
 resume, manifest validation, bounded hydration, and semantic admission. Paired
 real-snapshot benchmarks record exact output SHA-256 parity. Full-suite, cold
-SLO, portable export, and installation proof remain separate gates.
+SLO, portable export, and installation proof remain separate gates. A later
+clean actual-snapshot run completed the 430 MB cold projection in `843.960 s`
+with zero cgroup swap and a `6,123,139,072` byte peak. The same receipt keeps a
+large-epoch stable-projection append fallback explicit rather than treating the
+cold result as proof of the separate append-read SLO.

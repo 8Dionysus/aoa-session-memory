@@ -226,3 +226,20 @@ past 500 MB and was fully re-sanitized and rewritten on every append. The
 bounded immutable shard plus compact manifest protocol above closes that
 specific scaling defect while preserving the original raw-authority,
 privacy-repair, last-good, and non-exhaustive-recall boundaries.
+
+## Review Amendment — 2026-08-11 (Stable Projection Handoff)
+
+An actual 430 MB cold-and-growth receipt confirms that capture and persistent
+postings remain delta-bound, but exposes the next owner boundary. A `17,284`
+byte append was captured and indexed in `0.110 s` with zero historical raw
+reads. Because the large epoch deliberately carried no conventional SHA-256
+continuation state, the subsequent stable projection could not form its legacy
+whole-stream publish identity from the block chain and fell back to a full raw
+scan. Classification, segment, and episode components still reused their
+bounded artifacts, but the scan violates the strict large-append read SLO.
+
+The follow-up is therefore narrower than capture repair: stable projection must
+admit an exact ordered capture-ledger identity as a first-class source identity,
+or another portable continuation contract must be proved. Re-reading the old
+99% on every projection, pretending the block-chain head is a conventional
+SHA-256, or weakening raw validation are not accepted resolutions.
