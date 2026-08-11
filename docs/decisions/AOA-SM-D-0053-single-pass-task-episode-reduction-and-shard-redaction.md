@@ -74,6 +74,13 @@ guess. The exact
 pre-split generation `8670e45e...11d` is a declared reuse-then-restamp
 predecessor; unknown generations are not admitted.
 
+The checkpoint stage DAG separately binds a rehydration-plan version into the
+correlation, segment, and task-episode work identities. Changing full-versus-
+tail admission therefore invalidates and removes staged segment/raw-block and
+session-component artifacts even when the umbrella raw publish identity is
+unchanged. Crash resume may reuse classification evidence, but cannot publish
+artifacts produced under a different rehydration plan.
+
 ## Rationale
 
 The reducer already owns one event observation, the segment manifest already

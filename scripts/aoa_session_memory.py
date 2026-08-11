@@ -55,6 +55,7 @@ DERIVED_TEXT_PRIVACY_POLICY_VERSION = 1
 DERIVED_TEXT_PRIVACY_LOOKAHEAD_CHARS = 8192
 SESSION_PROJECTION_PUBLISH_IDENTITY_VERSION = 1
 SESSION_PROJECTION_WORK_STATE_SCHEMA_VERSION = 1
+SESSION_PROJECTION_REHYDRATION_PLAN_VERSION = 2
 EVENT_CLASSIFICATION_CACHE_SCHEMA_VERSION = 1
 EVENT_CLASSIFICATION_BLOCK_MAX_LINES = 512
 EVENT_CLASSIFICATION_BLOCK_TARGET_BYTES = 4 * 1024 * 1024
@@ -26813,7 +26814,12 @@ def session_projection_stage_work_identities(
                 "stage_work_id"
             ]
         },
-        contracts={"boundary_merge": "bounded_tail_v1"},
+        contracts={
+            "boundary_merge": "bounded_tail_v1",
+            "rehydration_plan_version": (
+                SESSION_PROJECTION_REHYDRATION_PLAN_VERSION
+            ),
+        },
     )
     segment_identity = identity(
         "segment_index",
@@ -26838,6 +26844,11 @@ def session_projection_stage_work_identities(
             "classification": classification_identity[
                 "stage_work_id"
             ],
+        },
+        contracts={
+            "rehydration_plan_version": (
+                SESSION_PROJECTION_REHYDRATION_PLAN_VERSION
+            ),
         },
     )
     goals = identity(
@@ -39602,6 +39613,32 @@ def reindex_session_from_raw(
         }:
             work_state["raw_blocks"] = {}
             work_state["segments"] = {}
+            remove_projection_publish_path(
+                stage_dir / "segments"
+            )
+            remove_projection_publish_path(
+                stage_dir / "raw" / RAW_BLOCKS_DIR
+            )
+            for stale_raw_component in (
+                stage_dir / "raw" / RAW_BLOCK_INDEX_JSON,
+                stage_dir
+                / "raw"
+                / RAW_COMPACTION_EVENTS_JSONL,
+            ):
+                stale_raw_component.unlink(missing_ok=True)
+        if changed_stages & {
+            "task_episodes",
+            "goal_lifecycles",
+            "session_component_manifest",
+        }:
+            remove_projection_publish_path(
+                stage_dir / SESSION_INDEX_SHARDS_DIR
+            )
+            for stale_session_component in (
+                stage_dir / SESSION_INDEX_JSON,
+                stage_dir / SESSION_INDEX_MARKDOWN,
+            ):
+                stale_session_component.unlink(missing_ok=True)
         work_state["work_identity"] = work_identity
         work_state["stage_work_identities"] = (
             expected_stage_identities

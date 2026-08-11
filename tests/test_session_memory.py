@@ -86192,7 +86192,9 @@ def test_maintenance_cleanup_preserves_current_checkpoint_and_removes_only_obsol
     assert module.sha256_file(raw_path) == raw_sha_before_cleanup
 
 
-@pytest.mark.parametrize("change_kind", ["generation", "policy"])
+@pytest.mark.parametrize(
+    "change_kind", ["generation", "policy", "rehydration"]
+)
 def test_checkpoint_resume_invalidates_changed_generation_or_policy(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -86290,11 +86292,17 @@ def test_checkpoint_resume_invalidates_changed_generation_or_policy(
             "segment_index_generation_identity",
             changed_identity,
         )
-    else:
+    elif change_kind == "policy":
         monkeypatch.setattr(
             module,
             "DERIVED_TEXT_PRIVACY_POLICY_VERSION",
             module.DERIVED_TEXT_PRIVACY_POLICY_VERSION + 1,
+        )
+    else:
+        monkeypatch.setattr(
+            module,
+            "SESSION_PROJECTION_REHYDRATION_PLAN_VERSION",
+            module.SESSION_PROJECTION_REHYDRATION_PLAN_VERSION + 1,
         )
     fake_clock[0] = 0.0
     calls.clear()
@@ -86306,9 +86314,14 @@ def test_checkpoint_resume_invalidates_changed_generation_or_policy(
 
     assert interrupted["status"] == "checkpointed"
     assert resumed["status"] == "reindexed"
-    assert resumed["work_id"] != interrupted["work_id"]
+    if change_kind == "rehydration":
+        assert resumed["work_id"] == interrupted["work_id"]
+    else:
+        assert resumed["work_id"] != interrupted["work_id"]
     assert calls == list(range(resumed["segment_count"]))
-    assert old_work_dir.is_dir()
+    assert old_work_dir.is_dir() is (
+        change_kind != "rehydration"
+    )
 
 
 def test_session_projection_process_parallel_matches_serial_semantics(
