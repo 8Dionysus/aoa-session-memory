@@ -92870,13 +92870,21 @@ def test_task_episode_shard_reuse_admits_published_manifest_without_content_read
 
     monkeypatch.setattr(module, "read_json", guarded_read_json)
     monkeypatch.setattr(module, "sha256_file", guarded_sha256_file)
+    monkeypatch.setattr(
+        module,
+        "redact_derived_value",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("pre-redacted stable prefix re-redacted")
+        ),
+    )
     reused = module.materialize_session_index_task_episode_shards(
         stage_dir,
-        episodes,
+        first["payloads"],
         published_session_dir=published_dir,
         publish_identity=publish_identity,
         literal_policy=policy,
         workers=1,
+        pre_redacted_episode_count=len(episodes),
     )
 
     assert reused["complete"] is True
@@ -92885,6 +92893,9 @@ def test_task_episode_shard_reuse_admits_published_manifest_without_content_read
         "manifest_admitted_reused_shard_count"
     ] == len(episodes)
     assert reused["execution"]["rebuilt_shard_count"] == 0
+    assert reused["execution"]["pre_redacted_episode_count"] == len(
+        episodes
+    )
 
 
 def test_session_index_shard_manifest_validates_manifest_first_components(

@@ -23953,6 +23953,7 @@ def materialize_session_index_task_episode_shards(
     literal_policy: DerivedSessionSensitiveLiteralPolicy,
     workers: int,
     cooperative_deadline_monotonic: float | None = None,
+    pre_redacted_episode_count: int = 0,
 ) -> dict[str, Any]:
     generation_identity = task_episode_source_generation_identity()
     source = (
@@ -24014,15 +24015,6 @@ def materialize_session_index_task_episode_shards(
         expected_payload: dict[str, Any] | None = None
         expected_payload_sha256 = ""
         if prior is not None:
-            expected_payload = redact_derived_value(
-                episode,
-                literal_policy=literal_policy,
-            )
-            expected_payload_sha256 = (
-                session_index_shard_payload_sha256(
-                    expected_payload
-                )
-            )
             envelope, record = prior
             prior_source_identity = (
                 envelope.get("source_identity")
@@ -24034,6 +24026,26 @@ def materialize_session_index_task_episode_shards(
                     "task_episode_generation_id"
                 )
                 or ""
+            )
+            if (
+                ordinal < pre_redacted_episode_count
+                and prior_source_identity
+                == component_source_identity
+            ):
+                # The bounded stable prefix was hydrated from previously
+                # redacted shards.  Its exact source identity includes the
+                # privacy/redaction generations, so re-running recursive
+                # redaction over every historical episode adds no safety.
+                expected_payload = dict(episode)
+            else:
+                expected_payload = redact_derived_value(
+                    episode,
+                    literal_policy=literal_policy,
+                )
+            expected_payload_sha256 = (
+                session_index_shard_payload_sha256(
+                    expected_payload
+                )
             )
             prior_payload_matches = bool(
                 str(envelope.get("payload_sha256") or "")
@@ -24230,6 +24242,10 @@ def materialize_session_index_task_episode_shards(
                 migrated_predecessor_count
             ),
             "rebuilt_shard_count": processed_pending,
+            "pre_redacted_episode_count": min(
+                len(task_episodes),
+                max(0, pre_redacted_episode_count),
+            ),
         },
     }
 
@@ -25034,6 +25050,11 @@ def write_session_index_impl(
             workers=workers,
             cooperative_deadline_monotonic=(
                 cooperative_deadline_monotonic
+            ),
+            pre_redacted_episode_count=int_value(
+                task_episode_incremental_build.get(
+                    "reused_sealed_episode_count"
+                )
             ),
         )
     )

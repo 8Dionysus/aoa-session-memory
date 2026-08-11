@@ -52,6 +52,14 @@ then passed to any rewrite or restamp worker instead of being recursively
 scanned a second time. A worker without that explicit payload performs the full
 privacy pass.
 
+For append-stable bounded replay, the declared reused sealed-episode prefix is
+already hydrated from previously redacted shards. When an episode in that
+prefix has the exact current component source identity, including privacy and
+redaction generations, its hydrated payload is the expected redacted payload;
+the parent must not recursively redact it again. A source-identity mismatch,
+tail episode, unknown provenance, or policy-generation change retains the full
+privacy pass.
+
 These source-contract changes invalidate task-episode source and dependent
 session-index generations. Raw-event classification and segment-index producer
 contracts remain byte-identical and their generations remain reusable.
@@ -74,8 +82,9 @@ persisting a new cache, weakening redaction, or changing evidence authority.
 - Tradeoff: ordered-range lookup relies on the generated segment-manifest
   ordering contract; malformed external lists fail to match rather than being
   searched exhaustively.
-- Tradeoff: a prior shard still requires one complete expected-payload privacy
-  projection before it can be reused or restamped.
+- Tradeoff: a prior shard outside the explicitly bounded pre-redacted prefix,
+  or with a different component source identity, still requires one complete
+  expected-payload privacy projection before reuse or restamp.
 
 ## Boundaries
 
@@ -104,7 +113,8 @@ warranted.
 
 Focused regressions prove one semantic derivation per observed event, boundary-
 correct ordered range lookup, one cold top-level shard privacy pass, checkpoint
-resume, manifest validation, bounded hydration, and semantic admission. Paired
+resume, manifest validation, bounded hydration, exact-current pre-redacted
+prefix reuse without a second privacy pass, and semantic admission. Paired
 real-snapshot benchmarks record exact output SHA-256 parity. Full-suite, cold
 SLO, portable export, and installation proof remain separate gates. A later
 clean actual-snapshot run completed the 430 MB cold projection in `843.960 s`
