@@ -124,8 +124,9 @@ def mirror_session(
     workspace: Path,
     transcript: Path,
     session_id: str,
-) -> dict[str, Any]:
-    session_memory.mirror_transcript_without_indexing(
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    started = time.monotonic()
+    mirrored = session_memory.mirror_transcript_without_indexing(
         aoa_root=aoa_root,
         event={
             "session_id": session_id,
@@ -138,7 +139,245 @@ def mirror_session(
         now=session_memory.utc_now(),
         registry_lock_timeout_sec=0.0,
     )
-    return session_memory.resolve_session_record(aoa_root, session_id)
+    wall_seconds = time.monotonic() - started
+    capture = (
+        mirrored.get("capture")
+        if isinstance(mirrored.get("capture"), dict)
+        else {}
+    )
+    return (
+        session_memory.resolve_session_record(aoa_root, session_id),
+        capture_execution_summary(capture, wall_seconds=wall_seconds),
+    )
+
+
+def capture_execution_summary(
+    capture: dict[str, Any],
+    *,
+    wall_seconds: float,
+) -> dict[str, Any]:
+    overlay = (
+        capture.get("persistent_live_tail")
+        if isinstance(capture.get("persistent_live_tail"), dict)
+        else {}
+    )
+    postings = (
+        overlay.get("postings")
+        if isinstance(overlay.get("postings"), dict)
+        else {}
+    )
+    return {
+        "wall_seconds": round(wall_seconds, 6),
+        "raw_bytes": int(capture.get("raw_bytes") or 0),
+        "appended_bytes": int(capture.get("appended_bytes") or 0),
+        "appended_block_count": int(
+            capture.get("appended_block_count") or 0
+        ),
+        "sha256_state_bootstrap_bytes_read": int(
+            capture.get("sha256_state_bootstrap_bytes_read") or 0
+        ),
+        "sha256_delta_bytes_hashed": int(
+            capture.get("sha256_delta_bytes_hashed") or 0
+        ),
+        "postings": {
+            key: postings.get(key)
+            for key in (
+                "generation_id",
+                "manifest_bytes",
+                "processed_bytes",
+                "processed_line_count",
+                "new_entry_count",
+                "entry_count",
+                "token_count",
+                "shard_count",
+                "shards_read_for_update",
+                "shards_written",
+                "rewritten_entry_count",
+                "privacy_resanitization",
+                "source_unique_bytes_read",
+                "source_pass_bytes_read",
+                "source_bytes_read",
+                "historical_raw_bytes_read",
+                "pending_incomplete_bytes",
+                "no_op",
+            )
+            if key in postings
+        },
+        "truth_status": (
+            "benchmark_owned_capture_metrics_without_source_identity"
+        ),
+    }
+
+
+def benchmark_live_route_probes(
+    *,
+    aoa_root: Path,
+    session_dir: Path,
+    transcript: Path,
+    session_id: str,
+    repetitions: int,
+) -> dict[str, Any]:
+    runs: list[dict[str, Any]] = []
+    for ordinal in range(max(0, repetitions)):
+        unique_token = f"liverouteprobe{ordinal:04d}"
+        event = {
+            "timestamp": f"2026-08-08T12:03:{ordinal % 60:02d}Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": f"incremental live route {unique_token}",
+                    }
+                ],
+            },
+        }
+        availability_started = time.monotonic()
+        with transcript.open("a", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(
+                    event,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            )
+        manifest = session_memory.read_json(
+            session_dir / "session.manifest.json", {}
+        )
+        capture_started = time.monotonic()
+        capture = session_memory.preserve_unindexed_raw_capture(
+            session_dir=session_dir,
+            session_id=session_id,
+            transcript_path=transcript,
+            manifest=manifest,
+            hook_event_name="BenchmarkLiveRoute",
+            now=session_memory.utc_now(),
+        )
+        capture_seconds = time.monotonic() - capture_started
+        query_started = time.monotonic()
+        result = session_memory.live_tail_exact_search(
+            aoa_root=aoa_root,
+            session=session_id,
+            query=unique_token,
+            limit=5,
+        )
+        query_seconds = time.monotonic() - query_started
+        availability_seconds = time.monotonic() - availability_started
+        route = (
+            result.get("route")
+            if isinstance(result.get("route"), dict)
+            else {}
+        )
+        results = (
+            result.get("results")
+            if isinstance(result.get("results"), list)
+            else []
+        )
+        returned_current = any(
+            isinstance(item, dict)
+            and isinstance(item.get("freshness"), dict)
+            and item["freshness"].get("returned_evidence_current") is True
+            for item in results
+        )
+        summary = capture_execution_summary(
+            capture,
+            wall_seconds=capture_seconds,
+        )
+        runs.append(
+            {
+                "ordinal": ordinal,
+                "ok": bool(
+                    result.get("ok") is True
+                    and route.get("id")
+                    == "persistent_live_tail_postings"
+                    and int(result.get("result_count") or 0) >= 1
+                    and returned_current
+                ),
+                "capture_seconds": round(capture_seconds, 6),
+                "query_seconds": round(query_seconds, 6),
+                "availability_seconds": round(
+                    availability_seconds, 6
+                ),
+                "route_id": route.get("id"),
+                "result_count": int(result.get("result_count") or 0),
+                "returned_evidence_current": returned_current,
+                "global_recall_complete": bool(
+                    result.get("scan", {}).get("global_recall_complete")
+                )
+                if isinstance(result.get("scan"), dict)
+                else False,
+                "postings": summary["postings"],
+                "scan": {
+                    key: result.get("scan", {}).get(key)
+                    for key in (
+                        "posting_entry_count",
+                        "posting_candidate_count",
+                        "posting_entries_examined",
+                        "posting_manifest_bytes_read",
+                        "posting_shards_examined",
+                        "posting_shard_descriptors_examined",
+                        "posting_shards_filtered_without_read",
+                        "posting_shard_bytes_read",
+                        "posting_storage_mode",
+                        "posting_full_scan_performed",
+                        "raw_verified_result_count",
+                        "global_recall_complete",
+                    )
+                    if isinstance(result.get("scan"), dict)
+                    and key in result.get("scan", {})
+                },
+            }
+        )
+    capture_values = [float(run["capture_seconds"]) for run in runs]
+    query_values = [float(run["query_seconds"]) for run in runs]
+    availability_values = [
+        float(run["availability_seconds"]) for run in runs
+    ]
+    return {
+        "ok": bool(runs and all(run["ok"] for run in runs)),
+        "run_count": len(runs),
+        "capture_seconds_p50": round(percentile(capture_values, 0.50), 6),
+        "capture_seconds_p95": round(percentile(capture_values, 0.95), 6),
+        "query_seconds_p50": round(percentile(query_values, 0.50), 6),
+        "query_seconds_p95": round(percentile(query_values, 0.95), 6),
+        "availability_seconds_p50": round(
+            percentile(availability_values, 0.50), 6
+        ),
+        "availability_seconds_p95": round(
+            percentile(availability_values, 0.95), 6
+        ),
+        "overlay_p95_within_30_seconds": bool(
+            runs and percentile(capture_values, 0.95) <= 30.0
+        ),
+        "event_availability_p95_within_5_seconds": bool(
+            runs and percentile(availability_values, 0.95) <= 5.0
+        ),
+        "historical_raw_bytes_read": sum(
+            int(run["postings"].get("historical_raw_bytes_read") or 0)
+            for run in runs
+        ),
+        "max_shards_read_for_update": max(
+            (
+                int(run["postings"].get("shards_read_for_update") or 0)
+                for run in runs
+            ),
+            default=0,
+        ),
+        "max_posting_shards_examined": max(
+            (
+                int(run["scan"].get("posting_shards_examined") or 0)
+                for run in runs
+            ),
+            default=0,
+        ),
+        "runs": runs,
+        "truth_status": (
+            "benchmark_owned_append_to_verified_live_route_measurement"
+        ),
+    }
 
 
 def usage_snapshot() -> dict[str, float]:
@@ -478,6 +717,7 @@ def benchmark_receipt_base(
         "repetitions": args.repetitions,
         "serial_repetitions": args.serial_repetitions,
         "parallel_repetitions": args.parallel_repetitions,
+        "live_route_repetitions": args.live_route_repetitions,
     }
     if source_transcript:
         fixture["snapshot_copy"] = dict(
@@ -564,7 +804,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         raw_bytes = transcript.stat().st_size
 
         benchmark_root = workspace / "benchmark" / ".aoa"
-        serial_record = mirror_session(
+        serial_record, initial_capture = mirror_session(
             aoa_root=benchmark_root,
             workspace=workspace,
             transcript=transcript,
@@ -633,7 +873,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                 start_minute=1,
             ),
         )
-        fresh_record = mirror_session(
+        fresh_record, fresh_capture = mirror_session(
             aoa_root=benchmark_root,
             workspace=workspace,
             transcript=fresh_transcript,
@@ -644,6 +884,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             record=fresh_record,
             workers=args.workers,
         )
+        fresh["capture_execution"] = fresh_capture
         completed_runs["fresh_session"] = fresh
         write_partial_receipt(
             args,
@@ -676,6 +917,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         growth_manifest = session_memory.read_json(
             parallel_session_dir / "session.manifest.json", {}
         )
+        capture_started = time.monotonic()
         capture = session_memory.preserve_unindexed_raw_capture(
             session_dir=parallel_session_dir,
             session_id=session_id,
@@ -684,24 +926,38 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             hook_event_name="BenchmarkAppend",
             now=session_memory.utc_now(),
         )
+        capture_seconds = time.monotonic() - capture_started
         growing = benchmark_build(
             aoa_root=benchmark_root,
             record=parallel_record,
             workers=args.workers,
         )
-        growing["capture_execution"] = {
-            "appended_bytes": int(capture.get("appended_bytes") or 0),
-            "appended_block_count": int(
-                capture.get("appended_block_count") or 0
-            ),
-            "sha256_state_bootstrap_bytes_read": int(
-                capture.get("sha256_state_bootstrap_bytes_read") or 0
-            ),
-            "sha256_delta_bytes_hashed": int(
-                capture.get("sha256_delta_bytes_hashed") or 0
-            ),
-        }
+        growing["capture_execution"] = capture_execution_summary(
+            capture,
+            wall_seconds=capture_seconds,
+        )
         completed_runs["growing_session"] = growing
+        write_partial_receipt(
+            args,
+            raw_bytes=raw_bytes,
+            completed_runs=completed_runs,
+        )
+        live_route = (
+            benchmark_live_route_probes(
+                aoa_root=benchmark_root,
+                session_dir=parallel_session_dir,
+                transcript=transcript,
+                session_id=session_id,
+                repetitions=args.live_route_repetitions,
+            )
+            if args.live_route_repetitions
+            else {
+                "ok": True,
+                "run_count": 0,
+                "status": "not_requested",
+            }
+        )
+        completed_runs["live_route"] = live_route
         write_partial_receipt(
             args,
             raw_bytes=raw_bytes,
@@ -756,8 +1012,10 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                 run.get("raw_unchanged") is True
                 for run in serial_runs + parallel_runs
             )
+            and live_route.get("ok") is True
         ),
         "status": "complete",
+        "initial_capture_execution": initial_capture,
         "cold_serial": serial,
         "cold_parallel": parallel,
         "cold_serial_runs": serial_runs,
@@ -766,6 +1024,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         "cold_parallel_summary": parallel_summary,
         "fresh_session": fresh,
         "growing_session": growing,
+        "live_route": live_route,
         "serial_parallel_semantic_parity": serial_parallel_parity,
         "parallel_internal_semantic_parity": parallel_internal_parity,
         "parallel_speedup": round(speedup, 4),
@@ -781,6 +1040,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fresh-segments", type=int, default=2)
     parser.add_argument("--growth-segments", type=int, default=2)
     parser.add_argument("--repetitions", type=int, default=1)
+    parser.add_argument(
+        "--live-route-repetitions",
+        type=int,
+        default=0,
+        help=(
+            "Append unique complete events after stable projection and "
+            "measure capture plus verified persistent live-route latency."
+        ),
+    )
     parser.add_argument(
         "--serial-repetitions",
         type=int,
@@ -827,6 +1095,7 @@ def main() -> int:
         or args.repetitions < 1
         or args.serial_repetitions < 0
         or args.parallel_repetitions < 1
+        or args.live_route_repetitions < 0
     ):
         raise SystemExit("segment counts must be positive")
     if args.payload_bytes < 0 or not 1 <= args.workers <= 6:

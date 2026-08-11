@@ -56,6 +56,8 @@ def test_session_projection_benchmark_smoke_proves_parity_and_reuse(
             "1",
             "--growth-segments",
             "1",
+            "--live-route-repetitions",
+            "3",
             "--temp-root",
             str(tmp_path),
             "--output",
@@ -78,6 +80,18 @@ def test_session_projection_benchmark_smoke_proves_parity_and_reuse(
     assert payload["cold_parallel_summary"]["run_count"] == 1
     assert payload["cold_serial_summary"]["wall_seconds_p95"] > 0
     assert payload["cold_parallel_summary"]["wall_seconds_p95"] > 0
+    assert payload["initial_capture_execution"]["postings"][
+        "historical_raw_bytes_read"
+    ] == 0
+    assert payload["live_route"]["ok"] is True
+    assert payload["live_route"]["run_count"] == 3
+    assert payload["live_route"]["overlay_p95_within_30_seconds"] is True
+    assert payload["live_route"][
+        "event_availability_p95_within_5_seconds"
+    ] is True
+    assert payload["live_route"]["historical_raw_bytes_read"] == 0
+    assert payload["live_route"]["max_shards_read_for_update"] <= 1
+    assert payload["live_route"]["max_posting_shards_examined"] <= 1
     assert payload["cold_parallel_summary"][
         "cgroup_measurement_run_count"
     ] in {0, 1}
