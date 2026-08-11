@@ -671,6 +671,15 @@ maintenance; it does not start a second memory-heavy build. Applying Codex
 sweeps use the same lease per selected raw source at or above the heavy
 threshold, including mirror-only capture; smaller sources in the sweep remain
 eligible. Segment
+
+The recurring catch-up resource wrapper has two freshness routes. A ready
+live-tail target keeps the bounded targeted command. When no live-tail target
+is ready and the timer explicitly enables index drip, the wrapper launches the
+probe-class bounded `index-maintenance` route directly; it does not first
+attempt the global catch-up child and wait for resource denial. This preferred
+drip retains admission, the maintenance lock, dirty-first fairness, semantic
+progress receipts, and automatic retry. Its completion is bounded-scope
+completion only; backlog/deep remain responsible for global convergence.
 generation uses a deterministic process pool with a default of four workers
 and a bounded one-to-six range, falling back visibly to serial execution when
 the pool cannot start. Segment processes use the isolated `spawn` start method

@@ -59682,6 +59682,10 @@ def auto_maintenance_resource_status_retryable(status: str) -> bool:
         return False
     return (
         normalized.startswith("resource_blocked")
+        or normalized in {
+            "bounded_index_drip_progressed",
+            "bounded_index_drip_failed",
+        }
         or normalized in AUTO_MAINTENANCE_CHILD_PROGRESS_RETRY_STATUSES
         or normalized in {
             "skipped_lock_held",
@@ -59711,7 +59715,10 @@ def auto_maintenance_resource_status_progressed(
         return bool(payload.get("child_result_verified")) and bool(
             progress_evidence.get("verified") is True
         )
-    if normalized == "resource_blocked_index_drip_progressed":
+    if normalized in {
+        "resource_blocked_index_drip_progressed",
+        "bounded_index_drip_progressed",
+    }:
         return True
     if normalized != "resource_blocked_graph_drip_completed" or not isinstance(payload, dict):
         return False
@@ -60657,6 +60664,15 @@ def auto_maintenance_resource_launch(
         if live_tail_fast_path.get("used") and isinstance(live_tail_fast_path.get("child_command"), list)
         else None
     )
+    bounded_index_drip_preferred = bool(
+        profile == "catchup"
+        and target == "all"
+        and apply
+        and index_drip_on_block is True
+        and effective_index_drip_on_block
+        and repair_indexes is not False
+        and live_tail_child_command is None
+    )
     demand_key_child_command = (
         live_tail_child_command
         if live_tail_child_command
@@ -60707,24 +60723,25 @@ def auto_maintenance_resource_launch(
     returncode: int | None = None
     stdout = ""
     stderr = ""
-    try:
-        completed = subprocess.run(
-            command,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=float(runtime_envelope["wrapper_timeout_seconds"]),
-        )
-        returncode = completed.returncode
-        stdout = completed.stdout or ""
-        stderr = completed.stderr or ""
-        resource_payload = parse_json_object_from_stdout(stdout)
-    except FileNotFoundError as exc:
-        diagnostics.append(f"resource_launcher_missing:{exc.filename or resource_binary}")
-    except subprocess.TimeoutExpired as exc:
-        stdout = (exc.stdout or "") if isinstance(exc.stdout, str) else ""
-        stderr = (exc.stderr or "") if isinstance(exc.stderr, str) else ""
-        diagnostics.append("resource_launcher_timeout")
+    if not bounded_index_drip_preferred:
+        try:
+            completed = subprocess.run(
+                command,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=float(runtime_envelope["wrapper_timeout_seconds"]),
+            )
+            returncode = completed.returncode
+            stdout = completed.stdout or ""
+            stderr = completed.stderr or ""
+            resource_payload = parse_json_object_from_stdout(stdout)
+        except FileNotFoundError as exc:
+            diagnostics.append(f"resource_launcher_missing:{exc.filename or resource_binary}")
+        except subprocess.TimeoutExpired as exc:
+            stdout = (exc.stdout or "") if isinstance(exc.stdout, str) else ""
+            stderr = (exc.stderr or "") if isinstance(exc.stderr, str) else ""
+            diagnostics.append("resource_launcher_timeout")
     elapsed_ms = int((time.monotonic() - started) * 1000)
     blocked_reasons = resource_payload.get("blocked_reasons") if isinstance(resource_payload.get("blocked_reasons"), list) else []
     denied_reasons = resource_payload.get("denied_reasons") if isinstance(resource_payload.get("denied_reasons"), list) else []
@@ -60769,7 +60786,12 @@ def auto_maintenance_resource_launch(
         and child_result_verified
         and (child_payload.get("mutates") or child_payload.get("apply"))
     )
-    if blocked_reasons:
+    if bounded_index_drip_preferred:
+        status = "bounded_index_drip_preferred"
+        diagnostics.append(
+            "catchup_live_tail_not_ready_bounded_index_drip_preferred"
+        )
+    elif blocked_reasons:
         status = "resource_blocked"
         diagnostics.extend(f"resource_blocked:{item}" for item in blocked_reasons)
     elif denied_reasons:
@@ -60820,7 +60842,15 @@ def auto_maintenance_resource_launch(
         status = "resource_launcher_no_json"
         diagnostics.append("resource_launcher_no_json")
     fallback_index_drip: dict[str, Any] = {}
-    if status == "resource_blocked" and effective_index_drip_on_block and apply and repair_indexes is not False:
+    if (
+        status in {
+            "resource_blocked",
+            "bounded_index_drip_preferred",
+        }
+        and effective_index_drip_on_block
+        and apply
+        and repair_indexes is not False
+    ):
         fallback_demand_epoch = str(
             settings.get("resource_demand_epoch") or ""
         ).strip()
@@ -60872,6 +60902,11 @@ def auto_maintenance_resource_launch(
             fallback_resource_args.extend(
                 ["--estimate-confidence", str(fallback_effective_estimate_confidence)]
             )
+        index_drip_route_reason = (
+            "bounded_index_drip_preferred"
+            if bounded_index_drip_preferred
+            else "index_drip_on_block"
+        )
         fallback_command = [
             resource_binary,
             "resource",
@@ -60918,7 +60953,8 @@ def auto_maintenance_resource_launch(
             "--budget-seconds",
             str(max(1.0, float(index_drip_budget_seconds))),
             "--reason",
-            f"auto_maintenance_resource:{profile}:index_drip_on_block:{reason}",
+            f"auto_maintenance_resource:{profile}:"
+            f"{index_drip_route_reason}:{reason}",
             "--write-report",
         ]
         if selected_search_shard_repair_limit is not None:
@@ -61017,6 +61053,11 @@ def auto_maintenance_resource_launch(
         fallback_progressed = fallback_status == "progressed_with_remaining"
         fallback_index_drip = {
             "enabled": True,
+            "route_mode": (
+                "preferred_freshness_lane"
+                if bounded_index_drip_preferred
+                else "resource_block_fallback"
+            ),
             "ok": fallback_ok,
             "status": fallback_status,
             "made_progress": fallback_progress["made_progress"],
@@ -61064,14 +61105,19 @@ def auto_maintenance_resource_launch(
             "stderr_tail": fallback_stderr[-4000:],
             "diagnostics": sorted(set(fallback_diagnostics)),
         }
+        index_drip_status_prefix = (
+            "bounded_index_drip"
+            if bounded_index_drip_preferred
+            else "resource_blocked_index_drip"
+        )
         if fallback_ok:
-            status = "resource_blocked_index_drip_completed"
+            status = f"{index_drip_status_prefix}_completed"
             diagnostics.append("index_drip_fallback_completed")
         elif fallback_progressed:
-            status = "resource_blocked_index_drip_progressed"
+            status = f"{index_drip_status_prefix}_progressed"
             diagnostics.append("index_drip_fallback_progressed_with_remaining")
         else:
-            status = "resource_blocked_index_drip_failed"
+            status = f"{index_drip_status_prefix}_failed"
             diagnostics.append(f"index_drip_fallback_{fallback_status}")
     fallback_graph_drip: dict[str, Any] = {}
     graph_drip_circuit = (
@@ -61403,6 +61449,12 @@ def auto_maintenance_resource_launch(
         "target": target,
         "reason": reason,
         "live_tail_fast_path": live_tail_fast_path,
+        "bounded_index_drip_preferred": bounded_index_drip_preferred,
+        "bounded_index_drip_preference_reason": (
+            "catchup_live_tail_not_ready"
+            if bounded_index_drip_preferred
+            else ""
+        ),
         "index_drip_on_block": effective_index_drip_on_block,
         "index_drip_on_block_source": "profile_default" if index_drip_on_block is None else "explicit",
         "index_drip_memory_demand_floor_mib": index_drip_memory_demand_floor_mib,
@@ -61562,7 +61614,10 @@ def auto_maintenance_resource_launch(
         payload["report_json"] = str(report_json)
         payload["report_markdown"] = str(report_md)
     blocked_status = str(status).startswith("resource_blocked")
-    payload["recommended_exit_code"] = 1 if (fail_on_block and (blocked_status or deferred_status)) or (not payload_ok and not blocked_status and not deferred_status) else 0
+    bounded_index_drip_status = str(status).startswith(
+        "bounded_index_drip_"
+    )
+    payload["recommended_exit_code"] = 1 if (fail_on_block and (blocked_status or deferred_status)) or (not payload_ok and not blocked_status and not deferred_status and not bounded_index_drip_status) else 0
     return payload
 
 
@@ -160328,7 +160383,10 @@ def diagnostic_report_handled_resource_fallback(report: dict[str, Any]) -> bool:
         if resource_fallback_child_status(fallback) in {"skipped_lock_held", "deferred_conflicting_lease"}:
             return False
         return fallback.get("ok") is True and "graph_drip_fallback_completed" in diagnostic_set
-    if status == "resource_blocked_index_drip_completed":
+    if status in {
+        "resource_blocked_index_drip_completed",
+        "bounded_index_drip_completed",
+    }:
         fallback = report.get("fallback_index_drip") if isinstance(report.get("fallback_index_drip"), dict) else {}
         if resource_fallback_child_status(fallback) in {"skipped_lock_held", "deferred_conflicting_lease"}:
             return False
@@ -160550,7 +160608,10 @@ def recent_problem_handled_by_current_state(
             for key in ("actionable_count", "dirty_count", "missing_count", "blocked_count")
         )
     if (
-        status == "resource_blocked_index_drip_failed"
+        status in {
+            "resource_blocked_index_drip_failed",
+            "bounded_index_drip_failed",
+        }
         and str(fallback_index_drip.get("status") or "") == "skipped_lock_held"
         and "index_drip_fallback_skipped_lock_held" in diagnostics
     ):

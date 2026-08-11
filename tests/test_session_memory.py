@@ -56284,6 +56284,7 @@ def test_catchup_auto_maintenance_resource_can_disable_profile_graph_drip(
         workspace_root=workspace,
         aoa_root=aoa_root,
         profile="catchup",
+        target="bounded-target",
         apply=True,
         write_report=True,
         reason="timer_catchup",
@@ -56307,7 +56308,7 @@ def test_catchup_auto_maintenance_resource_can_disable_profile_graph_drip(
     assert Path(payload["report_markdown"]).exists()
 
 
-def test_catchup_auto_maintenance_resource_uses_explicit_index_drip_fallback(
+def test_catchup_auto_maintenance_resource_prefers_explicit_bounded_index_drip(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
     workspace = tmp_path / "AbyssOS"
@@ -56317,34 +56318,21 @@ def test_catchup_auto_maintenance_resource_uses_explicit_index_drip_fallback(
 
     def fake_run(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
         calls.append(command)
-        if len(calls) == 1:
-            stdout = json.dumps(
-                {
-                    "schema": "abyss_machine_resource_plan_v1",
-                    "generated_at": "2026-06-26T00:00:00-06:00",
-                    "ok": False,
-                    "blocked_reasons": ["indexing_unattended_swap_used_pressure"],
-                    "denied_reasons": [],
-                    "request": {"class": "medium", "kind": "indexing"},
-                    "execution": {"ok": None, "returncode": None},
-                }
-            )
-        else:
-            stdout = json.dumps(
-                {
-                    "schema": "abyss_machine_resource_launch_v1",
-                    "generated_at": "2026-06-26T00:00:10-06:00",
+        stdout = json.dumps(
+            {
+                "schema": "abyss_machine_resource_launch_v1",
+                "generated_at": "2026-06-26T00:00:10-06:00",
+                "ok": True,
+                "blocked_reasons": [],
+                "denied_reasons": [],
+                "request": {"class": "probe", "kind": "indexing"},
+                "execution": {
                     "ok": True,
-                    "blocked_reasons": [],
-                    "denied_reasons": [],
-                    "request": {"class": "probe", "kind": "indexing"},
-                    "execution": {
-                        "ok": True,
-                        "returncode": 0,
-                        "stdout_tail": "{\"ok\": true, \"search_dirty_session_count\": 119}",
-                    },
-                }
-            )
+                    "returncode": 0,
+                    "stdout_tail": "{\"ok\": true, \"search_dirty_session_count\": 119}",
+                },
+            }
+        )
         return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
 
     monkeypatch.setattr(module.subprocess, "run", fake_run)
@@ -56360,31 +56348,42 @@ def test_catchup_auto_maintenance_resource_uses_explicit_index_drip_fallback(
     )
 
     assert payload["ok"] is False
-    assert payload["status"] == "resource_blocked_index_drip_completed"
+    assert payload["status"] == "bounded_index_drip_completed"
     assert payload["mutates"] is True
     assert payload["recommended_exit_code"] == 0
+    assert payload["bounded_index_drip_preferred"] is True
+    assert payload["bounded_index_drip_preference_reason"] == (
+        "catchup_live_tail_not_ready"
+    )
     assert payload["index_drip_on_block"] is True
     assert payload["index_drip_on_block_source"] == "explicit"
     assert payload["fallback_index_drip"]["ok"] is True
     assert payload["fallback_index_drip"]["status"] == "completed"
+    assert payload["fallback_index_drip"]["route_mode"] == (
+        "preferred_freshness_lane"
+    )
     assert payload["fallback_index_drip"]["repair_limit"] == 12
     assert payload["search_shard_repair_limit"] == 24
     assert payload["fallback_index_drip"]["search_shard_repair_limit"] == 24
-    assert calls[0][3:5] == ["--class", "medium"]
-    assert calls[1][3:5] == ["--class", "probe"]
-    assert calls[1][calls[1].index("--demand-key") + 1] == (
+    assert len(calls) == 1
+    assert calls[0][3:5] == ["--class", "probe"]
+    assert calls[0][calls[0].index("--demand-key") + 1] == (
         "aoa-session-memory:auto-maintenance:catchup:index-drip-v4"
     )
-    assert calls[1][calls[1].index("--demand-owner") + 1] == "aoa-session-memory"
-    assert "index-maintenance" in calls[1]
-    assert "graph-maintenance" not in calls[1]
-    assert "--observe-query-demand" in calls[1]
-    assert calls[1][calls[1].index("--discovery-limit") + 1] == "24"
-    assert "--skip-token-accounting" in calls[1]
-    assert "--skip-graph-repair" in calls[1]
-    assert "--repair-limit" in calls[1]
-    assert "12" in calls[1]
-    assert calls[1][calls[1].index("--search-shard-repair-limit") + 1] == "24"
+    assert calls[0][calls[0].index("--demand-owner") + 1] == "aoa-session-memory"
+    assert "index-maintenance" in calls[0]
+    assert "graph-maintenance" not in calls[0]
+    assert "--observe-query-demand" in calls[0]
+    assert calls[0][calls[0].index("--discovery-limit") + 1] == "24"
+    assert "--skip-token-accounting" in calls[0]
+    assert "--skip-graph-repair" in calls[0]
+    assert "--repair-limit" in calls[0]
+    assert "12" in calls[0]
+    assert calls[0][calls[0].index("--search-shard-repair-limit") + 1] == "24"
+    assert (
+        "catchup_live_tail_not_ready_bounded_index_drip_preferred"
+        in payload["diagnostics"]
+    )
     assert "index_drip_fallback_completed" in payload["diagnostics"]
     assert Path(payload["report_json"]).exists()
     assert Path(payload["report_markdown"]).exists()
@@ -56559,6 +56558,7 @@ def test_catchup_index_drip_reports_bounded_progress_without_false_failure(
         workspace_root=workspace,
         aoa_root=aoa_root,
         profile="catchup",
+        target="bounded-target",
         apply=True,
         reason="timer_catchup",
         index_drip_on_block=True,
@@ -56710,6 +56710,7 @@ def test_catchup_index_drip_floor_prefers_larger_learned_demand_and_is_retryable
         workspace_root=workspace,
         aoa_root=aoa_root,
         profile="catchup",
+        target="bounded-target",
         apply=True,
         reason="timer_catchup",
         index_drip_on_block=True,
@@ -56808,6 +56809,7 @@ def test_index_drip_fallback_reports_child_lock_conflict(tmp_path: Path, monkeyp
         workspace_root=workspace,
         aoa_root=aoa_root,
         profile="catchup",
+        target="bounded-target",
         apply=True,
         reason="timer_catchup",
         index_drip_on_block=True,
