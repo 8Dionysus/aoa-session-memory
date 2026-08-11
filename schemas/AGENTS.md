@@ -15,8 +15,8 @@ or naming semantics by themselves.
 - `raw-capture-state.schema.json` distinguishes preserved-but-unindexed raw
   evidence from a capture committed with one session projection generation.
 - `segment.index.schema.json` describes generated segment event indexes.
-  It includes route-signal projections such as `by_route_layer` and
-  `by_route_signal`.
+  It includes immutable segment component identity, index-first render mode,
+  and route-signal projections such as `by_route_layer` and `by_route_signal`.
 - `session.manifest.schema.json` describes session archive manifests.
 - `skill-usage-receipt.schema.json` describes one immutable, owner-reviewed
   positive skill-use evidence packet. It may admit invocation, verification,

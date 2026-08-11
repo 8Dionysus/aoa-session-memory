@@ -12,12 +12,14 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable, Iterator
 
 import aoa_session_memory as session_memory
 
 
-def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+def write_jsonl(
+    path: Path, rows: Iterable[dict[str, Any]]
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
         for row in rows:
@@ -33,58 +35,44 @@ def synthetic_rows(
     cwd: Path,
     segments: int,
     payload_bytes: int,
+    events_per_segment: int = 2,
     start_minute: int = 0,
-) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = [
-        {
-            "timestamp": f"2026-08-08T12:{start_minute:02d}:00Z",
-            "type": "session_meta",
-            "payload": {"id": session_id, "cwd": str(cwd)},
-        }
-    ]
+) -> Iterator[dict[str, Any]]:
+    yield {
+        "timestamp": f"2026-08-08T12:{start_minute:02d}:00Z",
+        "type": "session_meta",
+        "payload": {"id": session_id, "cwd": str(cwd)},
+    }
     filler = "x" * max(0, payload_bytes)
     for ordinal in range(max(1, segments)):
         second = ordinal % 50 + 1
-        rows.extend(
-            [
-                {
-                    "timestamp": f"2026-08-08T12:{start_minute:02d}:{second:02d}Z",
-                    "type": "response_item",
-                    "payload": {
-                        "type": "message",
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "input_text",
-                                "text": (
-                                    f"benchmark segment {ordinal} " + filler
-                                ),
-                            }
-                        ],
-                    },
+        for event_ordinal in range(max(1, events_per_segment)):
+            role = "user" if event_ordinal == 0 else "assistant"
+            content_type = (
+                "input_text" if role == "user" else "output_text"
+            )
+            yield {
+                "timestamp": f"2026-08-08T12:{start_minute:02d}:{second:02d}Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": role,
+                    "content": [
+                        {
+                            "type": content_type,
+                            "text": (
+                                f"benchmark segment {ordinal} event "
+                                f"{event_ordinal} " + filler
+                            ),
+                        }
+                    ],
                 },
-                {
-                    "timestamp": f"2026-08-08T12:{start_minute:02d}:{second:02d}Z",
-                    "type": "response_item",
-                    "payload": {
-                        "type": "message",
-                        "role": "assistant",
-                        "content": [
-                            {
-                                "type": "output_text",
-                                "text": f"completed segment {ordinal}",
-                            }
-                        ],
-                    },
-                },
-                {
-                    "timestamp": f"2026-08-08T12:{start_minute:02d}:{second:02d}Z",
-                    "type": "turn_context",
-                    "payload": {"summary": f"boundary {ordinal}"},
-                },
-            ]
-        )
-    return rows
+            }
+        yield {
+            "timestamp": f"2026-08-08T12:{start_minute:02d}:{second:02d}Z",
+            "type": "turn_context",
+            "payload": {"summary": f"boundary {ordinal}"},
+        }
 
 
 def mirror_session(
@@ -132,6 +120,54 @@ def usage_snapshot() -> dict[str, float]:
     }
 
 
+def percentile(values: list[float], percentile_value: float) -> float:
+    """Return a deterministic nearest-rank percentile for benchmark receipts."""
+    if not values:
+        return 0.0
+    ordered = sorted(float(value) for value in values)
+    rank = max(
+        1,
+        min(
+            len(ordered),
+            int((percentile_value * len(ordered) + 0.999999)),
+        ),
+    )
+    return ordered[rank - 1]
+
+
+def benchmark_run_summary(
+    runs: list[dict[str, Any]],
+) -> dict[str, Any]:
+    wall = [float(run.get("wall_seconds") or 0.0) for run in runs]
+    cpu = [float(run.get("cpu_seconds") or 0.0) for run in runs]
+    return {
+        "run_count": len(runs),
+        "wall_seconds_p50": round(percentile(wall, 0.50), 6),
+        "wall_seconds_p95": round(percentile(wall, 0.95), 6),
+        "cpu_seconds_p50": round(percentile(cpu, 0.50), 6),
+        "cpu_seconds_p95": round(percentile(cpu, 0.95), 6),
+        "max_self_rss_kib": max(
+            (int(run.get("self_max_rss_kib") or 0) for run in runs),
+            default=0,
+        ),
+        "max_child_rss_kib": max(
+            (int(run.get("child_max_rss_kib") or 0) for run in runs),
+            default=0,
+        ),
+        "swap_delta": sum(
+            int(run.get("swap_delta") or 0) for run in runs
+        ),
+        "semantic_digests": sorted(
+            {
+                str(run.get("semantic_digest", {}).get("sha256") or "")
+                for run in runs
+                if isinstance(run.get("semantic_digest"), dict)
+                and run.get("semantic_digest", {}).get("sha256")
+            }
+        ),
+    }
+
+
 def benchmark_build(
     *,
     aoa_root: Path,
@@ -165,6 +201,9 @@ def benchmark_build(
     )
     return {
         "status": result.get("status"),
+        "action": result.get("action"),
+        "diagnostics": result.get("diagnostics", []),
+        "checkpoint_phase": result.get("checkpoint_phase"),
         "workers_requested": workers,
         "wall_seconds": round(wall_seconds, 6),
         "cpu_seconds": round(cpu_seconds, 6),
@@ -191,7 +230,19 @@ def benchmark_build(
         "raw_block_execution": result.get(
             "raw_block_execution", {}
         ),
+        "raw_scan_execution": result.get(
+            "raw_scan_execution", {}
+        ),
+        "parent_rehydration_execution": result.get(
+            "parent_rehydration_execution", {}
+        ),
+        "classification_execution": result.get(
+            "classification_execution", {}
+        ),
         "segment_execution": result.get("segment_execution", {}),
+        "session_index_execution": result.get(
+            "session_index_execution", {}
+        ),
         "semantic_digest": validation.get("semantic_digest", {}),
         "raw_sha256_before": raw_sha_before,
         "raw_sha256_after": session_memory.sha256_file(raw_path),
@@ -215,8 +266,10 @@ def benchmark_receipt_base(
             "raw_bytes": raw_bytes,
             "segments_requested": args.segments,
             "payload_bytes_per_primary_event": args.payload_bytes,
+            "events_per_segment": args.events_per_segment,
             "fresh_segments": args.fresh_segments,
             "growth_segments": args.growth_segments,
+            "repetitions": args.repetitions,
         },
         "host": {
             "cpu_count": os.cpu_count(),
@@ -237,7 +290,7 @@ def write_partial_receipt(
     args: argparse.Namespace,
     *,
     raw_bytes: int,
-    completed_runs: dict[str, dict[str, Any]],
+    completed_runs: dict[str, Any],
 ) -> None:
     if not args.output:
         return
@@ -270,6 +323,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                 cwd=workspace,
                 segments=args.segments,
                 payload_bytes=args.payload_bytes,
+                events_per_segment=args.events_per_segment,
             ),
         )
         raw_bytes = transcript.stat().st_size
@@ -283,36 +337,53 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         )
         baseline_snapshot = root / "cold-baseline-snapshot"
         shutil.copytree(benchmark_root, baseline_snapshot)
-        serial = benchmark_build(
-            aoa_root=benchmark_root,
-            record=serial_record,
-            workers=1,
-        )
-        completed_runs = {"cold_serial": serial}
-        write_partial_receipt(
-            args,
-            raw_bytes=raw_bytes,
-            completed_runs=completed_runs,
-        )
-        # Reset only the benchmark-owned temporary projection root so the
-        # parallel run is a true cold build from the exact same captured
-        # authority and metadata at the same logical paths.
-        shutil.rmtree(benchmark_root)
-        shutil.copytree(baseline_snapshot, benchmark_root)
-        parallel_record = session_memory.resolve_session_record(
-            benchmark_root, "benchmark-representative"
-        )
-        parallel = benchmark_build(
-            aoa_root=benchmark_root,
-            record=parallel_record,
-            workers=args.workers,
-        )
-        completed_runs["cold_parallel"] = parallel
-        write_partial_receipt(
-            args,
-            raw_bytes=raw_bytes,
-            completed_runs=completed_runs,
-        )
+        serial_runs: list[dict[str, Any]] = []
+        parallel_runs: list[dict[str, Any]] = []
+        completed_runs: dict[str, Any] = {}
+        parallel_record = serial_record
+        for _repetition in range(args.repetitions):
+            # Reset only the benchmark-owned temporary projection root so
+            # every run starts from the exact same captured authority and
+            # metadata at the same logical paths.
+            shutil.rmtree(benchmark_root)
+            shutil.copytree(baseline_snapshot, benchmark_root)
+            serial_record = session_memory.resolve_session_record(
+                benchmark_root, "benchmark-representative"
+            )
+            serial_runs.append(
+                benchmark_build(
+                    aoa_root=benchmark_root,
+                    record=serial_record,
+                    workers=1,
+                )
+            )
+            completed_runs["cold_serial_runs"] = serial_runs
+            write_partial_receipt(
+                args,
+                raw_bytes=raw_bytes,
+                completed_runs=completed_runs,
+            )
+
+            shutil.rmtree(benchmark_root)
+            shutil.copytree(baseline_snapshot, benchmark_root)
+            parallel_record = session_memory.resolve_session_record(
+                benchmark_root, "benchmark-representative"
+            )
+            parallel_runs.append(
+                benchmark_build(
+                    aoa_root=benchmark_root,
+                    record=parallel_record,
+                    workers=args.workers,
+                )
+            )
+            completed_runs["cold_parallel_runs"] = parallel_runs
+            write_partial_receipt(
+                args,
+                raw_bytes=raw_bytes,
+                completed_runs=completed_runs,
+            )
+        serial = serial_runs[0]
+        parallel = parallel_runs[0]
 
         fresh_transcript = root / "fresh.jsonl"
         write_jsonl(
@@ -322,6 +393,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                 cwd=workspace,
                 segments=args.fresh_segments,
                 payload_bytes=min(args.payload_bytes, 4096),
+                events_per_segment=args.events_per_segment,
                 start_minute=1,
             ),
         )
@@ -346,19 +418,17 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         parallel_session_dir = session_memory.session_dir_from_record(
             parallel_record
         )
-        growing_raw_path = Path(
-            session_memory.read_json(
-                parallel_session_dir / "session.manifest.json", {}
-            )["raw"]["path"]
-        )
-        with growing_raw_path.open("a", encoding="utf-8") as handle:
-            for row in synthetic_rows(
+        growth_rows = synthetic_rows(
                 session_id="benchmark-tail",
                 cwd=workspace,
                 segments=args.growth_segments,
                 payload_bytes=min(args.payload_bytes, 4096),
+                events_per_segment=args.events_per_segment,
                 start_minute=2,
-            )[1:]:
+            )
+        next(growth_rows, None)
+        with transcript.open("a", encoding="utf-8") as handle:
+            for row in growth_rows:
                 handle.write(
                     json.dumps(
                         row,
@@ -367,11 +437,34 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                     )
                     + "\n"
                 )
+        growth_manifest = session_memory.read_json(
+            parallel_session_dir / "session.manifest.json", {}
+        )
+        capture = session_memory.preserve_unindexed_raw_capture(
+            session_dir=parallel_session_dir,
+            session_id="benchmark-representative",
+            transcript_path=transcript,
+            manifest=growth_manifest,
+            hook_event_name="BenchmarkAppend",
+            now=session_memory.utc_now(),
+        )
         growing = benchmark_build(
             aoa_root=benchmark_root,
             record=parallel_record,
             workers=args.workers,
         )
+        growing["capture_execution"] = {
+            "appended_bytes": int(capture.get("appended_bytes") or 0),
+            "appended_block_count": int(
+                capture.get("appended_block_count") or 0
+            ),
+            "sha256_state_bootstrap_bytes_read": int(
+                capture.get("sha256_state_bootstrap_bytes_read") or 0
+            ),
+            "sha256_delta_bytes_hashed": int(
+                capture.get("sha256_delta_bytes_hashed") or 0
+            ),
+        }
         completed_runs["growing_session"] = growing
         write_partial_receipt(
             args,
@@ -379,35 +472,50 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             completed_runs=completed_runs,
         )
 
-    serial_digest = str(
-        serial.get("semantic_digest", {}).get("sha256") or ""
-    )
-    parallel_digest = str(
-        parallel.get("semantic_digest", {}).get("sha256") or ""
-    )
+    serial_summary = benchmark_run_summary(serial_runs)
+    parallel_summary = benchmark_run_summary(parallel_runs)
+    serial_digests = set(serial_summary["semantic_digests"])
+    parallel_digests = set(parallel_summary["semantic_digests"])
+    serial_digest = next(iter(serial_digests), "")
+    parallel_digest = next(iter(parallel_digests), "")
     speedup = (
-        float(serial["wall_seconds"]) / float(parallel["wall_seconds"])
-        if float(parallel["wall_seconds"]) > 0
+        float(serial_summary["wall_seconds_p50"])
+        / float(parallel_summary["wall_seconds_p50"])
+        if float(parallel_summary["wall_seconds_p50"]) > 0
         else 0.0
     )
     return {
         **benchmark_receipt_base(args, raw_bytes=raw_bytes),
         "ok": bool(
-            serial.get("status") == "reindexed"
-            and parallel.get("status") == "reindexed"
+            all(run.get("status") == "reindexed" for run in serial_runs)
+            and all(
+                run.get("status") == "reindexed"
+                for run in parallel_runs
+            )
             and fresh.get("status") == "reindexed"
             and growing.get("status") == "reindexed"
             and serial_digest
-            and serial_digest == parallel_digest
-            and serial.get("raw_unchanged") is True
-            and parallel.get("raw_unchanged") is True
+            and serial_digests == parallel_digests
+            and len(serial_digests) == 1
+            and all(
+                run.get("raw_unchanged") is True
+                for run in serial_runs + parallel_runs
+            )
         ),
         "status": "complete",
         "cold_serial": serial,
         "cold_parallel": parallel,
+        "cold_serial_runs": serial_runs,
+        "cold_parallel_runs": parallel_runs,
+        "cold_serial_summary": serial_summary,
+        "cold_parallel_summary": parallel_summary,
         "fresh_session": fresh,
         "growing_session": growing,
-        "serial_parallel_semantic_parity": serial_digest == parallel_digest,
+        "serial_parallel_semantic_parity": bool(
+            serial_digests
+            and serial_digests == parallel_digests
+            and len(serial_digests) == 1
+        ),
         "parallel_speedup": round(speedup, 4),
     }
 
@@ -416,9 +524,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--segments", type=int, default=40)
     parser.add_argument("--payload-bytes", type=int, default=4096)
+    parser.add_argument("--events-per-segment", type=int, default=2)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--fresh-segments", type=int, default=2)
     parser.add_argument("--growth-segments", type=int, default=2)
+    parser.add_argument("--repetitions", type=int, default=1)
     parser.add_argument("--temp-root")
     parser.add_argument("--output")
     return parser
@@ -426,7 +536,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
-    if args.segments < 1 or args.fresh_segments < 1:
+    if (
+        args.segments < 1
+        or args.fresh_segments < 1
+        or args.events_per_segment < 1
+        or args.repetitions < 1
+    ):
         raise SystemExit("segment counts must be positive")
     if args.payload_bytes < 0 or not 1 <= args.workers <= 6:
         raise SystemExit("payload must be nonnegative and workers must be 1..6")

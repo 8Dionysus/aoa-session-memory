@@ -57,6 +57,7 @@ EVENT_CLASSIFICATION_BLOCK_MAX_LINES = 512
 EVENT_CLASSIFICATION_BLOCK_TARGET_BYTES = 4 * 1024 * 1024
 EVENT_CLASSIFICATION_CACHE_DIR = "classification-cache"
 EVENT_CLASSIFICATION_CACHE_INDEX_JSON = "index.json"
+SENSITIVE_STRUCTURAL_MARKER_VERSION = 1
 SESSION_INDEX_SHARD_SCHEMA_VERSION = 1
 SESSION_INDEX_SHARDS_DIR = "session-index-shards"
 SESSION_INDEX_SHARD_MANIFEST_JSON = "manifest.json"
@@ -86,18 +87,66 @@ PROJECTION_PRODUCER_CONTRACT_VERSION = 1
 PROJECTION_PRODUCER_IDENTITY_MODE = (
     "projection_source_contract_ranges_v1"
 )
+PROJECTION_GENERATION_DAG_VERSION = 2
+PROJECTION_PREDECESSOR_ATTESTATION_VERSION = 1
+DECLARED_PROJECTION_PREDECESSOR_GENERATION_IDS: dict[
+    str,
+    frozenset[str],
+] = {
+    # Exact generation identities published by the 0.7.0 source before the
+    # dependency DAG was corrected.  These are a bounded transition allowlist,
+    # not schema-level compatibility claims.
+    "raw_event_classification_cache": frozenset(
+        {"bbe6dcc2fd98e1db25ea866eafbf79b242b0caf06ffbc05274f0f2c0ccfa7644"}
+    ),
+    "segment_index": frozenset(
+        {"0b23900190fd835ee724c548900dc5984bc0aa1f03c1cbcd395a4bf09c18a6d5"}
+    ),
+    "task_episode_source": frozenset(
+        {"496c751411bc10da537166036c0665c7b8518be76d0b5073527a4211e3ee3d7f"}
+    ),
+    "session_index": frozenset(
+        {"10decaa465e6cb12cc50839be886d509a74f49f1c0112d1e34b8e3ae098b8842"}
+    ),
+}
 PROJECTION_PRODUCER_SOURCE_RANGES: dict[
     str,
     tuple[tuple[str, str], ...],
 ] = {
+    "raw_event_classification_cache": (
+        (
+            "def command_classifier(",
+            "def event_msg_type(",
+        ),
+    ),
     "segment_index": (
-        ("def parse_raw_events(", "def task_episode_lineage_for_range("),
-        ("def write_raw_block_artifacts(", "def write_session_index("),
+        ("def event_msg_type(", "def task_episode_lineage_for_range("),
+        ("def event_index_record(", "def render_segment_markdown_on_demand("),
+        (
+            "def reuse_published_session_segment(",
+            "def task_episode_component_source_identity(",
+        ),
+    ),
+    "review_rendering": (
+        (
+            "def render_segment_markdown_on_demand(",
+            "def reuse_published_session_segment(",
+        ),
     ),
     "task_episode_source": (
         (
             "def task_episode_lineage_for_range(",
-            "def write_raw_block_artifacts(",
+            "def goal_usage_fields_from_mapping(",
+        ),
+        (
+            "def task_episode_component_source_identity(",
+            "def write_session_index_impl(",
+        ),
+    ),
+    "goal_lifecycles": (
+        (
+            "def task_episode_id_for_event(",
+            "def event_index_record(",
         ),
     ),
     "session_index": (
@@ -164,6 +213,12 @@ PROJECTION_PRODUCER_SOURCE_RANGES: dict[
     "entity_registry": (
         ("def entity_registry_id(", "def load_entity_registry("),
         ("def build_parser()", "def main("),
+    ),
+    "persistent_live_tail_postings": (
+        (
+            "def persistent_live_tail_postings_path(",
+            "def raw_capture_epoch_id(",
+        ),
     ),
 }
 
@@ -391,6 +446,18 @@ MAINTENANCE_COORDINATOR_STATE_JSON = "maintenance-coordinator.json"
 MAINTENANCE_BULK_MODES = {"catchup", "backlog", "deep", "manual-bulk"}
 HOOK_JOBS_ROOT = DIAGNOSTICS_ROOT / "hook-jobs"
 HOOK_WORKER_SEEN_JSON = Path("hooks/worker-seen.json")
+PROJECTION_OUTBOX_ROOT = Path("projection-outbox")
+PROJECTION_OUTBOX_RECORDS_DIR = PROJECTION_OUTBOX_ROOT / "records"
+PROJECTION_OUTBOX_CONSUMER_STATE_DIR = (
+    PROJECTION_OUTBOX_ROOT / "consumer-state"
+)
+PROJECTION_OUTBOX_SCHEMA_VERSION = 1
+PROJECTION_OUTBOX_CONSUMERS = (
+    "exact_and_lexical_search",
+    "episode_semantic",
+    "entity_registry",
+    "graph",
+)
 SEARCH_ROOT = Path("search")
 SEARCH_DB_NAME = "aoa-search.sqlite3"
 SEARCH_PROVIDER_CONFIG_PATH = Path("config/search-providers.json")
@@ -420,7 +487,18 @@ RAW_SOURCE_JSON = "source.json"
 LEGACY_RAW_SOURCE_JSON = "raw-source.json"
 RAW_CAPTURES_DIR = "captures"
 RAW_CAPTURE_STATE_JSON = "capture.latest.json"
-RAW_CAPTURE_STATE_SCHEMA_VERSION = 1
+RAW_CAPTURE_STATE_SCHEMA_VERSION = 2
+RAW_CAPTURE_LEDGER_JSON = "capture-ledger.json"
+RAW_CAPTURE_LEDGER_SCHEMA_VERSION = 1
+RAW_CAPTURE_BLOCKS_DIR = "capture-blocks"
+RAW_CAPTURE_BLOCK_TARGET_BYTES = 4 * 1024 * 1024
+PERSISTENT_LIVE_TAIL_INDEX_JSON = "live-tail.index.json"
+PERSISTENT_LIVE_TAIL_INDEX_SCHEMA_VERSION = 1
+PERSISTENT_LIVE_TAIL_POSTINGS_JSON = "live-tail.postings.json"
+PERSISTENT_LIVE_TAIL_POSTINGS_SCHEMA_VERSION = 2
+CAPTURE_WATCH_STATE_JSON = "capture-watch-state.json"
+CAPTURE_WATCH_STATE_LOCK = "capture-watch-state.lock"
+CAPTURE_WATCH_STATE_SCHEMA_VERSION = 1
 RAW_BLOCKS_DIR = "blocks"
 RAW_BLOCK_INDEX_JSON = "blocks.index.json"
 RAW_COMPACTION_EVENTS_JSONL = "compaction-events.jsonl"
@@ -440,6 +518,7 @@ TASK_EPISODE_REPRESENTATION_VERSION = 9
 TASK_EPISODE_BOUNDARY_POLICY_VERSION = 6
 TASK_EPISODE_IDENTITY_VERSION = 1
 TASK_EPISODE_EVIDENCE_INTEGRITY_VERSION = 1
+TASK_EPISODE_BUILDER_STATE_VERSION = 1
 TASK_EPISODE_COMPATIBLE_SCHEMA_MIN = 2
 TASK_EPISODE_REPRESENTATION_MAX_CHARS = 900
 TASK_EPISODE_COMPACT_SUCCESS_OUTPUT_MAX_CHARS = 640
@@ -655,6 +734,7 @@ PROJECTION_SEMANTIC_VOLATILE_KEYS = frozenset(
         "route_refreshed_at",
         "source_latest_mtime",
         "updated_at",
+        "artifact_receipts",
     }
 )
 SEARCH_BODY_STORAGE_MODE = "compressed_full_body_slim_preview_hot"
@@ -3811,6 +3891,69 @@ def write_json(path: Path, payload: Any) -> None:
             os.close(fd)
         if tmp_path is not None:
             tmp_path.unlink(missing_ok=True)
+
+
+def fsync_parent_directory(path: Path) -> None:
+    descriptor = os.open(
+        path.parent,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+    )
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def write_json_durable(path: Path, payload: Any) -> None:
+    """Atomically persist a queue or watermark before it becomes visible."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=".aoa-json-durable-",
+        suffix=".tmp",
+        dir=path.parent,
+    )
+    temporary = Path(temporary_name)
+    try:
+        mode = (path.stat().st_mode & 0o777) if path.exists() else 0o644
+        os.fchmod(descriptor, mode)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            descriptor = -1
+            handle.write(
+                json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+            )
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(path)
+        fsync_parent_directory(path)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        temporary.unlink(missing_ok=True)
+
+
+def write_bytes_durable(
+    path: Path, payload: bytes, *, mode: int = 0o600
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=".aoa-bytes-durable-",
+        suffix=".tmp",
+        dir=path.parent,
+    )
+    temporary = Path(temporary_name)
+    try:
+        os.fchmod(descriptor, mode)
+        with os.fdopen(descriptor, "wb") as handle:
+            descriptor = -1
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(path)
+        fsync_parent_directory(path)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        temporary.unlink(missing_ok=True)
 
 
 def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -10387,9 +10530,11 @@ def session_query_source_event_scan(
     session_index = read_json(session_index_path, {})
     task_episode_ranges: list[tuple[str, int, int]] = []
     for episode in (
-        session_index.get("task_episodes", [])
+        session_index_task_episode_components(
+            session_dir,
+            session_index,
+        )
         if isinstance(session_index, dict)
-        and isinstance(session_index.get("task_episodes"), list)
         else []
     ):
         if not isinstance(episode, dict):
@@ -11648,12 +11793,14 @@ def generated_route_index_generation_stale_reasons(
         if isinstance(index.get("generation_identity"), dict)
         else {}
     )
-    stored_generation_id = str(
-        index.get("generation_id")
-        or stored.get("generation_id")
-        or ""
+    if not stored and index.get("generation_id"):
+        stored = {"generation_id": index.get("generation_id")}
+    admission = projection_generation_admission(
+        projection=projection,
+        stored_identity=stored,
+        expected_identity=expected,
     )
-    if stored_generation_id == str(expected["generation_id"]):
+    if admission["compatible"]:
         return []
     return [f"{projection}_generation_identity_changed"]
 
@@ -11680,11 +11827,10 @@ def generated_session_index_dependency_generation_stale_reasons(
             if isinstance(stored_dependencies.get(projection), dict)
             else {}
         )
-        stored_generation_id = str(
-            stored_identity.get("generation_id") or ""
-        )
-        if stored_generation_id != str(
-            expected_identity["generation_id"]
+        if not projection_generation_is_admitted(
+            projection=projection,
+            stored_identity=stored_identity,
+            expected_identity=expected_identity,
         ):
             reasons.append(
                 f"{projection}_dependency_generation_identity_changed"
@@ -11749,18 +11895,50 @@ def generated_segment_index_stale_reasons(
     expected_publish_id: str = "",
     expected_raw_sha256: str = "",
 ) -> list[str]:
-    return [
+    reasons = [
         *route_signal_index_stale_reasons(index),
         *generated_route_index_generation_stale_reasons(
             index,
             projection="segment_index",
         ),
-        *generated_projection_publish_stale_reasons(
-            index,
-            expected_publish_id=expected_publish_id,
-            expected_raw_sha256=expected_raw_sha256,
-        ),
     ]
+    stored_component = (
+        index.get("component_identity")
+        if isinstance(index.get("component_identity"), dict)
+        else {}
+    )
+    if stored_component:
+        expected_component = segment_component_identity(
+            segment_id=str(index.get("segment_id") or ""),
+            role=str(index.get("segment_role") or ""),
+            source_range=(
+                index.get("source_range")
+                if isinstance(index.get("source_range"), dict)
+                else {}
+            ),
+            input_digest=str(index.get("input_digest") or ""),
+            raw_block=(
+                index.get("source_block")
+                if isinstance(index.get("source_block"), dict)
+                else None
+            ),
+            generation_identity=(
+                index.get("generation_identity")
+                if isinstance(index.get("generation_identity"), dict)
+                else {}
+            ),
+        )
+        if stored_component != expected_component:
+            reasons.append("segment_component_identity_mismatch")
+    else:
+        reasons.extend(
+            generated_projection_publish_stale_reasons(
+                index,
+                expected_publish_id=expected_publish_id,
+                expected_raw_sha256=expected_raw_sha256,
+            )
+        )
+    return reasons
 
 
 def generated_segment_index_is_current(
@@ -13900,31 +14078,23 @@ def parse_raw_events(
 
 def event_classification_generation_identity() -> dict[str, Any]:
     """Bind cached classification fields to their exact producer contract."""
-    payload = {
-        "schema_version": EVENT_CLASSIFICATION_CACHE_SCHEMA_VERSION,
-        "projection": "raw_event_classification_cache",
-        "segment_index_generation_id": (
-            segment_index_generation_identity()["generation_id"]
-        ),
-        "derived_text_privacy_policy_version": (
-            DERIVED_TEXT_PRIVACY_POLICY_VERSION
-        ),
-        "derived_text_redaction_policy_version": (
-            DERIVED_TEXT_REDACTION_POLICY_VERSION
-        ),
-        "normalization": (
-            "content_addressed_line_blocks_without_raw_or_parsed_payload_v1"
-        ),
-    }
-    generation_id = hashlib.sha256(
-        json.dumps(
-            payload,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
-    return {**payload, "generation_id": generation_id}
+    return canonical_generation_identity(
+        {
+            "schema_version": EVENT_CLASSIFICATION_CACHE_SCHEMA_VERSION,
+            "projection": "raw_event_classification_cache",
+            "generation_dag_version": PROJECTION_GENERATION_DAG_VERSION,
+            "derived_text_privacy_policy_version": (
+                DERIVED_TEXT_PRIVACY_POLICY_VERSION
+            ),
+            "derived_text_redaction_policy_version": (
+                DERIVED_TEXT_REDACTION_POLICY_VERSION
+            ),
+            "normalization": (
+                "content_addressed_line_blocks_without_raw_or_parsed_payload_v1"
+            ),
+            "dependency_generations": {},
+        }
+    )
 
 
 def scan_raw_event_classification_blocks(
@@ -14035,6 +14205,207 @@ def scan_raw_event_classification_blocks(
     }
 
 
+def incremental_raw_event_classification_scan(
+    *,
+    raw_path: Path,
+    session_dir: Path,
+    manifest: dict[str, Any],
+) -> dict[str, Any]:
+    """Extend the published append-stable plan by reading only captured tail."""
+    raw = (
+        manifest.get("raw")
+        if isinstance(manifest.get("raw"), dict)
+        else {}
+    )
+    prefix_bytes = int_value(raw.get("bytes"), -1)
+    prefix_lines = int_value(raw.get("line_count"), -1)
+    prefix_sha256 = str(raw.get("sha256") or "")
+    capture_state = raw_capture_state_for_session(session_dir)
+    capture_path = Path(str(capture_state.get("capture_path") or ""))
+    if not (
+        prefix_bytes >= 0
+        and prefix_lines >= 0
+        and prefix_sha256
+        and capture_path.is_file()
+        and raw_path.resolve() == capture_path.resolve()
+        and str(capture_state.get("raw_digest_status") or "")
+        == "complete_sha256"
+        and int_value(capture_state.get("raw_bytes"), -1)
+        == raw_path.stat().st_size
+        and str(capture_state.get("raw_sha256") or "")
+    ):
+        raise ValueError("incremental_scan_capture_contract_unavailable")
+    overlay = read_json(
+        persistent_live_tail_index_path(session_dir), {}
+    )
+    archive_prefixes = (
+        overlay.get("archive_prefixes")
+        if isinstance(overlay.get("archive_prefixes"), dict)
+        else {}
+    )
+    prefix_attestation = (
+        archive_prefixes.get(str(prefix_bytes))
+        if isinstance(archive_prefixes.get(str(prefix_bytes)), dict)
+        else {}
+    )
+    if not (
+        prefix_attestation.get("matches") is True
+        and str(prefix_attestation.get("sha256") or "")
+        == prefix_sha256
+        and str(prefix_attestation.get("expected_sha256") or "")
+        == prefix_sha256
+    ):
+        raise ValueError("incremental_scan_prefix_not_attested")
+    if prefix_bytes > 0:
+        with raw_path.open("rb") as handle:
+            handle.seek(prefix_bytes - 1)
+            if handle.read(1) != b"\n":
+                raise ValueError(
+                    "incremental_scan_prefix_not_line_aligned"
+                )
+    prior_cache_root = event_classification_cache_root(session_dir)
+    prior_index = read_json(
+        event_classification_cache_index_path(prior_cache_root), {}
+    )
+    expected_generation = event_classification_generation_identity()
+    if not (
+        isinstance(prior_index, dict)
+        and projection_generation_is_admitted(
+            projection="raw_event_classification_cache",
+            stored_identity=prior_index.get("generation_identity"),
+            expected_identity=expected_generation,
+        )
+    ):
+        raise ValueError("incremental_scan_prior_generation_unavailable")
+    prior_records = (
+        prior_index.get("blocks")
+        if isinstance(prior_index.get("blocks"), dict)
+        else {}
+    )
+    prior_blocks = sorted(
+        (
+            dict(record.get("block"))
+            for record in prior_records.values()
+            if isinstance(record, dict)
+            and isinstance(record.get("block"), dict)
+        ),
+        key=lambda block: int_value(block.get("ordinal")),
+    )
+    if prefix_bytes or prefix_lines:
+        if not prior_blocks:
+            raise ValueError("incremental_scan_prior_blocks_missing")
+        expected_byte = 0
+        expected_line = 1
+        for ordinal, block in enumerate(prior_blocks):
+            if not (
+                int_value(block.get("ordinal"), -1) == ordinal
+                and int_value(block.get("byte_start"), -1)
+                == expected_byte
+                and int_value(block.get("line_start"), -1)
+                == expected_line
+            ):
+                raise ValueError("incremental_scan_prior_block_gap")
+            expected_byte = int_value(block.get("byte_end"), -1)
+            expected_line = int_value(block.get("line_end"), -1) + 1
+        if expected_byte != prefix_bytes or expected_line - 1 != prefix_lines:
+            raise ValueError("incremental_scan_prior_watermark_mismatch")
+    source_bytes = raw_path.stat().st_size
+    if source_bytes < prefix_bytes:
+        raise ValueError("incremental_scan_source_truncated")
+    blocks = list(prior_blocks)
+    total_tail_bytes = 0
+    tail_line_count = 0
+    latest_timestamp = str(
+        (
+            manifest.get("index_schema", {}).get(
+                "projection_publish", {}
+            ).get("processed_watermark", {})
+            if isinstance(manifest.get("index_schema"), dict)
+            else {}
+        ).get("to_timestamp")
+        or ""
+    )
+    block_start_offset = prefix_bytes
+    block_start_line = prefix_lines + 1
+    block_bytes = 0
+    block_lines = 0
+    block_sha256 = hashlib.sha256()
+
+    def finish_tail_block() -> None:
+        nonlocal block_start_offset, block_start_line
+        nonlocal block_bytes, block_lines, block_sha256
+        if block_lines <= 0:
+            return
+        digest = block_sha256.hexdigest()
+        blocks.append(
+            {
+                "ordinal": len(blocks),
+                "byte_start": block_start_offset,
+                "byte_end": block_start_offset + block_bytes,
+                "byte_count": block_bytes,
+                "line_start": block_start_line,
+                "line_end": block_start_line + block_lines - 1,
+                "line_count": block_lines,
+                "raw_sha256": digest,
+                "cache_key": (
+                    f"{block_start_line:09d}-"
+                    f"{block_start_line + block_lines - 1:09d}-"
+                    f"{digest}"
+                ),
+            }
+        )
+        block_start_offset += block_bytes
+        block_start_line += block_lines
+        block_bytes = 0
+        block_lines = 0
+        block_sha256 = hashlib.sha256()
+
+    with raw_path.open("rb") as handle:
+        handle.seek(prefix_bytes)
+        for raw_line in handle:
+            block_sha256.update(raw_line)
+            block_bytes += len(raw_line)
+            total_tail_bytes += len(raw_line)
+            block_lines += 1
+            tail_line_count += 1
+            try:
+                parsed = json.loads(
+                    raw_line.decode("utf-8", errors="replace")
+                )
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, dict) and parsed.get("timestamp"):
+                latest_timestamp = str(parsed["timestamp"])
+            if (
+                block_lines >= EVENT_CLASSIFICATION_BLOCK_MAX_LINES
+                or block_bytes >= EVENT_CLASSIFICATION_BLOCK_TARGET_BYTES
+            ):
+                finish_tail_block()
+    finish_tail_block()
+    if prefix_bytes + total_tail_bytes != source_bytes:
+        raise ValueError("incremental_scan_source_changed_during_read")
+    return {
+        "schema_version": EVENT_CLASSIFICATION_CACHE_SCHEMA_VERSION,
+        "artifact_type": "raw_event_classification_plan",
+        "raw_path": str(raw_path),
+        "raw_sha256": str(capture_state.get("raw_sha256") or ""),
+        "raw_bytes": source_bytes,
+        "raw_line_count": prefix_lines + tail_line_count,
+        "processed_to_line": prefix_lines + tail_line_count,
+        "processed_to_timestamp": latest_timestamp,
+        "block_count": len(blocks),
+        "block_max_lines": EVENT_CLASSIFICATION_BLOCK_MAX_LINES,
+        "block_target_bytes": EVENT_CLASSIFICATION_BLOCK_TARGET_BYTES,
+        "blocks": blocks,
+        "scan_mode": "attested_prefix_plus_captured_tail_v1",
+        "prefix_bytes_reused": prefix_bytes,
+        "prefix_line_count_reused": prefix_lines,
+        "source_bytes_read": total_tail_bytes + int(prefix_bytes > 0),
+        "tail_bytes_read": total_tail_bytes,
+        "tail_line_count": tail_line_count,
+    }
+
+
 def raw_event_classification_payload(
     event: RawEvent,
     *,
@@ -14109,6 +14480,206 @@ def raw_event_from_classification_payload(
     )
 
 
+def event_classification_block_summary(
+    classifications: Iterable[dict[str, Any]],
+) -> dict[str, Any]:
+    """Produce mergeable, raw-free counters and boundary frontier data."""
+    by_type: Counter[str] = Counter()
+    by_family: Counter[str] = Counter()
+    by_phase: Counter[str] = Counter()
+    by_actor: Counter[str] = Counter()
+    by_outcome: Counter[str] = Counter()
+    by_conversation_act: Counter[str] = Counter()
+    by_session_act: Counter[str] = Counter()
+    by_agent_event: Counter[str] = Counter()
+    route_counts: dict[str, Counter[str]] = defaultdict(Counter)
+    compaction_boundaries: list[dict[str, Any]] = []
+    correlation_frontier: dict[str, dict[str, Any]] = {}
+    event_count = 0
+    first_line = 0
+    last_line = 0
+    for payload in classifications:
+        if not isinstance(payload, dict):
+            continue
+        event_count += 1
+        line_no = int_value(payload.get("line_no"))
+        first_line = first_line or line_no
+        last_line = line_no
+        by_type[str(payload.get("event_type") or "RAW_EVENT")] += 1
+        by_family[str(payload.get("family") or "raw_evidence")] += 1
+        by_phase[str(payload.get("phase") or "observe")] += 1
+        by_actor[str(payload.get("actor") or "unknown")] += 1
+        by_outcome[str(payload.get("outcome") or "observed")] += 1
+        facets = (
+            payload.get("facets")
+            if isinstance(payload.get("facets"), dict)
+            else {}
+        )
+        for key, counter in (
+            ("conversation_act", by_conversation_act),
+            ("session_act", by_session_act),
+            ("agent_event", by_agent_event),
+        ):
+            facet = (
+                facets.get(key)
+                if isinstance(facets.get(key), dict)
+                else {}
+            )
+            kind = str(
+                facet.get("kind")
+                or facet.get("class")
+                or ""
+            )
+            if kind:
+                counter[kind] += 1
+        for signal in (
+            facets.get("route_signals")
+            if isinstance(facets.get("route_signals"), list)
+            else []
+        ):
+            if not isinstance(signal, dict):
+                continue
+            layer = str(signal.get("layer") or "")
+            key = str(signal.get("key") or "")
+            if layer and key:
+                route_counts[layer][key] += 1
+        if bool(payload.get("compaction_boundary")):
+            compaction_boundaries.append(
+                {
+                    "event_id": str(payload.get("event_id") or ""),
+                    "line": line_no,
+                    "timestamp": str(payload.get("timestamp") or ""),
+                    "source_type": str(
+                        payload.get("source_type") or ""
+                    ),
+                }
+            )
+        correlation_id = str(payload.get("correlation_id") or "")
+        if correlation_id:
+            correlation_frontier[correlation_id] = {
+                "event_id": str(payload.get("event_id") or ""),
+                "line": line_no,
+                "event_type": str(payload.get("event_type") or ""),
+                "outcome": str(payload.get("outcome") or ""),
+            }
+    return {
+        "schema_version": 1,
+        "event_count": event_count,
+        "line_range": {"from_line": first_line, "to_line": last_line},
+        "event_counts": dict(sorted(by_type.items())),
+        "family_counts": dict(sorted(by_family.items())),
+        "phase_counts": dict(sorted(by_phase.items())),
+        "actor_counts": dict(sorted(by_actor.items())),
+        "outcome_counts": dict(sorted(by_outcome.items())),
+        "conversation_act_counts": dict(
+            sorted(by_conversation_act.items())
+        ),
+        "session_act_counts": dict(sorted(by_session_act.items())),
+        "agent_event_counts": dict(sorted(by_agent_event.items())),
+        "route_signal_counts": {
+            layer: dict(sorted(counter.items()))
+            for layer, counter in sorted(route_counts.items())
+        },
+        "compaction_boundaries": compaction_boundaries,
+        "correlation_frontier": [
+            {"correlation_id": correlation_id, **entry}
+            for correlation_id, entry in sorted(
+                correlation_frontier.items()
+            )
+        ],
+        "raw_text_persisted": False,
+        "truth_status": (
+            "mergeable_derived_classification_summary_not_raw_authority"
+        ),
+    }
+
+
+def merge_event_classification_block_summaries(
+    records: Iterable[dict[str, Any]],
+) -> dict[str, Any]:
+    scalar_keys = (
+        "event_counts",
+        "family_counts",
+        "phase_counts",
+        "actor_counts",
+        "outcome_counts",
+        "conversation_act_counts",
+        "session_act_counts",
+        "agent_event_counts",
+    )
+    counters = {key: Counter() for key in scalar_keys}
+    route_counts: dict[str, Counter[str]] = defaultdict(Counter)
+    event_count = 0
+    first_line = 0
+    last_line = 0
+    block_count = 0
+    for record in records:
+        summary = (
+            record.get("summary")
+            if isinstance(record, dict)
+            and isinstance(record.get("summary"), dict)
+            else {}
+        )
+        if int_value(summary.get("schema_version")) != 1:
+            raise ValueError(
+                "classification_block_summary_missing_or_incompatible"
+            )
+        block_count += 1
+        event_count += int_value(summary.get("event_count"))
+        line_range = (
+            summary.get("line_range")
+            if isinstance(summary.get("line_range"), dict)
+            else {}
+        )
+        block_from = int_value(line_range.get("from_line"))
+        block_to = int_value(line_range.get("to_line"))
+        first_line = first_line or block_from
+        last_line = max(last_line, block_to)
+        for key in scalar_keys:
+            values = (
+                summary.get(key)
+                if isinstance(summary.get(key), dict)
+                else {}
+            )
+            counters[key].update(
+                {
+                    str(name): int_value(count)
+                    for name, count in values.items()
+                    if int_value(count) > 0
+                }
+            )
+        for layer, values in (
+            summary.get("route_signal_counts", {}).items()
+            if isinstance(summary.get("route_signal_counts"), dict)
+            else []
+        ):
+            if isinstance(values, dict):
+                route_counts[str(layer)].update(
+                    {
+                        str(name): int_value(count)
+                        for name, count in values.items()
+                        if int_value(count) > 0
+                    }
+                )
+    return {
+        "schema_version": 1,
+        "event_count": event_count,
+        "line_range": {"from_line": first_line, "to_line": last_line},
+        **{
+            key: dict(sorted(counter.items()))
+            for key, counter in counters.items()
+        },
+        "route_signal_counts": {
+            layer: dict(sorted(counter.items()))
+            for layer, counter in sorted(route_counts.items())
+        },
+        "source_block_count": block_count,
+        "truth_status": (
+            "deterministic_merge_of_classification_block_summaries"
+        ),
+    }
+
+
 def raw_classification_block_bytes(
     raw_path: Path,
     block: dict[str, Any],
@@ -14181,8 +14752,13 @@ def sanitize_event_classification_cache_artifact(
         if isinstance(cached.get("classifications"), list)
         else []
     )
+    generation_admission = projection_generation_admission(
+        projection="raw_event_classification_cache",
+        stored_identity=cached.get("generation_identity"),
+        expected_identity=generation_identity,
+    )
     if (
-        cached.get("generation_identity") != generation_identity
+        not generation_admission["compatible"]
         or cached.get("block") != block
         or len(classifications) != int_value(block.get("line_count"))
     ):
@@ -14191,14 +14767,20 @@ def sanitize_event_classification_cache_artifact(
         artifact_path,
         {
             **cached,
-            "classifications": [
+            "generation_identity": generation_identity,
+            "classifications": (
+                sanitized_classifications := [
                 redact_derived_value(
                     item,
                     literal_policy=literal_policy,
                 )
                 for item in classifications
                 if isinstance(item, dict)
-            ],
+                ]
+            ),
+            "summary": event_classification_block_summary(
+                sanitized_classifications
+            ),
         },
     )
 
@@ -14253,6 +14835,9 @@ def classify_raw_event_block_task(
             "generation_identity": generation_identity,
             "block": dict(block),
             "classifications": classifications,
+            "summary": event_classification_block_summary(
+                classifications
+            ),
         },
     )
     return {
@@ -14285,6 +14870,17 @@ def sensitive_literal_block_task(
             kind: sorted(values)
             for kind, values in values_by_kind.items()
             if values
+        },
+        "structural_marker": {
+            "schema_version": SENSITIVE_STRUCTURAL_MARKER_VERSION,
+            "candidate_present": bool(values_by_kind),
+            "kind_counts": {
+                str(kind): len(values)
+                for kind, values in sorted(values_by_kind.items())
+                if values
+            },
+            "literal_values_persisted": False,
+            "reversible_literal_digests_persisted": False,
         },
         "scan_ms": int(
             (time.perf_counter_ns() - started) / 1_000_000
@@ -14336,6 +14932,224 @@ def load_raw_event_classification_block(
                 payload=classification,
             )
         )
+    return events
+
+
+def load_raw_event_classification_metadata_block(
+    *,
+    block: dict[str, Any],
+    artifact_path: Path,
+    generation_identity: dict[str, Any],
+) -> list[RawEvent]:
+    """Hydrate safe classification metadata without opening historical raw."""
+    cached = read_gzip_json(artifact_path)
+    if (
+        int_value(cached.get("schema_version"))
+        != EVENT_CLASSIFICATION_CACHE_SCHEMA_VERSION
+        or cached.get("generation_identity") != generation_identity
+        or cached.get("block") != block
+    ):
+        raise ValueError("classification_cache_identity_mismatch")
+    classifications = (
+        cached.get("classifications")
+        if isinstance(cached.get("classifications"), list)
+        else []
+    )
+    if len(classifications) != int_value(block.get("line_count")):
+        raise ValueError("classification_cache_event_count_mismatch")
+    events: list[RawEvent] = []
+    for payload in classifications:
+        if not isinstance(payload, dict):
+            raise ValueError("classification_cache_record_invalid")
+        events.append(
+            raw_event_from_classification_payload(
+                raw="",
+                parsed=None,
+                payload=payload,
+            )
+        )
+    return events
+
+
+def incremental_parent_tail_replay_from_line(
+    *,
+    session_dir: Path,
+    manifest: dict[str, Any],
+    raw_scan: dict[str, Any],
+) -> int:
+    if str(raw_scan.get("scan_mode") or "") != (
+        "attested_prefix_plus_captured_tail_v1"
+    ):
+        return 0
+    prefix_lines = int_value(raw_scan.get("prefix_line_count_reused"))
+    if prefix_lines <= 0:
+        return 0
+    candidates = [prefix_lines + 1]
+    segments = (
+        manifest.get("segments")
+        if isinstance(manifest.get("segments"), list)
+        else []
+    )
+    if segments:
+        last_segment = segments[-1]
+        source_range = (
+            last_segment.get("source_range")
+            if isinstance(last_segment, dict)
+            and isinstance(last_segment.get("source_range"), dict)
+            else {}
+        )
+        from_line = int_value(source_range.get("from_line"))
+        if from_line > 0:
+            candidates.append(from_line)
+    previous_index = read_json(session_dir / SESSION_INDEX_JSON, {})
+    previous_goal_lifecycles = (
+        previous_index.get("goal_lifecycles")
+        if isinstance(previous_index.get("goal_lifecycles"), list)
+        else []
+    )
+    for lifecycle in reversed(previous_goal_lifecycles):
+        if not isinstance(lifecycle, dict):
+            continue
+        status = str(lifecycle.get("status") or "")
+        flags = (
+            lifecycle.get("ambiguity_flags")
+            if isinstance(lifecycle.get("ambiguity_flags"), list)
+            else []
+        )
+        if status in {"create_failed", "complete", "blocked"} and (
+            "missing_close" not in flags
+        ):
+            break
+        goal_range = goal_lifecycle_line_range(lifecycle)
+        if goal_range is not None and goal_range[0] > 0:
+            candidates.append(goal_range[0])
+        break
+    previous_episodes = session_index_task_episode_components(
+        session_dir, previous_index
+    )
+    if len(previous_episodes) < 3:
+        return 0
+    stable_to_line = prefix_lines
+    if segments and str(segments[-1].get("role") or "") in {
+        "initial-to-latest",
+        "compaction-to-latest",
+    }:
+        prior_sealed = segments[-2] if len(segments) >= 2 else {}
+        prior_sealed_range = (
+            prior_sealed.get("source_range")
+            if isinstance(prior_sealed, dict)
+            and isinstance(prior_sealed.get("source_range"), dict)
+            else {}
+        )
+        stable_to_line = int_value(
+            prior_sealed_range.get("to_line")
+        )
+    stable_episode_count = 0
+    for episode in previous_episodes:
+        episode_range = (
+            episode.get("event_range")
+            if isinstance(episode, dict)
+            and isinstance(episode.get("event_range"), dict)
+            else {}
+        )
+        if (
+            int_value(episode_range.get("to_line")) <= 0
+            or int_value(episode_range.get("to_line")) > stable_to_line
+        ):
+            break
+        stable_episode_count += 1
+    if stable_episode_count < 3:
+        return 0
+    if previous_episodes:
+        boundary_episode = previous_episodes[
+            max(0, stable_episode_count - 2)
+        ]
+        episode_range = (
+            boundary_episode.get("event_range")
+            if isinstance(boundary_episode, dict)
+            and isinstance(boundary_episode.get("event_range"), dict)
+            else {}
+        )
+        from_line = int_value(episode_range.get("from_line"))
+        if from_line > 0:
+            candidates.append(from_line)
+    replay_from_line = max(1, min(candidates))
+    for lifecycle in previous_goal_lifecycles:
+        if not isinstance(lifecycle, dict):
+            return 0
+        goal_range = goal_lifecycle_line_range(lifecycle)
+        if goal_range is None:
+            return 0
+        if goal_range[0] < replay_from_line <= goal_range[1]:
+            replay_from_line = goal_range[0]
+    return replay_from_line
+
+
+def load_raw_event_classification_range(
+    *,
+    raw_path: Path,
+    block_refs: Iterable[dict[str, Any]],
+    generation_identity: dict[str, Any],
+    from_line: int,
+    to_line: int,
+    reconciliation_patches: dict[str, dict[str, Any]] | None = None,
+) -> list[RawEvent]:
+    """Hydrate one bounded line range from immutable classification blocks.
+
+    Spawn workers use this route instead of receiving pickled ``RawEvent``
+    slices from the parent.  The optional patches contain only events changed
+    by whole-session correlation reconciliation; unchanged classifications
+    remain block-local.
+    """
+    if from_line <= 0 or to_line < from_line:
+        raise ValueError("classification_range_invalid")
+    patches = (
+        reconciliation_patches
+        if isinstance(reconciliation_patches, dict)
+        else {}
+    )
+    events: list[RawEvent] = []
+    for ref in block_refs:
+        if not isinstance(ref, dict):
+            continue
+        block = (
+            ref.get("block")
+            if isinstance(ref.get("block"), dict)
+            else {}
+        )
+        if (
+            int_value(block.get("line_end")) < from_line
+            or int_value(block.get("line_start")) > to_line
+        ):
+            continue
+        artifact_path = Path(str(ref.get("artifact_path") or ""))
+        if not artifact_path.is_file():
+            raise ValueError("classification_range_artifact_missing")
+        for event in load_raw_event_classification_block(
+            raw_path=raw_path,
+            block=block,
+            artifact_path=artifact_path,
+            generation_identity=generation_identity,
+        ):
+            if event.line_no < from_line or event.line_no > to_line:
+                continue
+            patch = patches.get(event.event_id)
+            if isinstance(patch, dict):
+                event = raw_event_from_classification_payload(
+                    raw=event.raw,
+                    parsed=event.parsed,
+                    payload=patch,
+                )
+            events.append(event)
+    events.sort(key=lambda item: item.line_no)
+    expected_line_count = to_line - from_line + 1
+    if (
+        len(events) != expected_line_count
+        or not events
+        or events[0].line_no != from_line
+        or events[-1].line_no != to_line
+    ):
+        raise ValueError("classification_range_not_contiguous")
     return events
 
 
@@ -15501,6 +16315,74 @@ def segment_ranges(events: list[RawEvent]) -> list[tuple[int, int, str]]:
         role = "initial-to-latest" if not ranges else "compaction-to-latest"
         ranges.append((start, len(events), role))
     return ranges
+
+
+def incremental_segment_tail_plan(
+    *,
+    events: list[RawEvent],
+    previous_segments: list[dict[str, Any]],
+    attested_prefix_to_line: int,
+) -> dict[str, Any]:
+    """Keep sealed topology and recompute only the prior open segment/tail."""
+    if not previous_segments or attested_prefix_to_line <= 0:
+        return {
+            "admitted": False,
+            "reason": "previous_segment_topology_unavailable",
+        }
+    last_segment = previous_segments[-1]
+    last_role = str(last_segment.get("role") or "")
+    last_range = (
+        last_segment.get("source_range")
+        if isinstance(last_segment.get("source_range"), dict)
+        else {}
+    )
+    last_to_line = int_value(last_range.get("to_line"))
+    if last_to_line != attested_prefix_to_line:
+        return {
+            "admitted": False,
+            "reason": "previous_segment_watermark_mismatch",
+        }
+    last_is_open = last_role in {
+        "initial-to-latest",
+        "compaction-to-latest",
+    }
+    stable_count = len(previous_segments) - int(last_is_open)
+    replay_from_line = (
+        int_value(last_range.get("from_line"))
+        if last_is_open
+        else attested_prefix_to_line + 1
+    )
+    topology_events = [
+        event for event in events if event.line_no >= replay_from_line
+    ]
+    if not topology_events:
+        return {
+            "admitted": False,
+            "reason": "segment_tail_events_unavailable",
+        }
+    local_ranges = segment_ranges(topology_events)
+    segment_no_offset = stable_count
+    adjusted_ranges: list[tuple[int, int, str]] = []
+    for local_ordinal, (start, end, role) in enumerate(local_ranges):
+        adjusted_role = role
+        if segment_no_offset > 0:
+            adjusted_role = (
+                "compaction-to-compaction"
+                if role == "initial-to-compaction"
+                else "compaction-to-latest"
+                if role == "initial-to-latest"
+                else role
+            )
+        adjusted_ranges.append((start, end, adjusted_role))
+    return {
+        "admitted": True,
+        "reason": "attested_sealed_prefix_and_bounded_open_tail",
+        "stable_segment_count": stable_count,
+        "segment_no_offset": segment_no_offset,
+        "replay_from_line": replay_from_line,
+        "events": topology_events,
+        "ranges": adjusted_ranges,
+    }
 
 
 def text_from_content(content: Any, *, max_chars: int | None = None) -> str:
@@ -18954,11 +19836,16 @@ class TaskEpisodeBuilder:
         semantic_query_terms: list[dict[str, Any]] | None = None,
         semantic_query_text: str = "",
         runtime_goal_continuation_boundaries: bool = False,
+        episode_ordinal_offset: int = 0,
+        previous_episode_id: str = "",
     ) -> None:
         self.segments = segments
         self.episodes: list[dict[str, Any]] = []
         self.current: dict[str, Any] | None = None
-        self.previous_episode_id = ""
+        self.episode_ordinal_offset = max(
+            0, int_value(episode_ordinal_offset)
+        )
+        self.previous_episode_id = str(previous_episode_id or "")
         self.action_by_correlation: dict[str, dict[str, str]] = {}
         self.forced_episode_starts = forced_episode_starts or {}
         self.semantic_query_terms = [
@@ -19184,7 +20071,11 @@ class TaskEpisodeBuilder:
                 )
                 self.previous_episode_id = str(self.current.get("episode_id") or "")
             self.current = new_task_episode(
-                ordinal=len(self.episodes) + 1,
+                ordinal=(
+                    self.episode_ordinal_offset
+                    + len(self.episodes)
+                    + 1
+                ),
                 user_event=event,
                 segments=self.segments,
                 previous_episode_id=self.previous_episode_id,
@@ -19229,7 +20120,11 @@ class TaskEpisodeBuilder:
                 )
                 self.previous_episode_id = str(self.current.get("episode_id") or "")
             self.current = new_task_episode(
-                ordinal=len(self.episodes) + 1,
+                ordinal=(
+                    self.episode_ordinal_offset
+                    + len(self.episodes)
+                    + 1
+                ),
                 user_event=event,
                 segments=self.segments,
                 previous_episode_id=self.previous_episode_id,
@@ -19299,7 +20194,11 @@ class TaskEpisodeBuilder:
                 close_open_task_episode_for_transition(self.current, event, self.segments)
                 self.previous_episode_id = str(self.current.get("episode_id") or "")
             self.current = new_task_episode(
-                ordinal=len(self.episodes) + 1,
+                ordinal=(
+                    self.episode_ordinal_offset
+                    + len(self.episodes)
+                    + 1
+                ),
                 user_event=event,
                 segments=self.segments,
                 previous_episode_id=self.previous_episode_id,
@@ -19330,7 +20229,11 @@ class TaskEpisodeBuilder:
                 self.current.get("episode_id") or ""
             )
             self.current = new_task_episode(
-                ordinal=len(self.episodes) + 1,
+                ordinal=(
+                    self.episode_ordinal_offset
+                    + len(self.episodes)
+                    + 1
+                ),
                 user_event=event,
                 segments=self.segments,
                 previous_episode_id=self.previous_episode_id,
@@ -19393,7 +20296,11 @@ class TaskEpisodeBuilder:
                     self.current.get("episode_id") or ""
                 )
             self.current = new_task_episode(
-                ordinal=len(self.episodes) + 1,
+                ordinal=(
+                    self.episode_ordinal_offset
+                    + len(self.episodes)
+                    + 1
+                ),
                 user_event=event,
                 segments=self.segments,
                 previous_episode_id=self.previous_episode_id,
@@ -19759,6 +20666,8 @@ def generated_task_episodes_for_events(
     segments: list[dict[str, Any]],
     *,
     lineage: dict[str, Any] | None = None,
+    episode_ordinal_offset: int = 0,
+    previous_episode_id: str = "",
 ) -> list[dict[str, Any]]:
     history_prefix = (
         lineage.get("history_prefix")
@@ -19774,7 +20683,12 @@ def generated_task_episodes_for_events(
     bootstrap_control_line = line_from_raw_ref(
         history_prefix.get("bootstrap_control_ref")
     ) or 0
-    builder = TaskEpisodeBuilder(segments, forced_episode_starts=forced_episode_starts)
+    builder = TaskEpisodeBuilder(
+        segments,
+        forced_episode_starts=forced_episode_starts,
+        episode_ordinal_offset=episode_ordinal_offset,
+        previous_episode_id=previous_episode_id,
+    )
     for event in events:
         if (
             bootstrap_control_line > 0
@@ -20269,6 +21183,167 @@ def goal_lifecycle_counts_for_lifecycles(lifecycles: list[dict[str, Any]], goal_
     }
 
 
+def goal_lifecycle_line_range(
+    lifecycle: dict[str, Any],
+) -> tuple[int, int] | None:
+    lines = [
+        int_value(item.get("line"))
+        for item in (
+            lifecycle.get("events")
+            if isinstance(lifecycle.get("events"), list)
+            else []
+        )
+        if isinstance(item, dict) and int_value(item.get("line")) > 0
+    ]
+    if not lines:
+        for raw_ref in (
+            lifecycle.get("raw_refs")
+            if isinstance(lifecycle.get("raw_refs"), list)
+            else []
+        ):
+            matched = re.search(r"raw:line:(\d+)", str(raw_ref or ""))
+            if matched:
+                lines.append(int(matched.group(1)))
+    return (min(lines), max(lines)) if lines else None
+
+
+def incremental_goal_lifecycles_for_events(
+    *,
+    events: list[RawEvent],
+    segments: list[dict[str, Any]],
+    task_episodes: list[dict[str, Any]],
+    previous_index: dict[str, Any],
+    replay_from_line: int,
+    session_id: str,
+    session_label: str,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """Merge stable goal lifecycles with one bounded affected tail."""
+    previous_lifecycles = (
+        previous_index.get("goal_lifecycles")
+        if isinstance(previous_index.get("goal_lifecycles"), list)
+        else None
+    )
+    previous_events = (
+        previous_index.get("goal_events")
+        if isinstance(previous_index.get("goal_events"), list)
+        else None
+    )
+    if (
+        replay_from_line <= 0
+        or previous_lifecycles is None
+        or previous_events is None
+    ):
+        return None, {
+            "mode": "full_event_reduction_required",
+            "reason": "previous_goal_components_unavailable",
+        }
+    stable_lifecycles: list[dict[str, Any]] = []
+    for lifecycle in previous_lifecycles:
+        if not isinstance(lifecycle, dict):
+            return None, {
+                "mode": "full_event_reduction_required",
+                "reason": "previous_goal_lifecycle_invalid",
+            }
+        line_range = goal_lifecycle_line_range(lifecycle)
+        if line_range is None:
+            return None, {
+                "mode": "full_event_reduction_required",
+                "reason": "previous_goal_lifecycle_range_unavailable",
+            }
+        if line_range[1] < replay_from_line:
+            stable_lifecycles.append(dict(lifecycle))
+            continue
+        if line_range[0] < replay_from_line:
+            return None, {
+                "mode": "full_event_reduction_required",
+                "reason": "goal_lifecycle_crosses_replay_boundary",
+                "required_replay_from_line": line_range[0],
+            }
+    stable_events = [
+        dict(item)
+        for item in previous_events
+        if isinstance(item, dict)
+        and int_value(item.get("line")) > 0
+        and int_value(item.get("line")) < replay_from_line
+    ]
+    tail = generated_goal_lifecycles_for_events(
+        events,
+        segments,
+        task_episodes,
+        session_id=session_id,
+        session_label=session_label,
+        ordinal_offset=len(stable_lifecycles),
+    )
+    tail_lifecycles = [
+        dict(item)
+        for item in tail.get("goal_lifecycles", [])
+        if isinstance(item, dict)
+    ]
+    tail_events = [
+        dict(item)
+        for item in tail.get("goal_events", [])
+        if isinstance(item, dict)
+        and int_value(item.get("line")) >= replay_from_line
+    ]
+    combined_lifecycles = [*stable_lifecycles, *tail_lifecycles]
+    combined_events = [*stable_events, *tail_events]
+    goal_ids = [
+        str(item.get("goal_id") or "")
+        for item in combined_lifecycles
+    ]
+    event_ids = [
+        str(item.get("event_id") or "") for item in combined_events
+    ]
+    if (
+        len(set(goal_ids)) != len(goal_ids)
+        or len(set(event_ids)) != len(event_ids)
+    ):
+        return None, {
+            "mode": "full_event_reduction_required",
+            "reason": "incremental_goal_identity_collision",
+        }
+    return {
+        "goal_lifecycles": combined_lifecycles,
+        "goal_events": combined_events,
+        "goal_lifecycle_counts": goal_lifecycle_counts_for_lifecycles(
+            combined_lifecycles, combined_events
+        ),
+        "goal_event_counts": dict(
+            sorted(
+                Counter(
+                    str(item.get("kind") or "unknown")
+                    for item in combined_events
+                ).items()
+            )
+        ),
+    }, {
+        "mode": "append_stable_goal_tail_merge_v1",
+        "replay_from_line": replay_from_line,
+        "stable_lifecycle_count": len(stable_lifecycles),
+        "rebuilt_lifecycle_count": len(tail_lifecycles),
+        "stable_event_count": len(stable_events),
+        "rebuilt_event_count": len(tail_events),
+    }
+
+
+def goal_lifecycle_incremental_replay_admitted(
+    previous_index: dict[str, Any], replay_from_line: int
+) -> bool:
+    lifecycles = previous_index.get("goal_lifecycles")
+    goal_events = previous_index.get("goal_events")
+    if not isinstance(lifecycles, list) or not isinstance(goal_events, list):
+        return False
+    for lifecycle in lifecycles:
+        if not isinstance(lifecycle, dict):
+            return False
+        line_range = goal_lifecycle_line_range(lifecycle)
+        if line_range is None:
+            return False
+        if line_range[0] < replay_from_line <= line_range[1]:
+            return False
+    return True
+
+
 def generated_goal_lifecycles_for_events(
     events: list[RawEvent],
     segments: list[dict[str, Any]],
@@ -20276,12 +21351,13 @@ def generated_goal_lifecycles_for_events(
     *,
     session_id: str,
     session_label: str,
+    ordinal_offset: int = 0,
 ) -> dict[str, Any]:
     lifecycles: list[dict[str, Any]] = []
     goal_events: list[dict[str, Any]] = []
     current: dict[str, Any] | None = None
     correlation_to_lifecycle: dict[str, dict[str, Any]] = {}
-    ordinal = 0
+    ordinal = max(0, ordinal_offset)
     compaction_lines = [event.line_no for event in events if event.compaction_boundary or event.event_type == "COMPACTION_EVENT"]
 
     for raw_event in events:
@@ -20402,6 +21478,14 @@ def event_index_record(
         )
     if relationships:
         record["relationships"] = relationships
+    if len(event.raw) > DERIVED_SEGMENT_RAW_VIEW_MAX_CHARS:
+        record["raw_body_view"] = {
+            "status": "omitted_large_raw_event",
+            "raw_chars": len(event.raw),
+            "authority_boundary": (
+                "generated body omitted; open raw_ref for evidence"
+            ),
+        }
     return redact_derived_value(
         record,
         literal_policy=literal_policy,
@@ -20433,7 +21517,10 @@ def write_raw_block_artifacts(
     reference_session_dir: Path | None = None,
     publish_identity: dict[str, Any] | None = None,
     published_raw_blocks: dict[str, Any] | None = None,
+    attested_prefix_to_line: int = 0,
     execution_metrics_out: dict[str, Any] | None = None,
+    segment_no_offset: int = 0,
+    prefix_block_records: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     raw_dir = session_dir / "raw"
     reference_raw_dir = (
@@ -20442,10 +21529,15 @@ def write_raw_block_artifacts(
     blocks_dir = raw_dir / RAW_BLOCKS_DIR
     reference_blocks_dir = reference_raw_dir / RAW_BLOCKS_DIR
     blocks_dir.mkdir(parents=True, exist_ok=True)
-    block_records: list[dict[str, Any]] = []
+    block_records: list[dict[str, Any]] = [
+        dict(item)
+        for item in (prefix_block_records or [])
+        if isinstance(item, dict)
+    ]
     compaction_records: list[dict[str, Any]] = []
     token_accounting_seconds = 0.0
-    reused_block_count = 0
+    reused_block_count = len(block_records)
+    attested_sealed_reused_block_count = len(block_records)
     rebuilt_block_count = 0
     prior_blocks_by_segment = {
         str(item.get("segment_id") or ""): item
@@ -20457,19 +21549,50 @@ def write_raw_block_artifacts(
         )
         if isinstance(item, dict) and item.get("segment_id")
     }
-    for segment_no, (start, end, role) in enumerate(ranges):
+    for prefix_block in block_records:
+        relative = Path(str(prefix_block.get("rel") or ""))
+        source_block_path = reference_session_dir / relative if (
+            reference_session_dir is not None
+            and relative
+            and not relative.is_absolute()
+        ) else Path(str(prefix_block.get("path") or ""))
+        target_block_path = blocks_dir / source_block_path.name
+        if not source_block_path.is_file():
+            raise ValueError("incremental_prefix_raw_block_missing")
+        target_block_path.unlink(missing_ok=True)
+        stage_projection_path_with_links(
+            source=source_block_path,
+            target=target_block_path,
+        )
+    if reference_session_dir is not None and block_records:
+        previous_compaction_path = (
+            reference_session_dir
+            / "raw"
+            / RAW_COMPACTION_EVENTS_JSONL
+        )
+        if previous_compaction_path.is_file():
+            prefix_ids = {
+                str(item.get("segment_id") or "")
+                for item in block_records
+            }
+            for line in previous_compaction_path.read_text(
+                encoding="utf-8", errors="replace"
+            ).splitlines():
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if (
+                    isinstance(item, dict)
+                    and str(item.get("segment_id") or "") in prefix_ids
+                ):
+                    compaction_records.append(dict(item))
+    for local_segment_no, (start, end, role) in enumerate(ranges):
+        segment_no = segment_no_offset + local_segment_no
         segment_id = f"{segment_no:03d}"
         block_name = f"{segment_id}__{role}.raw.jsonl"
         block_path = blocks_dir / block_name
         block_events = events[start:end]
-        block_hasher = hashlib.sha256()
-        block_bytes = 0
-        for event in block_events:
-            encoded = event.raw.encode("utf-8")
-            block_hasher.update(encoded)
-            block_hasher.update(b"\n")
-            block_bytes += len(encoded) + 1
-        block_sha256 = block_hasher.hexdigest()
         first_line = block_events[0].line_no if block_events else None
         last_line = block_events[-1].line_no if block_events else None
         boundary_events = [event for event in block_events if event.compaction_boundary]
@@ -20487,7 +21610,34 @@ def write_raw_block_artifacts(
             and isinstance(prior_block.get("source_range"), dict)
             else {}
         )
+        attested_sealed_reuse = bool(
+            isinstance(prior_block, dict)
+            and raw_block_status_for_role(role) == "sealed"
+            and int_value(last_line) <= attested_prefix_to_line
+            and str(prior_block.get("role") or "") == role
+            and int_value(prior_block.get("line_count"), -1)
+            == len(block_events)
+            and prior_range.get("from_line") == first_line
+            and prior_range.get("to_line") == last_line
+            and source_block_path.is_file()
+            and source_block_path.stat().st_size
+            == int_value(prior_block.get("bytes"), -1)
+        )
+        if attested_sealed_reuse:
+            block_bytes = int_value(prior_block.get("bytes"))
+            block_sha256 = str(prior_block.get("sha256") or "")
+        else:
+            block_hasher = hashlib.sha256()
+            block_bytes = 0
+            for event in block_events:
+                encoded = event.raw.encode("utf-8")
+                block_hasher.update(encoded)
+                block_hasher.update(b"\n")
+                block_bytes += len(encoded) + 1
+            block_sha256 = block_hasher.hexdigest()
         reusable_block = bool(
+            attested_sealed_reuse
+            or (
             isinstance(prior_block, dict)
             and str(prior_block.get("role") or "") == role
             and int_value(prior_block.get("line_count"), -1)
@@ -20501,6 +21651,7 @@ def write_raw_block_artifacts(
             and source_block_path.is_file()
             and source_block_path.stat().st_size == block_bytes
             and sha256_file(source_block_path) == block_sha256
+            )
         )
         if reusable_block:
             block_path.unlink(missing_ok=True)
@@ -20509,6 +21660,8 @@ def write_raw_block_artifacts(
                 target=block_path,
             )
             reused_block_count += 1
+            if attested_sealed_reuse:
+                attested_sealed_reused_block_count += 1
         else:
             with block_path.open("w", encoding="utf-8") as handle:
                 for event in block_events:
@@ -20589,6 +21742,9 @@ def write_raw_block_artifacts(
         execution_metrics_out.update(
             {
                 "reused_block_count": reused_block_count,
+                "attested_sealed_reused_block_count": (
+                    attested_sealed_reused_block_count
+                ),
                 "rebuilt_block_count": rebuilt_block_count,
                 "token_accounting_ms": int(
                     token_accounting_seconds * 1000
@@ -20605,6 +21761,286 @@ def write_raw_block_artifacts(
     }
 
 
+def immutable_component_artifact_receipt(path: Path) -> dict[str, Any]:
+    stat = path.stat()
+    return {
+        "bytes": stat.st_size,
+        "sha256": sha256_file(path),
+        "mtime_ns": stat.st_mtime_ns,
+        "ctime_ns": stat.st_ctime_ns,
+    }
+
+
+def immutable_component_artifact_receipt_metadata_current(
+    path: Path, receipt: Any
+) -> bool:
+    if not isinstance(receipt, dict) or not path.is_file():
+        return False
+    stat = path.stat()
+    ctime_current = bool(
+        receipt.get("metadata_mode") == "size_mtime_v1"
+        or stat.st_ctime_ns == int_value(receipt.get("ctime_ns"), -1)
+    )
+    return bool(
+        receipt.get("sha256")
+        and stat.st_size == int_value(receipt.get("bytes"), -1)
+        and stat.st_mtime_ns == int_value(receipt.get("mtime_ns"), -1)
+        and ctime_current
+    )
+
+
+def immutable_component_artifact_receipt_from_attested_link(
+    path: Path, source_receipt: dict[str, Any]
+) -> dict[str, Any]:
+    stat = path.stat()
+    return {
+        "bytes": stat.st_size,
+        "sha256": str(source_receipt.get("sha256") or ""),
+        "mtime_ns": stat.st_mtime_ns,
+        "ctime_ns": stat.st_ctime_ns,
+        "metadata_mode": "size_mtime_v1",
+    }
+
+
+def deep_audit_artifact_receipt(
+    path: Path, receipt: Any
+) -> list[str]:
+    """Re-hash one metadata-admitted artifact for the explicit audit lane."""
+    if not isinstance(receipt, dict):
+        return ["receipt_missing_or_invalid"]
+    if not path.is_file():
+        return ["artifact_missing"]
+    stat = path.stat()
+    reasons: list[str] = []
+    if stat.st_size != int_value(receipt.get("bytes"), -1):
+        reasons.append("artifact_byte_count_mismatch")
+    expected_sha256 = str(receipt.get("sha256") or "")
+    if not expected_sha256:
+        reasons.append("artifact_sha256_missing")
+    elif sha256_file_exact(path) != expected_sha256:
+        reasons.append("artifact_sha256_mismatch")
+    return reasons
+
+
+def deep_audit_session_projection_artifacts(
+    *, session_dir: Path, manifest: dict[str, Any]
+) -> dict[str, Any]:
+    """Verify immutable hot-path attestations by reading their full content."""
+    diagnostics: list[str] = []
+    artifact_count = 0
+    content_bytes_read = 0
+    segment_component_count = 0
+    legacy_unreceipted_segment_count = 0
+    classification_block_count = 0
+
+    segments = (
+        manifest.get("segments")
+        if isinstance(manifest.get("segments"), list)
+        else []
+    )
+    for segment in segments:
+        if not isinstance(segment, dict):
+            diagnostics.append("segment_manifest_record_invalid")
+            continue
+        segment_id = str(segment.get("segment_id") or "unknown")
+        component_identity = (
+            segment.get("component_identity")
+            if isinstance(segment.get("component_identity"), dict)
+            else {}
+        )
+        receipts = (
+            segment.get("artifact_receipts")
+            if isinstance(segment.get("artifact_receipts"), dict)
+            else {}
+        )
+        if not component_identity:
+            legacy_unreceipted_segment_count += 1
+            continue
+        segment_component_count += 1
+        expected_component = segment_component_identity(
+            segment_id=segment_id,
+            role=str(segment.get("role") or ""),
+            source_range=(
+                segment.get("source_range")
+                if isinstance(segment.get("source_range"), dict)
+                else {}
+            ),
+            input_digest=str(segment.get("input_digest") or ""),
+            raw_block=(
+                segment.get("raw_block")
+                if isinstance(segment.get("raw_block"), dict)
+                else None
+            ),
+        )
+        if component_identity != expected_component:
+            diagnostics.append(
+                f"segment_component_identity_mismatch:{segment_id}"
+            )
+        artifact_paths = {
+            "markdown": projection_path_from_ref(
+                segment.get("markdown"), base=session_dir
+            ),
+            "index": projection_path_from_ref(
+                segment.get("index"), base=session_dir
+            ),
+        }
+        for role, artifact_path in artifact_paths.items():
+            receipt = receipts.get(role)
+            reasons = deep_audit_artifact_receipt(
+                artifact_path, receipt
+            )
+            diagnostics.extend(
+                f"segment_{role}:{segment_id}:{reason}"
+                for reason in reasons
+            )
+            if artifact_path.is_file():
+                artifact_count += 1
+                content_bytes_read += artifact_path.stat().st_size
+        index_payload = read_json(artifact_paths["index"], {})
+        if not isinstance(index_payload, dict):
+            diagnostics.append(f"segment_index_invalid:{segment_id}")
+        else:
+            if index_payload.get("component_identity") != (
+                component_identity
+            ):
+                diagnostics.append(
+                    f"segment_index_component_identity_mismatch:{segment_id}"
+                )
+            diagnostics.extend(
+                f"segment_index:{segment_id}:{reason}"
+                for reason in generated_segment_index_stale_reasons(
+                    index_payload
+                )
+            )
+
+    cache_root = event_classification_cache_root(session_dir)
+    cache_index_path = event_classification_cache_index_path(cache_root)
+    if cache_index_path.is_file():
+        cache_index = read_json(cache_index_path, {})
+        if not isinstance(cache_index, dict):
+            diagnostics.append("classification_cache_index_invalid")
+        else:
+            generation_identity = (
+                cache_index.get("generation_identity")
+                if isinstance(
+                    cache_index.get("generation_identity"), dict
+                )
+                else {}
+            )
+            records = (
+                cache_index.get("blocks")
+                if isinstance(cache_index.get("blocks"), dict)
+                else {}
+            )
+            normalized_records = {
+                str(key): dict(record)
+                for key, record in records.items()
+                if isinstance(record, dict)
+            }
+            if str(cache_index.get("records_root_sha256") or "") != (
+                event_classification_cache_records_root_sha256(
+                    normalized_records
+                )
+            ):
+                diagnostics.append(
+                    "classification_cache_records_root_mismatch"
+                )
+            for cache_key, record in normalized_records.items():
+                classification_block_count += 1
+                block = (
+                    record.get("block")
+                    if isinstance(record.get("block"), dict)
+                    else {}
+                )
+                artifact_path = cache_root / str(
+                    record.get("artifact") or ""
+                )
+                artifact_count += int(artifact_path.is_file())
+                if artifact_path.is_file():
+                    content_bytes_read += artifact_path.stat().st_size
+                if not event_classification_cache_record_current(
+                    cache_root=cache_root,
+                    record=record,
+                    block=block,
+                    verify_content=True,
+                ):
+                    diagnostics.append(
+                        "classification_cache_artifact_invalid:"
+                        f"{cache_key}"
+                    )
+                    continue
+                payload = read_gzip_json(artifact_path)
+                classifications = (
+                    payload.get("classifications")
+                    if isinstance(payload.get("classifications"), list)
+                    else []
+                )
+                if (
+                    payload.get("generation_identity")
+                    != generation_identity
+                    or payload.get("block") != block
+                    or len(classifications)
+                    != int_value(block.get("line_count"), -1)
+                ):
+                    diagnostics.append(
+                        "classification_cache_payload_invalid:"
+                        f"{cache_key}"
+                    )
+
+    return {
+        "schema_version": 1,
+        "status": "current" if not diagnostics else "failed",
+        "ok": not diagnostics,
+        "session_dir": str(session_dir),
+        "artifact_count": artifact_count,
+        "content_bytes_read": content_bytes_read,
+        "segment_component_count": segment_component_count,
+        "legacy_unreceipted_segment_count": (
+            legacy_unreceipted_segment_count
+        ),
+        "classification_block_count": classification_block_count,
+        "diagnostics": diagnostics,
+        "admission": (
+            "full_sha256_rehash_of_hot_metadata_attestations_v1"
+        ),
+    }
+
+
+def segment_component_identity(
+    *,
+    segment_id: str,
+    role: str,
+    source_range: dict[str, Any],
+    input_digest: str,
+    raw_block: dict[str, Any] | None,
+    generation_identity: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    generation = generation_identity or segment_index_generation_identity()
+    payload = {
+        "schema_version": 1,
+        "component_type": "segment_index",
+        "segment_id": segment_id,
+        "role": role,
+        "source_range": dict(source_range),
+        "input_digest": input_digest,
+        "raw_block_sha256": str(
+            (raw_block or {}).get("sha256") or ""
+        ),
+        "generation_id": str(generation.get("generation_id") or ""),
+    }
+    return {
+        **payload,
+        "component_id": hashlib.sha256(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest(),
+    }
+
+
 def write_segment(
     session_dir: Path,
     raw_rel: str,
@@ -20616,6 +22052,7 @@ def write_segment(
     reference_session_dir: Path | None = None,
     publish_identity: dict[str, Any] | None = None,
     literal_policy: DerivedSessionSensitiveLiteralPolicy | None = None,
+    markdown_render_mode: str = "index_first_compact_v1",
 ) -> dict[str, Any]:
     segment_id = f"{segment_no:03d}"
     md_name = f"{segment_id}__{role}.md"
@@ -20636,16 +22073,21 @@ def write_segment(
         role=role,
         raw_block=raw_block,
     )
-    event_views = [
-        (
-            event,
-            *derived_segment_event_view(
+    full_markdown_render = markdown_render_mode == "full_review_v1"
+    event_views = (
+        [
+            (
                 event,
-                literal_policy=literal_policy,
-            ),
-        )
-        for event in events
-    ]
+                *derived_segment_event_view(
+                    event,
+                    literal_policy=literal_policy,
+                ),
+            )
+            for event in events
+        ]
+        if full_markdown_render
+        else []
+    )
     redaction_kind_counts: Counter[str] = Counter()
     redacted_event_count = 0
     for _event, _view, report in event_views:
@@ -20662,6 +22104,8 @@ def write_segment(
         "redaction_count": sum(redaction_kind_counts.values()),
         "kind_counts": dict(sorted(redaction_kind_counts.items())),
         "raw_authority_preserved": True,
+        "markdown_render_mode": markdown_render_mode,
+        "full_raw_views_rendered": full_markdown_render,
         "session_sensitive_literals": (
             literal_policy.report()
             if literal_policy is not None
@@ -20700,39 +22144,72 @@ def write_segment(
         "Promote claims only after reviewing raw refs or the relevant event body.",
         "",
     ]
-    for event, redacted_event_view, redaction_report in event_views:
-        anchor = anchor_for(event)
+    if full_markdown_render:
+        for event, redacted_event_view, redaction_report in event_views:
+            anchor = anchor_for(event)
+            lines.extend(
+                [
+                    f'<a id="{anchor}"></a>',
+                    "",
+                    f"## EVENT {event.event_id} - {event.event_type} - {event.importance}",
+                    f"- line: {event.line_no}",
+                    f"- time: {event.timestamp or ''}",
+                    f"- source: {event.source_type}",
+                    f"- family: {event.family}",
+                    f"- phase: {event.phase}",
+                    f"- actor: {event.actor}",
+                    f"- action: {event.action}",
+                    f"- object: {event.object_ref}",
+                    f"- outcome: {event.outcome}",
+                    f"- refs: raw:line:{event.line_no}",
+                    f"- correlation_id: {event.correlation_id or ''}",
+                    f"- tags: {json.dumps(event.tags, ensure_ascii=False)}",
+                    f"- derived_view_redacted: {str(bool(redaction_report.get('redacted'))).lower()}",
+                    "",
+                    "### Title",
+                    "",
+                    event.title,
+                    "",
+                    "### Raw",
+                    "",
+                    "````json",
+                    markdown_escape_fence(redacted_event_view),
+                    "````",
+                    "",
+                ]
+            )
+    else:
         lines.extend(
             [
-                f'<a id="{anchor}"></a>',
+                "## Index-first view",
                 "",
-                f"## EVENT {event.event_id} - {event.event_type} - {event.importance}",
-                f"- line: {event.line_no}",
-                f"- time: {event.timestamp or ''}",
-                f"- source: {event.source_type}",
-                f"- family: {event.family}",
-                f"- phase: {event.phase}",
-                f"- actor: {event.actor}",
-                f"- action: {event.action}",
-                f"- object: {event.object_ref}",
-                f"- outcome: {event.outcome}",
-                f"- refs: raw:line:{event.line_no}",
-                f"- correlation_id: {event.correlation_id or ''}",
-                f"- tags: {json.dumps(event.tags, ensure_ascii=False)}",
-                f"- derived_view_redacted: {str(bool(redaction_report.get('redacted'))).lower()}",
-                "",
-                "### Title",
-                "",
-                event.title,
-                "",
-                "### Raw",
-                "",
-                "````json",
-                markdown_escape_fence(redacted_event_view),
-                "````",
+                "Raw event bodies are rendered only on explicit review demand.",
+                "The sibling JSON index and raw refs are the primary navigation surface.",
                 "",
             ]
         )
+        for event in events:
+            lines.extend(
+                [
+                    f'<a id="{anchor_for(event)}"></a>',
+                    "",
+                    f"## EVENT {event.event_id} - {event.event_type} - {event.importance}",
+                    f"- line: {event.line_no}",
+                    f"- time: {event.timestamp or ''}",
+                    f"- source: {event.source_type}",
+                    f"- family: {event.family}",
+                    f"- phase: {event.phase}",
+                    f"- actor: {event.actor}",
+                    f"- action: {event.action}",
+                    f"- outcome: {event.outcome}",
+                    f"- refs: raw:line:{event.line_no}",
+                    "",
+                    "### Title",
+                    "",
+                    event.title,
+                    "",
+                ]
+            )
     md_path.write_text(
         redact_derived_text(
             "\n".join(lines),
@@ -20798,10 +22275,20 @@ def write_segment(
         include_observations=True,
     )
     generation_identity = segment_index_generation_identity()
+    source_range = {"from_line": first_line, "to_line": last_line}
+    component_identity = segment_component_identity(
+        segment_id=segment_id,
+        role=role,
+        source_range=source_range,
+        input_digest=input_digest,
+        raw_block=raw_block,
+        generation_identity=generation_identity,
+    )
     index = {
         "schema_version": SCHEMA_VERSION,
         "generation_id": generation_identity["generation_id"],
         "generation_identity": generation_identity,
+        "component_identity": component_identity,
         "projection_publish": publish_identity or {},
         "conversation_act_schema_version": CONVERSATION_ACT_SCHEMA_VERSION,
         "session_act_schema_version": SESSION_ACT_SCHEMA_VERSION,
@@ -20810,12 +22297,17 @@ def write_segment(
         "route_signal_classifier_version": ROUTE_SIGNAL_CLASSIFIER_VERSION,
         "token_accounting_schema_version": TOKEN_ACCOUNTING_SCHEMA_VERSION,
         "derived_text_redaction": segment_redaction,
+        "markdown_render": {
+            "mode": markdown_render_mode,
+            "full_raw_views_rendered": full_markdown_render,
+            "on_demand_supported": True,
+        },
         "segment_id": segment_id,
         "segment_role": role,
         "input_digest": input_digest,
         "source_raw": raw_rel,
         "source_block": raw_block if isinstance(raw_block, dict) else None,
-        "source_range": {"from_line": first_line, "to_line": last_line},
+        "source_range": source_range,
         "markdown": str(reference_md_path),
         "events": records,
         "by_type": dict(sorted(by_type.items())),
@@ -20844,6 +22336,10 @@ def write_segment(
             literal_policy=literal_policy,
         ),
     )
+    artifact_receipts = {
+        "markdown": immutable_component_artifact_receipt(md_path),
+        "index": immutable_component_artifact_receipt(index_path),
+    }
     return {
         "segment_id": segment_id,
         "role": role,
@@ -20851,13 +22347,16 @@ def write_segment(
         "markdown": str(reference_md_path),
         "index": str(reference_index_path),
         "event_count": len(events),
-        "source_range": {"from_line": first_line, "to_line": last_line},
+        "source_range": source_range,
         "raw_block": raw_block if isinstance(raw_block, dict) else None,
+        "component_identity": component_identity,
+        "artifact_receipts": artifact_receipts,
         "token_accounting": token_accounting_summary_for_events(
             events,
             scope={"kind": "segment", "segment_id": segment_id, "segment_role": role},
             include_observations=False,
         ),
+        "markdown_render": index["markdown_render"],
     }
 
 
@@ -20866,6 +22365,7 @@ def session_projection_segment_input_digest(
     events: list[RawEvent],
     role: str,
     raw_block: dict[str, Any] | None,
+    segment_generation_id: str | None = None,
 ) -> str:
     payload = {
         "schema_version": 1,
@@ -20884,7 +22384,8 @@ def session_projection_segment_input_digest(
             else ""
         ),
         "segment_generation_id": (
-            segment_index_generation_identity()["generation_id"]
+            segment_generation_id
+            or segment_index_generation_identity()["generation_id"]
         ),
         "derived_text_privacy_policy_version": (
             DERIVED_TEXT_PRIVACY_POLICY_VERSION
@@ -20903,6 +22404,246 @@ def session_projection_segment_input_digest(
     ).hexdigest()
 
 
+def render_segment_markdown_on_demand(
+    *,
+    session_dir: Path,
+    segment: str,
+) -> dict[str, Any]:
+    manifest = read_json(session_dir / "session.manifest.json", {})
+    if not isinstance(manifest, dict) or not manifest:
+        raise ValueError("segment_render_session_manifest_missing")
+    candidates = (
+        manifest.get("segments")
+        if isinstance(manifest.get("segments"), list)
+        else []
+    )
+    requested = str(segment or "").strip()
+    selected = next(
+        (
+            item
+            for item in candidates
+            if isinstance(item, dict)
+            and requested
+            in {
+                str(item.get("segment_id") or ""),
+                Path(str(item.get("index") or "")).name,
+                Path(str(item.get("markdown") or "")).name,
+                Path(str(item.get("index") or "")).stem,
+                Path(str(item.get("markdown") or "")).stem,
+            }
+        ),
+        None,
+    )
+    if not isinstance(selected, dict):
+        raise ValueError(f"segment_render_target_unresolved:{requested}")
+    index_path = projection_path_from_ref(
+        selected.get("index"),
+        base=session_dir,
+    )
+    index = read_json(index_path, {})
+    if not isinstance(index, dict) or not index:
+        raise ValueError("segment_render_index_missing")
+    source_raw = projection_path_from_ref(
+        index.get("source_raw") or "raw/session.raw.jsonl",
+        base=session_dir,
+    )
+    if not source_raw.is_file():
+        raise ValueError("segment_render_raw_missing")
+    source_range = (
+        index.get("source_range")
+        if isinstance(index.get("source_range"), dict)
+        else {}
+    )
+    from_line = int_value(source_range.get("from_line"), 0)
+    to_line = int_value(source_range.get("to_line"), 0)
+    if from_line <= 0 or to_line < from_line:
+        raise ValueError("segment_render_source_range_invalid")
+    source_block = (
+        index.get("source_block")
+        if isinstance(index.get("source_block"), dict)
+        else {}
+    )
+    selected_lines: list[tuple[int, str]] = []
+    source_read_mode = "legacy_raw_range_scan"
+    bytes_read = 0
+    if source_block:
+        block_path, compressed, _storage_mode = raw_block_payload_path(
+            session_dir,
+            source_block,
+        )
+        if block_path.is_file():
+            stored_block_bytes = block_path.read_bytes()
+            block_bytes = (
+                gzip.decompress(stored_block_bytes)
+                if compressed
+                else stored_block_bytes
+            )
+            bytes_read = block_path.stat().st_size
+            expected_block_sha256 = str(
+                source_block.get("uncompressed_sha256")
+                or source_block.get("sha256")
+                or ""
+            )
+            if (
+                expected_block_sha256
+                and hashlib.sha256(block_bytes).hexdigest()
+                != expected_block_sha256
+            ):
+                raise ValueError(
+                    "segment_render_raw_block_digest_mismatch"
+                )
+            block_from_line = int_value(
+                (
+                    source_block.get("source_range")
+                    if isinstance(
+                        source_block.get("source_range"), dict
+                    )
+                    else {}
+                ).get("from_line"),
+                from_line,
+            )
+            selected_lines = [
+                (
+                    block_from_line + offset,
+                    raw_line.decode("utf-8", errors="replace").rstrip(
+                        "\r\n"
+                    ),
+                )
+                for offset, raw_line in enumerate(
+                    block_bytes.splitlines(keepends=True)
+                )
+            ]
+            selected_lines = [
+                item
+                for item in selected_lines
+                if from_line <= item[0] <= to_line
+            ]
+            source_read_mode = "verified_raw_block"
+    if not selected_lines:
+        with source_raw.open(
+            "r", encoding="utf-8", errors="replace"
+        ) as raw_handle:
+            for line_no, raw_line in enumerate(raw_handle, start=1):
+                bytes_read += len(
+                    raw_line.encode("utf-8", errors="replace")
+                )
+                if line_no < from_line:
+                    continue
+                if line_no > to_line:
+                    break
+                selected_lines.append(
+                    (line_no, raw_line.rstrip("\r\n"))
+                )
+    privacy_scan_bytes = 0
+
+    def privacy_scan_lines() -> Iterable[str]:
+        nonlocal privacy_scan_bytes
+        with source_raw.open(
+            "r", encoding="utf-8", errors="replace"
+        ) as raw_handle:
+            for raw_line in raw_handle:
+                privacy_scan_bytes += len(
+                    raw_line.encode("utf-8", errors="replace")
+                )
+                yield raw_line.rstrip("\r\n")
+
+    # Session-sensitive literals discovered in another block may recur in the
+    # selected block.  Until privacy-safe structural marker summaries select
+    # every necessary block, keep the exact whole-session scan process-local.
+    literal_values = derived_session_sensitive_literal_values_from_texts(
+        privacy_scan_lines()
+    )
+    literal_policy = DerivedSessionSensitiveLiteralPolicy(
+        values_by_kind=literal_values
+    )
+    records_by_line = {
+        int_value(item.get("line")): item
+        for item in (
+            index.get("events")
+            if isinstance(index.get("events"), list)
+            else []
+        )
+        if isinstance(item, dict) and int_value(item.get("line")) > 0
+    }
+    lines = [
+        "---",
+        "aoa_artifact_type: codex_compaction_segment_on_demand_review",
+        "schema_version: 1",
+        f"segment_id: {index.get('segment_id')}",
+        f"source_index: {index_path}",
+        f"source_raw: {source_raw}",
+        f"source_from_line: {from_line}",
+        f"source_to_line: {to_line}",
+        "status: generated_redacted_on_demand_view",
+        "---",
+        "",
+        f"# Segment {index.get('segment_id')}: on-demand review",
+        "",
+        "This file is a disposable redacted review view. Raw refs remain authoritative.",
+        "",
+    ]
+    rendered_event_count = 0
+    for line_no, raw_line in selected_lines:
+        record = records_by_line.get(line_no, {})
+        event_id = str(
+            record.get("event_id") or f"event-{line_no:06d}"
+        )
+        event_anchor = safe_slug(
+            event_id.lower(), fallback="event"
+        )
+        lines.extend(
+            [
+                f'<a id="event-{event_anchor}"></a>',
+                "",
+                f"## EVENT {event_id} - {record.get('type') or 'RAW_EVENT'}",
+                f"- line: {line_no}",
+                f"- refs: raw:line:{line_no}",
+                "",
+                "### Raw",
+                "",
+                "````json",
+                markdown_escape_fence(
+                    redact_derived_text(
+                        raw_line,
+                        literal_policy=literal_policy,
+                    )
+                ),
+                "````",
+                "",
+            ]
+        )
+        rendered_event_count += 1
+    rendered_path = (
+        session_dir
+        / "segments"
+        / "rendered"
+        / f"{Path(str(selected.get('markdown') or '')).stem}.full.md"
+    )
+    rendered_path.parent.mkdir(parents=True, exist_ok=True)
+    rendered_path.write_text("\n".join(lines), encoding="utf-8")
+    return {
+        "schema_version": 1,
+        "artifact_type": "segment_markdown_on_demand_render_receipt",
+        "status": "rendered",
+        "session_id": manifest.get("session_id"),
+        "segment_id": index.get("segment_id"),
+        "index_path": str(index_path),
+        "raw_path": str(source_raw),
+        "rendered_path": str(rendered_path),
+        "rendered_event_count": rendered_event_count,
+        "source_read_mode": source_read_mode,
+        "source_bytes_read": bytes_read,
+        "privacy_scan_bytes_read": privacy_scan_bytes,
+        "privacy_scan_mode": (
+            "whole_session_process_local_until_safe_block_markers_v1"
+        ),
+        "bytes": rendered_path.stat().st_size,
+        "sha256": sha256_file(rendered_path),
+        "privacy": literal_policy.report(),
+        "authority": "disposable_redacted_review_view",
+    }
+
+
 def reuse_published_session_segment(
     *,
     stage_dir: Path,
@@ -20913,25 +22654,161 @@ def reuse_published_session_segment(
     raw_block: dict[str, Any] | None,
     published_segment: Any,
     publish_identity: dict[str, Any],
+    attested_prefix_to_line: int = 0,
+    source_range_override: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     if not isinstance(published_segment, dict):
         return None
     segment_id = f"{segment_no:03d}"
-    expected_digest = session_projection_segment_input_digest(
-        events=events,
-        role=role,
-        raw_block=raw_block,
+    current_generation = segment_index_generation_identity()
+    admitted_generation_ids = {
+        str(current_generation["generation_id"]),
+        *DECLARED_PROJECTION_PREDECESSOR_GENERATION_IDS.get(
+            "segment_index",
+            frozenset(),
+        ),
+    }
+    published_digest = str(
+        published_segment.get("input_digest") or ""
     )
+    published_range = (
+        published_segment.get("source_range")
+        if isinstance(published_segment.get("source_range"), dict)
+        else {}
+    )
+    published_raw_block = (
+        published_segment.get("raw_block")
+        if isinstance(published_segment.get("raw_block"), dict)
+        else {}
+    )
+    current_range = (
+        dict(source_range_override)
+        if isinstance(source_range_override, dict)
+        else {
+            "from_line": events[0].line_no if events else None,
+            "to_line": events[-1].line_no if events else None,
+        }
+    )
+    attested_current_digest = bool(
+        published_digest
+        and raw_block_status_for_role(role) == "sealed"
+        and int_value(current_range.get("to_line"))
+        <= attested_prefix_to_line
+        and published_range == current_range
+        and isinstance(raw_block, dict)
+        and str(raw_block.get("sha256") or "")
+        == str(published_raw_block.get("sha256") or "")
+        and raw_block.get("source_range")
+        == published_raw_block.get("source_range")
+    )
+    expected_digests = (
+        {
+            str(current_generation["generation_id"]): (
+                published_digest
+            )
+        }
+        if attested_current_digest
+        else {
+            generation_id: session_projection_segment_input_digest(
+                events=events,
+                role=role,
+                raw_block=raw_block,
+                segment_generation_id=generation_id,
+            )
+            for generation_id in admitted_generation_ids
+        }
+    )
+    matched_generation_id = next(
+        (
+            generation_id
+            for generation_id, digest in expected_digests.items()
+            if digest == published_digest
+        ),
+        "",
+    )
+    expected_digest = expected_digests[
+        str(current_generation["generation_id"])
+    ]
     if (
         str(published_segment.get("segment_id") or "") != segment_id
         or str(published_segment.get("role") or "") != role
-        or str(published_segment.get("input_digest") or "")
-        != expected_digest
+        or not matched_generation_id
     ):
         return None
     source_md = Path(str(published_segment.get("markdown") or ""))
     source_index = Path(str(published_segment.get("index") or ""))
+    target_md = stage_dir / "segments" / source_md.name
+    target_index = stage_dir / "segments" / source_index.name
+    current_component_identity = segment_component_identity(
+        segment_id=segment_id,
+        role=role,
+        source_range=current_range,
+        input_digest=expected_digest,
+        raw_block=raw_block,
+        generation_identity=current_generation,
+    )
+    published_receipts = (
+        published_segment.get("artifact_receipts")
+        if isinstance(published_segment.get("artifact_receipts"), dict)
+        else {}
+    )
+    immutable_component_reuse = bool(
+        matched_generation_id
+        == str(current_generation.get("generation_id") or "")
+        and published_segment.get("component_identity")
+        == current_component_identity
+        and immutable_component_artifact_receipt_metadata_current(
+            source_md, published_receipts.get("markdown")
+        )
+        and immutable_component_artifact_receipt_metadata_current(
+            source_index, published_receipts.get("index")
+        )
+    )
+    if immutable_component_reuse:
+        target_md.parent.mkdir(parents=True, exist_ok=True)
+        target_md.unlink(missing_ok=True)
+        target_index.unlink(missing_ok=True)
+        stage_projection_path_with_links(
+            source=source_md, target=target_md
+        )
+        stage_projection_path_with_links(
+            source=source_index, target=target_index
+        )
+        return {
+            **published_segment,
+            "segment_id": segment_id,
+            "role": role,
+            "input_digest": expected_digest,
+            "markdown": str(session_dir / "segments" / source_md.name),
+            "index": str(session_dir / "segments" / source_index.name),
+            "raw_block": raw_block,
+            "component_identity": current_component_identity,
+            "artifact_receipts": {
+                "markdown": (
+                    immutable_component_artifact_receipt_from_attested_link(
+                        target_md,
+                        dict(published_receipts["markdown"]),
+                    )
+                ),
+                "index": (
+                    immutable_component_artifact_receipt_from_attested_link(
+                        target_index,
+                        dict(published_receipts["index"]),
+                    )
+                ),
+            },
+            "reuse_mode": "immutable_component_link_v1",
+        }
     existing_index = read_json(source_index, {})
+    generation_admission = projection_generation_admission(
+        projection="segment_index",
+        stored_identity=(
+            existing_index.get("generation_identity")
+            if isinstance(existing_index, dict)
+            else {}
+        ),
+        expected_identity=current_generation,
+    )
     required_mapping_keys = (
         "by_type",
         "by_tag",
@@ -20954,8 +22831,14 @@ def reuse_published_session_segment(
         and isinstance(existing_index.get("events"), list)
         else []
     )
+    expected_event_count = max(
+        0,
+        int_value(current_range.get("to_line"))
+        - int_value(current_range.get("from_line"))
+        + 1,
+    )
     universal_structure_current = bool(
-        len(indexed_events) == len(events)
+        len(indexed_events) == expected_event_count
         and all(
             isinstance(existing_index.get(key), dict)
             for key in required_mapping_keys
@@ -20984,27 +22867,42 @@ def reuse_published_session_segment(
         and isinstance(existing_index, dict)
         and universal_structure_current
         and str(existing_index.get("input_digest") or "")
-        == expected_digest
+        == published_digest
         and str(existing_index.get("generation_id") or "")
-        == str(
-            segment_index_generation_identity().get(
-                "generation_id"
-            )
-            or ""
-        )
+        == matched_generation_id
+        and generation_admission["compatible"]
         and not generated_segment_index_stale_reasons(
             existing_index
         )
     ):
         return None
-    target_md = stage_dir / "segments" / source_md.name
-    target_index = stage_dir / "segments" / source_index.name
     target_md.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source_md, target_md)
     reused_index = dict(existing_index)
+    reused_index["generation_id"] = current_generation[
+        "generation_id"
+    ]
+    reused_index["generation_identity"] = current_generation
+    reused_index["input_digest"] = expected_digest
+    reused_index["component_identity"] = current_component_identity
+    if generation_admission["requires_restamp"]:
+        reused_index["generation_transition"] = {
+            "schema_version": (
+                PROJECTION_PREDECESSOR_ATTESTATION_VERSION
+            ),
+            "from_generation_id": matched_generation_id,
+            "to_generation_id": current_generation[
+                "generation_id"
+            ],
+            "basis": "declared_predecessor_reuse_then_restamp",
+        }
     reused_index["projection_publish"] = publish_identity
     reused_index["source_block"] = raw_block
     write_json(target_index, reused_index)
+    artifact_receipts = {
+        "markdown": immutable_component_artifact_receipt(target_md),
+        "index": immutable_component_artifact_receipt(target_index),
+    }
     return {
         **published_segment,
         "segment_id": segment_id,
@@ -21013,6 +22911,9 @@ def reuse_published_session_segment(
         "markdown": str(session_dir / "segments" / source_md.name),
         "index": str(session_dir / "segments" / source_index.name),
         "raw_block": raw_block,
+        "component_identity": current_component_identity,
+        "artifact_receipts": artifact_receipts,
+        "reuse_mode": "validated_migration_restamp_v1",
     }
 
 
@@ -21022,11 +22923,16 @@ def write_segment_process_task(
         str,
         int,
         str,
-        list[RawEvent],
+        str,
+        list[dict[str, Any]],
+        dict[str, Any],
+        int,
+        int,
+        dict[str, dict[str, Any]],
         dict[str, Any] | None,
         Path,
         dict[str, Any],
-        DerivedSessionSensitiveLiteralPolicy,
+        dict[str, set[str]],
     ],
 ) -> tuple[int, str, dict[str, Any]]:
     (
@@ -21034,12 +22940,30 @@ def write_segment_process_task(
         raw_rel,
         segment_no,
         role,
-        events,
+        raw_path_text,
+        classification_block_refs,
+        classification_generation_identity,
+        from_line,
+        to_line,
+        reconciliation_patches,
         raw_block,
         reference_session_dir,
         publish_identity,
-        literal_policy,
+        sensitive_values_by_kind,
     ) = task
+    events = load_raw_event_classification_range(
+        raw_path=Path(raw_path_text),
+        block_refs=classification_block_refs,
+        generation_identity=(
+            classification_generation_identity
+        ),
+        from_line=from_line,
+        to_line=to_line,
+        reconciliation_patches=reconciliation_patches,
+    )
+    literal_policy = DerivedSessionSensitiveLiteralPolicy(
+        values_by_kind=sensitive_values_by_kind
+    )
     return (
         segment_no,
         role,
@@ -21238,6 +23162,8 @@ def write_session_index(
     workers: int = 1,
     cooperative_deadline_monotonic: float | None = None,
     execution_metrics_out: dict[str, Any] | None = None,
+    event_summary: dict[str, Any] | None = None,
+    processed_to_line: int | None = None,
 ) -> dict[str, Any]:
     return write_session_index_impl(
         session_dir,
@@ -21251,6 +23177,8 @@ def write_session_index(
             cooperative_deadline_monotonic
         ),
         execution_metrics_out=execution_metrics_out,
+        event_summary=event_summary,
+        processed_to_line=processed_to_line,
     )
 
 
@@ -21285,6 +23213,43 @@ def session_index_task_episode_shard_key(
         or f"ordinal-{ordinal:04d}"
     )
     return f"{ordinal:04d}:{stable}"
+
+
+def task_episode_component_source_identity(
+    episode: dict[str, Any],
+    *,
+    generation_identity: dict[str, Any],
+) -> dict[str, Any]:
+    semantic_source = session_projection_semantic_digest_value(
+        episode
+    )
+    source_sha256 = hashlib.sha256(
+        json.dumps(
+            semantic_source,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    event_range = (
+        episode.get("event_range")
+        if isinstance(episode.get("event_range"), dict)
+        else {}
+    )
+    return {
+        "schema_version": 1,
+        "identity_mode": "append_stable_episode_component_v1",
+        "task_episode_generation_id": str(
+            generation_identity.get("generation_id") or ""
+        ),
+        "episode_source_sha256": source_sha256,
+        "event_range": {
+            "from_line": int_value(event_range.get("from_line")),
+            "to_line": int_value(event_range.get("to_line")),
+        },
+        "privacy_policy_version": DERIVED_TEXT_PRIVACY_POLICY_VERSION,
+        "redaction_policy_version": DERIVED_TEXT_REDACTION_POLICY_VERSION,
+    }
 
 
 def session_index_task_episode_shard_envelope(
@@ -21358,6 +23323,11 @@ def write_session_index_component_shard(
             "component_key": str(
                 envelope.get("component_key") or ""
             ),
+            "source_identity": (
+                dict(envelope.get("source_identity"))
+                if isinstance(envelope.get("source_identity"), dict)
+                else {}
+            ),
             "ref": str(
                 Path(SESSION_INDEX_SHARDS_DIR)
                 / SESSION_INDEX_TASK_EPISODE_SHARDS_DIR
@@ -21375,8 +23345,6 @@ def write_session_index_component_shard(
 
 def staged_session_index_task_episode_shards(
     session_dir: Path,
-    *,
-    source_identity: dict[str, Any],
 ) -> dict[str, tuple[dict[str, Any], dict[str, Any]]]:
     shard_dir = (
         session_dir
@@ -21398,7 +23366,7 @@ def staged_session_index_task_episode_shards(
             or envelope.get("artifact_type")
             != "session_index_component_shard"
             or envelope.get("component") != "task_episodes"
-            or envelope.get("source_identity") != source_identity
+            or not isinstance(envelope.get("source_identity"), dict)
             or not isinstance(envelope.get("payload"), dict)
             or session_index_shard_payload_sha256(
                 envelope["payload"]
@@ -21415,6 +23383,13 @@ def staged_session_index_task_episode_shards(
             envelope,
             {
                 "component_key": component_key,
+                "source_identity": dict(
+                    envelope.get("source_identity")
+                    if isinstance(
+                        envelope.get("source_identity"), dict
+                    )
+                    else {}
+                ),
                 "ref": str(
                     Path(SESSION_INDEX_SHARDS_DIR)
                     / SESSION_INDEX_TASK_EPISODE_SHARDS_DIR
@@ -21425,6 +23400,7 @@ def staged_session_index_task_episode_shards(
                     envelope.get("payload_sha256") or ""
                 ),
                 "bytes": path.stat().st_size,
+                "_artifact_path": str(path),
             },
         )
     return current
@@ -21434,6 +23410,7 @@ def materialize_session_index_task_episode_shards(
     session_dir: Path,
     task_episodes: list[dict[str, Any]],
     *,
+    published_session_dir: Path | None = None,
     publish_identity: dict[str, Any],
     literal_policy: DerivedSessionSensitiveLiteralPolicy,
     workers: int,
@@ -21457,8 +23434,18 @@ def materialize_session_index_task_episode_shards(
     }
     existing = staged_session_index_task_episode_shards(
         session_dir,
-        source_identity=source_identity,
     )
+    if (
+        published_session_dir is not None
+        and published_session_dir != session_dir
+    ):
+        published_existing = (
+            staged_session_index_task_episode_shards(
+                published_session_dir,
+            )
+        )
+        for component_key, candidate in published_existing.items():
+            existing.setdefault(component_key, candidate)
     payloads: dict[int, dict[str, Any]] = {}
     records: dict[int, dict[str, Any]] = {}
     pending: list[
@@ -21471,25 +23458,108 @@ def materialize_session_index_task_episode_shards(
         ]
     ] = []
     reused_count = 0
+    migrated_predecessor_count = 0
     for ordinal, episode in enumerate(task_episodes):
         component_key = session_index_task_episode_shard_key(
             episode,
             ordinal,
         )
+        component_source_identity = (
+            task_episode_component_source_identity(
+                episode,
+                generation_identity=generation_identity,
+            )
+        )
+        expected_payload = redact_derived_value(
+            episode,
+            literal_policy=literal_policy,
+        )
+        expected_payload_sha256 = (
+            session_index_shard_payload_sha256(expected_payload)
+        )
         prior = existing.get(component_key)
         if prior is not None:
             envelope, record = prior
-            payloads[ordinal] = dict(envelope["payload"])
-            records[ordinal] = dict(record)
-            reused_count += 1
-            continue
+            prior_source_identity = (
+                envelope.get("source_identity")
+                if isinstance(envelope.get("source_identity"), dict)
+                else {}
+            )
+            prior_generation_id = str(
+                prior_source_identity.get(
+                    "task_episode_generation_id"
+                )
+                or ""
+            )
+            prior_payload_matches = bool(
+                str(envelope.get("payload_sha256") or "")
+                == expected_payload_sha256
+            )
+            if (
+                prior_source_identity == component_source_identity
+                and prior_payload_matches
+            ):
+                reusable_record = dict(record)
+                source_artifact = Path(
+                    str(reusable_record.pop("_artifact_path", ""))
+                )
+                target_artifact = session_dir / str(
+                    reusable_record.get("ref") or ""
+                )
+                if source_artifact != target_artifact:
+                    stage_projection_path_with_links(
+                        source=source_artifact,
+                        target=target_artifact,
+                    )
+                payloads[ordinal] = dict(envelope["payload"])
+                records[ordinal] = reusable_record
+                reused_count += 1
+                continue
+            legacy_source_matches = bool(
+                prior_payload_matches
+                and "raw_sha256" in prior_source_identity
+                and "raw_bytes" in prior_source_identity
+                and "raw_line_count" in prior_source_identity
+                and (
+                    prior_generation_id
+                    == str(generation_identity.get("generation_id") or "")
+                    or prior_generation_id
+                    in DECLARED_PROJECTION_PREDECESSOR_GENERATION_IDS.get(
+                        "task_episode_source",
+                        frozenset(),
+                    )
+                )
+            )
+            if legacy_source_matches:
+                _, _, restamped = (
+                    session_index_task_episode_shard_envelope(
+                        (
+                            ordinal,
+                            component_key,
+                            episode,
+                            literal_policy,
+                            component_source_identity,
+                        )
+                    )
+                )
+                new_record = write_session_index_component_shard(
+                    session_dir
+                    / SESSION_INDEX_SHARDS_DIR
+                    / SESSION_INDEX_TASK_EPISODE_SHARDS_DIR,
+                    restamped,
+                )
+                payloads[ordinal] = dict(restamped["payload"])
+                records[ordinal] = new_record
+                reused_count += 1
+                migrated_predecessor_count += 1
+                continue
         pending.append(
             (
                 ordinal,
                 component_key,
                 episode,
                 literal_policy,
-                source_identity,
+                component_source_identity,
             )
         )
 
@@ -21588,6 +23658,9 @@ def materialize_session_index_task_episode_shards(
             "planned_shard_count": len(task_episodes),
             "completed_shard_count": len(payloads),
             "checkpoint_reused_shard_count": reused_count,
+            "migrated_predecessor_shard_count": (
+                migrated_predecessor_count
+            ),
             "rebuilt_shard_count": processed_pending,
         },
     }
@@ -21604,7 +23677,7 @@ def write_session_index_shard_manifest(
         "schema_version": SESSION_INDEX_SHARD_SCHEMA_VERSION,
         "artifact_type": "session_index_shard_manifest",
         "storage_mode": (
-            "content_addressed_components_with_embedded_compatibility_view"
+            "content_addressed_components_manifest_first_v1"
         ),
         "projection_publish": publish_identity,
         "source_identity": source_identity,
@@ -21628,6 +23701,655 @@ def write_session_index_shard_manifest(
     return manifest
 
 
+def session_index_task_episode_component_read(
+    session_dir: Path,
+    session_index: dict[str, Any],
+    *,
+    order: str = "chronological",
+    limit: int | None = None,
+    selector: Callable[[dict[str, Any]], bool] | None = None,
+) -> dict[str, Any]:
+    """Hydrate only the manifest-first task-episode shards a reader needs.
+
+    Every returned shard is content-address verified.  A bounded positive read
+    deliberately does not claim that unvisited components are globally valid;
+    deep/audit callers use the unbounded compatibility wrapper below.
+    """
+    embedded = (
+        session_index.get("task_episodes")
+        if isinstance(session_index.get("task_episodes"), list)
+        else []
+    )
+    storage = (
+        session_index.get("component_storage")
+        if isinstance(session_index.get("component_storage"), dict)
+        else {}
+    )
+    effective_limit = (
+        None if limit is None else max(0, int_value(limit))
+    )
+
+    def selected_payloads(
+        payloads: Iterable[dict[str, Any]],
+        *,
+        total_count: int,
+        reader_mode: str,
+    ) -> dict[str, Any]:
+        ordered = list(payloads)
+        if order == "recent":
+            ordered.reverse()
+        elif order != "chronological":
+            return {
+                "status": "invalid",
+                "payloads": [],
+                "diagnostics": ["task_episode_component_order_invalid"],
+                "reader_mode": reader_mode,
+                "component_count": total_count,
+                "hydrated_component_count": 0,
+                "selected_component_count": 0,
+                "scan_complete": False,
+                "global_component_integrity": "unresolved",
+            }
+        selected: list[dict[str, Any]] = []
+        hydrated = 0
+        if effective_limit == 0:
+            return {
+                "status": "current",
+                "payloads": [],
+                "diagnostics": [],
+                "reader_mode": reader_mode,
+                "component_count": total_count,
+                "hydrated_component_count": 0,
+                "selected_component_count": 0,
+                "scan_complete": total_count == 0,
+                "global_component_integrity": (
+                    "verified" if total_count == 0 else "unresolved"
+                ),
+            }
+        for payload in ordered:
+            hydrated += 1
+            if selector is not None and not selector(payload):
+                continue
+            selected.append(dict(payload))
+            if effective_limit is not None and len(selected) >= effective_limit:
+                break
+        scan_complete = hydrated == total_count
+        return {
+            "status": "current",
+            "payloads": selected,
+            "diagnostics": [],
+            "reader_mode": reader_mode,
+            "component_count": total_count,
+            "hydrated_component_count": hydrated,
+            "selected_component_count": len(selected),
+            "scan_complete": scan_complete,
+            "global_component_integrity": (
+                "verified" if scan_complete else "unresolved"
+            ),
+        }
+
+    embedded_payloads = [
+        dict(item) for item in embedded if isinstance(item, dict)
+    ]
+    if embedded and not storage:
+        return selected_payloads(
+            embedded_payloads,
+            total_count=len(embedded_payloads),
+            reader_mode="embedded_legacy_compatibility",
+        )
+    manifest_ref = str(storage.get("manifest_ref") or "")
+    relative_manifest = Path(manifest_ref)
+    if (
+        not manifest_ref
+        or relative_manifest.is_absolute()
+        or ".." in relative_manifest.parts
+    ):
+        if embedded_payloads:
+            return selected_payloads(
+                embedded_payloads,
+                total_count=len(embedded_payloads),
+                reader_mode="embedded_legacy_compatibility",
+            )
+        return {
+            "status": "invalid",
+            "payloads": [],
+            "diagnostics": ["session_index_shard_manifest_ref_invalid"],
+            "reader_mode": "manifest_first",
+            "component_count": 0,
+            "hydrated_component_count": 0,
+            "selected_component_count": 0,
+            "scan_complete": False,
+            "global_component_integrity": "unresolved",
+        }
+    component_manifest = read_json(
+        session_dir / relative_manifest,
+        {},
+    )
+    if not (
+        isinstance(component_manifest, dict)
+        and int_value(component_manifest.get("schema_version"))
+        == SESSION_INDEX_SHARD_SCHEMA_VERSION
+        and component_manifest.get("artifact_type")
+        == "session_index_shard_manifest"
+        and component_manifest.get("storage_mode")
+        == "content_addressed_components_manifest_first_v1"
+    ):
+        return {
+            "status": "invalid",
+            "payloads": [],
+            "diagnostics": ["session_index_shard_manifest_invalid"],
+            "reader_mode": "manifest_first",
+            "component_count": 0,
+            "hydrated_component_count": 0,
+            "selected_component_count": 0,
+            "scan_complete": False,
+            "global_component_integrity": "unresolved",
+        }
+    expected_publish_id = projection_publish_id(
+        session_index.get("projection_publish")
+        if isinstance(session_index.get("projection_publish"), dict)
+        else {}
+    )
+    manifest_publish_id = projection_publish_id(
+        component_manifest.get("projection_publish")
+        if isinstance(component_manifest.get("projection_publish"), dict)
+        else {}
+    )
+    if not expected_publish_id or manifest_publish_id != expected_publish_id:
+        return {
+            "status": "invalid",
+            "payloads": [],
+            "diagnostics": [
+                "session_index_shard_manifest_publish_id_mismatch"
+            ],
+            "reader_mode": "manifest_first",
+            "component_count": 0,
+            "hydrated_component_count": 0,
+            "selected_component_count": 0,
+            "scan_complete": False,
+            "global_component_integrity": "unresolved",
+        }
+    components = (
+        component_manifest.get("components")
+        if isinstance(component_manifest, dict)
+        and isinstance(component_manifest.get("components"), dict)
+        else {}
+    )
+    records = (
+        components.get("task_episodes")
+        if isinstance(components.get("task_episodes"), list)
+        else []
+    )
+    expected_count = int_value(
+        storage.get("task_episode_shard_count"), -1
+    )
+    if expected_count != len(records):
+        return {
+            "status": "invalid",
+            "payloads": [],
+            "diagnostics": [
+                "session_index_component_storage_count_mismatch"
+            ],
+            "reader_mode": "manifest_first",
+            "component_count": len(records),
+            "hydrated_component_count": 0,
+            "selected_component_count": 0,
+            "scan_complete": False,
+            "global_component_integrity": "unresolved",
+        }
+    indexed_records = list(enumerate(records))
+    if order == "recent":
+        indexed_records.reverse()
+    elif order != "chronological":
+        return {
+            "status": "invalid",
+            "payloads": [],
+            "diagnostics": ["task_episode_component_order_invalid"],
+            "reader_mode": "manifest_first",
+            "component_count": len(records),
+            "hydrated_component_count": 0,
+            "selected_component_count": 0,
+            "scan_complete": False,
+            "global_component_integrity": "unresolved",
+        }
+    episodes: list[dict[str, Any]] = []
+    hydrated_count = 0
+    if effective_limit == 0:
+        return {
+            "status": "current",
+            "payloads": [],
+            "diagnostics": [],
+            "reader_mode": "manifest_first",
+            "component_count": len(records),
+            "hydrated_component_count": 0,
+            "selected_component_count": 0,
+            "scan_complete": len(records) == 0,
+            "global_component_integrity": (
+                "verified" if not records else "unresolved"
+            ),
+        }
+    for ordinal, record in indexed_records:
+        hydrated_count += 1
+        if not isinstance(record, dict):
+            return {
+                "status": "invalid",
+                "payloads": [],
+                "diagnostics": [
+                    f"session_index_task_episode_shard_record_invalid:{ordinal}"
+                ],
+                "reader_mode": "manifest_first",
+                "component_count": len(records),
+                "hydrated_component_count": hydrated_count,
+                "selected_component_count": 0,
+                "scan_complete": False,
+                "global_component_integrity": "unresolved",
+            }
+        relative = Path(str(record.get("ref") or ""))
+        expected_parent = (
+            Path(SESSION_INDEX_SHARDS_DIR)
+            / SESSION_INDEX_TASK_EPISODE_SHARDS_DIR
+        )
+        if (
+            relative.is_absolute()
+            or ".." in relative.parts
+            or relative.parent != expected_parent
+            or relative.suffix != ".json"
+        ):
+            return {
+                "status": "invalid",
+                "payloads": [],
+                "diagnostics": [
+                    f"session_index_task_episode_shard_ref_invalid:{ordinal}"
+                ],
+                "reader_mode": "manifest_first",
+                "component_count": len(records),
+                "hydrated_component_count": hydrated_count,
+                "selected_component_count": 0,
+                "scan_complete": False,
+                "global_component_integrity": "unresolved",
+            }
+        artifact = session_dir / relative
+        artifact_sha256 = str(record.get("artifact_sha256") or "")
+        if not (
+            artifact.is_file()
+            and artifact.stem == artifact_sha256
+            and sha256_file(artifact) == artifact_sha256
+        ):
+            return {
+                "status": "invalid",
+                "payloads": [],
+                "diagnostics": [
+                    f"session_index_task_episode_shard_artifact_mismatch:{ordinal}"
+                ],
+                "reader_mode": "manifest_first",
+                "component_count": len(records),
+                "hydrated_component_count": hydrated_count,
+                "selected_component_count": 0,
+                "scan_complete": False,
+                "global_component_integrity": "unresolved",
+            }
+        envelope = read_json(artifact, {})
+        payload = (
+            envelope.get("payload")
+            if isinstance(envelope.get("payload"), dict)
+            else None
+        )
+        if not isinstance(payload, dict):
+            return {
+                "status": "invalid",
+                "payloads": [],
+                "diagnostics": [
+                    f"session_index_task_episode_shard_payload_mismatch:{ordinal}"
+                ],
+                "reader_mode": "manifest_first",
+                "component_count": len(records),
+                "hydrated_component_count": hydrated_count,
+                "selected_component_count": 0,
+                "scan_complete": False,
+                "global_component_integrity": "unresolved",
+            }
+        payload_sha256 = session_index_shard_payload_sha256(payload)
+        if not (
+            envelope.get("artifact_type")
+            == "session_index_component_shard"
+            and envelope.get("component") == "task_episodes"
+            and str(envelope.get("component_key") or "")
+            == str(record.get("component_key") or "")
+            and str(envelope.get("payload_sha256") or "")
+            == payload_sha256
+            and str(record.get("payload_sha256") or "")
+            == payload_sha256
+            and envelope.get("source_identity")
+            == record.get("source_identity")
+        ):
+            return {
+                "status": "invalid",
+                "payloads": [],
+                "diagnostics": [
+                    f"session_index_task_episode_shard_payload_mismatch:{ordinal}"
+                ],
+                "reader_mode": "manifest_first",
+                "component_count": len(records),
+                "hydrated_component_count": hydrated_count,
+                "selected_component_count": 0,
+                "scan_complete": False,
+                "global_component_integrity": "unresolved",
+            }
+        if selector is not None and not selector(payload):
+            continue
+        episodes.append(dict(payload))
+        if effective_limit is not None and len(episodes) >= effective_limit:
+            break
+    scan_complete = hydrated_count == len(records)
+    return {
+        "status": "current",
+        "payloads": episodes,
+        "diagnostics": [],
+        "reader_mode": "manifest_first",
+        "component_count": len(records),
+        "hydrated_component_count": hydrated_count,
+        "selected_component_count": len(episodes),
+        "scan_complete": scan_complete,
+        "global_component_integrity": (
+            "verified" if scan_complete else "unresolved"
+        ),
+    }
+
+
+def session_index_task_episode_components(
+    session_dir: Path,
+    session_index: dict[str, Any],
+) -> list[dict[str, Any]]:
+    result = session_index_task_episode_component_read(
+        session_dir,
+        session_index,
+    )
+    if result.get("status") != "current" or not result.get(
+        "scan_complete"
+    ):
+        return []
+    return [
+        dict(item)
+        for item in result.get("payloads", [])
+        if isinstance(item, dict)
+    ]
+
+
+def append_stable_segment_prefix(
+    previous_segments: Iterable[dict[str, Any]],
+    current_segments: Iterable[dict[str, Any]],
+) -> dict[str, Any]:
+    stable_to_line = 0
+    stable_segment_count = 0
+    for previous, current in zip(
+        previous_segments, current_segments, strict=False
+    ):
+        if not isinstance(previous, dict) or not isinstance(current, dict):
+            break
+        previous_range = (
+            previous.get("source_range")
+            if isinstance(previous.get("source_range"), dict)
+            else {}
+        )
+        current_range = (
+            current.get("source_range")
+            if isinstance(current.get("source_range"), dict)
+            else {}
+        )
+        if any(
+            (
+                str(previous.get("segment_id") or "")
+                != str(current.get("segment_id") or ""),
+                str(previous.get("role") or "")
+                != str(current.get("role") or ""),
+                str(previous.get("input_digest") or "")
+                != str(current.get("input_digest") or ""),
+                previous_range != current_range,
+            )
+        ):
+            break
+        stable_to_line = int_value(
+            current_range.get("to_line"), stable_to_line
+        )
+        stable_segment_count += 1
+    return {
+        "stable_to_line": stable_to_line,
+        "stable_segment_count": stable_segment_count,
+    }
+
+
+def incremental_task_episodes_for_events(
+    *,
+    events: list[RawEvent],
+    segments: list[dict[str, Any]],
+    lineage: dict[str, Any],
+    published_session_dir: Path | None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Reuse sealed episode components and replay only a bounded tail."""
+    full_metrics = {
+        "mode": "full_builder_replay",
+        "reused_sealed_episode_count": 0,
+        "replayed_event_count": len(events),
+        "replay_from_line": 1 if events else 0,
+        "stable_segment_count": 0,
+        "stable_to_line": 0,
+        "admission": "no_compatible_previous_projection",
+    }
+    if published_session_dir is None:
+        return (
+            generated_task_episodes_for_events(
+                events, segments, lineage=lineage
+            ),
+            full_metrics,
+        )
+    previous_index = read_json(
+        published_session_dir / SESSION_INDEX_JSON,
+        {},
+    )
+    previous_manifest = read_json(
+        published_session_dir / "session.manifest.json",
+        {},
+    )
+    stored_generation = (
+        previous_index.get("dependency_generation_identities", {}).get(
+            "task_episode_source"
+        )
+        if isinstance(
+            previous_index.get("dependency_generation_identities"),
+            dict,
+        )
+        else {}
+    )
+    generation_admission = projection_generation_admission(
+        projection="task_episode_source",
+        stored_identity=stored_generation,
+        expected_identity=task_episode_source_generation_identity(),
+    )
+    if (
+        not previous_index
+        or not previous_manifest
+        or not generation_admission.get("compatible")
+    ):
+        return (
+            generated_task_episodes_for_events(
+                events, segments, lineage=lineage
+            ),
+            full_metrics,
+        )
+    previous_episodes = session_index_task_episode_components(
+        published_session_dir,
+        previous_index,
+    )
+    prefix = append_stable_segment_prefix(
+        previous_manifest.get("segments", [])
+        if isinstance(previous_manifest.get("segments"), list)
+        else [],
+        segments,
+    )
+    stable_to_line = int_value(prefix.get("stable_to_line"))
+    stable_episode_count = 0
+    for episode in previous_episodes:
+        event_range = (
+            episode.get("event_range")
+            if isinstance(episode, dict)
+            and isinstance(episode.get("event_range"), dict)
+            else {}
+        )
+        to_line = int_value(event_range.get("to_line"))
+        if to_line <= 0 or to_line > stable_to_line:
+            break
+        stable_episode_count += 1
+    # Keep two boundary-adjacent episodes in replay so transport-turn
+    # bridging and semantic continuations can still revise the tail.
+    reused_count = max(0, stable_episode_count - 2)
+    if reused_count <= 0:
+        return (
+            generated_task_episodes_for_events(
+                events, segments, lineage=lineage
+            ),
+            {
+                **full_metrics,
+                "stable_segment_count": int_value(
+                    prefix.get("stable_segment_count")
+                ),
+                "stable_to_line": stable_to_line,
+                "admission": "stable_prefix_too_small_for_bounded_reuse",
+            },
+        )
+    reused = [
+        dict(item)
+        for item in previous_episodes[:reused_count]
+        if isinstance(item, dict)
+    ]
+    replay_episode = previous_episodes[reused_count]
+    replay_range = (
+        replay_episode.get("event_range")
+        if isinstance(replay_episode, dict)
+        and isinstance(replay_episode.get("event_range"), dict)
+        else {}
+    )
+    replay_from_line = int_value(replay_range.get("from_line"))
+    replay_events = [
+        event for event in events if event.line_no >= replay_from_line
+    ]
+    previous_episode_id = str(
+        reused[-1].get("episode_id") or ""
+    )
+    replayed = generated_task_episodes_for_events(
+        replay_events,
+        segments,
+        lineage=lineage,
+        episode_ordinal_offset=len(reused),
+        previous_episode_id=previous_episode_id,
+    )
+    return (
+        [*reused, *replayed],
+        {
+            "mode": "append_stable_bounded_tail_replay_v1",
+            "reused_sealed_episode_count": len(reused),
+            "replayed_event_count": len(replay_events),
+            "replay_from_line": replay_from_line,
+            "stable_segment_count": int_value(
+                prefix.get("stable_segment_count")
+            ),
+            "stable_to_line": stable_to_line,
+            "admission": "matching_episode_abi_and_segment_digest_prefix",
+            "previous_episode_count": len(previous_episodes),
+        },
+    )
+
+
+def task_episode_builder_state_payload(
+    *,
+    episodes: list[dict[str, Any]],
+    manifest: dict[str, Any],
+    build_metrics: dict[str, Any],
+    processed_to_line: int,
+) -> dict[str, Any]:
+    last_episode = episodes[-1] if episodes else {}
+    last_two = episodes[-2:]
+    correlation_ids = sorted(
+        {
+            str(item.get("correlation_id") or "")
+            for episode in last_two
+            if isinstance(episode, dict)
+            for item in (
+                episode.get("correlation_chain")
+                if isinstance(episode.get("correlation_chain"), list)
+                else []
+            )
+            if isinstance(item, dict)
+            and str(item.get("correlation_id") or "")
+        }
+    )
+    raw_blocks = (
+        manifest.get("raw_blocks", {}).get("blocks", [])
+        if isinstance(manifest.get("raw_blocks"), dict)
+        and isinstance(
+            manifest.get("raw_blocks", {}).get("blocks"), list
+        )
+        else []
+    )
+    last_block = raw_blocks[-1] if raw_blocks else {}
+    lineage = (
+        manifest.get("lineage")
+        if isinstance(manifest.get("lineage"), dict)
+        else {}
+    )
+    history_prefix = (
+        lineage.get("history_prefix")
+        if isinstance(lineage.get("history_prefix"), dict)
+        else {}
+    )
+    return {
+        "schema_version": TASK_EPISODE_BUILDER_STATE_VERSION,
+        "artifact_type": "task_episode_builder_frontier",
+        "generation_identity": (
+            task_episode_source_generation_identity()
+        ),
+        "processed_to_line": processed_to_line,
+        "last_processed_block": {
+            "block_id": str(last_block.get("block_id") or ""),
+            "sha256": str(last_block.get("sha256") or ""),
+            "source_range": last_block.get("source_range", {}),
+        },
+        "sealed_episode_count": max(0, len(episodes) - 2),
+        "tail_episode_ids": [
+            str(episode.get("episode_id") or "")
+            for episode in last_two
+            if isinstance(episode, dict)
+        ],
+        "current_episode_id": str(
+            last_episode.get("episode_id") or ""
+        ),
+        "current_episode_status": str(
+            last_episode.get("status") or ""
+        ),
+        "transition_state": (
+            last_episode.get("transition", {})
+            if isinstance(last_episode, dict)
+            and isinstance(last_episode.get("transition"), dict)
+            else {}
+        ),
+        "correlation_frontier": correlation_ids,
+        "lineage_context": {
+            "relationship": str(lineage.get("relationship") or ""),
+            "parent_session_id": str(
+                lineage.get("parent_session_id") or ""
+            ),
+            "local_work_from_line": int_value(
+                history_prefix.get("local_work_from_line")
+            ),
+        },
+        "build_contract": (
+            "append_frontier_with_bounded_replay_v1"
+        ),
+        "truth_status": (
+            "append_frontier_for_bounded_replay_not_raw_authority"
+        ),
+    }
+
+
 def write_session_index_impl(
     session_dir: Path,
     manifest: dict[str, Any],
@@ -21639,6 +24361,8 @@ def write_session_index_impl(
     workers: int = 1,
     cooperative_deadline_monotonic: float | None = None,
     execution_metrics_out: dict[str, Any] | None = None,
+    event_summary: dict[str, Any] | None = None,
+    processed_to_line: int | None = None,
 ) -> dict[str, Any]:
     execution_started = time.monotonic()
     execution_metrics: dict[str, Any] = {}
@@ -21646,33 +24370,81 @@ def write_session_index_impl(
         literal_policy = DerivedSessionSensitiveLiteralPolicy(
             values_by_kind={},
         )
-    counts = Counter(event.event_type for event in events)
-    by_type = {event_type: counts[event_type] for event_type in EVENT_TYPE_ORDER if counts[event_type]}
-    family_counts = dict(sorted(Counter(event.family for event in events).items()))
-    phase_counts = dict(sorted(Counter(event.phase for event in events).items()))
-    actor_counts = dict(sorted(Counter(event.actor for event in events).items()))
-    outcome_counts = dict(sorted(Counter(event.outcome for event in events).items()))
-    conversation_act_counts = conversation_act_counts_for_events(events)
-    session_act_counts = session_act_counts_for_events(events)
-    agent_event_counts = agent_event_counts_for_events(events)
-    route_signal_counts = route_signal_counts_for_events(events)
+    aggregate = event_summary if isinstance(event_summary, dict) else {}
+    aggregate_mode = bool(aggregate)
+    if aggregate_mode:
+        by_type = dict(aggregate.get("event_counts", {}))
+        family_counts = dict(aggregate.get("family_counts", {}))
+        phase_counts = dict(aggregate.get("phase_counts", {}))
+        actor_counts = dict(aggregate.get("actor_counts", {}))
+        outcome_counts = dict(aggregate.get("outcome_counts", {}))
+        conversation_act_counts = dict(
+            aggregate.get("conversation_act_counts", {})
+        )
+        session_act_counts = dict(
+            aggregate.get("session_act_counts", {})
+        )
+        agent_event_counts = dict(
+            aggregate.get("agent_event_counts", {})
+        )
+        route_signal_counts = dict(
+            aggregate.get("route_signal_counts", {})
+        )
+        total_event_count = int_value(aggregate.get("event_count"))
+    else:
+        counts = Counter(event.event_type for event in events)
+        by_type = {
+            event_type: counts[event_type]
+            for event_type in EVENT_TYPE_ORDER
+            if counts[event_type]
+        }
+        family_counts = dict(
+            sorted(Counter(event.family for event in events).items())
+        )
+        phase_counts = dict(
+            sorted(Counter(event.phase for event in events).items())
+        )
+        actor_counts = dict(
+            sorted(Counter(event.actor for event in events).items())
+        )
+        outcome_counts = dict(
+            sorted(Counter(event.outcome for event in events).items())
+        )
+        conversation_act_counts = conversation_act_counts_for_events(
+            events
+        )
+        session_act_counts = session_act_counts_for_events(events)
+        agent_event_counts = agent_event_counts_for_events(events)
+        route_signal_counts = route_signal_counts_for_events(events)
+        total_event_count = len(events)
+    execution_metrics["event_aggregate_mode"] = (
+        "classification_block_summary_merge_v1"
+        if aggregate_mode
+        else "full_event_reduction_v1"
+    )
     phase_started = time.monotonic()
     task_episode_segments = (
         manifest.get("segments", [])
         if isinstance(manifest.get("segments"), list)
         else []
     )
-    task_episodes = generated_task_episodes_for_events(
-        events,
-        task_episode_segments,
-        lineage=(
-            manifest.get("lineage")
-            if isinstance(manifest.get("lineage"), dict)
-            else {}
-        ),
+    task_episodes, task_episode_incremental_build = (
+        incremental_task_episodes_for_events(
+            events=events,
+            segments=task_episode_segments,
+            lineage=(
+                manifest.get("lineage")
+                if isinstance(manifest.get("lineage"), dict)
+                else {}
+            ),
+            published_session_dir=reference_session_dir,
+        )
     )
     execution_metrics["task_episode_generation_ms"] = int(
         (time.monotonic() - phase_started) * 1000
+    )
+    execution_metrics["task_episode_incremental_build"] = dict(
+        task_episode_incremental_build
     )
     phase_started = time.monotonic()
     attach_task_episode_session_context(
@@ -21688,6 +24460,7 @@ def write_session_index_impl(
         materialize_session_index_task_episode_shards(
             session_dir,
             task_episodes,
+            published_session_dir=reference_session_dir,
             publish_identity=(publish_identity or {}),
             literal_policy=literal_policy,
             workers=workers,
@@ -21721,16 +24494,148 @@ def write_session_index_impl(
     task_episode_counts = task_episode_counts_for_episodes(
         task_episodes,
     )
-    phase_started = time.monotonic()
-    goal_lifecycle_payload = generated_goal_lifecycles_for_events(
-        events,
-        manifest.get("segments", []) if isinstance(manifest.get("segments"), list) else [],
-        task_episodes,
-        session_id=str(manifest["session_id"]),
-        session_label=str((manifest.get("display") if isinstance(manifest.get("display"), dict) else {}).get("label") or manifest.get("session_label") or ""),
+    task_episode_builder_state = task_episode_builder_state_payload(
+        episodes=task_episodes,
+        manifest=manifest,
+        build_metrics=task_episode_incremental_build,
+        processed_to_line=(
+            int_value(processed_to_line)
+            if processed_to_line is not None
+            else total_event_count
+        ),
     )
+    phase_started = time.monotonic()
+    replay_from_line = int_value(
+        task_episode_incremental_build.get("replay_from_line")
+    )
+    tail_has_goal_signal = any(
+        event.line_no >= replay_from_line
+        and str(
+            (
+                event.facets.get("session_act")
+                if isinstance(
+                    event.facets.get("session_act"), dict
+                )
+                else {}
+            ).get("kind")
+            or ""
+        )
+        in GOAL_SESSION_ACTS
+        for event in events
+    ) if replay_from_line > 0 else False
+    previous_index_for_goal = (
+        read_json(reference_session_dir / SESSION_INDEX_JSON, {})
+        if reference_session_dir is not None
+        else {}
+    )
+    incremental_episode_mode = bool(
+        str(task_episode_incremental_build.get("mode") or "")
+        == "append_stable_bounded_tail_replay_v1"
+        and isinstance(
+            previous_index_for_goal.get("goal_lifecycles"), list
+        )
+        and isinstance(previous_index_for_goal.get("goal_events"), list)
+    )
+    goal_lifecycle_incremental_execution: dict[str, Any] = {}
+    if incremental_episode_mode and not tail_has_goal_signal:
+        prior_goal_lifecycles = [
+            dict(item)
+            for item in previous_index_for_goal.get(
+                "goal_lifecycles", []
+            )
+            if isinstance(item, dict)
+        ]
+        prior_goal_events = [
+            dict(item)
+            for item in previous_index_for_goal.get("goal_events", [])
+            if isinstance(item, dict)
+        ]
+        goal_lifecycle_payload = {
+            "goal_lifecycles": prior_goal_lifecycles,
+            "goal_events": prior_goal_events,
+            "goal_lifecycle_counts": (
+                previous_index_for_goal.get("goal_lifecycle_counts", {})
+            ),
+            "goal_event_counts": previous_index_for_goal.get(
+                "goal_event_counts", {}
+            ),
+        }
+        goal_lifecycle_mode = "reuse_no_goal_signal_in_tail_v1"
+        goal_lifecycle_incremental_execution = {
+            "mode": goal_lifecycle_mode,
+            "stable_lifecycle_count": len(prior_goal_lifecycles),
+            "rebuilt_lifecycle_count": 0,
+        }
+    elif incremental_episode_mode:
+        goal_replay_from_line = min(
+            value
+            for value in (
+                replay_from_line,
+                events[0].line_no if events else 0,
+            )
+            if value > 0
+        )
+        (
+            incremental_goal_payload,
+            goal_lifecycle_incremental_execution,
+        ) = incremental_goal_lifecycles_for_events(
+            events=events,
+            segments=(
+                manifest.get("segments", [])
+                if isinstance(manifest.get("segments"), list)
+                else []
+            ),
+            task_episodes=task_episodes,
+            previous_index=previous_index_for_goal,
+            replay_from_line=goal_replay_from_line,
+            session_id=str(manifest["session_id"]),
+            session_label=str(
+                (
+                    manifest.get("display")
+                    if isinstance(manifest.get("display"), dict)
+                    else {}
+                ).get("label")
+                or manifest.get("session_label")
+                or ""
+            ),
+        )
+        if incremental_goal_payload is None:
+            if event_summary is not None:
+                raise ValueError(
+                    "incremental_goal_lifecycle_merge_failed:"
+                    + str(
+                        goal_lifecycle_incremental_execution.get(
+                            "reason"
+                        )
+                        or "unknown"
+                    )
+                )
+            goal_lifecycle_payload = generated_goal_lifecycles_for_events(
+                events,
+                manifest.get("segments", []) if isinstance(manifest.get("segments"), list) else [],
+                task_episodes,
+                session_id=str(manifest["session_id"]),
+                session_label=str((manifest.get("display") if isinstance(manifest.get("display"), dict) else {}).get("label") or manifest.get("session_label") or ""),
+            )
+            goal_lifecycle_mode = "full_event_reduction_v1"
+        else:
+            goal_lifecycle_payload = incremental_goal_payload
+            goal_lifecycle_mode = "append_stable_goal_tail_merge_v1"
+    else:
+        goal_lifecycle_payload = generated_goal_lifecycles_for_events(
+            events,
+            manifest.get("segments", []) if isinstance(manifest.get("segments"), list) else [],
+            task_episodes,
+            session_id=str(manifest["session_id"]),
+            session_label=str((manifest.get("display") if isinstance(manifest.get("display"), dict) else {}).get("label") or manifest.get("session_label") or ""),
+        )
+        goal_lifecycle_mode = "full_event_reduction_v1"
     execution_metrics["goal_lifecycle_generation_ms"] = int(
         (time.monotonic() - phase_started) * 1000
+    )
+    execution_metrics["goal_lifecycle_mode"] = goal_lifecycle_mode
+    execution_metrics["goal_lifecycle_incremental_build"] = (
+        goal_lifecycle_incremental_execution
     )
     display = manifest.get("display", {}) if isinstance(manifest.get("display"), dict) else {}
     lineage = manifest.get("lineage") if isinstance(manifest.get("lineage"), dict) else {}
@@ -21797,7 +24702,7 @@ def write_session_index_impl(
         "updated_at": manifest["updated_at"],
         "archive_status": manifest["archive_status"],
         "distillation_status": manifest.get("distillation_status", "raw_archived"),
-        "event_count": len(events),
+        "event_count": total_event_count,
         "event_counts": by_type,
         "family_counts": family_counts,
         "phase_counts": phase_counts,
@@ -21808,6 +24713,7 @@ def write_session_index_impl(
         "agent_event_counts": agent_event_counts,
         "task_episode_counts": task_episode_counts,
         "task_episodes": [],
+        "task_episode_builder_state": task_episode_builder_state,
         "goal_lifecycle_counts": goal_lifecycle_payload["goal_lifecycle_counts"],
         "goal_event_counts": goal_lifecycle_payload["goal_event_counts"],
         "goal_lifecycles": goal_lifecycle_payload["goal_lifecycles"],
@@ -21842,7 +24748,6 @@ def write_session_index_impl(
     execution_metrics["root_redaction_ms"] = int(
         (time.monotonic() - phase_started) * 1000
     )
-    session_index_json["task_episodes"] = task_episodes
     shard_manifest = write_session_index_shard_manifest(
         session_dir,
         publish_identity=(publish_identity or {}),
@@ -21863,7 +24768,8 @@ def write_session_index_impl(
             / SESSION_INDEX_SHARD_MANIFEST_JSON
         ),
         "task_episode_shard_count": len(task_episodes),
-        "embedded_compatibility_view": True,
+        "embedded_compatibility_view": False,
+        "reader_mode": "manifest_first",
     }
     phase_started = time.monotonic()
     write_json(session_dir / SESSION_INDEX_JSON, session_index_json)
@@ -21921,7 +24827,7 @@ def write_session_index_impl(
         "",
         f"- archive_status: `{manifest['archive_status']}`",
         f"- distillation_status: `{manifest.get('distillation_status', 'raw_archived')}`",
-        f"- events: `{len(events)}`",
+        f"- events: `{total_event_count}`",
         "",
         "## Token Accounting",
         "",
@@ -22023,6 +24929,1151 @@ def write_session_index_impl(
     }
 
 
+def projection_outbox_root_for_session(
+    session_dir: Path,
+) -> Path:
+    return session_dir.parent.parent / PROJECTION_OUTBOX_ROOT
+
+
+def projection_component_snapshot(
+    projection_dir: Path,
+) -> dict[str, dict[str, Any]]:
+    """Describe independently replaceable published contributions.
+
+    The snapshot contains only component identities, content digests, bounded
+    source refs, and generation identities.  It never hydrates raw bodies or
+    task-episode payloads.
+    """
+    components: dict[str, dict[str, Any]] = {}
+    manifest = read_json(
+        projection_dir / "session.manifest.json",
+        {},
+    )
+    session_index = read_json(
+        projection_dir / SESSION_INDEX_JSON,
+        {},
+    )
+
+    def add_component(
+        component_id: str,
+        *,
+        component_type: str,
+        digest: str,
+        source_ref: str,
+        generation_identity: dict[str, Any] | None = None,
+    ) -> None:
+        if not component_id or not digest:
+            return
+        components[component_id] = {
+            "component_id": component_id,
+            "component_type": component_type,
+            "digest": digest,
+            "source_ref": source_ref,
+            "generation_identity": (
+                dict(generation_identity)
+                if isinstance(generation_identity, dict)
+                else {}
+            ),
+        }
+
+    manifest_path = projection_dir / "session.manifest.json"
+    if manifest_path.is_file():
+        add_component(
+            "session:manifest",
+            component_type="session_manifest",
+            digest=sha256_file(manifest_path),
+            source_ref="session.manifest.json",
+            generation_identity=(
+                manifest.get("metadata_generation")
+                if isinstance(manifest, dict)
+                and isinstance(manifest.get("metadata_generation"), dict)
+                else {}
+            ),
+        )
+    session_index_path = projection_dir / SESSION_INDEX_JSON
+    if session_index_path.is_file():
+        add_component(
+            "session:index",
+            component_type="session_component_manifest",
+            digest=sha256_file(session_index_path),
+            source_ref=SESSION_INDEX_JSON,
+            generation_identity=(
+                session_index.get("generation_identity")
+                if isinstance(session_index, dict)
+                and isinstance(
+                    session_index.get("generation_identity"), dict
+                )
+                else {}
+            ),
+        )
+
+    for segment in (
+        manifest.get("segments", [])
+        if isinstance(manifest, dict)
+        and isinstance(manifest.get("segments"), list)
+        else []
+    ):
+        if not isinstance(segment, dict):
+            continue
+        segment_id = str(segment.get("segment_id") or "")
+        index_name = Path(str(segment.get("index") or "")).name
+        index_path = projection_dir / "segments" / index_name
+        if not segment_id or not index_path.is_file():
+            continue
+        segment_index = read_json(index_path, {})
+        segment_generation = (
+            segment_index.get("generation_identity")
+            if isinstance(segment_index, dict)
+            and isinstance(
+                segment_index.get("generation_identity"), dict
+            )
+            else {}
+        )
+        semantic_digest = hashlib.sha256(
+            json.dumps(
+                {
+                    "input_digest": str(
+                        segment_index.get("input_digest") or ""
+                    ),
+                    "generation_id": str(
+                        segment_generation.get("generation_id") or ""
+                    ),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        add_component(
+            f"segment:{segment_id}",
+            component_type="segment_index",
+            digest=semantic_digest,
+            source_ref=str(Path("segments") / index_name),
+            generation_identity=segment_generation,
+        )
+
+    raw_block_index = read_json(
+        projection_dir / "raw" / RAW_BLOCK_INDEX_JSON,
+        {},
+    )
+    for ordinal, block in enumerate(
+        raw_block_index.get("blocks", [])
+        if isinstance(raw_block_index, dict)
+        and isinstance(raw_block_index.get("blocks"), list)
+        else []
+    ):
+        if not isinstance(block, dict):
+            continue
+        block_id = str(
+            block.get("block_id")
+            or block.get("sha256")
+            or f"{ordinal:06d}"
+        )
+        digest = str(block.get("sha256") or "")
+        add_component(
+            f"raw_block:{block_id}",
+            component_type="raw_block",
+            digest=digest,
+            source_ref=str(
+                block.get("rel")
+                or block.get("path")
+                or block.get("plain_rel")
+                or ""
+            ),
+            generation_identity={},
+        )
+
+    shard_manifest = read_json(
+        projection_dir
+        / SESSION_INDEX_SHARDS_DIR
+        / SESSION_INDEX_SHARD_MANIFEST_JSON,
+        {},
+    )
+    shard_records = (
+        shard_manifest.get("components", {}).get("task_episodes", [])
+        if isinstance(shard_manifest, dict)
+        and isinstance(shard_manifest.get("components"), dict)
+        and isinstance(
+            shard_manifest.get("components", {}).get("task_episodes"),
+            list,
+        )
+        else []
+    )
+    for ordinal, record in enumerate(shard_records):
+        if not isinstance(record, dict):
+            continue
+        component_key = str(
+            record.get("component_key") or f"{ordinal:04d}"
+        )
+        add_component(
+            f"task_episode:{component_key}",
+            component_type="task_episode",
+            digest=str(record.get("artifact_sha256") or ""),
+            source_ref=str(record.get("ref") or ""),
+            generation_identity=(
+                record.get("source_identity")
+                if isinstance(record.get("source_identity"), dict)
+                else {}
+            ),
+        )
+    return components
+
+
+def projection_component_required_consumers(
+    component_type: str,
+) -> list[str]:
+    if component_type == "task_episode":
+        return [
+            "episode_semantic",
+            "entity_registry",
+            "exact_and_lexical_search",
+            "graph",
+        ]
+    if component_type == "raw_block":
+        return ["exact_and_lexical_search", "entity_registry"]
+    return list(PROJECTION_OUTBOX_CONSUMERS)
+
+
+def session_projection_outbox_record(
+    *,
+    session_dir: Path,
+    old_snapshot: dict[str, dict[str, Any]],
+    new_snapshot: dict[str, dict[str, Any]],
+    old_publish_id: str,
+    new_publish_id: str,
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    changes: list[dict[str, Any]] = []
+    required_consumers: set[str] = set()
+    for component_id in sorted(set(old_snapshot) | set(new_snapshot)):
+        old = old_snapshot.get(component_id, {})
+        new = new_snapshot.get(component_id, {})
+        if old == new:
+            continue
+        component_type = str(
+            new.get("component_type")
+            or old.get("component_type")
+            or "unknown"
+        )
+        consumers = projection_component_required_consumers(
+            component_type
+        )
+        required_consumers.update(consumers)
+        changes.append(
+            {
+                "component_id": component_id,
+                "component_type": component_type,
+                "operation": (
+                    "replace"
+                    if old and new
+                    else ("publish" if new else "tombstone")
+                ),
+                "old_digest": str(old.get("digest") or ""),
+                "new_digest": str(new.get("digest") or ""),
+                "source_ref": str(
+                    new.get("source_ref")
+                    or old.get("source_ref")
+                    or ""
+                ),
+                "generation_identity": (
+                    new.get("generation_identity")
+                    if isinstance(
+                        new.get("generation_identity"), dict
+                    )
+                    else {}
+                ),
+                "required_consumers": consumers,
+            }
+        )
+    identity_payload = {
+        "schema_version": PROJECTION_OUTBOX_SCHEMA_VERSION,
+        "session_id": str(session_id or session_dir.name),
+        "old_publish_id": old_publish_id,
+        "new_publish_id": new_publish_id,
+        "changes": changes,
+        "required_consumers": sorted(required_consumers),
+    }
+    record_id = hashlib.sha256(
+        json.dumps(
+            identity_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return {
+        **identity_payload,
+        "artifact_type": "session_projection_component_outbox",
+        "record_id": record_id,
+        "created_at": utc_now(),
+        "status": "pending",
+        "retry_policy": {
+            "mode": "bounded_idempotent_consumer_replay_v1",
+            "max_attempts_per_cycle": 3,
+        },
+        "publication_receipt": {
+            "session_dir": str(session_dir),
+            "publish_id": new_publish_id,
+        },
+        "truth_status": (
+            "changed_component_work_intent_not_downstream_completion"
+        ),
+    }
+
+
+def projection_outbox_record_path(
+    session_dir: Path,
+    record_id: str,
+) -> Path:
+    return (
+        projection_outbox_root_for_session(session_dir)
+        / "records"
+        / f"{record_id}.json"
+    )
+
+
+def write_projection_outbox_record(
+    session_dir: Path,
+    record: dict[str, Any],
+) -> dict[str, Any]:
+    record_id = str(record.get("record_id") or "")
+    if not record_id:
+        raise ValueError("projection_outbox_record_id_missing")
+    path = projection_outbox_record_path(session_dir, record_id)
+    existing = read_json(path, {})
+    if isinstance(existing, dict) and existing:
+        comparable_keys = (
+            "schema_version",
+            "artifact_type",
+            "record_id",
+            "session_id",
+            "old_publish_id",
+            "new_publish_id",
+            "changes",
+            "required_consumers",
+        )
+        if any(
+            existing.get(key) != record.get(key)
+            for key in comparable_keys
+        ):
+            raise ValueError("projection_outbox_record_collision")
+        return {
+            "status": "reused",
+            "path": str(path),
+            "record_id": record_id,
+            "change_count": len(record.get("changes", [])),
+        }
+    write_json_durable(path, record)
+    return {
+        "status": "written",
+        "path": str(path),
+        "record_id": record_id,
+        "change_count": len(record.get("changes", [])),
+    }
+
+
+def projection_outbox_consumer_state_path(
+    session_dir: Path,
+    *,
+    consumer: str,
+    record_id: str,
+) -> Path:
+    return (
+        projection_outbox_root_for_session(session_dir)
+        / "consumer-state"
+        / safe_slug(consumer, fallback="consumer")
+        / f"{record_id}.json"
+    )
+
+
+def write_projection_outbox_consumer_state(
+    session_dir: Path,
+    *,
+    record: dict[str, Any],
+    consumer: str,
+    status: str,
+    reason: str,
+    completion_receipt: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if consumer not in PROJECTION_OUTBOX_CONSUMERS:
+        raise ValueError(
+            f"projection_outbox_consumer_unknown:{consumer}"
+        )
+    record_id = str(record.get("record_id") or "")
+    if not record_id:
+        raise ValueError("projection_outbox_record_id_missing")
+    path = projection_outbox_consumer_state_path(
+        session_dir,
+        consumer=consumer,
+        record_id=record_id,
+    )
+    existing = read_json(path, {})
+    if isinstance(existing, dict) and existing.get("status") == "complete":
+        if status != "complete" or (
+            isinstance(completion_receipt, dict)
+            and existing.get("completion_receipt")
+            == completion_receipt
+            and existing.get("source_publish_id")
+            == record.get("new_publish_id")
+        ):
+            return {
+                "status": "already_complete",
+                "path": str(path),
+                "consumer": consumer,
+                "record_id": record_id,
+            }
+        raise ValueError(
+            "projection_outbox_completion_receipt_conflict"
+        )
+    attempts = int_value(
+        existing.get("attempt_count")
+        if isinstance(existing, dict)
+        else 0
+    )
+    payload = {
+        "schema_version": 1,
+        "artifact_type": "projection_outbox_consumer_state",
+        "record_id": record_id,
+        "session_id": record.get("session_id"),
+        "consumer": consumer,
+        "source_publish_id": record.get("new_publish_id"),
+        "status": status,
+        "reason": reason,
+        "attempt_count": attempts + 1,
+        "updated_at": utc_now(),
+        "component_ids": [
+            str(item.get("component_id") or "")
+            for item in record.get("changes", [])
+            if isinstance(item, dict)
+            and consumer
+            in (
+                item.get("required_consumers")
+                if isinstance(item.get("required_consumers"), list)
+                else []
+            )
+        ],
+        "semantic_completion": status == "complete",
+        "completion_receipt": (
+            dict(completion_receipt)
+            if isinstance(completion_receipt, dict)
+            else {}
+        ),
+        "truth_status": (
+            "consumer_completion_receipt"
+            if status == "complete"
+            else "consumer_work_state_not_semantic_completion"
+        ),
+    }
+    if status == "complete" and not payload["completion_receipt"]:
+        raise ValueError(
+            "projection_outbox_completion_receipt_required"
+        )
+    write_json_durable(path, payload)
+    return {
+        "status": status,
+        "path": str(path),
+        "consumer": consumer,
+        "record_id": record_id,
+    }
+
+
+def route_projection_outbox_record(
+    session_dir: Path,
+    *,
+    outbox_path: Path,
+    consumer_statuses: dict[str, tuple[str, str]],
+) -> dict[str, Any]:
+    record = read_json(outbox_path, {})
+    if not isinstance(record, dict) or not record:
+        return {
+            "ok": False,
+            "status": "outbox_record_unavailable",
+            "diagnostics": [str(outbox_path)],
+        }
+    current_manifest = read_json(
+        session_dir / "session.manifest.json",
+        {},
+    )
+    current_publish_id = projection_publish_id(
+        current_manifest.get("index_schema")
+        if isinstance(current_manifest, dict)
+        and isinstance(current_manifest.get("index_schema"), dict)
+        else {}
+    )
+    if current_publish_id != str(record.get("new_publish_id") or ""):
+        return {
+            "ok": False,
+            "status": "outbox_source_publish_not_current",
+            "record_id": record.get("record_id"),
+            "expected_publish_id": record.get("new_publish_id"),
+            "current_publish_id": current_publish_id,
+            "diagnostics": ["outbox_record_not_current_publication"],
+        }
+    states = []
+    for consumer in record.get("required_consumers", []):
+        if consumer not in consumer_statuses:
+            continue
+        status, reason = consumer_statuses[consumer]
+        states.append(
+            write_projection_outbox_consumer_state(
+                session_dir,
+                record=record,
+                consumer=consumer,
+                status=status,
+                reason=reason,
+            )
+        )
+    return {
+        "ok": True,
+        "status": "routed",
+        "record_id": record.get("record_id"),
+        "consumer_states": states,
+        "semantic_completion": False,
+    }
+
+
+def session_projection_outbox_record_for_publish(
+    aoa_root: Path,
+    *,
+    session_id: str,
+    publish_id: str,
+) -> tuple[Path | None, dict[str, Any]]:
+    records_dir = aoa_root / PROJECTION_OUTBOX_RECORDS_DIR
+    matches: list[tuple[str, Path, dict[str, Any]]] = []
+    for path in records_dir.glob("*.json"):
+        record = read_json(path, {})
+        if not isinstance(record, dict):
+            continue
+        if (
+            str(record.get("session_id") or "") == session_id
+            and str(record.get("new_publish_id") or "") == publish_id
+        ):
+            matches.append(
+                (str(record.get("created_at") or ""), path, record)
+            )
+    if not matches:
+        return None, {}
+    _created_at, path, record = max(matches, key=lambda item: item[0])
+    return path, record
+
+
+def projection_outbox_ready_sessions(
+    aoa_root: Path,
+    *,
+    limit: int = 16,
+) -> dict[str, Any]:
+    records_dir = aoa_root / PROJECTION_OUTBOX_RECORDS_DIR
+    selected_by_session: dict[str, tuple[str, dict[str, Any]]] = {}
+    inspected_count = 0
+    stale_record_count = 0
+    for path in sorted(
+        records_dir.glob("*.json"),
+        key=lambda item: item.stat().st_mtime_ns,
+        reverse=True,
+    ):
+        record = read_json(path, {})
+        if not isinstance(record, dict) or not record:
+            continue
+        inspected_count += 1
+        session_id = str(record.get("session_id") or "")
+        session_dir = Path(
+            str(
+                (
+                    record.get("publication_receipt")
+                    if isinstance(
+                        record.get("publication_receipt"), dict
+                    )
+                    else {}
+                ).get("session_dir")
+                or ""
+            )
+        )
+        if not session_id or not session_dir.is_dir():
+            stale_record_count += 1
+            continue
+        manifest = read_json(
+            session_dir / "session.manifest.json",
+            {},
+        )
+        publish_id = projection_publish_id(
+            manifest.get("index_schema")
+            if isinstance(manifest, dict)
+            and isinstance(manifest.get("index_schema"), dict)
+            else {}
+        )
+        if publish_id != str(record.get("new_publish_id") or ""):
+            stale_record_count += 1
+            continue
+        pending_consumers: list[str] = []
+        for consumer in record.get("required_consumers", []):
+            state = read_json(
+                projection_outbox_consumer_state_path(
+                    session_dir,
+                    consumer=str(consumer),
+                    record_id=str(record.get("record_id") or ""),
+                ),
+                {},
+            )
+            if str(state.get("status") or "") != "complete":
+                pending_consumers.append(str(consumer))
+        if not pending_consumers:
+            continue
+        display = (
+            manifest.get("display")
+            if isinstance(manifest, dict)
+            and isinstance(manifest.get("display"), dict)
+            else {}
+        )
+        candidate = {
+            "path": str(session_dir),
+            "session_id": session_id,
+            "session_label": str(
+                display.get("label")
+                or manifest.get("session_label")
+                or session_dir.name
+            ),
+            "session_title": str(
+                display.get("title")
+                or manifest.get("session_title")
+                or ""
+            ),
+            "archive_status": str(
+                manifest.get("archive_status") or "indexed"
+            ),
+            "outbox_record_id": str(record.get("record_id") or ""),
+            "outbox_record_path": str(path),
+            "outbox_created_at": str(record.get("created_at") or ""),
+            "outbox_mtime_ns": path.stat().st_mtime_ns,
+            "pending_consumers": pending_consumers,
+            "changed_component_count": len(record.get("changes", [])),
+        }
+        existing = selected_by_session.get(session_id)
+        ordering = str(record.get("created_at") or "")
+        if existing is None or ordering > existing[0]:
+            selected_by_session[session_id] = (ordering, candidate)
+        if len(selected_by_session) >= max(1, limit):
+            break
+    records = [
+        item[1]
+        for item in sorted(
+            selected_by_session.values(),
+            key=lambda pair: (
+                pair[0],
+                int_value(pair[1].get("outbox_mtime_ns")),
+                str(pair[1].get("session_id") or ""),
+            ),
+        )
+    ]
+    return {
+        "schema_version": 1,
+        "artifact_type": "projection_outbox_ready_sessions",
+        "generated_at": utc_now(),
+        "status": "ready" if records else "empty",
+        "records": records,
+        "ready_session_count": len(records),
+        "inspected_record_count": inspected_count,
+        "stale_record_count": stale_record_count,
+        "raw_bytes_read": 0,
+        "archive_manifest_scan_performed": False,
+        "truth_status": (
+            "current_publication_pending_consumer_work_not_semantic_completion"
+        ),
+    }
+
+
+def complete_projection_outbox_consumers_for_session(
+    *,
+    aoa_root: Path,
+    session_dir: Path,
+    consumers: Iterable[str],
+    completion_receipt: dict[str, Any],
+) -> dict[str, Any]:
+    manifest = read_json(
+        session_dir / "session.manifest.json",
+        {},
+    )
+    session_id = str(
+        manifest.get("session_id")
+        if isinstance(manifest, dict)
+        else ""
+    )
+    publish_id = projection_publish_id(
+        manifest.get("index_schema")
+        if isinstance(manifest, dict)
+        and isinstance(manifest.get("index_schema"), dict)
+        else {}
+    )
+    outbox_path, record = session_projection_outbox_record_for_publish(
+        aoa_root,
+        session_id=session_id,
+        publish_id=publish_id,
+    )
+    if outbox_path is None or not record:
+        return {
+            "ok": True,
+            "status": "no_current_outbox_record",
+            "completed_consumers": [],
+        }
+    required = {
+        str(item) for item in record.get("required_consumers", [])
+    }
+    completed: list[str] = []
+    states: list[dict[str, Any]] = []
+    for consumer in consumers:
+        consumer_name = str(consumer)
+        if consumer_name not in required:
+            continue
+        existing_state_path = projection_outbox_consumer_state_path(
+            session_dir,
+            consumer=consumer_name,
+            record_id=str(record.get("record_id") or ""),
+        )
+        existing_state = read_json(existing_state_path, {})
+        if (
+            isinstance(existing_state, dict)
+            and existing_state.get("status") == "complete"
+            and existing_state.get("source_publish_id") == publish_id
+            and existing_state.get("record_id") == record.get("record_id")
+        ):
+            completed.append(consumer_name)
+            states.append(
+                {
+                    "status": "already_complete",
+                    "path": str(existing_state_path),
+                    "consumer": consumer_name,
+                    "record_id": record.get("record_id"),
+                }
+            )
+            continue
+        state = write_projection_outbox_consumer_state(
+            session_dir,
+            record=record,
+            consumer=consumer_name,
+            status="complete",
+            reason="exact_consumer_transaction_committed",
+            completion_receipt={
+                **completion_receipt,
+                "consumer": consumer_name,
+                "source_publish_id": publish_id,
+                "outbox_record_id": record.get("record_id"),
+                "completed_at": utc_now(),
+            },
+        )
+        completed.append(consumer_name)
+        states.append(state)
+    return {
+        "ok": True,
+        "status": "completed" if completed else "not_required",
+        "record_id": record.get("record_id"),
+        "outbox_ref": str(outbox_path),
+        "completed_consumers": completed,
+        "consumer_states": states,
+    }
+
+
+def complete_graph_outbox_consumers_from_ledger(
+    aoa_root: Path,
+    *,
+    limit: int = 32,
+) -> dict[str, Any]:
+    ready = projection_outbox_ready_sessions(aoa_root, limit=limit)
+    ledger = read_graph_source_state_ledger(aoa_root)
+    entries = (
+        ledger.get("sources")
+        if isinstance(ledger.get("sources"), dict)
+        else {}
+    )
+    completions: list[dict[str, Any]] = []
+    deferred: list[dict[str, Any]] = []
+    for candidate in ready.get("records", []):
+        if not isinstance(candidate, dict) or "graph" not in (
+            candidate.get("pending_consumers") or []
+        ):
+            continue
+        session_dir = Path(str(candidate.get("path") or ""))
+        record = read_json(
+            Path(str(candidate.get("outbox_record_path") or "")),
+            {},
+        )
+        session_id = str(candidate.get("session_id") or "")
+        publish_id = str(record.get("new_publish_id") or "")
+        required_keys = {
+            graph_source_key("session", session_id, "")
+        }
+        for change in record.get("changes", []):
+            if not isinstance(change, dict):
+                continue
+            component_id = str(change.get("component_id") or "")
+            if component_id.startswith("segment:"):
+                required_keys.add(
+                    graph_source_key(
+                        "segment",
+                        session_id,
+                        component_id.split(":", 1)[1],
+                    )
+                )
+        unresolved = [
+            source_key
+            for source_key in sorted(required_keys)
+            if not (
+                isinstance(entries.get(source_key), dict)
+                and str(entries[source_key].get("status") or "")
+                == "current"
+                and str(
+                    entries[source_key].get(
+                        "source_projection_publish_id"
+                    )
+                    or ""
+                )
+                == publish_id
+            )
+        ]
+        if unresolved:
+            deferred.append(
+                {
+                    "session_id": session_id,
+                    "record_id": record.get("record_id"),
+                    "unresolved_source_keys": unresolved,
+                }
+            )
+            continue
+        completion = complete_projection_outbox_consumers_for_session(
+            aoa_root=aoa_root,
+            session_dir=session_dir,
+            consumers=["graph"],
+            completion_receipt={
+                "artifact_type": "graph_consumer_ledger_receipt",
+                "graph_store": str(graph_paths(aoa_root)["store"]),
+                "graph_ledger": str(
+                    graph_paths(aoa_root)["source_state_ledger"]
+                ),
+                "source_keys": sorted(required_keys),
+                "ledger_updated_at": ledger.get("updated_at"),
+            },
+        )
+        if completion.get("completed_consumers"):
+            completions.append(completion)
+    return {
+        "ok": True,
+        "status": "completed" if completions else "no_completion",
+        "completed_count": len(completions),
+        "completions": completions,
+        "deferred": deferred,
+    }
+
+
+def complete_entity_registry_outbox_consumers(
+    aoa_root: Path,
+    *,
+    limit: int = 32,
+) -> dict[str, Any]:
+    """Acknowledge entity work only from an exact persisted registry view."""
+    registry_state = entity_registry_maintenance_status(aoa_root)
+    observed_route_source = str(
+        registry_state.get("observed_route_source") or ""
+    )
+    route_dependency: dict[str, Any] = {}
+    dependency_current = False
+    if observed_route_source == "operational_route_rollup":
+        route_dependency = entity_registry_observed_rollup_ready(
+            aoa_root
+        )
+        dependency_current = bool(route_dependency.get("ready"))
+    elif observed_route_source == "archived_route_terms":
+        route_dependency = {
+            "status": "current"
+            if search_db_path(aoa_root).is_file()
+            else "missing",
+            "path": str(search_db_path(aoa_root)),
+        }
+        dependency_current = search_db_path(aoa_root).is_file()
+    if (
+        registry_state.get("status") != "current"
+        or not dependency_current
+    ):
+        return {
+            "ok": True,
+            "status": "deferred_registry_dependency_not_current",
+            "completed_count": 0,
+            "completions": [],
+            "deferred": [
+                {
+                    "reason": "entity_registry_or_observed_route_dependency_not_current",
+                    "entity_registry_status": registry_state.get(
+                        "status"
+                    ),
+                    "observed_route_source": observed_route_source,
+                    "route_dependency_status": route_dependency.get(
+                        "status"
+                    ),
+                }
+            ],
+        }
+
+    ready = projection_outbox_ready_sessions(aoa_root, limit=limit)
+    completions: list[dict[str, Any]] = []
+    deferred: list[dict[str, Any]] = []
+    for candidate in ready.get("records", []):
+        if not isinstance(candidate, dict) or "entity_registry" not in (
+            candidate.get("pending_consumers") or []
+        ):
+            continue
+        session_dir = Path(str(candidate.get("path") or ""))
+        record = read_json(
+            Path(str(candidate.get("outbox_record_path") or "")),
+            {},
+        )
+        record_id = str(record.get("record_id") or "")
+        search_state = read_json(
+            projection_outbox_consumer_state_path(
+                session_dir,
+                consumer="exact_and_lexical_search",
+                record_id=record_id,
+            ),
+            {},
+        )
+        if str(search_state.get("status") or "") != "complete":
+            deferred.append(
+                {
+                    "session_id": candidate.get("session_id"),
+                    "record_id": record_id,
+                    "reason": "exact_search_predecessor_not_complete",
+                }
+            )
+            continue
+        completion = complete_projection_outbox_consumers_for_session(
+            aoa_root=aoa_root,
+            session_dir=session_dir,
+            consumers=["entity_registry"],
+            completion_receipt={
+                "artifact_type": "entity_registry_consumer_receipt",
+                "registry_path": registry_state.get("path"),
+                "registry_generated_at": registry_state.get(
+                    "generated_at"
+                ),
+                "registry_semantic_digest": registry_state.get(
+                    "semantic_digest"
+                ),
+                "observed_route_source": observed_route_source,
+                "observed_source_dependency": registry_state.get(
+                    "observed_source_dependency"
+                ),
+                "route_dependency": route_dependency,
+                "search_predecessor_state": search_state,
+            },
+        )
+        if completion.get("completed_consumers"):
+            completions.append(completion)
+    return {
+        "ok": True,
+        "status": "completed" if completions else "no_completion",
+        "completed_count": len(completions),
+        "completions": completions,
+        "deferred": deferred,
+    }
+
+
+def session_projection_freshness_vector(
+    *,
+    aoa_root: Path,
+    session_dir: Path,
+    returned_evidence: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    manifest = read_json(session_dir / "session.manifest.json", {})
+    session_index = read_json(
+        session_dir / SESSION_INDEX_JSON,
+        {},
+    )
+    session_id = str(
+        manifest.get("session_id")
+        if isinstance(manifest, dict)
+        else ""
+    ) or session_dir.name
+    capture_state = raw_capture_state_for_session(session_dir)
+    source_path = Path(str(capture_state.get("source_path") or ""))
+    capture_reasons: list[str] = []
+    try:
+        source_stat = source_path.stat()
+    except OSError:
+        source_stat = None
+        capture_reasons.append("capture_source_unavailable")
+    captured_bytes = int_value(capture_state.get("raw_bytes"), -1)
+    captured_snapshot = (
+        capture_state.get("source_snapshot_after")
+        if isinstance(
+            capture_state.get("source_snapshot_after"), dict
+        )
+        else {}
+    )
+    capture_current = bool(
+        source_stat is not None
+        and source_stat.st_size == captured_bytes
+        and (
+            not captured_snapshot.get("device")
+            or source_stat.st_dev
+            == int_value(captured_snapshot.get("device"), -1)
+        )
+        and (
+            not captured_snapshot.get("inode")
+            or source_stat.st_ino
+            == int_value(captured_snapshot.get("inode"), -1)
+        )
+    )
+    if not capture_current and source_stat is not None:
+        capture_reasons.append("source_advanced_beyond_capture_watermark")
+
+    overlay = read_json(
+        persistent_live_tail_index_path(session_dir),
+        {},
+    )
+    overlay_reasons: list[str] = []
+    overlay_current = bool(
+        capture_current
+        and isinstance(overlay, dict)
+        and overlay.get("artifact_type")
+        == "persistent_live_tail_overlay"
+        and int_value(overlay.get("captured_bytes"), -1)
+        == captured_bytes
+        and str(overlay.get("source_path") or "")
+        == str(source_path)
+        and str(overlay.get("ledger_chain_sha256") or "")
+        == str(capture_state.get("ledger_chain_sha256") or "")
+    )
+    if not overlay_current:
+        overlay_reasons.append(
+            "persistent_live_overlay_not_at_capture_watermark"
+        )
+
+    stable_reasons = (
+        ["session_projection_publish_in_progress"]
+        if session_projection_publish_in_progress(session_dir)
+        else generated_session_index_stale_reasons_for_session(
+            session_dir,
+            session_index,
+        )
+        if isinstance(session_index, dict) and session_index
+        else ["session_index_missing"]
+    )
+    archived_bytes = int_value(
+        (
+            manifest.get("raw")
+            if isinstance(manifest, dict)
+            and isinstance(manifest.get("raw"), dict)
+            else {}
+        ).get("bytes"),
+        -1,
+    )
+    if captured_bytes > archived_bytes:
+        stable_reasons = unique_preserving_order(
+            [*stable_reasons, "captured_tail_not_in_stable_projection"]
+        )
+    stable_current = not stable_reasons
+    publish_id = projection_publish_id(
+        manifest.get("index_schema")
+        if isinstance(manifest, dict)
+        and isinstance(manifest.get("index_schema"), dict)
+        else {}
+    )
+    outbox_path, outbox_record = (
+        session_projection_outbox_record_for_publish(
+            aoa_root,
+            session_id=session_id,
+            publish_id=publish_id,
+        )
+    )
+    downstream: dict[str, Any] = {}
+    for consumer in PROJECTION_OUTBOX_CONSUMERS:
+        state_path: Path | None = (
+            projection_outbox_consumer_state_path(
+                session_dir,
+                consumer=consumer,
+                record_id=str(outbox_record.get("record_id") or ""),
+            )
+            if outbox_record
+            else None
+        )
+        state = read_json(state_path, {}) if state_path is not None else {}
+        observed_status = str(state.get("status") or "unresolved")
+        downstream[consumer] = {
+            "status": observed_status,
+            "current": observed_status == "complete",
+            "semantic_completion": bool(
+                state.get("semantic_completion")
+            ),
+            "source_publish_id": str(
+                state.get("source_publish_id") or publish_id
+            ),
+            "record_id": str(outbox_record.get("record_id") or ""),
+            "state_ref": str(state_path) if state_path is not None else "",
+            "reason": str(state.get("reason") or ""),
+        }
+    returned = dict(returned_evidence or {})
+    returned_status = str(returned.get("status") or "not_returned")
+    if returned.get("persistent_overlay") and overlay_current:
+        returned_status = "current"
+    global_recall_complete = bool(
+        stable_current
+        and all(item["current"] for item in downstream.values())
+    )
+    return {
+        "schema_version": 1,
+        "artifact_type": "session_projection_freshness_vector",
+        "generated_at": utc_now(),
+        "session_id": session_id,
+        "session_dir": str(session_dir),
+        "source_publish_id": publish_id,
+        "axes": {
+            "raw_capture": {
+                "status": "current" if capture_current else "stale",
+                "current": capture_current,
+                "captured_bytes": captured_bytes,
+                "source_bytes": (
+                    source_stat.st_size if source_stat is not None else -1
+                ),
+                "reasons": capture_reasons,
+            },
+            "live_overlay": {
+                "status": "current" if overlay_current else "stale",
+                "current": overlay_current,
+                "captured_bytes": int_value(
+                    overlay.get("captured_bytes"), -1
+                ),
+                "reasons": overlay_reasons,
+            },
+            "stable_session_projection": {
+                "status": "current" if stable_current else "stale-readable",
+                "current": stable_current,
+                "archived_bytes": archived_bytes,
+                "reasons": stable_reasons,
+            },
+            "search": downstream["exact_and_lexical_search"],
+            "episode_semantic": downstream["episode_semantic"],
+            "entity_registry": downstream["entity_registry"],
+            "graph": downstream["graph"],
+            "returned_evidence": {
+                "status": returned_status,
+                "current": returned_status == "current",
+                "source": returned,
+            },
+            "global_recall": {
+                "status": (
+                    "complete" if global_recall_complete else "incomplete"
+                ),
+                "complete": global_recall_complete,
+                "negative_claims_admitted": global_recall_complete,
+            },
+        },
+        "outbox": {
+            "record_ref": str(outbox_path) if outbox_path else "",
+            "record_id": str(outbox_record.get("record_id") or ""),
+            "status": str(outbox_record.get("status") or "unresolved"),
+        },
+        "truth_status": (
+            "independent_freshness_axes_no_cross_axis_promotion"
+        ),
+    }
+
+
 def session_projection_publish_journal_path(
     session_dir: Path,
 ) -> Path:
@@ -22052,29 +26103,13 @@ def session_projection_stage_prefix(
 def session_projection_work_identity(
     publish_identity: dict[str, Any],
 ) -> dict[str, Any]:
-    """Bind resumable work to every input that can change derived output."""
+    """Bind only the umbrella publication transaction to its raw source."""
     payload = {
         "schema_version": SESSION_PROJECTION_WORK_STATE_SCHEMA_VERSION,
         "projection_publish": publish_identity,
-        "generation_identities": {
-            "event_classification": (
-                event_classification_generation_identity()
-            ),
-            "session_index": session_index_generation_identity(),
-            "segment_index": segment_index_generation_identity(),
-            "task_episode_source": (
-                task_episode_source_generation_identity()
-            ),
-        },
-        "policy_versions": {
-            "derived_text_privacy": (
-                DERIVED_TEXT_PRIVACY_POLICY_VERSION
-            ),
-            "derived_text_redaction": (
-                DERIVED_TEXT_REDACTION_POLICY_VERSION
-            ),
-            "token_accounting": TOKEN_ACCOUNTING_SCHEMA_VERSION,
-        },
+        "publication_contract": (
+            "atomic_component_publication_transaction_v1"
+        ),
     }
     work_id = hashlib.sha256(
         json.dumps(
@@ -22084,7 +26119,151 @@ def session_projection_work_identity(
             separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()
-    return {**payload, "work_id": work_id}
+    return {
+        **payload,
+        "work_id": work_id,
+        "stage_work_identities": (
+            session_projection_stage_work_identities(
+                publish_identity
+            )
+        ),
+    }
+
+
+def session_projection_stage_work_identities(
+    publish_identity: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    source = (
+        publish_identity.get("source")
+        if isinstance(publish_identity.get("source"), dict)
+        else {}
+    )
+    classification = event_classification_generation_identity()
+    segment = segment_index_generation_identity()
+    review_rendering = review_rendering_generation_identity(
+        segment_index=segment
+    )
+    task_episode = task_episode_source_generation_identity()
+    goal_lifecycles = goal_lifecycle_generation_identity(
+        task_episode=task_episode,
+        segment_index=segment,
+    )
+    session_index = session_index_generation_identity()
+
+    def identity(
+        stage: str,
+        *,
+        producer: dict[str, Any],
+        upstream: dict[str, str],
+        contracts: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        payload = {
+            "schema_version": 1,
+            "stage": stage,
+            "source": source,
+            "producer_generation_id": str(
+                producer.get("generation_id") or ""
+            ),
+            "upstream": dict(sorted(upstream.items())),
+            "contracts": contracts or {},
+        }
+        stage_work_id = hashlib.sha256(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        return {**payload, "stage_work_id": stage_work_id}
+
+    capture = identity(
+        "capture",
+        producer={"generation_id": "append-capture-v1"},
+        upstream={},
+        contracts={
+            "ledger_schema": RAW_CAPTURE_LEDGER_SCHEMA_VERSION,
+            "state_schema": RAW_CAPTURE_STATE_SCHEMA_VERSION,
+        },
+    )
+    classification_identity = identity(
+        "classification",
+        producer=classification,
+        upstream={"capture": capture["stage_work_id"]},
+    )
+    correlation = identity(
+        "correlation_summaries",
+        producer=classification,
+        upstream={
+            "classification": classification_identity[
+                "stage_work_id"
+            ]
+        },
+        contracts={"boundary_merge": "bounded_tail_v1"},
+    )
+    segment_identity = identity(
+        "segment_index",
+        producer=segment,
+        upstream={
+            "classification": classification_identity[
+                "stage_work_id"
+            ],
+            "correlation": correlation["stage_work_id"],
+        },
+    )
+    review = identity(
+        "review_rendering",
+        producer=review_rendering,
+        upstream={"segment_index": segment_identity["stage_work_id"]},
+        contracts={"render_mode": "index_first_lazy_review_v1"},
+    )
+    episode_identity = identity(
+        "task_episodes",
+        producer=task_episode,
+        upstream={
+            "classification": classification_identity[
+                "stage_work_id"
+            ],
+        },
+    )
+    goals = identity(
+        "goal_lifecycles",
+        producer=goal_lifecycles,
+        upstream={
+            "segment_index": segment_identity["stage_work_id"],
+            "task_episodes": episode_identity["stage_work_id"],
+        },
+        contracts={"schema": GOAL_LIFECYCLE_SCHEMA_VERSION},
+    )
+    component_manifest = identity(
+        "session_component_manifest",
+        producer=session_index,
+        upstream={
+            "segment_index": segment_identity["stage_work_id"],
+            "task_episodes": episode_identity["stage_work_id"],
+            "goal_lifecycles": goals["stage_work_id"],
+        },
+    )
+    return {
+        item["stage"]: item
+        for item in (
+            capture,
+            classification_identity,
+            correlation,
+            segment_identity,
+            review,
+            episode_identity,
+            goals,
+            component_manifest,
+        )
+    }
+
+
+def session_projection_stage_checkpoint_path(
+    work_dir: Path,
+    stage: str,
+) -> Path:
+    return work_dir / "stage-checkpoints" / f"{safe_slug(stage)}.json"
 
 
 def session_projection_work_dir(
@@ -22100,6 +26279,13 @@ def session_projection_work_checkpoint_path(
     work_dir: Path,
 ) -> Path:
     return work_dir / ".projection-work-state.json"
+
+
+def session_projection_checkpoint_observer(
+    *, phase: str, work_dir: Path
+) -> None:
+    """Test/diagnostic boundary invoked only after checkpoint publication."""
+    del phase, work_dir
 
 
 def session_projection_build_lease_path(
@@ -22118,17 +26304,44 @@ def session_projection_artifact_receipt(path: Path) -> dict[str, Any]:
     }
 
 
+def session_projection_attested_artifact_receipt(
+    path: Path, *, sha256: str
+) -> dict[str, Any]:
+    stat = path.stat()
+    return {
+        "rel": str(path),
+        "bytes": stat.st_size,
+        "sha256": sha256,
+        "mtime_ns": stat.st_mtime_ns,
+        "ctime_ns": stat.st_ctime_ns,
+        "validation_mode": "attested_metadata_v1",
+        "metadata_mode": "size_mtime_v1",
+    }
+
+
 def session_projection_artifact_receipt_current(
     receipt: Any,
 ) -> bool:
     if not isinstance(receipt, dict):
         return False
     path = Path(str(receipt.get("rel") or ""))
-    return bool(
-        path.is_file()
-        and path.stat().st_size == int_value(receipt.get("bytes"), -1)
-        and sha256_file(path) == str(receipt.get("sha256") or "")
-    )
+    if not path.is_file():
+        return False
+    stat = path.stat()
+    if stat.st_size != int_value(receipt.get("bytes"), -1):
+        return False
+    if receipt.get("validation_mode") == "attested_metadata_v1":
+        return bool(
+            receipt.get("sha256")
+            and stat.st_mtime_ns
+            == int_value(receipt.get("mtime_ns"), -1)
+            and (
+                receipt.get("metadata_mode") == "size_mtime_v1"
+                or stat.st_ctime_ns
+                == int_value(receipt.get("ctime_ns"), -1)
+            )
+        )
+    return sha256_file(path) == str(receipt.get("sha256") or "")
 
 
 def session_projection_segment_checkpoint_current(
@@ -22170,6 +26383,27 @@ def recover_interrupted_session_projection_publish(
     journal = read_json(journal_path, {})
     if not isinstance(journal, dict) or not journal:
         return {"status": "no_journal", "recovered": False}
+    stage_dir = Path(str(journal.get("stage_dir") or ""))
+    backup_root = Path(str(journal.get("backup_root") or ""))
+    if journal.get("status") == "published":
+        if stage_dir.name.startswith(
+            f".{session_dir.name}.projection-stage-"
+        ) or stage_dir.name.startswith(
+            f".{session_dir.name}.projection-work-"
+        ):
+            remove_projection_publish_path(stage_dir)
+        if backup_root.name.startswith(
+            f".{session_dir.name}.projection-backup-"
+        ):
+            remove_projection_publish_path(backup_root)
+        journal_path.unlink(missing_ok=True)
+        return {
+            "status": "finalized_committed_publish",
+            "recovered": True,
+            "restored": [],
+            "removed_new": [],
+            "outbox_record": journal.get("outbox_record", {}),
+        }
     operations = (
         journal.get("operations")
         if isinstance(journal.get("operations"), list)
@@ -22195,8 +26429,18 @@ def recover_interrupted_session_projection_publish(
         elif published and not had_original:
             remove_projection_publish_path(final_path)
             removed_new.append(str(final_path))
-    stage_dir = Path(str(journal.get("stage_dir") or ""))
-    backup_root = Path(str(journal.get("backup_root") or ""))
+    outbox_record = (
+        journal.get("outbox_record")
+        if isinstance(journal.get("outbox_record"), dict)
+        else {}
+    )
+    outbox_path = Path(str(outbox_record.get("path") or ""))
+    if (
+        outbox_path.name
+        and bool(outbox_record.get("written"))
+        and not bool(outbox_record.get("preexisting"))
+    ):
+        outbox_path.unlink(missing_ok=True)
     if stage_dir.name.startswith(
         f".{session_dir.name}.projection-stage-"
     ):
@@ -22211,6 +26455,9 @@ def recover_interrupted_session_projection_publish(
         "recovered": True,
         "restored": restored,
         "removed_new": removed_new,
+        "removed_outbox_record": (
+            str(outbox_path) if outbox_path.name else ""
+        ),
     }
 
 
@@ -22609,45 +26856,22 @@ def staged_session_index_shard_diagnostics(
         if isinstance(components.get("task_episodes"), list)
         else []
     )
-    episodes = (
-        session_index.get("task_episodes")
-        if isinstance(session_index.get("task_episodes"), list)
-        else []
-    )
-    if len(records) != len(episodes):
-        diagnostics.append(
-            "session_index_task_episode_shard_count_mismatch"
-        )
-        return diagnostics
     if int_value(storage.get("task_episode_shard_count"), -1) != len(
-        episodes
+        records
     ):
         diagnostics.append(
             "session_index_component_storage_count_mismatch"
         )
-    manifest_source_identity = (
-        manifest.get("source_identity")
-        if isinstance(manifest.get("source_identity"), dict)
-        else {}
-    )
-    for ordinal, (record, episode) in enumerate(
-        zip(records, episodes, strict=True)
-    ):
-        if not isinstance(record, dict) or not isinstance(
-            episode, dict
-        ):
+    if storage.get("embedded_compatibility_view") is not False:
+        diagnostics.append(
+            "session_index_component_storage_not_manifest_first"
+        )
+    for ordinal, record in enumerate(records):
+        if not isinstance(record, dict):
             diagnostics.append(
                 f"session_index_task_episode_shard_record_invalid:{ordinal}"
             )
             continue
-        expected_key = session_index_task_episode_shard_key(
-            episode,
-            ordinal,
-        )
-        if str(record.get("component_key") or "") != expected_key:
-            diagnostics.append(
-                f"session_index_task_episode_shard_key_mismatch:{ordinal}"
-            )
         ref = str(record.get("ref") or "")
         relative = Path(ref)
         expected_parent = (
@@ -22683,8 +26907,16 @@ def staged_session_index_shard_diagnostics(
             if isinstance(envelope.get("payload"), dict)
             else {}
         )
+        expected_key = session_index_task_episode_shard_key(
+            payload,
+            ordinal,
+        )
+        if str(record.get("component_key") or "") != expected_key:
+            diagnostics.append(
+                f"session_index_task_episode_shard_key_mismatch:{ordinal}"
+            )
         payload_sha256 = session_index_shard_payload_sha256(
-            episode
+            payload
         )
         if (
             int_value(envelope.get("schema_version"))
@@ -22693,7 +26925,7 @@ def staged_session_index_shard_diagnostics(
             != "session_index_component_shard"
             or envelope.get("component") != "task_episodes"
             or envelope.get("source_identity")
-            != manifest_source_identity
+            != record.get("source_identity")
             or str(envelope.get("component_key") or "")
             != expected_key
             or str(envelope.get("payload_sha256") or "")
@@ -22726,14 +26958,33 @@ def validate_staged_session_projection(
         ).get("raw_sha256")
         or ""
     )
+    expected_raw_bytes = int_value(
+        (
+            publish_identity.get("source")
+            if isinstance(publish_identity.get("source"), dict)
+            else {}
+        ).get("raw_bytes")
+    )
     diagnostics: list[str] = []
+    raw_validation_mode = "published_last_good_raw_v1"
     staged_raw_path = (
         stage_dir / "raw" / "session.raw.jsonl"
     )
     if staged_raw_path.is_file():
-        staged_raw_sha256 = sha256_file(staged_raw_path)
-        if staged_raw_sha256 != expected_raw_sha256:
-            diagnostics.append("staged_raw_sha256_mismatch")
+        if staged_raw_snapshot_receipt_current(
+            stage_dir=stage_dir,
+            staged_raw_path=staged_raw_path,
+            expected_raw_sha256=expected_raw_sha256,
+            expected_raw_bytes=expected_raw_bytes,
+        ):
+            raw_validation_mode = (
+                "current_ficlone_snapshot_receipt_v1"
+            )
+        else:
+            raw_validation_mode = "full_sha256_v1"
+            staged_raw_sha256 = sha256_file(staged_raw_path)
+            if staged_raw_sha256 != expected_raw_sha256:
+                diagnostics.append("staged_raw_sha256_mismatch")
     elif expected_raw_sha256 and not (
         session_dir / "raw" / "session.raw.jsonl"
     ).is_file():
@@ -22798,6 +27049,48 @@ def validate_staged_session_projection(
             / "segments"
             / final_index_path.name
         )
+        staged_markdown_path = (
+            stage_dir
+            / "segments"
+            / Path(str(segment.get("markdown") or "")).name
+        )
+        component_identity = (
+            segment.get("component_identity")
+            if isinstance(segment.get("component_identity"), dict)
+            else {}
+        )
+        artifact_receipts = (
+            segment.get("artifact_receipts")
+            if isinstance(segment.get("artifact_receipts"), dict)
+            else {}
+        )
+        expected_component_identity = segment_component_identity(
+            segment_id=str(segment.get("segment_id") or ""),
+            role=str(segment.get("role") or ""),
+            source_range=(
+                segment.get("source_range")
+                if isinstance(segment.get("source_range"), dict)
+                else {}
+            ),
+            input_digest=str(segment.get("input_digest") or ""),
+            raw_block=(
+                segment.get("raw_block")
+                if isinstance(segment.get("raw_block"), dict)
+                else None
+            ),
+        )
+        immutable_component_admitted = bool(
+            component_identity == expected_component_identity
+            and immutable_component_artifact_receipt_metadata_current(
+                staged_index_path, artifact_receipts.get("index")
+            )
+            and immutable_component_artifact_receipt_metadata_current(
+                staged_markdown_path,
+                artifact_receipts.get("markdown"),
+            )
+        )
+        if immutable_component_admitted:
+            continue
         staged_segment_index = read_json(
             staged_index_path,
             {},
@@ -22815,11 +27108,7 @@ def validate_staged_session_projection(
                 expected_raw_sha256=expected_raw_sha256,
             )
         )
-        if not (
-            stage_dir / "segments" / Path(
-                str(segment.get("markdown") or "")
-            ).name
-        ).is_file():
+        if not staged_markdown_path.is_file():
             diagnostics.append(
                 f"staged_segment_markdown_missing:{segment.get('segment_id')}"
             )
@@ -22827,6 +27116,22 @@ def validate_staged_session_projection(
         stage_dir / "raw" / RAW_BLOCK_INDEX_JSON,
         {},
     )
+    published_manifest = read_json(
+        session_dir / "session.manifest.json", {}
+    )
+    published_raw_blocks = {
+        str(item.get("block_id") or ""): item
+        for item in (
+            published_manifest.get("raw_blocks", {}).get("blocks", [])
+            if isinstance(published_manifest.get("raw_blocks"), dict)
+            and isinstance(
+                published_manifest.get("raw_blocks", {}).get("blocks"),
+                list,
+            )
+            else []
+        )
+        if isinstance(item, dict) and str(item.get("block_id") or "")
+    }
     if projection_publish_id(raw_block_index) != expected_publish_id:
         diagnostics.append("raw_block_index_publish_id_mismatch")
     for block in (
@@ -22865,12 +27170,31 @@ def validate_staged_session_projection(
             or RAW_BLOCK_STORAGE_MODE_PLAIN
         )
         plain_removed = bool(block.get("plain_removed"))
+        published_block = published_raw_blocks.get(str(block_id), {})
+        published_plain_path = Path(
+            str(
+                published_block.get("plain_path")
+                or published_block.get("path")
+                or ""
+            )
+        )
+        reused_last_good_plain = bool(
+            isinstance(published_block, dict)
+            and str(block.get("status") or "") == "sealed"
+            and str(published_block.get("sha256") or "")
+            == expected_uncompressed_sha256
+            and published_block.get("source_range")
+            == block.get("source_range")
+            and staged_plain_path.is_file()
+            and published_plain_path.is_file()
+            and os.path.samefile(staged_plain_path, published_plain_path)
+        )
         if not plain_removed:
             if not staged_plain_path.is_file():
                 diagnostics.append(
                     f"staged_raw_block_missing:{block_id}"
                 )
-            elif (
+            elif not reused_last_good_plain and (
                 expected_uncompressed_sha256
                 != sha256_file(staged_plain_path)
             ):
@@ -22943,6 +27267,21 @@ def validate_staged_session_projection(
             )
             else {}
         )
+        classification_records_root_current = bool(
+            str(
+                classification_cache_index.get(
+                    "records_root_sha256"
+                )
+                or ""
+            )
+            == event_classification_cache_records_root_sha256(
+                {
+                    str(key): dict(value)
+                    for key, value in classification_records.items()
+                    if isinstance(value, dict)
+                }
+            )
+        )
         for cache_key, classification_record in (
             classification_records.items()
         ):
@@ -22951,15 +27290,24 @@ def validate_staged_session_projection(
                 if isinstance(classification_record, dict)
                 else {}
             )
+            metadata_reuse_admitted = bool(
+                classification_records_root_current
+                and isinstance(classification_record, dict)
+                and classification_record.get("validation_mode")
+                == "attested_published_artifact_metadata_reuse_v1"
+            )
             if not event_classification_cache_record_current(
                 cache_root=classification_cache_root,
                 record=classification_record,
                 block=block,
+                verify_content=not metadata_reuse_admitted,
             ):
                 diagnostics.append(
                     "classification_cache_artifact_invalid:"
                     f"{cache_key}"
                 )
+                continue
+            if metadata_reuse_admitted:
                 continue
             cached_payload = read_gzip_json(
                 classification_cache_root
@@ -23050,6 +27398,114 @@ def validate_staged_session_projection(
             diagnostics.append(
                 "staged_first_pass_distillation_markdown_missing"
             )
+    migration_receipts = (
+        staged_manifest.get("generation_migration_receipts")
+        if isinstance(staged_manifest, dict)
+        and isinstance(
+            staged_manifest.get("generation_migration_receipts"), list
+        )
+        else []
+    )
+    for migration_receipt in migration_receipts:
+        if not isinstance(migration_receipt, dict):
+            diagnostics.append("generation_migration_receipt_invalid")
+            continue
+        if str(migration_receipt.get("publish_id") or "") != (
+            expected_publish_id
+        ):
+            continue
+        receipt_payload = {
+            key: value
+            for key, value in migration_receipt.items()
+            if key not in {"receipt_id", "recorded_at"}
+        }
+        expected_receipt_id = hashlib.sha256(
+            json.dumps(
+                receipt_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        transitions = (
+            migration_receipt.get("transitions")
+            if isinstance(
+                migration_receipt.get("transitions"), list
+            )
+            else []
+        )
+        transition_count = sum(
+            int_value(item.get("artifact_count"))
+            for item in transitions
+            if isinstance(item, dict)
+        )
+        if (
+            str(migration_receipt.get("receipt_id") or "")
+            != expected_receipt_id
+            or migration_receipt.get("source")
+            != publish_identity.get("source")
+            or transition_count <= 0
+            or transition_count
+            != int_value(migration_receipt.get("artifact_count"))
+            or migration_receipt.get("raw_authority_changed") is not False
+            or migration_receipt.get("unknown_generation_admission")
+            is not False
+        ):
+            diagnostics.append(
+                "generation_migration_receipt_payload_mismatch"
+            )
+            continue
+        for transition in transitions:
+            if not isinstance(transition, dict):
+                diagnostics.append(
+                    "generation_migration_transition_invalid"
+                )
+                continue
+            projection = str(transition.get("projection") or "")
+            current_generation_ids = {
+                "raw_event_classification_cache": str(
+                    event_classification_generation_identity().get(
+                        "generation_id"
+                    )
+                    or ""
+                ),
+                "segment_index": str(
+                    segment_index_generation_identity().get(
+                        "generation_id"
+                    )
+                    or ""
+                ),
+                "task_episode_source": str(
+                    task_episode_source_generation_identity().get(
+                        "generation_id"
+                    )
+                    or ""
+                ),
+            }
+            if sorted(
+                str(item)
+                for item in transition.get(
+                    "from_generation_ids", []
+                )
+            ) != sorted(
+                DECLARED_PROJECTION_PREDECESSOR_GENERATION_IDS.get(
+                    projection, frozenset()
+                )
+            ):
+                diagnostics.append(
+                    "generation_migration_predecessor_allowlist_mismatch:"
+                    f"{projection}"
+                )
+            if (
+                transition.get("admission")
+                != "exact_declared_predecessor_reuse_then_restamp_v1"
+                or str(transition.get("to_generation_id") or "")
+                != current_generation_ids.get(projection, "")
+            ):
+                diagnostics.append(
+                    "generation_migration_transition_target_mismatch:"
+                    f"{projection}"
+                )
     producer_source_state = (
         session_memory_loaded_producer_source_state()
     )
@@ -23068,6 +27524,7 @@ def validate_staged_session_projection(
             else []
         ),
         "diagnostics": diagnostics,
+        "raw_validation_mode": raw_validation_mode,
         "producer_source_state": producer_source_state,
         "semantic_digest": (
             session_projection_semantic_digest(stage_dir)
@@ -23093,6 +27550,103 @@ def stage_projection_path_with_links(
         os.link(source, target)
     except OSError:
         shutil.copy2(source, target)
+
+
+def stage_raw_snapshot(
+    *,
+    source: Path,
+    target: Path,
+    expected_sha256: str,
+) -> dict[str, Any]:
+    """Create an immutable-for-this-build CoW snapshot when supported."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.unlink(missing_ok=True)
+    source_before = file_snapshot(source)
+    mode = "copy2_fallback"
+    error = ""
+    try:
+        # Linux FICLONE. The portable fallback remains exact but is reported
+        # as full-source I/O rather than being mistaken for delta work.
+        with source.open("rb") as source_handle, target.open(
+            "wb"
+        ) as target_handle:
+            fcntl.ioctl(
+                target_handle.fileno(),
+                0x40049409,
+                source_handle.fileno(),
+            )
+        shutil.copystat(source, target)
+        mode = "ficlone_snapshot_v1"
+    except OSError as exc:
+        error = f"{exc.__class__.__name__}:{exc}"
+        target.unlink(missing_ok=True)
+        shutil.copy2(source, target)
+    source_after = file_snapshot(source)
+    target_snapshot = file_snapshot(target)
+    if source_before != source_after:
+        target.unlink(missing_ok=True)
+        raise ValueError("raw_snapshot_source_changed_during_clone")
+    if target_snapshot["size"] != source_before["size"]:
+        target.unlink(missing_ok=True)
+        raise ValueError("raw_snapshot_size_mismatch")
+    return {
+        "schema_version": 1,
+        "artifact_type": "session_projection_raw_snapshot_receipt",
+        "mode": mode,
+        "source_snapshot": source_before,
+        "target_snapshot": target_snapshot,
+        "expected_sha256": expected_sha256,
+        "source_bytes_read": (
+            0 if mode == "ficlone_snapshot_v1" else source_before["size"]
+        ),
+        "target_bytes_written": (
+            0 if mode == "ficlone_snapshot_v1" else target_snapshot["size"]
+        ),
+        "fallback_error": error,
+        "truth_status": (
+            "kernel_cow_snapshot_bound_by_source_and_target_stat"
+            if mode == "ficlone_snapshot_v1"
+            else "portable_full_copy_requires_full_digest_validation"
+        ),
+    }
+
+
+def staged_raw_snapshot_receipt_current(
+    *,
+    stage_dir: Path,
+    staged_raw_path: Path,
+    expected_raw_sha256: str,
+    expected_raw_bytes: int,
+) -> bool:
+    checkpoint = read_json(
+        session_projection_work_checkpoint_path(stage_dir), {}
+    )
+    receipt = (
+        checkpoint.get("raw_snapshot_execution")
+        if isinstance(checkpoint, dict)
+        and isinstance(
+            checkpoint.get("raw_snapshot_execution"), dict
+        )
+        else {}
+    )
+    target_snapshot = (
+        receipt.get("target_snapshot")
+        if isinstance(receipt.get("target_snapshot"), dict)
+        else {}
+    )
+    if not (
+        receipt.get("mode") == "ficlone_snapshot_v1"
+        and str(receipt.get("expected_sha256") or "")
+        == expected_raw_sha256
+        and staged_raw_path.is_file()
+        and staged_raw_path.stat().st_size == expected_raw_bytes
+        and int_value(target_snapshot.get("size"), -1)
+        == expected_raw_bytes
+        and int_value(target_snapshot.get("mtime_ns"), -1)
+        == staged_raw_path.stat().st_mtime_ns
+    ):
+        return False
+    return True
 
 
 def stage_existing_session_projection(
@@ -23159,6 +27713,42 @@ def atomic_publish_session_projection(
             "staged_session_projection_invalid:"
             + ",".join(validation.get("diagnostics", []))
         )
+    old_snapshot = projection_component_snapshot(session_dir)
+    new_snapshot = projection_component_snapshot(stage_dir)
+    old_manifest = read_json(
+        session_dir / "session.manifest.json",
+        {},
+    )
+    old_publish_id = projection_publish_id(
+        old_manifest.get("index_schema")
+        if isinstance(old_manifest, dict)
+        and isinstance(old_manifest.get("index_schema"), dict)
+        else {}
+    )
+    if old_publish_id == "None":
+        old_publish_id = ""
+    new_publish_id = projection_publish_id(publish_identity)
+    new_manifest = read_json(
+        stage_dir / "session.manifest.json",
+        {},
+    )
+    outbox_record = session_projection_outbox_record(
+        session_dir=session_dir,
+        old_snapshot=old_snapshot,
+        new_snapshot=new_snapshot,
+        old_publish_id=old_publish_id,
+        new_publish_id=new_publish_id,
+        session_id=str(
+            new_manifest.get("session_id")
+            if isinstance(new_manifest, dict)
+            else ""
+        ),
+    )
+    outbox_path = projection_outbox_record_path(
+        session_dir,
+        str(outbox_record["record_id"]),
+    )
+    outbox_preexisting = outbox_path.is_file()
     publish_started = time.monotonic()
     backup_root = Path(
         tempfile.mkdtemp(
@@ -23212,6 +27802,13 @@ def atomic_publish_session_projection(
         "stage_dir": str(stage_dir),
         "backup_root": str(backup_root),
         "operations": operations,
+        "outbox_record": {
+            "record_id": outbox_record["record_id"],
+            "path": str(outbox_path),
+            "preexisting": outbox_preexisting,
+            "written": False,
+            "change_count": len(outbox_record["changes"]),
+        },
     }
     write_json(journal_path, journal)
     try:
@@ -23244,6 +27841,15 @@ def atomic_publish_session_projection(
             raise ValueError(
                 "producer_source_changed_during_session_publish"
             )
+        outbox_write = write_projection_outbox_record(
+            session_dir,
+            outbox_record,
+        )
+        journal["outbox_record"]["written"] = True
+        journal["outbox_record"]["write_status"] = (
+            outbox_write["status"]
+        )
+        write_json(journal_path, journal)
     except BaseException:
         write_json(journal_path, journal)
         recover_interrupted_session_projection_publish(
@@ -23262,6 +27868,11 @@ def atomic_publish_session_projection(
         "validation": validation,
         "producer_source_state": producer_source_state,
         "prior_recovery": recovery,
+        "outbox": outbox_write,
+        "changed_components": outbox_record["changes"],
+        "required_downstream_consumers": outbox_record[
+            "required_consumers"
+        ],
         "phase_timings_ms": {
             "projection_validation": validation_ms,
             "atomic_publish": int(
@@ -23485,10 +28096,8 @@ def raw_capture_state_semantic_stale_reasons(
     if not state:
         return []
     reasons: list[str] = []
-    if (
-        int_value(state.get("schema_version"))
-        != RAW_CAPTURE_STATE_SCHEMA_VERSION
-    ):
+    state_schema_version = int_value(state.get("schema_version"))
+    if state_schema_version not in {1, RAW_CAPTURE_STATE_SCHEMA_VERSION}:
         reasons.append("raw_capture_state_schema_incompatible")
     capture_path_value = state.get("capture_path")
     capture_path = (
@@ -23499,8 +28108,25 @@ def raw_capture_state_semantic_stale_reasons(
     if capture_path is None or not capture_path.is_file():
         reasons.append("raw_capture_payload_missing")
     capture_sha256 = str(state.get("raw_sha256") or "")
-    if not capture_sha256:
+    if not capture_sha256 and not (
+        state_schema_version == RAW_CAPTURE_STATE_SCHEMA_VERSION
+        and state.get("raw_digest_status") == "deferred_to_projection"
+        and state.get("ledger_chain_sha256")
+    ):
         reasons.append("raw_capture_sha256_missing")
+    if (
+        state_schema_version == RAW_CAPTURE_STATE_SCHEMA_VERSION
+        and state.get("capture_mode")
+        == "append_only_immutable_block_ledger_v1"
+    ):
+        ledger_path = Path(str(state.get("ledger_path") or ""))
+        overlay_path = Path(
+            str(state.get("persistent_live_tail_index") or "")
+        )
+        if not ledger_path.is_file():
+            reasons.append("raw_capture_ledger_missing")
+        if not overlay_path.is_file():
+            reasons.append("persistent_live_tail_index_missing")
     raw = (
         manifest.get("raw")
         if isinstance(manifest.get("raw"), dict)
@@ -23512,7 +28138,12 @@ def raw_capture_state_semantic_stale_reasons(
         "preserved_unindexed",
         "preserved_unstable_unindexed",
     }:
-        if capture_sha256 != projection_raw_sha256:
+        if (
+            capture_sha256 != projection_raw_sha256
+            if capture_sha256
+            else int_value(state.get("raw_bytes"), -1)
+            != int_value(raw.get("bytes"), -2)
+        ):
             reasons.append(
                 "preserved_raw_capture_ahead_of_session_projection"
             )
@@ -23555,6 +28186,1226 @@ def raw_capture_state_semantic_stale_reasons(
     return reasons
 
 
+def raw_capture_ledger_path(session_dir: Path) -> Path:
+    return session_dir / "raw" / RAW_CAPTURE_LEDGER_JSON
+
+
+def persistent_live_tail_index_path(session_dir: Path) -> Path:
+    return session_dir / "raw" / PERSISTENT_LIVE_TAIL_INDEX_JSON
+
+
+def persistent_live_tail_postings_path(session_dir: Path) -> Path:
+    return session_dir / "raw" / PERSISTENT_LIVE_TAIL_POSTINGS_JSON
+
+
+def capture_watch_state_path(aoa_root: Path) -> Path:
+    return aoa_root / DIAGNOSTICS_ROOT / CAPTURE_WATCH_STATE_JSON
+
+
+def capture_watch_state_lock_path(aoa_root: Path) -> Path:
+    return aoa_root / DIAGNOSTICS_ROOT / CAPTURE_WATCH_STATE_LOCK
+
+
+def register_capture_watch(
+    *,
+    aoa_root: Path,
+    session_id: str,
+    session_dir: Path,
+    transcript_path: Path,
+    observed_at: str,
+) -> dict[str, Any]:
+    """Remember one hook-observed source for bounded timer reconciliation."""
+    lock_path = capture_watch_state_lock_path(aoa_root)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("w", encoding="utf-8") as lock_handle:
+        fcntl.flock(lock_handle, fcntl.LOCK_EX)
+        path = capture_watch_state_path(aoa_root)
+        state = read_json(path, {})
+        entries = (
+            dict(state.get("entries"))
+            if isinstance(state, dict)
+            and isinstance(state.get("entries"), dict)
+            else {}
+        )
+        prior = (
+            dict(entries.get(session_id))
+            if isinstance(entries.get(session_id), dict)
+            else {}
+        )
+        try:
+            snapshot = file_snapshot(transcript_path)
+            source_available = True
+        except OSError:
+            snapshot = {
+                "path": str(transcript_path),
+                "size": -1,
+                "mtime_ns": -1,
+            }
+            source_available = False
+        entries[session_id] = {
+            **prior,
+            "session_id": session_id,
+            "session_dir": str(session_dir),
+            "transcript_path": str(transcript_path),
+            "observed_at": observed_at,
+            "observed_size": int_value(snapshot.get("size"), -1),
+            "observed_mtime_ns": int_value(
+                snapshot.get("mtime_ns"), -1
+            ),
+            "source_available": source_available,
+        }
+        payload = {
+            "schema_version": CAPTURE_WATCH_STATE_SCHEMA_VERSION,
+            "artifact_type": "session_memory_capture_watch_state",
+            "updated_at": observed_at,
+            "entries": entries,
+            "authority": (
+                "operational_source_watch_only_raw_capture_is_authority"
+            ),
+        }
+        write_json(path, payload)
+        return dict(entries[session_id])
+
+
+def reconcile_capture_watch(
+    *,
+    aoa_root: Path,
+    limit: int,
+    apply: bool,
+    target: str = "all",
+    now: str | None = None,
+) -> dict[str, Any]:
+    """Recover missed capture hooks from a bounded watched-source frontier."""
+    checked_at = now or utc_now()
+    path = capture_watch_state_path(aoa_root)
+    state = read_json(path, {})
+    entries = (
+        state.get("entries")
+        if isinstance(state, dict)
+        and isinstance(state.get("entries"), dict)
+        else {}
+    )
+    selected = sorted(
+        (
+            dict(item)
+            for item in entries.values()
+            if isinstance(item, dict)
+            and (
+                target == "all"
+                or str(item.get("session_id") or "") == target
+            )
+        ),
+        key=lambda item: (
+            str(item.get("last_checked_at") or ""),
+            str(item.get("observed_at") or ""),
+            str(item.get("session_id") or ""),
+        ),
+    )[: max(0, limit)]
+    results: list[dict[str, Any]] = []
+    updates: dict[str, dict[str, Any]] = {}
+    for watched in selected:
+        session_id = str(watched.get("session_id") or "")
+        transcript_path = Path(
+            str(watched.get("transcript_path") or "")
+        )
+        result: dict[str, Any] = {
+            "session_id": session_id,
+            "transcript_path": str(transcript_path),
+            "status": "unchanged",
+            "mutates": False,
+        }
+        if (
+            not session_id
+            or not transcript_path.is_file()
+            or not os.access(transcript_path, os.R_OK)
+        ):
+            result["status"] = "source_unavailable"
+            results.append(result)
+            updates[session_id] = {
+                "last_checked_at": checked_at,
+                "last_status": result["status"],
+            }
+            continue
+        source_snapshot = file_snapshot(transcript_path)
+        resolved_session_dir = session_dir_for_id(
+            aoa_root, session_id
+        )
+        stored_session_dir = Path(
+            str(watched.get("session_dir") or resolved_session_dir)
+        )
+        session_dir = (
+            resolved_session_dir
+            if resolved_session_dir.exists()
+            else stored_session_dir
+        )
+        manifest = read_json(
+            session_dir / "session.manifest.json", {}
+        )
+        capture_state = raw_capture_state_for_session(session_dir)
+        captured_snapshot = (
+            capture_state.get("source_snapshot_after")
+            if isinstance(
+                capture_state.get("source_snapshot_after"), dict
+            )
+            else {}
+        )
+        capture_current = bool(
+            str(capture_state.get("source_path") or "")
+            == str(transcript_path)
+            and int_value(captured_snapshot.get("size"), -1)
+            == int_value(source_snapshot.get("size"), -2)
+            and int_value(captured_snapshot.get("mtime_ns"), -1)
+            == int_value(source_snapshot.get("mtime_ns"), -2)
+        )
+        result["source_snapshot"] = source_snapshot
+        result["capture_current_before"] = capture_current
+        if not capture_current:
+            result["status"] = "capture_change_detected"
+            if apply:
+                if isinstance(manifest, dict) and manifest.get(
+                    "session_id"
+                ):
+                    captured = preserve_unindexed_raw_capture(
+                        session_dir=session_dir,
+                        session_id=session_id,
+                        transcript_path=transcript_path,
+                        manifest=manifest,
+                        hook_event_name="TimerWatchRecovery",
+                        now=checked_at,
+                    )
+                    result.update(
+                        {
+                            "status": "missed_hook_capture_recovered",
+                            "mutates": True,
+                            "session_dir": str(session_dir),
+                            "appended_bytes": int_value(
+                                captured.get("appended_bytes")
+                            ),
+                            "capture_ref": str(
+                                captured.get("capture_ref") or ""
+                            ),
+                        }
+                    )
+                else:
+                    mirrored = mirror_transcript_without_indexing(
+                        aoa_root=aoa_root,
+                        event={
+                            "session_id": session_id,
+                            "transcript_path": str(transcript_path),
+                        },
+                        transcript_path=transcript_path,
+                        hook_event_name="TimerWatchRecovery",
+                        now=checked_at,
+                    )
+                    result.update(
+                        {
+                            "status": "missed_hook_session_recovered",
+                            "mutates": True,
+                            "session_dir": str(
+                                mirrored.get("session_dir") or ""
+                            ),
+                            "appended_bytes": int_value(
+                                mirrored.get("capture", {}).get(
+                                    "appended_bytes"
+                                )
+                                if isinstance(
+                                    mirrored.get("capture"), dict
+                                )
+                                else 0
+                            ),
+                        }
+                    )
+        results.append(result)
+        updates[session_id] = {
+            "last_checked_at": checked_at,
+            "last_status": result["status"],
+            "last_source_size": int_value(
+                source_snapshot.get("size"), -1
+            ),
+            "last_source_mtime_ns": int_value(
+                source_snapshot.get("mtime_ns"), -1
+            ),
+        }
+    if apply and updates:
+        lock_path = capture_watch_state_lock_path(aoa_root)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("w", encoding="utf-8") as lock_handle:
+            fcntl.flock(lock_handle, fcntl.LOCK_EX)
+            current = read_json(path, {})
+            current_entries = (
+                dict(current.get("entries"))
+                if isinstance(current, dict)
+                and isinstance(current.get("entries"), dict)
+                else {}
+            )
+            for session_id, update in updates.items():
+                if not session_id:
+                    continue
+                prior = (
+                    dict(current_entries.get(session_id))
+                    if isinstance(
+                        current_entries.get(session_id), dict
+                    )
+                    else {}
+                )
+                current_entries[session_id] = {**prior, **update}
+            write_json(
+                path,
+                {
+                    "schema_version": (
+                        CAPTURE_WATCH_STATE_SCHEMA_VERSION
+                    ),
+                    "artifact_type": (
+                        "session_memory_capture_watch_state"
+                    ),
+                    "updated_at": checked_at,
+                    "entries": current_entries,
+                    "authority": (
+                        "operational_source_watch_only_raw_capture_is_authority"
+                    ),
+                },
+            )
+    return {
+        "schema_version": CAPTURE_WATCH_STATE_SCHEMA_VERSION,
+        "artifact_type": "session_memory_capture_watch_reconciliation",
+        "generated_at": checked_at,
+        "ok": True,
+        "status": "applied" if apply else "planned",
+        "apply": apply,
+        "watched_source_count": len(entries),
+        "selected_count": len(selected),
+        "changed_count": sum(
+            result.get("capture_current_before") is False
+            for result in results
+        ),
+        "recovered_count": sum(
+            bool(result.get("mutates")) for result in results
+        ),
+        "archive_manifest_scan_performed": False,
+        "raw_payload_read_for_unchanged_sources": False,
+        "results": results,
+        "truth_status": (
+            "bounded_known_source_reconciliation_not_global_source_discovery"
+        ),
+    }
+
+
+def persistent_live_tail_postings_generation_identity() -> dict[str, Any]:
+    return canonical_generation_identity(
+        {
+            "projection": "persistent_live_tail_postings",
+            "schema_version": (
+                PERSISTENT_LIVE_TAIL_POSTINGS_SCHEMA_VERSION
+            ),
+            "event_classification_generation_id": (
+                event_classification_generation_identity()[
+                    "generation_id"
+                ]
+            ),
+            "privacy_policy_version": (
+                DERIVED_TEXT_PRIVACY_POLICY_VERSION
+            ),
+            "redaction_policy_version": (
+                DERIVED_TEXT_REDACTION_POLICY_VERSION
+            ),
+            "storage_contract": (
+                "redacted_inverted_token_postings_and_typed_raw_refs_v2"
+            ),
+            "dependency_generations": {
+                "event_classification": (
+                    event_classification_generation_identity()[
+                        "generation_id"
+                    ]
+                )
+            },
+        }
+    )
+
+
+def persistent_live_tail_safe_tokens(value: Any) -> list[str]:
+    blocked = {
+        "redacted",
+        "credential",
+        "credentials",
+        "secret",
+        "token",
+    }
+    return sorted(
+        {
+            token.casefold()
+            for token in re.findall(
+                r"[^\W_]+",
+                str(value or ""),
+                flags=re.UNICODE,
+            )
+            if len(token) >= 2 and token.casefold() not in blocked
+        }
+    )[:160]
+
+
+def persistent_live_tail_inverted_token_postings(
+    entries: list[dict[str, Any]],
+) -> dict[str, list[int]]:
+    """Build a compact token-to-entry-position map over redacted entries."""
+    postings: dict[str, list[int]] = {}
+    for position, entry in enumerate(entries):
+        for token in entry.get("tokens", []):
+            normalized = str(token or "").casefold()
+            if not normalized:
+                continue
+            postings.setdefault(normalized, []).append(position)
+    return {
+        token: positions
+        for token, positions in sorted(postings.items())
+    }
+
+
+def update_persistent_live_tail_postings(
+    *,
+    session_dir: Path,
+    session_id: str,
+    epoch: dict[str, Any],
+    projection_raw_bytes: int,
+    projection_raw_line_count: int,
+    now: str,
+) -> dict[str, Any]:
+    """Index only newly completed captured lines without retaining raw text."""
+    path = persistent_live_tail_postings_path(session_dir)
+    generation_identity = (
+        persistent_live_tail_postings_generation_identity()
+    )
+    existing = read_json(path, {})
+    same_frontier = bool(
+        isinstance(existing, dict)
+        and int_value(existing.get("schema_version"))
+        == PERSISTENT_LIVE_TAIL_POSTINGS_SCHEMA_VERSION
+        and str(existing.get("session_id") or "") == session_id
+        and str(existing.get("epoch_id") or "")
+        == str(epoch.get("epoch_id") or "")
+        and existing.get("generation_identity")
+        == generation_identity
+    )
+    materialization_path = Path(
+        str(epoch.get("materialization_path") or "")
+    )
+    if not materialization_path.is_file():
+        raise ValueError("live_tail_postings_materialization_missing")
+    materialized_bytes = materialization_path.stat().st_size
+    processed_bytes = (
+        int_value(existing.get("processed_bytes"))
+        if same_frontier
+        else max(0, min(projection_raw_bytes, materialized_bytes))
+    )
+    processed_line_count = (
+        int_value(existing.get("processed_line_count"))
+        if same_frontier
+        else max(0, projection_raw_line_count)
+    )
+    entries = (
+        [
+            dict(item)
+            for item in existing.get("entries", [])
+            if isinstance(item, dict)
+            and int_value(item.get("line"))
+            > projection_raw_line_count
+        ]
+        if same_frontier
+        and isinstance(existing.get("entries"), list)
+        else []
+    )
+    if processed_bytes > materialized_bytes:
+        processed_bytes = max(
+            0, min(projection_raw_bytes, materialized_bytes)
+        )
+        processed_line_count = max(0, projection_raw_line_count)
+        entries = []
+        same_frontier = False
+    with materialization_path.open("rb") as handle:
+        handle.seek(processed_bytes)
+        pending = handle.read()
+    complete_length = pending.rfind(b"\n") + 1
+    complete_payload = pending[:complete_length]
+    raw_lines = complete_payload.splitlines(keepends=True)
+    decoded_lines = [
+        raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+        for raw_line in raw_lines
+    ]
+    literal_values = derived_session_sensitive_literal_values_from_texts(
+        decoded_lines
+    )
+    literal_policy = DerivedSessionSensitiveLiteralPolicy(
+        values_by_kind=literal_values
+    )
+    # A value can become recognizable as sensitive in a later line.  Reapply
+    # the new process-local literal policy to retained derived entries.
+    sanitized_entries: list[dict[str, Any]] = []
+    for entry in entries:
+        sanitized = redact_derived_value(
+            entry,
+            literal_policy=literal_policy,
+        )
+        preview = str(sanitized.get("preview") or "")
+        sanitized["tokens"] = persistent_live_tail_safe_tokens(
+            preview
+        )
+        sanitized_entries.append(sanitized)
+    entries = sanitized_entries
+    byte_offset = processed_bytes
+    next_line = processed_line_count + 1
+    for raw_line, raw_text in zip(
+        raw_lines, decoded_lines, strict=True
+    ):
+        try:
+            loaded = json.loads(raw_text)
+            parsed = loaded if isinstance(loaded, dict) else None
+        except json.JSONDecodeError:
+            parsed = None
+        event = classify_raw_event(raw_text, parsed, next_line)
+        semantic = event_semantic_text(event) or event.title
+        preview_projection = derived_text_privacy_projection(
+            semantic,
+            max_chars=700,
+        )
+        preview = redact_derived_text(
+            str(preview_projection.get("text") or ""),
+            literal_policy=literal_policy,
+        )
+        route_signals = [
+            {
+                "layer": str(item.get("layer") or ""),
+                "key": str(item.get("key") or ""),
+            }
+            for item in event_route_signals(event)
+            if str(item.get("layer") or "")
+            and str(item.get("key") or "")
+        ]
+        entry = redact_derived_value(
+            {
+                "event_id": event.event_id,
+                "line": next_line,
+                "byte_offset": byte_offset,
+                "byte_count": len(raw_line),
+                "event_type": event.event_type,
+                "source_type": event.source_type,
+                "timestamp": event.timestamp or "",
+                "family": event.family,
+                "phase": event.phase,
+                "actor": event.actor,
+                "action": event.action,
+                "outcome": event.outcome,
+                "correlation_id": event.correlation_id or "",
+                "route_signals": route_signals,
+                "preview": preview,
+                "tokens": persistent_live_tail_safe_tokens(preview),
+                "raw_ref": f"raw:line:{next_line}",
+                "capture_ref": (
+                    f"raw-ledger:{epoch.get('epoch_id')}:"
+                    f"line:{next_line}"
+                ),
+            },
+            literal_policy=literal_policy,
+        )
+        entries.append(entry)
+        byte_offset += len(raw_line)
+        next_line += 1
+    processed_bytes += complete_length
+    processed_line_count += len(raw_lines)
+    token_postings = persistent_live_tail_inverted_token_postings(
+        entries
+    )
+    payload = {
+        "schema_version": (
+            PERSISTENT_LIVE_TAIL_POSTINGS_SCHEMA_VERSION
+        ),
+        "artifact_type": "persistent_live_tail_postings",
+        "session_id": session_id,
+        "epoch_id": str(epoch.get("epoch_id") or ""),
+        "generation_identity": generation_identity,
+        "updated_at": now,
+        "processed_bytes": processed_bytes,
+        "processed_line_count": processed_line_count,
+        "source_captured_bytes": materialized_bytes,
+        "projection_raw_bytes": projection_raw_bytes,
+        "projection_raw_line_count": projection_raw_line_count,
+        "pending_incomplete_bytes": (
+            materialized_bytes - processed_bytes
+        ),
+        "entry_count": len(entries),
+        "entries": entries,
+        "token_count": len(token_postings),
+        "token_postings": token_postings,
+        "privacy": {
+            **literal_policy.report(),
+            "raw_text_persisted": False,
+            "reversible_literal_digests_persisted": False,
+        },
+        "authority": (
+            "derived_navigation_with_typed_refs_raw_capture_is_authority"
+        ),
+    }
+    write_json_durable(path, payload)
+    return {
+        "path": str(path),
+        "generation_id": generation_identity["generation_id"],
+        "processed_bytes": processed_bytes,
+        "processed_line_count": processed_line_count,
+        "new_entry_count": len(raw_lines),
+        "entry_count": len(entries),
+        "token_count": len(token_postings),
+        "source_bytes_read": len(pending),
+        "reused_frontier": same_frontier,
+        "pending_incomplete_bytes": materialized_bytes
+        - processed_bytes,
+    }
+
+
+def raw_capture_epoch_id(
+    *,
+    session_id: str,
+    source_path: Path,
+    source_stat: os.stat_result,
+    started_at: str,
+) -> str:
+    payload = (
+        f"{session_id}\0{source_path}\0{source_stat.st_dev}\0"
+        f"{source_stat.st_ino}\0{started_at}\0{time.time_ns()}"
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
+
+
+def raw_capture_epoch_boundary_current(
+    *,
+    epoch: dict[str, Any],
+    source_path: Path,
+    session_dir: Path,
+) -> tuple[bool, list[str]]:
+    diagnostics: list[str] = []
+    captured_bytes = int_value(epoch.get("captured_bytes"), 0)
+    blocks = (
+        epoch.get("blocks")
+        if isinstance(epoch.get("blocks"), list)
+        else []
+    )
+    if captured_bytes == 0 or not blocks:
+        return True, diagnostics
+    last = blocks[-1] if isinstance(blocks[-1], dict) else {}
+    byte_start = int_value(last.get("byte_start"), -1)
+    byte_count = int_value(last.get("byte_count"), -1)
+    if byte_start < 0 or byte_count <= 0:
+        return False, ["capture_ledger_last_block_range_invalid"]
+    try:
+        with source_path.open("rb") as handle:
+            handle.seek(byte_start)
+            observed = handle.read(byte_count)
+    except OSError as exc:
+        return False, [f"capture_ledger_boundary_read_failed:{exc}"]
+    if len(observed) != byte_count:
+        diagnostics.append("capture_ledger_boundary_short_read")
+    elif hashlib.sha256(observed).hexdigest() != str(
+        last.get("sha256") or ""
+    ):
+        diagnostics.append("capture_ledger_boundary_digest_mismatch")
+    block_path = Path(str(last.get("path") or ""))
+    if not block_path.is_file():
+        rebased_block_path = (
+            session_dir
+            / "raw"
+            / RAW_CAPTURE_BLOCKS_DIR
+            / block_path.name
+        )
+        if rebased_block_path.is_file():
+            last["path"] = str(rebased_block_path)
+            block_path = rebased_block_path
+    if not (
+        block_path.is_file()
+        and block_path.stat().st_size == byte_count
+        and sha256_file(block_path) == str(last.get("sha256") or "")
+    ):
+        diagnostics.append("capture_ledger_last_block_artifact_invalid")
+    return not diagnostics, diagnostics
+
+
+def raw_capture_chain_sha256(
+    *,
+    previous_chain_sha256: str,
+    block_sha256: str,
+    byte_start: int,
+    byte_count: int,
+) -> str:
+    return hashlib.sha256(
+        (
+            f"{previous_chain_sha256}:{block_sha256}:"
+            f"{byte_start}:{byte_count}"
+        ).encode("ascii")
+    ).hexdigest()
+
+
+_SHA256_INITIAL_STATE = (
+    0x6A09E667,
+    0xBB67AE85,
+    0x3C6EF372,
+    0xA54FF53A,
+    0x510E527F,
+    0x9B05688C,
+    0x1F83D9AB,
+    0x5BE0CD19,
+)
+_SHA256_ROUND_CONSTANTS = (
+    0x428A2F98, 0x71374491, 0xB5C0FBCF, 0xE9B5DBA5,
+    0x3956C25B, 0x59F111F1, 0x923F82A4, 0xAB1C5ED5,
+    0xD807AA98, 0x12835B01, 0x243185BE, 0x550C7DC3,
+    0x72BE5D74, 0x80DEB1FE, 0x9BDC06A7, 0xC19BF174,
+    0xE49B69C1, 0xEFBE4786, 0x0FC19DC6, 0x240CA1CC,
+    0x2DE92C6F, 0x4A7484AA, 0x5CB0A9DC, 0x76F988DA,
+    0x983E5152, 0xA831C66D, 0xB00327C8, 0xBF597FC7,
+    0xC6E00BF3, 0xD5A79147, 0x06CA6351, 0x14292967,
+    0x27B70A85, 0x2E1B2138, 0x4D2C6DFC, 0x53380D13,
+    0x650A7354, 0x766A0ABB, 0x81C2C92E, 0x92722C85,
+    0xA2BFE8A1, 0xA81A664B, 0xC24B8B70, 0xC76C51A3,
+    0xD192E819, 0xD6990624, 0xF40E3585, 0x106AA070,
+    0x19A4C116, 0x1E376C08, 0x2748774C, 0x34B0BCB5,
+    0x391C0CB3, 0x4ED8AA4A, 0x5B9CCA4F, 0x682E6FF3,
+    0x748F82EE, 0x78A5636F, 0x84C87814, 0x8CC70208,
+    0x90BEFFFA, 0xA4506CEB, 0xBEF9A3F7, 0xC67178F2,
+)
+
+
+class PersistableSha256:
+    """Portable SHA-256 with serializable continuation state."""
+
+    def __init__(
+        self,
+        *,
+        words: Iterable[int] = _SHA256_INITIAL_STATE,
+        total_bytes: int = 0,
+        pending: bytes = b"",
+    ) -> None:
+        self.words = [int(value) & 0xFFFFFFFF for value in words]
+        if len(self.words) != 8:
+            raise ValueError("sha256_state_word_count_invalid")
+        self.total_bytes = max(0, int(total_bytes))
+        self.pending = bytes(pending)
+        if len(self.pending) >= 64:
+            raise ValueError("sha256_state_pending_too_large")
+        if self.total_bytes % 64 != len(self.pending):
+            raise ValueError("sha256_state_length_mismatch")
+
+    @staticmethod
+    def _rotate_right(value: int, count: int) -> int:
+        return ((value >> count) | (value << (32 - count))) & 0xFFFFFFFF
+
+    def _compress(self, chunk: bytes) -> None:
+        schedule = [
+            int.from_bytes(chunk[index : index + 4], "big")
+            for index in range(0, 64, 4)
+        ]
+        for index in range(16, 64):
+            prior_15 = schedule[index - 15]
+            prior_2 = schedule[index - 2]
+            sigma0 = (
+                self._rotate_right(prior_15, 7)
+                ^ self._rotate_right(prior_15, 18)
+                ^ (prior_15 >> 3)
+            )
+            sigma1 = (
+                self._rotate_right(prior_2, 17)
+                ^ self._rotate_right(prior_2, 19)
+                ^ (prior_2 >> 10)
+            )
+            schedule.append(
+                (
+                    schedule[index - 16]
+                    + sigma0
+                    + schedule[index - 7]
+                    + sigma1
+                )
+                & 0xFFFFFFFF
+            )
+        a, b, c, d, e, f, g, h = self.words
+        for constant, word in zip(
+            _SHA256_ROUND_CONSTANTS, schedule, strict=True
+        ):
+            upper = (
+                self._rotate_right(e, 6)
+                ^ self._rotate_right(e, 11)
+                ^ self._rotate_right(e, 25)
+            )
+            choice = (e & f) ^ ((~e) & g)
+            temp1 = (h + upper + choice + constant + word) & 0xFFFFFFFF
+            lower = (
+                self._rotate_right(a, 2)
+                ^ self._rotate_right(a, 13)
+                ^ self._rotate_right(a, 22)
+            )
+            majority = (a & b) ^ (a & c) ^ (b & c)
+            temp2 = (lower + majority) & 0xFFFFFFFF
+            h, g, f, e, d, c, b, a = (
+                g,
+                f,
+                e,
+                (d + temp1) & 0xFFFFFFFF,
+                c,
+                b,
+                a,
+                (temp1 + temp2) & 0xFFFFFFFF,
+            )
+        self.words = [
+            (left + right) & 0xFFFFFFFF
+            for left, right in zip(
+                self.words, (a, b, c, d, e, f, g, h), strict=True
+            )
+        ]
+
+    def update(self, payload: bytes) -> None:
+        data = self.pending + bytes(payload)
+        self.total_bytes += len(payload)
+        complete = len(data) - (len(data) % 64)
+        for offset in range(0, complete, 64):
+            self._compress(data[offset : offset + 64])
+        self.pending = data[complete:]
+
+    def copy(self) -> "PersistableSha256":
+        return PersistableSha256(
+            words=self.words,
+            total_bytes=self.total_bytes,
+            pending=self.pending,
+        )
+
+    def hexdigest(self) -> str:
+        clone = self.copy()
+        bit_length = clone.total_bytes * 8
+        padding_length = (56 - (clone.total_bytes + 1) % 64) % 64
+        clone.update(
+            b"\x80"
+            + (b"\x00" * padding_length)
+            + bit_length.to_bytes(8, "big")
+        )
+        if clone.pending:
+            raise ValueError("sha256_finalization_incomplete")
+        return "".join(f"{value:08x}" for value in clone.words)
+
+    def state_payload(self) -> dict[str, Any]:
+        return {
+            "schema_version": 1,
+            "algorithm": "sha256",
+            "words": [f"{value:08x}" for value in self.words],
+            "total_bytes": self.total_bytes,
+            "pending_hex": self.pending.hex(),
+            "hexdigest": self.hexdigest(),
+        }
+
+    @classmethod
+    def from_payload(cls, payload: Any) -> "PersistableSha256":
+        if not isinstance(payload, dict) or payload.get("algorithm") != "sha256":
+            raise ValueError("sha256_state_payload_invalid")
+        instance = cls(
+            words=[int(str(value), 16) for value in payload.get("words", [])],
+            total_bytes=int_value(payload.get("total_bytes"), -1),
+            pending=bytes.fromhex(str(payload.get("pending_hex") or "")),
+        )
+        if instance.hexdigest() != str(payload.get("hexdigest") or ""):
+            raise ValueError("sha256_state_digest_mismatch")
+        return instance
+
+
+def append_raw_capture_ledger(
+    *,
+    session_dir: Path,
+    session_id: str,
+    transcript_path: Path,
+    now: str,
+    projection_raw_bytes: int,
+    projection_raw_sha256: str,
+    projection_raw_line_count: int = 0,
+) -> dict[str, Any]:
+    """Persist only new source bytes into immutable chained capture blocks."""
+    ledger_path = raw_capture_ledger_path(session_dir)
+    ledger = read_json(ledger_path, {})
+    if (
+        not isinstance(ledger, dict)
+        or int_value(ledger.get("schema_version"))
+        != RAW_CAPTURE_LEDGER_SCHEMA_VERSION
+        or str(ledger.get("session_id") or "") != session_id
+    ):
+        ledger = {
+            "schema_version": RAW_CAPTURE_LEDGER_SCHEMA_VERSION,
+            "artifact_type": "append_only_raw_capture_ledger",
+            "session_id": session_id,
+            "source_path": str(transcript_path),
+            "created_at": now,
+            "current_epoch_id": "",
+            "epochs": [],
+        }
+    epochs = (
+        ledger.get("epochs")
+        if isinstance(ledger.get("epochs"), list)
+        else []
+    )
+    try:
+        source_stat_before = transcript_path.stat()
+    except OSError as exc:
+        raise ValueError(f"raw_capture_source_stat_failed:{exc}") from exc
+    current_epoch = next(
+        (
+            item
+            for item in reversed(epochs)
+            if isinstance(item, dict)
+            and str(item.get("epoch_id") or "")
+            == str(ledger.get("current_epoch_id") or "")
+        ),
+        None,
+    )
+    epoch_diagnostics: list[str] = []
+    continue_epoch = bool(
+        isinstance(current_epoch, dict)
+        and str(current_epoch.get("source_path") or "")
+        == str(transcript_path)
+        and int_value(current_epoch.get("source_device"), -1)
+        == int(source_stat_before.st_dev)
+        and int_value(current_epoch.get("source_inode"), -1)
+        == int(source_stat_before.st_ino)
+        and source_stat_before.st_size
+        >= int_value(current_epoch.get("captured_bytes"), 0)
+    )
+    if continue_epoch and current_epoch is not None:
+        continue_epoch, epoch_diagnostics = (
+            raw_capture_epoch_boundary_current(
+                epoch=current_epoch,
+                source_path=transcript_path,
+                session_dir=session_dir,
+            )
+        )
+    if not continue_epoch:
+        epoch_id = raw_capture_epoch_id(
+            session_id=session_id,
+            source_path=transcript_path,
+            source_stat=source_stat_before,
+            started_at=now,
+        )
+        materialization_path = (
+            session_dir
+            / "raw"
+            / RAW_CAPTURES_DIR
+            / f"epoch-{epoch_id}.raw.jsonl"
+        )
+        current_epoch = {
+            "schema_version": RAW_CAPTURE_LEDGER_SCHEMA_VERSION,
+            "epoch_id": epoch_id,
+            "source_path": str(transcript_path),
+            "source_device": int(source_stat_before.st_dev),
+            "source_inode": int(source_stat_before.st_ino),
+            "started_at": now,
+            "captured_bytes": 0,
+            "newline_count": 0,
+            "raw_line_count": 0,
+            "has_incomplete_tail": False,
+            "chain_sha256": hashlib.sha256(b"").hexdigest(),
+            "materialization_path": str(materialization_path),
+            "blocks": [],
+            "archive_prefixes": {},
+            "start_reason": (
+                "initial_capture"
+                if not epochs
+                else "source_epoch_changed_or_boundary_unverifiable"
+            ),
+            "start_diagnostics": epoch_diagnostics,
+        }
+        epochs.append(current_epoch)
+        ledger["current_epoch_id"] = epoch_id
+    epoch = current_epoch
+    assert isinstance(epoch, dict)
+    materialization_path = Path(str(epoch["materialization_path"]))
+    if not materialization_path.is_file() and epoch.get("blocks"):
+        rebased_materialization_path = (
+            session_dir
+            / "raw"
+            / RAW_CAPTURES_DIR
+            / materialization_path.name
+        )
+        if rebased_materialization_path.is_file():
+            materialization_path = rebased_materialization_path
+            epoch["materialization_path"] = str(materialization_path)
+    materialization_path.parent.mkdir(parents=True, exist_ok=True)
+    captured_bytes = int_value(epoch.get("captured_bytes"), 0)
+    if materialization_path.is_file():
+        materialized_bytes = materialization_path.stat().st_size
+        if materialized_bytes < captured_bytes:
+            raise ValueError(
+                "raw_capture_materialization_shorter_than_committed_ledger"
+            )
+        if materialized_bytes > captured_bytes:
+            with materialization_path.open("r+b") as handle:
+                handle.truncate(captured_bytes)
+    elif captured_bytes:
+        raise ValueError("raw_capture_materialization_missing_for_epoch")
+
+    snapshot_end = int(source_stat_before.st_size)
+    captured_prefix_sha256 = str(
+        epoch.get("full_raw_sha256") or ""
+    )
+    captured_prefix_bytes = captured_bytes
+    appended_bytes = 0
+    appended_blocks: list[dict[str, Any]] = []
+    sha_state_bootstrap_bytes_read = 0
+    if captured_bytes == 0:
+        full_digest = PersistableSha256()
+    else:
+        try:
+            full_digest = PersistableSha256.from_payload(
+                epoch.get("full_raw_sha256_state")
+            )
+            if full_digest.total_bytes != captured_bytes:
+                raise ValueError("sha256_state_watermark_mismatch")
+        except (TypeError, ValueError):
+            # One-time compatibility migration for an older ledger. New
+            # captures persist continuation state and never repeat this read.
+            full_digest = PersistableSha256()
+            with materialization_path.open("rb") as prior_materialization:
+                while True:
+                    prior_chunk = prior_materialization.read(
+                        RAW_CAPTURE_BLOCK_TARGET_BYTES
+                    )
+                    if not prior_chunk:
+                        break
+                    full_digest.update(prior_chunk)
+                    sha_state_bootstrap_bytes_read += len(prior_chunk)
+    archive_prefix_digest = (
+        hashlib.sha256()
+        if captured_bytes == 0
+        and projection_raw_bytes > 0
+        and projection_raw_bytes <= snapshot_end
+        else None
+    )
+    blocks = (
+        epoch.get("blocks")
+        if isinstance(epoch.get("blocks"), list)
+        else []
+    )
+    chain_sha256 = str(
+        epoch.get("chain_sha256")
+        or hashlib.sha256(b"").hexdigest()
+    )
+    newline_count = int_value(epoch.get("newline_count"), 0)
+    block_root = session_dir / "raw" / RAW_CAPTURE_BLOCKS_DIR
+    block_root.mkdir(parents=True, exist_ok=True)
+    if snapshot_end > captured_bytes:
+        with transcript_path.open("rb") as source_handle, materialization_path.open(
+            "ab"
+        ) as materialized:
+            source_handle.seek(captured_bytes)
+            offset = captured_bytes
+            while offset < snapshot_end:
+                payload = source_handle.read(
+                    min(
+                        RAW_CAPTURE_BLOCK_TARGET_BYTES,
+                        snapshot_end - offset,
+                    )
+                )
+                if not payload:
+                    raise ValueError("raw_capture_source_short_read")
+                block_sha256 = hashlib.sha256(payload).hexdigest()
+                block_path = block_root / f"{block_sha256}.raw.part"
+                if block_path.is_file():
+                    if sha256_file(block_path) != block_sha256:
+                        raise ValueError(
+                            "raw_capture_block_digest_mismatch:"
+                            + str(block_path)
+                        )
+                else:
+                    write_bytes_durable(
+                        block_path,
+                        payload,
+                        mode=0o600,
+                    )
+                previous_chain = chain_sha256
+                chain_sha256 = raw_capture_chain_sha256(
+                    previous_chain_sha256=previous_chain,
+                    block_sha256=block_sha256,
+                    byte_start=offset,
+                    byte_count=len(payload),
+                )
+                block_newlines = payload.count(b"\n")
+                record = {
+                    "ordinal": len(blocks),
+                    "byte_start": offset,
+                    "byte_end": offset + len(payload),
+                    "byte_count": len(payload),
+                    "line_start": newline_count + 1,
+                    "newline_count": block_newlines,
+                    "starts_on_line_boundary": (
+                        offset == 0
+                        or bool(blocks and blocks[-1].get("ends_on_line_boundary"))
+                    ),
+                    "ends_on_line_boundary": payload.endswith(b"\n"),
+                    "sha256": block_sha256,
+                    "previous_chain_sha256": previous_chain,
+                    "chain_sha256": chain_sha256,
+                    "path": str(block_path),
+                    "committed_at": now,
+                }
+                blocks.append(record)
+                appended_blocks.append(record)
+                materialized.write(payload)
+                full_digest.update(payload)
+                if archive_prefix_digest is not None and offset < projection_raw_bytes:
+                    archive_prefix_digest.update(
+                        payload[: max(0, projection_raw_bytes - offset)]
+                    )
+                offset += len(payload)
+                appended_bytes += len(payload)
+                newline_count += block_newlines
+            materialized.flush()
+            os.fsync(materialized.fileno())
+    try:
+        source_stat_after = transcript_path.stat()
+    except OSError as exc:
+        raise ValueError(f"raw_capture_post_stat_failed:{exc}") from exc
+    source_stable = bool(
+        source_stat_before.st_dev == source_stat_after.st_dev
+        and source_stat_before.st_ino == source_stat_after.st_ino
+        and source_stat_before.st_size == source_stat_after.st_size
+        and source_stat_before.st_mtime_ns == source_stat_after.st_mtime_ns
+    )
+    materialized_size = materialization_path.stat().st_size
+    has_incomplete_tail = False
+    if materialized_size:
+        with materialization_path.open("rb") as handle:
+            handle.seek(-1, os.SEEK_END)
+            has_incomplete_tail = handle.read(1) != b"\n"
+    if full_digest.total_bytes != materialized_size:
+        raise ValueError("raw_capture_sha256_state_size_mismatch")
+    epoch["full_raw_sha256"] = full_digest.hexdigest()
+    epoch["full_raw_sha256_bytes"] = materialized_size
+    epoch["full_raw_sha256_state"] = full_digest.state_payload()
+    epoch.update(
+        {
+            "captured_bytes": materialized_size,
+            "newline_count": newline_count,
+            "raw_line_count": newline_count
+            + int(has_incomplete_tail),
+            "has_incomplete_tail": has_incomplete_tail,
+            "chain_sha256": chain_sha256,
+            "blocks": blocks,
+            "captured_at": now,
+            "source_snapshot": {
+                "path": str(transcript_path),
+                "size": int(source_stat_before.st_size),
+                "mtime_ns": int(source_stat_before.st_mtime_ns),
+                "device": int(source_stat_before.st_dev),
+                "inode": int(source_stat_before.st_ino),
+            },
+        }
+    )
+    archive_prefixes = (
+        epoch.get("archive_prefixes")
+        if isinstance(epoch.get("archive_prefixes"), dict)
+        else {}
+    )
+    if (
+        projection_raw_bytes > 0
+        and projection_raw_bytes == captured_prefix_bytes
+        and captured_prefix_sha256
+    ):
+        archive_prefixes[str(projection_raw_bytes)] = {
+            "sha256": captured_prefix_sha256,
+            "expected_sha256": projection_raw_sha256,
+            "matches": bool(
+                projection_raw_sha256
+                and captured_prefix_sha256 == projection_raw_sha256
+            ),
+            "observed_at": now,
+            "admission": (
+                "persisted_incremental_sha_at_exact_capture_watermark"
+            ),
+            "source_bytes_read": 0,
+        }
+    if archive_prefix_digest is not None:
+        observed_prefix = archive_prefix_digest.hexdigest()
+        archive_prefixes[str(projection_raw_bytes)] = {
+            "sha256": observed_prefix,
+            "expected_sha256": projection_raw_sha256,
+            "matches": bool(
+                projection_raw_sha256
+                and observed_prefix == projection_raw_sha256
+            ),
+            "observed_at": now,
+        }
+    epoch["archive_prefixes"] = archive_prefixes
+    ledger.update(
+        {
+            "updated_at": now,
+            "source_path": str(transcript_path),
+            "epochs": epochs,
+        }
+    )
+    write_json_durable(ledger_path, ledger)
+    postings = update_persistent_live_tail_postings(
+        session_dir=session_dir,
+        session_id=session_id,
+        epoch=epoch,
+        projection_raw_bytes=projection_raw_bytes,
+        projection_raw_line_count=projection_raw_line_count,
+        now=now,
+    )
+    overlay = {
+        "schema_version": PERSISTENT_LIVE_TAIL_INDEX_SCHEMA_VERSION,
+        "artifact_type": "persistent_live_tail_overlay",
+        "session_id": session_id,
+        "updated_at": now,
+        "epoch_id": epoch["epoch_id"],
+        "ledger_path": str(ledger_path),
+        "ledger_chain_sha256": chain_sha256,
+        "source_path": str(transcript_path),
+        "source_device": int(source_stat_before.st_dev),
+        "source_inode": int(source_stat_before.st_ino),
+        "source_snapshot_size": int(source_stat_before.st_size),
+        "source_snapshot_mtime_ns": int(source_stat_before.st_mtime_ns),
+        "captured_bytes": materialized_size,
+        "raw_line_count": epoch["raw_line_count"],
+        "has_incomplete_tail": has_incomplete_tail,
+        "materialization_path": str(materialization_path),
+        "block_count": len(blocks),
+        "postings": postings,
+        "archive_prefixes": archive_prefixes,
+        "source_stable_during_capture": source_stable,
+        "authority": "captured_raw_evidence_overlay",
+        "projection_authority": False,
+    }
+    write_json_durable(
+        persistent_live_tail_index_path(session_dir), overlay
+    )
+    return {
+        "ledger": ledger,
+        "ledger_path": str(ledger_path),
+        "epoch": epoch,
+        "overlay": overlay,
+        "materialization_path": str(materialization_path),
+        "appended_bytes": appended_bytes,
+        "appended_block_count": len(appended_blocks),
+        "sha256_state_bootstrap_bytes_read": (
+            sha_state_bootstrap_bytes_read
+        ),
+        "sha256_delta_bytes_hashed": appended_bytes,
+        "source_snapshot_before": {
+            "path": str(transcript_path),
+            "size": int(source_stat_before.st_size),
+            "mtime_ns": int(source_stat_before.st_mtime_ns),
+        },
+        "source_snapshot_after": {
+            "path": str(transcript_path),
+            "size": int(source_stat_after.st_size),
+            "mtime_ns": int(source_stat_after.st_mtime_ns),
+        },
+        "source_stable": source_stable,
+        "full_raw_sha256": (
+            str(epoch.get("full_raw_sha256") or "")
+            if int_value(epoch.get("full_raw_sha256_bytes"), -1)
+            == materialized_size
+            else ""
+        ),
+    }
+
+
 def _preserve_unindexed_raw_capture_locked(
     *,
     session_dir: Path,
@@ -23564,46 +29415,33 @@ def _preserve_unindexed_raw_capture_locked(
     hook_event_name: str,
     now: str,
 ) -> dict[str, Any]:
-    captures_dir = (
-        session_dir / "raw" / RAW_CAPTURES_DIR
-    )
-    captures_dir.mkdir(parents=True, exist_ok=True)
-    source_snapshot_before = file_snapshot(transcript_path)
-    temporary_path = captures_dir / (
-        f".capture-{os.getpid()}-{threading.get_ident()}-"
-        f"{time.time_ns()}.tmp"
-    )
-    try:
-        shutil.copy2(transcript_path, temporary_path)
-        source_snapshot_after = file_snapshot(transcript_path)
-        raw_sha256 = sha256_file(temporary_path)
-        capture_path = (
-            captures_dir / f"{raw_sha256}.raw.jsonl"
-        )
-        if capture_path.exists():
-            if sha256_file(capture_path) != raw_sha256:
-                raise ValueError(
-                    "content_addressed_raw_capture_digest_mismatch:"
-                    + str(capture_path)
-                )
-            temporary_path.unlink(missing_ok=True)
-        else:
-            temporary_path.replace(capture_path)
-    except BaseException:
-        temporary_path.unlink(missing_ok=True)
-        raise
-    source_stable = (
-        source_snapshot_before["size"]
-        == source_snapshot_after["size"]
-        and source_snapshot_before["mtime_ns"]
-        == source_snapshot_after["mtime_ns"]
-    )
     raw = (
         manifest.get("raw")
         if isinstance(manifest.get("raw"), dict)
         else {}
     )
     projection_raw_sha256 = str(raw.get("sha256") or "")
+    projection_raw_bytes = int_value(raw.get("bytes"), 0)
+    capture = append_raw_capture_ledger(
+        session_dir=session_dir,
+        session_id=session_id,
+        transcript_path=transcript_path,
+        now=now,
+        projection_raw_bytes=projection_raw_bytes,
+        projection_raw_sha256=projection_raw_sha256,
+        projection_raw_line_count=int_value(
+            raw.get("line_count"),
+            int_value(manifest.get("latest_event_count")),
+        ),
+    )
+    epoch = capture["epoch"]
+    overlay = capture["overlay"]
+    capture_path = Path(str(capture["materialization_path"]))
+    source_snapshot_before = capture["source_snapshot_before"]
+    source_snapshot_after = capture["source_snapshot_after"]
+    source_stable = bool(capture["source_stable"])
+    raw_sha256 = str(capture.get("full_raw_sha256") or "")
+    ledger_chain_sha256 = str(epoch.get("chain_sha256") or "")
     projection_is_indexed = (
         manifest.get("archive_status") == "indexed"
         and raw.get("indexing_status") == "indexed"
@@ -23611,6 +29449,7 @@ def _preserve_unindexed_raw_capture_locked(
     matches_projection = bool(
         projection_is_indexed
         and projection_raw_sha256
+        and raw_sha256
         and projection_raw_sha256 == raw_sha256
     )
     hooks_seen = sorted(
@@ -23637,17 +29476,53 @@ def _preserve_unindexed_raw_capture_locked(
         "artifact_type": "raw_capture_state",
         "session_id": session_id,
         "status": status,
-        "capture_id": f"sha256:{raw_sha256}",
+        "capture_id": f"ledger-sha256:{ledger_chain_sha256}",
         "capture_path": str(capture_path),
-        "capture_ref": f"raw-capture:sha256:{raw_sha256}",
+        "capture_ref": (
+            f"raw-ledger:{epoch.get('epoch_id')}:"
+            f"{ledger_chain_sha256}"
+        ),
         "raw_sha256": raw_sha256,
+        "raw_digest_status": (
+            "complete_sha256"
+            if raw_sha256
+            else "deferred_to_projection"
+        ),
         "raw_bytes": capture_path.stat().st_size,
-        "raw_line_count": count_file_lines(capture_path),
+        "raw_line_count": int_value(epoch.get("raw_line_count")),
         "captured_at": now,
         "source_path": str(transcript_path),
         "source_snapshot_before": source_snapshot_before,
         "source_snapshot_after": source_snapshot_after,
         "source_stable_during_capture": source_stable,
+        "capture_mode": "append_only_immutable_block_ledger_v1",
+        "ledger_path": capture["ledger_path"],
+        "ledger_epoch_id": epoch.get("epoch_id"),
+        "ledger_chain_sha256": ledger_chain_sha256,
+        "ledger_block_count": len(
+            epoch.get("blocks")
+            if isinstance(epoch.get("blocks"), list)
+            else []
+        ),
+        "appended_bytes": capture["appended_bytes"],
+        "appended_block_count": capture["appended_block_count"],
+        "sha256_state_bootstrap_bytes_read": int_value(
+            capture.get("sha256_state_bootstrap_bytes_read")
+        ),
+        "sha256_delta_bytes_hashed": int_value(
+            capture.get("sha256_delta_bytes_hashed")
+        ),
+        "has_incomplete_tail": bool(
+            epoch.get("has_incomplete_tail")
+        ),
+        "persistent_live_tail_index": str(
+            persistent_live_tail_index_path(session_dir)
+        ),
+        "persistent_live_tail_postings": str(
+            persistent_live_tail_postings_path(session_dir)
+        ),
+        "persistent_live_tail_index_written": True,
+        "persistent_live_tail": overlay,
         "hooks_seen": hooks_seen,
         "projection_publish_id_at_capture": (
             projection_publish_id_at_capture
@@ -23667,7 +29542,7 @@ def _preserve_unindexed_raw_capture_locked(
             "capture or its still-readable owner transcript"
         ),
     }
-    write_json(raw_capture_state_path(session_dir), state)
+    write_json_durable(raw_capture_state_path(session_dir), state)
     return state
 
 
@@ -24177,6 +30052,8 @@ def sync_session_from_transcript(
         manifest=manifest,
         reason="archive_updated_by_sync",
         checked_at=now,
+        component_changes=publish_result.get("changed_components"),
+        publication_outbox=publish_result.get("outbox"),
     )
     search_freshness_state = (
         dirty_propagation.get("projections", {})
@@ -30894,11 +36771,21 @@ def event_classification_cache_record(
     block: dict[str, Any],
     artifact_path: Path,
 ) -> dict[str, Any]:
+    artifact = read_gzip_json(artifact_path)
+    summary = (
+        artifact.get("summary")
+        if isinstance(artifact.get("summary"), dict)
+        else {}
+    )
     return {
         "block": dict(block),
         "artifact": str(artifact_path.relative_to(cache_root)),
         "bytes": artifact_path.stat().st_size,
         "sha256": sha256_file(artifact_path),
+        "mtime_ns": artifact_path.stat().st_mtime_ns,
+        "ctime_ns": artifact_path.stat().st_ctime_ns,
+        "summary": summary,
+        "validation_mode": "content_sha256_verified_at_record_v1",
     }
 
 
@@ -30907,6 +36794,7 @@ def event_classification_cache_record_current(
     cache_root: Path,
     record: Any,
     block: dict[str, Any],
+    verify_content: bool = True,
 ) -> bool:
     if (
         not isinstance(record, dict)
@@ -30914,13 +36802,56 @@ def event_classification_cache_record_current(
     ):
         return False
     artifact = cache_root / str(record.get("artifact") or "")
-    return bool(
-        artifact.is_file()
-        and artifact.stat().st_size
-        == int_value(record.get("bytes"), -1)
-        and sha256_file(artifact)
-        == str(record.get("sha256") or "")
+    if not artifact.is_file():
+        return False
+    stat = artifact.stat()
+    if stat.st_size != int_value(record.get("bytes"), -1):
+        return False
+    if not verify_content:
+        return bool(
+            record.get("sha256")
+            and int_value(record.get("mtime_ns"), -1)
+            == stat.st_mtime_ns
+            and (
+                record.get("metadata_mode") == "size_mtime_v1"
+                or int_value(record.get("ctime_ns"), -1)
+                == stat.st_ctime_ns
+            )
+            and event_classification_cache_record_has_summary(record)
+        )
+    return sha256_file_exact(artifact) == str(
+        record.get("sha256") or ""
     )
+
+
+def event_classification_cache_record_has_summary(record: Any) -> bool:
+    return bool(
+        isinstance(record, dict)
+        and isinstance(record.get("summary"), dict)
+        and int_value(record["summary"].get("schema_version")) == 1
+    )
+
+
+def event_classification_cache_records_root_sha256(
+    records: dict[str, dict[str, Any]],
+) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            {
+                key: {
+                    "block": records[key].get("block"),
+                    "artifact": records[key].get("artifact"),
+                    "bytes": records[key].get("bytes"),
+                    "sha256": records[key].get("sha256"),
+                    "summary": records[key].get("summary"),
+                }
+                for key in sorted(records)
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def write_event_classification_cache_index(
@@ -30929,6 +36860,9 @@ def write_event_classification_cache_index(
     generation_identity: dict[str, Any],
     records: dict[str, dict[str, Any]],
 ) -> None:
+    records_root_sha256 = (
+        event_classification_cache_records_root_sha256(records)
+    )
     write_json(
         event_classification_cache_index_path(cache_root),
         {
@@ -30939,6 +36873,10 @@ def write_event_classification_cache_index(
             "generated_at": utc_now(),
             "generation_identity": generation_identity,
             "block_count": len(records),
+            "records_root_sha256": records_root_sha256,
+            "artifact_admission": (
+                "exact_record_root_plus_size_mtime_ctime_with_deep_audit_v1"
+            ),
             "blocks": {
                 key: records[key]
                 for key in sorted(records)
@@ -30990,11 +36928,14 @@ def reusable_event_classification_cache_record(
             event_classification_cache_index_path(cache_root),
             {},
         )
-        if (
-            not isinstance(index, dict)
-            or index.get("generation_identity")
-            != generation_identity
-        ):
+        if not isinstance(index, dict):
+            continue
+        generation_admission = projection_generation_admission(
+                projection="raw_event_classification_cache",
+                stored_identity=index.get("generation_identity"),
+                expected_identity=generation_identity,
+            )
+        if not generation_admission.get("compatible"):
             continue
         records = (
             index.get("blocks")
@@ -31002,13 +36943,185 @@ def reusable_event_classification_cache_record(
             else {}
         )
         record = records.get(cache_key)
+        records_root_current = bool(
+            str(index.get("records_root_sha256") or "")
+            == event_classification_cache_records_root_sha256(
+                {
+                    str(key): dict(value)
+                    for key, value in records.items()
+                    if isinstance(value, dict)
+                }
+            )
+        )
         if event_classification_cache_record_current(
             cache_root=cache_root,
             record=record,
             block=block,
+            verify_content=not records_root_current,
         ):
-            return cache_root, dict(record)
+            return cache_root, {
+                **dict(record),
+                "_generation_admission": generation_admission,
+                "_records_root_current": records_root_current,
+            }
     return None
+
+
+def session_projection_build_raw_path(
+    *,
+    session_dir: Path,
+    manifest: dict[str, Any],
+) -> tuple[Path, str]:
+    raw = (
+        manifest.get("raw")
+        if isinstance(manifest.get("raw"), dict)
+        else {}
+    )
+    published = (
+        projection_path_from_ref(raw.get("path"), base=session_dir)
+        if raw.get("path")
+        else session_dir / "raw" / "session.raw.jsonl"
+    )
+    capture_state = raw_capture_state_for_session(session_dir)
+    capture_path = Path(str(capture_state.get("capture_path") or ""))
+    if (
+        str(capture_state.get("status") or "")
+        in {"preserved_unindexed", "preserved_unstable_unindexed"}
+        and bool(capture_state.get("source_stable_during_capture"))
+        and capture_path.is_file()
+        and int_value(capture_state.get("raw_bytes"), -1)
+        >= int_value(raw.get("bytes"), 0)
+    ):
+        return capture_path, "preserved_capture_ahead"
+    return published, "published_projection_raw"
+
+
+def session_projection_predecessor_migration_receipt(
+    *,
+    session_id: str,
+    publish_identity: dict[str, Any],
+    classification_execution: dict[str, Any],
+    segment_execution: dict[str, Any],
+    session_index_execution: dict[str, Any],
+    recorded_at: str,
+) -> dict[str, Any]:
+    task_episode_shards = (
+        session_index_execution.get("task_episode_shards")
+        if isinstance(
+            session_index_execution.get("task_episode_shards"), dict
+        )
+        else {}
+    )
+    counts = {
+        "raw_event_classification_cache": int_value(
+            classification_execution.get(
+                "migrated_predecessor_block_count"
+            )
+        ),
+        "segment_index": int_value(
+            segment_execution.get("migrated_component_restamp_count")
+        ),
+        "task_episode_source": int_value(
+            task_episode_shards.get(
+                "migrated_predecessor_shard_count"
+            )
+        ),
+    }
+    migrated = {
+        projection: count
+        for projection, count in counts.items()
+        if count > 0
+    }
+    if not migrated:
+        return {}
+    current_generations = {
+        "raw_event_classification_cache": str(
+            event_classification_generation_identity().get(
+                "generation_id"
+            )
+            or ""
+        ),
+        "segment_index": str(
+            segment_index_generation_identity().get("generation_id")
+            or ""
+        ),
+        "task_episode_source": str(
+            task_episode_source_generation_identity().get(
+                "generation_id"
+            )
+            or ""
+        ),
+    }
+    transitions = [
+        {
+            "projection": projection,
+            "artifact_count": migrated[projection],
+            "from_generation_ids": sorted(
+                DECLARED_PROJECTION_PREDECESSOR_GENERATION_IDS.get(
+                    projection, frozenset()
+                )
+            ),
+            "to_generation_id": current_generations[projection],
+            "admission": "exact_declared_predecessor_reuse_then_restamp_v1",
+        }
+        for projection in sorted(migrated)
+    ]
+    payload = {
+        "schema_version": 1,
+        "artifact_type": (
+            "session_projection_predecessor_migration_receipt"
+        ),
+        "status": "published_after_atomic_validation",
+        "session_id": session_id,
+        "recorded_at": recorded_at,
+        "publish_id": projection_publish_id(publish_identity),
+        "source": dict(publish_identity.get("source") or {}),
+        "transitions": transitions,
+        "artifact_count": sum(migrated.values()),
+        "raw_authority_changed": False,
+        "unknown_generation_admission": False,
+        "rollback": (
+            "atomic publication preserves the previous last-good on any "
+            "validation or publish failure; artifacts remain rebuildable "
+            "from raw authority"
+        ),
+    }
+    receipt_id = hashlib.sha256(
+        json.dumps(
+            {
+                key: value
+                for key, value in payload.items()
+                if key != "recorded_at"
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return {**payload, "receipt_id": receipt_id}
+
+
+def session_projection_classification_scan(
+    *,
+    raw_path: Path,
+    session_dir: Path,
+    manifest: dict[str, Any],
+) -> dict[str, Any]:
+    try:
+        return incremental_raw_event_classification_scan(
+            raw_path=raw_path,
+            session_dir=session_dir,
+            manifest=manifest,
+        )
+    except (OSError, ValueError) as exc:
+        scan = scan_raw_event_classification_blocks(raw_path)
+        scan["scan_mode"] = "full_source_scan_v1"
+        scan["source_bytes_read"] = int_value(scan.get("raw_bytes"))
+        scan["tail_bytes_read"] = int_value(scan.get("raw_bytes"))
+        scan["incremental_fallback_reason"] = (
+            f"{exc.__class__.__name__}:{exc}"
+        )
+        return scan
 
 
 def reindex_session_from_raw(
@@ -31054,10 +37167,9 @@ def reindex_session_from_raw(
             "diagnostics": ["missing_session_manifest"],
         }
     raw = manifest.get("raw") if isinstance(manifest.get("raw"), dict) else {}
-    raw_path = (
-        projection_path_from_ref(raw.get("path"), base=session_dir)
-        if raw.get("path")
-        else session_dir / "raw" / "session.raw.jsonl"
+    raw_path, raw_source_mode = session_projection_build_raw_path(
+        session_dir=session_dir,
+        manifest=manifest,
     )
     archive_status = str(manifest.get("archive_status") or "")
     if archive_status not in {"indexed", "raw_mirrored_index_deferred"}:
@@ -31149,9 +37261,16 @@ def reindex_session_from_raw(
     )
     now = utc_now()
     phase_started = time.monotonic()
-    raw_scan = scan_raw_event_classification_blocks(raw_path)
+    raw_scan = session_projection_classification_scan(
+        raw_path=raw_path,
+        session_dir=session_dir,
+        manifest=manifest,
+    )
     phase_timings_ms["raw_source_scan"] = int(
         (time.monotonic() - phase_started) * 1000
+    )
+    phase_timings_ms["raw_source_bytes_read"] = int_value(
+        raw_scan.get("source_bytes_read")
     )
     publish_identity = session_projection_publish_identity_from_scan(
         raw_scan
@@ -31169,7 +37288,15 @@ def reindex_session_from_raw(
     work_state = read_json(checkpoint_path, {})
     if (
         not isinstance(work_state, dict)
-        or work_state.get("work_identity") != work_identity
+        or str(
+            (
+                work_state.get("work_identity")
+                if isinstance(work_state.get("work_identity"), dict)
+                else {}
+            ).get("work_id")
+            or ""
+        )
+        != str(work_identity.get("work_id") or "")
     ):
         if stage_dir.exists():
             remove_projection_publish_path(stage_dir)
@@ -31191,7 +37318,85 @@ def reindex_session_from_raw(
             "classification_blocks": {},
             "raw_blocks": {},
             "segments": {},
+            "stage_work_identities": work_identity.get(
+                "stage_work_identities", {}
+            ),
+            "stage_invalidations": [],
         }
+        write_json(checkpoint_path, work_state)
+    else:
+        expected_stage_identities = (
+            work_identity.get("stage_work_identities")
+            if isinstance(
+                work_identity.get("stage_work_identities"), dict
+            )
+            else {}
+        )
+        stored_stage_identities = (
+            work_state.get("stage_work_identities")
+            if isinstance(
+                work_state.get("stage_work_identities"), dict
+            )
+            else {}
+        )
+        changed_stages = {
+            stage
+            for stage, expected in expected_stage_identities.items()
+            if (
+                not isinstance(stored_stage_identities.get(stage), dict)
+                or str(
+                    stored_stage_identities[stage].get(
+                        "stage_work_id"
+                    )
+                    or ""
+                )
+                != str(expected.get("stage_work_id") or "")
+            )
+        }
+        stage_downstream = {
+            "capture": {"classification"},
+            "classification": {
+                "correlation_summaries",
+                "segment_index",
+                "task_episodes",
+            },
+            "correlation_summaries": {"segment_index"},
+            "segment_index": {
+                "review_rendering",
+                "goal_lifecycles",
+                "session_component_manifest",
+            },
+            "review_rendering": set(),
+            "task_episodes": {
+                "goal_lifecycles",
+                "session_component_manifest",
+            },
+            "goal_lifecycles": {"session_component_manifest"},
+            "session_component_manifest": set(),
+        }
+        pending_stage_invalidations = list(changed_stages)
+        while pending_stage_invalidations:
+            changed_stage = pending_stage_invalidations.pop()
+            for downstream_stage in stage_downstream.get(
+                changed_stage, set()
+            ):
+                if downstream_stage in changed_stages:
+                    continue
+                changed_stages.add(downstream_stage)
+                pending_stage_invalidations.append(downstream_stage)
+        if changed_stages & {"capture", "classification"}:
+            work_state["classification_blocks"] = {}
+        if changed_stages & {
+            "correlation_summaries",
+            "segment_index",
+        }:
+            work_state["raw_blocks"] = {}
+            work_state["segments"] = {}
+        work_state["work_identity"] = work_identity
+        work_state["stage_work_identities"] = (
+            expected_stage_identities
+        )
+        work_state["stage_invalidations"] = sorted(changed_stages)
         write_json(checkpoint_path, work_state)
     completed_classification_blocks = (
         work_state.get("classification_blocks")
@@ -31205,8 +37410,65 @@ def reindex_session_from_raw(
         if isinstance(work_state.get("segments"), dict)
         else {}
     )
+    work_state["raw_scan_execution"] = {
+        "source_mode": raw_source_mode,
+        "scan_mode": str(raw_scan.get("scan_mode") or ""),
+        "source_bytes_read": int_value(
+            raw_scan.get("source_bytes_read")
+        ),
+        "tail_bytes_read": int_value(
+            raw_scan.get("tail_bytes_read")
+        ),
+        "prefix_bytes_reused": int_value(
+            raw_scan.get("prefix_bytes_reused")
+        ),
+        "fallback_reason": str(
+            raw_scan.get("incremental_fallback_reason") or ""
+        ),
+    }
 
     def save_work_state(phase: str) -> None:
+        phase_order = {
+            name: ordinal
+            for ordinal, name in enumerate(
+                (
+                    "planned",
+                    "sensitive_literal_policy_complete",
+                    "classification_blocks_planned",
+                    "classification_blocks_in_progress",
+                    "classification_blocks_complete",
+                    "classification_rehydrated",
+                    "raw_copied",
+                    "raw_blocks_complete",
+                    "segments_in_progress",
+                    "segments_complete",
+                    "token_accounting_complete",
+                    "projection_complete_unpublished",
+                    "awaiting_atomic_publish",
+                )
+            )
+        }
+        rank = phase_order.get(phase, -1)
+        completed_stage_rank = {
+            "capture": 0,
+            "classification": 4,
+            "correlation_summaries": 5,
+            "segment_index": 9,
+            "review_rendering": 9,
+            "task_episodes": 11,
+            "goal_lifecycles": 11,
+            "session_component_manifest": 11,
+        }
+        completed_stages = {
+            stage
+            for stage, required_rank in completed_stage_rank.items()
+            if rank >= required_rank
+        }
+        work_state["stage_invalidations"] = [
+            stage
+            for stage in work_state.get("stage_invalidations", [])
+            if stage not in completed_stages
+        ]
         work_state.update(
             {
                 "updated_at": utc_now(),
@@ -31219,6 +37481,46 @@ def reindex_session_from_raw(
             }
         )
         write_json(checkpoint_path, work_state)
+        for stage, stage_identity in (
+            work_identity.get("stage_work_identities", {}).items()
+            if isinstance(
+                work_identity.get("stage_work_identities"), dict
+            )
+            else []
+        ):
+            write_json(
+                session_projection_stage_checkpoint_path(
+                    stage_dir, str(stage)
+                ),
+                {
+                    "schema_version": 1,
+                    "artifact_type": (
+                        "session_projection_stage_checkpoint"
+                    ),
+                    "session_id": work_state.get("session_id"),
+                    "stage": stage,
+                    "stage_work_identity": stage_identity,
+                    "umbrella_work_id": work_identity.get("work_id"),
+                    "phase": phase,
+                    "updated_at": work_state.get("updated_at"),
+                    "status": (
+                        "complete"
+                        if stage in completed_stages
+                        else
+                        "invalidated"
+                        if stage
+                        in work_state.get("stage_invalidations", [])
+                        else "checkpointed"
+                    ),
+                    "truth_status": (
+                        "stage_scoped_resumable_work_not_publication"
+                    ),
+                },
+            )
+        session_projection_checkpoint_observer(
+            phase=phase,
+            work_dir=stage_dir,
+        )
 
     def deadline_exhausted() -> bool:
         return bool(
@@ -31258,6 +37560,15 @@ def reindex_session_from_raw(
             "classification_execution": work_state.get(
                 "classification_execution", {}
             ),
+            "raw_scan_execution": work_state.get(
+                "raw_scan_execution", {}
+            ),
+            "raw_snapshot_execution": work_state.get(
+                "raw_snapshot_execution", {}
+            ),
+            "parent_rehydration_execution": work_state.get(
+                "parent_rehydration_execution", {}
+            ),
             "wall_time_ms": int(
                 (time.monotonic() - build_started) * 1000
             ),
@@ -31292,12 +37603,81 @@ def reindex_session_from_raw(
         ]
         phase_started = time.monotonic()
         sensitive_values_by_kind: dict[str, set[str]] = {}
+        privacy_markers_by_key: dict[str, dict[str, Any]] = {}
         sensitive_scan_fallback_reason = ""
+        published_classification_index = read_json(
+            event_classification_cache_index_path(
+                event_classification_cache_root(session_dir)
+            ),
+            {},
+        )
+        published_classification_records = (
+            published_classification_index.get("blocks")
+            if isinstance(
+                published_classification_index.get("blocks"), dict
+            )
+            else {}
+        )
+
+        def structural_marker_for_block(
+            block: dict[str, Any],
+        ) -> dict[str, Any]:
+            cache_key = str(block.get("cache_key") or "")
+            candidates = (
+                completed_classification_blocks.get(cache_key),
+                published_classification_records.get(cache_key),
+            )
+            for record_candidate in candidates:
+                privacy_scan = (
+                    record_candidate.get("privacy_scan")
+                    if isinstance(record_candidate, dict)
+                    and isinstance(
+                        record_candidate.get("privacy_scan"), dict
+                    )
+                    else {}
+                )
+                marker = (
+                    privacy_scan.get("structural_marker")
+                    if isinstance(
+                        privacy_scan.get("structural_marker"), dict
+                    )
+                    else {}
+                )
+                if int_value(marker.get("schema_version")) == (
+                    SENSITIVE_STRUCTURAL_MARKER_VERSION
+                ):
+                    return dict(marker)
+            return {}
+
+        sensitive_scan_blocks: list[dict[str, Any]] = []
+        skipped_non_sensitive_block_count = 0
+        prefix_line_count = int_value(
+            raw_scan.get("prefix_line_count_reused")
+        )
+        for block in scan_blocks:
+            marker = structural_marker_for_block(block)
+            cache_key = str(block.get("cache_key") or "")
+            if (
+                marker
+                and marker.get("candidate_present") is False
+                and int_value(block.get("line_end"))
+                <= prefix_line_count
+            ):
+                privacy_markers_by_key[cache_key] = marker
+                skipped_non_sensitive_block_count += 1
+                continue
+            sensitive_scan_blocks.append(block)
         actual_sensitive_scan_workers = min(
-            configured_segment_workers, len(scan_blocks)
+            configured_segment_workers, len(sensitive_scan_blocks)
         )
 
         def merge_sensitive_scan(result: dict[str, Any]) -> None:
+            cache_key = str(result.get("cache_key") or "")
+            structural_marker = result.get("structural_marker")
+            if cache_key and isinstance(structural_marker, dict):
+                privacy_markers_by_key[cache_key] = dict(
+                    structural_marker
+                )
             values_by_kind = result.get("values_by_kind")
             if not isinstance(values_by_kind, dict):
                 return
@@ -31318,7 +37698,7 @@ def reindex_session_from_raw(
                         sensitive_literal_block_task,
                         [
                             (str(raw_path), block)
-                            for block in scan_blocks
+                            for block in sensitive_scan_blocks
                         ],
                     )
                     for result in results:
@@ -31328,11 +37708,21 @@ def reindex_session_from_raw(
                     type(exc).__name__
                 )
                 sensitive_values_by_kind = {}
+                privacy_markers_by_key = {
+                    str(block.get("cache_key") or ""):
+                    structural_marker_for_block(block)
+                    for block in scan_blocks
+                    if structural_marker_for_block(block).get(
+                        "candidate_present"
+                    ) is False
+                    and int_value(block.get("line_end"))
+                    <= prefix_line_count
+                }
         if (
             actual_sensitive_scan_workers <= 1
             or sensitive_scan_fallback_reason
         ):
-            for block in scan_blocks:
+            for block in sensitive_scan_blocks:
                 merge_sensitive_scan(
                     sensitive_literal_block_task(
                         (str(raw_path), block)
@@ -31356,6 +37746,17 @@ def reindex_session_from_raw(
                 sensitive_scan_fallback_reason
             ),
             "literal_values_persisted": False,
+            "structural_marker_version": (
+                SENSITIVE_STRUCTURAL_MARKER_VERSION
+            ),
+            "selected_block_count": len(sensitive_scan_blocks),
+            "skipped_non_sensitive_block_count": (
+                skipped_non_sensitive_block_count
+            ),
+            "selected_raw_bytes": sum(
+                int_value(block.get("byte_count"))
+                for block in sensitive_scan_blocks
+            ),
             "policy_report": literal_policy.report(),
         }
         phase_timings_ms["sensitive_literal_policy"] = int(
@@ -31369,6 +37770,17 @@ def reindex_session_from_raw(
 
         classification_started = time.monotonic()
         reusable_block_count = 0
+        attested_metadata_reused_block_count = 0
+        attested_reuse_content_bytes_skipped = 0
+        migrated_predecessor_block_count = int_value(
+            (
+                work_state.get("classification_execution")
+                if isinstance(
+                    work_state.get("classification_execution"), dict
+                )
+                else {}
+            ).get("migrated_predecessor_block_count")
+        )
         pending_classification_blocks: list[dict[str, Any]] = []
         for block in scan_blocks:
             cache_key = str(block.get("cache_key") or "")
@@ -31379,6 +37791,9 @@ def reindex_session_from_raw(
                 cache_root=classification_cache_root,
                 record=prior_record,
                 block=block,
+                verify_content=False,
+            ) and event_classification_cache_record_has_summary(
+                prior_record
             ):
                 reusable_block_count += 1
                 continue
@@ -31395,6 +37810,10 @@ def reindex_session_from_raw(
                 pending_classification_blocks.append(block)
                 continue
             source_cache_root, source_record = reusable
+            generation_admission = source_record.pop(
+                "_generation_admission", {}
+            )
+            source_record.pop("_records_root_current", None)
             source_artifact = source_cache_root / str(
                 source_record.get("artifact") or ""
             )
@@ -31408,19 +37827,56 @@ def reindex_session_from_raw(
                 source=source_artifact,
                 target=target_artifact,
             )
-            sanitize_event_classification_cache_artifact(
-                artifact_path=target_artifact,
-                block=block,
-                generation_identity=classification_generation,
-                literal_policy=literal_policy,
-            )
-            completed_classification_blocks[cache_key] = (
-                event_classification_cache_record(
-                    cache_root=classification_cache_root,
-                    block=block,
-                    artifact_path=target_artifact,
+            if (
+                not bool(generation_admission.get("requires_restamp"))
+                and event_classification_cache_record_has_summary(
+                    source_record
                 )
-            )
+            ):
+                target_stat = target_artifact.stat()
+                completed_classification_blocks[cache_key] = {
+                    **source_record,
+                    "block": dict(block),
+                    "artifact": str(
+                        target_artifact.relative_to(
+                            classification_cache_root
+                        )
+                    ),
+                    "bytes": target_stat.st_size,
+                    "mtime_ns": target_stat.st_mtime_ns,
+                    "ctime_ns": target_stat.st_ctime_ns,
+                    "validation_mode": (
+                        "attested_published_artifact_metadata_reuse_v1"
+                    ),
+                    "metadata_mode": "size_mtime_v1",
+                }
+                attested_metadata_reused_block_count += 1
+                attested_reuse_content_bytes_skipped += target_stat.st_size
+            else:
+                if bool(
+                    generation_admission.get("requires_restamp")
+                ):
+                    migrated_predecessor_block_count += 1
+                sanitize_event_classification_cache_artifact(
+                    artifact_path=target_artifact,
+                    block=block,
+                    generation_identity=classification_generation,
+                    literal_policy=literal_policy,
+                )
+                completed_classification_blocks[cache_key] = (
+                    event_classification_cache_record(
+                        cache_root=classification_cache_root,
+                        block=block,
+                        artifact_path=target_artifact,
+                    )
+                )
+            completed_classification_blocks[cache_key][
+                "privacy_scan"
+            ] = {
+                "structural_marker": privacy_markers_by_key.get(
+                    cache_key, {}
+                )
+            }
             reusable_block_count += 1
         write_event_classification_cache_index(
             cache_root=classification_cache_root,
@@ -31453,6 +37909,13 @@ def reindex_session_from_raw(
                     artifact_path=artifact_path,
                 )
             )
+            completed_classification_blocks[cache_key][
+                "privacy_scan"
+            ] = {
+                "structural_marker": privacy_markers_by_key.get(
+                    cache_key, {}
+                )
+            }
             rebuilt_classification_block_count += 1
             write_event_classification_cache_index(
                 cache_root=classification_cache_root,
@@ -31530,6 +37993,7 @@ def reindex_session_from_raw(
                         cache_key
                     ),
                     block=block,
+                    verify_content=False,
                 ):
                     continue
                 classify_raw_event_block_task(
@@ -31577,6 +38041,15 @@ def reindex_session_from_raw(
                 1, actual_classification_workers
             ),
             "reused_block_count": reusable_block_count,
+            "attested_metadata_reused_block_count": (
+                attested_metadata_reused_block_count
+            ),
+            "attested_reuse_content_bytes_skipped": (
+                attested_reuse_content_bytes_skipped
+            ),
+            "migrated_predecessor_block_count": (
+                migrated_predecessor_block_count
+            ),
             "rebuilt_block_count": (
                 rebuilt_classification_block_count
             ),
@@ -31592,25 +38065,185 @@ def reindex_session_from_raw(
             )
 
         phase_started = time.monotonic()
+        parent_tail_replay_from_line = (
+            incremental_parent_tail_replay_from_line(
+                session_dir=session_dir,
+                manifest=manifest,
+                raw_scan=raw_scan,
+            )
+        )
+        metadata_only_block_count = 0
+        parent_raw_bytes_read = 0
+        tail_events: list[RawEvent] = []
         for block in scan_blocks:
-            events.extend(
-                load_raw_event_classification_block(
-                    raw_path=raw_path,
-                    block=block,
-                    artifact_path=(
-                        event_classification_cache_artifact_path(
-                            classification_cache_root, block
-                        )
-                    ),
-                    generation_identity=(
-                        classification_generation
-                    ),
+            artifact_path = (
+                event_classification_cache_artifact_path(
+                    classification_cache_root, block
                 )
             )
-        events = reconcile_correlated_event_outcomes(events)
+            if (
+                parent_tail_replay_from_line > 0
+                and int_value(block.get("line_end"))
+                < parent_tail_replay_from_line
+            ):
+                metadata_only_block_count += 1
+            else:
+                tail_events.extend(
+                    load_raw_event_classification_block(
+                        raw_path=raw_path,
+                        block=block,
+                        artifact_path=artifact_path,
+                        generation_identity=classification_generation,
+                    )
+                )
+                parent_raw_bytes_read += int_value(
+                    block.get("byte_count")
+                )
+        unreconciled_tail_events = tail_events
+        tail_events = reconcile_correlated_event_outcomes(
+            unreconciled_tail_events
+        )
+        reconciliation_patches = {
+            event.event_id: raw_event_classification_payload(
+                event,
+                literal_policy=literal_policy,
+            )
+            for original, event in zip(
+                unreconciled_tail_events, tail_events, strict=True
+            )
+            if original != event
+        }
+        del unreconciled_tail_events
+        tail_has_goal_signal = any(
+            str(
+                (
+                    event.facets.get("session_act")
+                    if isinstance(
+                        event.facets.get("session_act"), dict
+                    )
+                    else {}
+                ).get("kind")
+                or ""
+            )
+            in GOAL_SESSION_ACTS
+            for event in tail_events
+        )
+        segment_tail_plan = incremental_segment_tail_plan(
+            events=tail_events,
+            previous_segments=[
+                dict(item)
+                for item in manifest.get("segments", [])
+                if isinstance(item, dict)
+            ]
+            if isinstance(manifest.get("segments"), list)
+            else [],
+            attested_prefix_to_line=int_value(
+                raw_scan.get("prefix_line_count_reused")
+            ),
+        )
+        previous_index_for_incremental_goal = read_json(
+            session_dir / SESSION_INDEX_JSON, {}
+        )
+        goal_tail_incremental_ready = (
+            goal_lifecycle_incremental_replay_admitted(
+                previous_index_for_incremental_goal,
+                parent_tail_replay_from_line,
+            )
+        )
+        streaming_incremental_mode = bool(
+            parent_tail_replay_from_line > 0
+            and segment_tail_plan.get("admitted")
+            and goal_tail_incremental_ready
+        )
+        if streaming_incremental_mode:
+            events = tail_events
+        else:
+            events = []
+            for block in scan_blocks:
+                artifact_path = (
+                    event_classification_cache_artifact_path(
+                        classification_cache_root, block
+                    )
+                )
+                if (
+                    parent_tail_replay_from_line > 0
+                    and int_value(block.get("line_end"))
+                    < parent_tail_replay_from_line
+                ):
+                    events.extend(
+                        load_raw_event_classification_metadata_block(
+                            block=block,
+                            artifact_path=artifact_path,
+                            generation_identity=classification_generation,
+                        )
+                    )
+                else:
+                    events.extend(
+                        event
+                        for event in tail_events
+                        if int_value(block.get("line_start"))
+                        <= event.line_no
+                        <= int_value(block.get("line_end"))
+                    )
+            unreconciled_events = events
+            events = reconcile_correlated_event_outcomes(
+                unreconciled_events
+            )
+            reconciliation_patches = {
+                event.event_id: raw_event_classification_payload(
+                    event,
+                    literal_policy=literal_policy,
+                )
+                for original, event in zip(
+                    unreconciled_events, events, strict=True
+                )
+                if original != event
+            }
+            del unreconciled_events
         phase_timings_ms["classification_rehydration"] = int(
             (time.monotonic() - phase_started) * 1000
         )
+        work_state["parent_rehydration_execution"] = {
+            "mode": (
+                "bounded_raw_tail_plus_block_summaries_v1"
+                if streaming_incremental_mode
+                else "metadata_prefix_plus_bounded_raw_tail_v1"
+                if parent_tail_replay_from_line > 0
+                else "full_raw_event_rehydration_v1"
+            ),
+            "tail_replay_from_line": parent_tail_replay_from_line,
+            "metadata_only_block_count": metadata_only_block_count,
+            "raw_block_count_read": (
+                len(scan_blocks) - metadata_only_block_count
+            ),
+            "raw_bytes_read": parent_raw_bytes_read,
+            "materialized_event_object_count": len(events),
+            "total_event_count": int_value(
+                raw_scan.get("raw_line_count")
+            ),
+            "full_event_object_list_materialized": (
+                not streaming_incremental_mode
+            ),
+            "historical_raw_bodies_retained": False
+            if parent_tail_replay_from_line > 0
+            else True,
+            "historical_event_objects_materialized": (
+                not streaming_incremental_mode
+            ),
+            "classification_summary_block_count": (
+                len(completed_classification_blocks)
+                if streaming_incremental_mode
+                else 0
+            ),
+            "streaming_fallback_reason": (
+                "goal_lifecycle_incremental_state_unavailable"
+                if not goal_tail_incremental_ready
+                else str(segment_tail_plan.get("reason") or "")
+                if not streaming_incremental_mode
+                else ""
+            ),
+            "tail_has_goal_signal": tail_has_goal_signal,
+        }
         phase_timings_ms["parse_and_classification"] = (
             phase_timings_ms.get("raw_source_scan", 0)
             + phase_timings_ms.get("event_classification", 0)
@@ -31626,11 +38259,11 @@ def reindex_session_from_raw(
         )
         if not staged_raw_path.is_file():
             phase_started = time.monotonic()
-            staged_raw_path.parent.mkdir(
-                parents=True,
-                exist_ok=True,
+            work_state["raw_snapshot_execution"] = stage_raw_snapshot(
+                source=raw_path,
+                target=staged_raw_path,
+                expected_sha256=str(raw_scan.get("raw_sha256") or ""),
             )
-            shutil.copy2(raw_path, staged_raw_path)
             phase_timings_ms["raw_copy"] = int(
                 (time.monotonic() - phase_started) * 1000
             )
@@ -31638,20 +38271,47 @@ def reindex_session_from_raw(
         published_raw_path = (
             session_dir / "raw" / "session.raw.jsonl"
         )
-        lineage = session_lineage_for_events(
-            events,
-            session_id=str(
-                manifest.get("session_id")
-                or record.get("session_id")
-                or ""
-            ),
+        lineage = (
+            dict(manifest.get("lineage"))
+            if parent_tail_replay_from_line > 0
+            and isinstance(manifest.get("lineage"), dict)
+            else session_lineage_for_events(
+                events,
+                session_id=str(
+                    manifest.get("session_id")
+                    or record.get("session_id")
+                    or ""
+                ),
+            )
         )
         if lineage:
             manifest["lineage"] = lineage
         else:
             manifest.pop("lineage", None)
         raw_rel = "raw/session.raw.jsonl"
-        ranges = segment_ranges(events)
+        if streaming_incremental_mode:
+            segment_events = [
+                event
+                for event in events
+                if event.line_no
+                >= int_value(segment_tail_plan.get("replay_from_line"))
+            ]
+            ranges = [
+                tuple(item)
+                for item in segment_tail_plan.get("ranges", [])
+            ]
+            segment_no_offset = int_value(
+                segment_tail_plan.get("segment_no_offset")
+            )
+            stable_segment_count = int_value(
+                segment_tail_plan.get("stable_segment_count")
+            )
+        else:
+            segment_events = events
+            ranges = segment_ranges(segment_events)
+            segment_no_offset = 0
+            stable_segment_count = 0
+        total_event_count = int_value(raw_scan.get("raw_line_count"))
         if deadline_exhausted():
             return checkpointed_result("raw_copied")
         raw_blocks_state = (
@@ -31681,11 +38341,19 @@ def reindex_session_from_raw(
         else:
             phase_started = time.monotonic()
             raw_block_execution: dict[str, Any] = {}
+            published_raw_block_items = (
+                manifest.get("raw_blocks", {}).get("blocks", [])
+                if isinstance(manifest.get("raw_blocks"), dict)
+                and isinstance(
+                    manifest.get("raw_blocks", {}).get("blocks"), list
+                )
+                else []
+            )
             raw_blocks = write_raw_block_artifacts(
                 stage_dir,
                 raw_rel,
                 ranges,
-                events,
+                segment_events,
                 reference_session_dir=session_dir,
                 publish_identity=publish_identity,
                 published_raw_blocks=(
@@ -31695,7 +38363,22 @@ def reindex_session_from_raw(
                     )
                     else None
                 ),
+                attested_prefix_to_line=int_value(
+                    raw_scan.get("prefix_line_count_reused")
+                ),
                 execution_metrics_out=raw_block_execution,
+                segment_no_offset=segment_no_offset,
+                prefix_block_records=(
+                    [
+                        dict(item)
+                        for item in published_raw_block_items[
+                            :stable_segment_count
+                        ]
+                        if isinstance(item, dict)
+                    ]
+                    if streaming_incremental_mode
+                    else None
+                ),
             )
             raw_artifact_paths = sorted(
                 path
@@ -31704,10 +38387,40 @@ def reindex_session_from_raw(
                 and path.name != "session.raw.jsonl"
                 and path != checkpoint_path
             )
+            attested_prefix_raw_sha_by_name = {
+                Path(
+                    str(
+                        item.get("plain_rel")
+                        or item.get("rel")
+                        or item.get("plain_path")
+                        or item.get("path")
+                        or ""
+                    )
+                ).name: str(item.get("sha256") or "")
+                for item in published_raw_block_items[
+                    :stable_segment_count
+                ]
+                if isinstance(item, dict) and item.get("sha256")
+            }
+            attested_prefix_raw_content_bytes_skipped = sum(
+                path.stat().st_size
+                for path in raw_artifact_paths
+                if path.name in attested_prefix_raw_sha_by_name
+            )
+            raw_block_execution[
+                "attested_prefix_content_bytes_skipped"
+            ] = attested_prefix_raw_content_bytes_skipped
             work_state["raw_blocks"] = {
                 "payload": raw_blocks,
                 "artifacts": [
-                    session_projection_artifact_receipt(path)
+                    session_projection_attested_artifact_receipt(
+                        path,
+                        sha256=attested_prefix_raw_sha_by_name[
+                            path.name
+                        ],
+                    )
+                    if path.name in attested_prefix_raw_sha_by_name
+                    else session_projection_artifact_receipt(path)
                     for path in raw_artifact_paths
                 ],
                 "execution": raw_block_execution,
@@ -31744,8 +38457,27 @@ def reindex_session_from_raw(
         pending_segments: list[
             tuple[int, int, int, str]
         ] = []
+        prior_segment_execution = (
+            work_state.get("segment_execution")
+            if isinstance(work_state.get("segment_execution"), dict)
+            else {}
+        )
+        immutable_component_link_count = int_value(
+            prior_segment_execution.get("immutable_component_link_count")
+        )
+        immutable_component_content_bytes_skipped = int_value(
+            prior_segment_execution.get(
+                "immutable_component_content_bytes_skipped"
+            )
+        )
+        migrated_component_restamp_count = int_value(
+            prior_segment_execution.get(
+                "migrated_component_restamp_count"
+            )
+        )
         phase_started = time.monotonic()
-        for segment_no, (start, end, role) in enumerate(ranges):
+        for local_segment_no, (start, end, role) in enumerate(ranges):
+            segment_no = segment_no_offset + local_segment_no
             segment_id = f"{segment_no:03d}"
             prior_segment = completed_segments.get(segment_id)
             if session_projection_segment_checkpoint_current(
@@ -31764,6 +38496,9 @@ def reindex_session_from_raw(
             role: str,
             segment_payload: dict[str, Any],
         ) -> None:
+            nonlocal immutable_component_link_count
+            nonlocal immutable_component_content_bytes_skipped
+            nonlocal migrated_component_restamp_count
             segment_id = f"{segment_no:03d}"
             md_path = stage_dir / "segments" / (
                 f"{segment_id}__{role}.md"
@@ -31771,17 +38506,99 @@ def reindex_session_from_raw(
             index_path = stage_dir / "segments" / (
                 f"{segment_id}__{role}.index.json"
             )
-            completed_segments[segment_id] = {
-                "payload": segment_payload,
-                "artifacts": [
+            reuse_mode = str(segment_payload.pop("reuse_mode", "") or "")
+            payload_receipts = (
+                segment_payload.get("artifact_receipts")
+                if isinstance(
+                    segment_payload.get("artifact_receipts"), dict
+                )
+                else {}
+            )
+            if reuse_mode == "immutable_component_link_v1":
+                immutable_component_link_count += 1
+                immutable_component_content_bytes_skipped += sum(
+                    int_value(
+                        payload_receipts.get(key, {}).get("bytes")
+                        if isinstance(payload_receipts.get(key), dict)
+                        else 0
+                    )
+                    for key in ("markdown", "index")
+                )
+                artifacts = [
+                    {
+                        "rel": str(path),
+                        **dict(payload_receipts[key]),
+                    }
+                    for key, path in (
+                        ("markdown", md_path),
+                        ("index", index_path),
+                    )
+                ]
+            else:
+                if reuse_mode == "validated_migration_restamp_v1":
+                    migrated_component_restamp_count += 1
+                artifacts = [
                     session_projection_artifact_receipt(md_path),
                     session_projection_artifact_receipt(index_path),
-                ],
+                ]
+            completed_segments[segment_id] = {
+                "payload": segment_payload,
+                "artifacts": artifacts,
             }
             segment_payload_by_id[segment_id] = segment_payload
             save_work_state("segments_in_progress")
 
         reused_published_segment_count = 0
+        if streaming_incremental_mode:
+            for segment_no in range(stable_segment_count):
+                segment_id = f"{segment_no:03d}"
+                prior_segment = completed_segments.get(segment_id)
+                if session_projection_segment_checkpoint_current(
+                    prior_segment
+                ):
+                    segment_payload_by_id[segment_id] = dict(
+                        prior_segment["payload"]
+                    )
+                    continue
+                published_segment = published_segments_by_id.get(
+                    segment_id
+                )
+                source_range = (
+                    published_segment.get("source_range")
+                    if isinstance(published_segment, dict)
+                    and isinstance(
+                        published_segment.get("source_range"), dict
+                    )
+                    else {}
+                )
+                role = str(
+                    published_segment.get("role")
+                    if isinstance(published_segment, dict)
+                    else ""
+                )
+                reused_payload = reuse_published_session_segment(
+                    stage_dir=stage_dir,
+                    session_dir=session_dir,
+                    segment_no=segment_no,
+                    role=role,
+                    events=[],
+                    raw_block=raw_blocks_by_segment.get(segment_id),
+                    published_segment=published_segment,
+                    publish_identity=publish_identity,
+                    attested_prefix_to_line=int_value(
+                        raw_scan.get("prefix_line_count_reused")
+                    ),
+                    source_range_override=source_range,
+                )
+                if reused_payload is None:
+                    raise ValueError(
+                        "incremental_sealed_segment_reuse_failed:"
+                        f"{segment_id}"
+                    )
+                record_segment_completion(
+                    segment_no, role, reused_payload
+                )
+                reused_published_segment_count += 1
         build_pending_segments: list[
             tuple[int, int, int, str]
         ] = []
@@ -31792,12 +38609,15 @@ def reindex_session_from_raw(
                 session_dir=session_dir,
                 segment_no=segment_no,
                 role=role,
-                events=events[start:end],
+                events=segment_events[start:end],
                 raw_block=raw_blocks_by_segment.get(segment_id),
                 published_segment=published_segments_by_id.get(
                     segment_id
                 ),
                 publish_identity=publish_identity,
+                attested_prefix_to_line=int_value(
+                    raw_scan.get("prefix_line_count_reused")
+                ),
             )
             if reused_payload is None:
                 build_pending_segments.append(
@@ -31860,13 +38680,47 @@ def reindex_session_from_raw(
                                     raw_rel,
                                     segment_no,
                                     role,
-                                    events[start:end],
+                                    str(raw_path),
+                                    [
+                                        {
+                                            "block": block,
+                                            "artifact_path": str(
+                                                event_classification_cache_artifact_path(
+                                                    classification_cache_root,
+                                                    block,
+                                                )
+                                            ),
+                                        }
+                                        for block in scan_blocks
+                                        if int_value(
+                                            block.get("line_end")
+                                        )
+                                        >= segment_events[start].line_no
+                                        and int_value(
+                                            block.get("line_start")
+                                        )
+                                        <= segment_events[end - 1].line_no
+                                    ],
+                                    classification_generation,
+                                    segment_events[start].line_no,
+                                    segment_events[end - 1].line_no,
+                                    {
+                                        event_id: patch
+                                        for event_id, patch in (
+                                            reconciliation_patches.items()
+                                        )
+                                        if segment_events[start].line_no
+                                        <= int_value(
+                                            patch.get("line_no")
+                                        )
+                                        <= segment_events[end - 1].line_no
+                                    },
                                     raw_blocks_by_segment.get(
                                         f"{segment_no:03d}"
                                     ),
                                     session_dir,
                                     publish_identity,
-                                    literal_policy,
+                                    sensitive_values_by_kind,
                                 ),
                             )
                             for segment_no, start, end, role in wave
@@ -31911,7 +38765,7 @@ def reindex_session_from_raw(
                     raw_rel,
                     segment_no,
                     role,
-                    events[start:end],
+                    segment_events[start:end],
                     raw_blocks_by_segment.get(segment_id),
                     reference_session_dir=session_dir,
                     publish_identity=publish_identity,
@@ -31929,9 +38783,10 @@ def reindex_session_from_raw(
                     return checkpointed_result(
                         "segments_in_progress"
                     )
+        total_segment_count = segment_no_offset + len(ranges)
         segment_payloads = [
             segment_payload_by_id[f"{segment_no:03d}"]
-            for segment_no in range(len(ranges))
+            for segment_no in range(total_segment_count)
         ]
         phase_timings_ms["segment_generation"] = int(
             (time.monotonic() - phase_started) * 1000
@@ -31947,27 +38802,72 @@ def reindex_session_from_raw(
             ),
             "parallel_fallback_reason": parallel_fallback_reason,
             "process_start_method": segment_worker_start_method,
+            "worker_input_mode": (
+                "immutable_classification_block_refs_v1"
+                if actual_segment_workers > 1
+                and not parallel_fallback_reason
+                else "parent_event_slice_serial"
+            ),
+            "serialized_raw_event_slice_count": 0,
+            "reconciliation_patch_count": len(
+                reconciliation_patches
+            ),
             "bounded_wave_size": max(1, actual_segment_workers),
             "checkpoint_reused_segment_count": (
-                len(ranges)
+                total_segment_count
                 - len(build_pending_segments)
                 - reused_published_segment_count
             ),
             "published_reused_segment_count": (
                 reused_published_segment_count
             ),
+            "immutable_component_link_count": (
+                immutable_component_link_count
+            ),
+            "immutable_component_content_bytes_skipped": (
+                immutable_component_content_bytes_skipped
+            ),
+            "migrated_component_restamp_count": (
+                migrated_component_restamp_count
+            ),
             "rebuilt_segment_count": len(build_pending_segments),
         }
         save_work_state("segments_complete")
         phase_started = time.monotonic()
-        token_accounting = token_accounting_summary_for_session(
-            events,
-            session_id=str(
-                manifest.get("session_id")
-                or record.get("session_id")
-                or "unknown"
-            ),
+        current_session_id = str(
+            manifest.get("session_id")
+            or record.get("session_id")
+            or "unknown"
         )
+        if parent_tail_replay_from_line > 0:
+            token_accounting = token_accounting_merge_summaries(
+                (
+                    block.get("token_accounting", {})
+                    for block in raw_blocks.get("blocks", [])
+                    if isinstance(block, dict)
+                ),
+                scope={
+                    "kind": "session",
+                    "session_id": current_session_id,
+                },
+            )
+            token_accounting_mode = (
+                "merge_current_segment_components_v1"
+            )
+        else:
+            token_accounting = token_accounting_summary_for_session(
+                events,
+                session_id=current_session_id,
+            )
+            token_accounting_mode = "full_event_reduction_v1"
+        work_state["token_accounting_execution"] = {
+            "mode": token_accounting_mode,
+            "segment_summary_count": len(
+                raw_blocks.get("blocks", [])
+                if isinstance(raw_blocks.get("blocks"), list)
+                else []
+            ),
+        }
         phase_timings_ms["token_accounting"] = int(
             (time.monotonic() - phase_started) * 1000
         )
@@ -31985,7 +38885,7 @@ def reindex_session_from_raw(
         manifest["segments"] = segment_payloads
         manifest["raw_blocks"] = raw_blocks
         manifest["token_accounting"] = token_accounting
-        manifest["latest_event_count"] = len(events)
+        manifest["latest_event_count"] = total_event_count
         manifest["updated_at"] = now
         session_generation = session_index_generation_identity()
         segment_generation = segment_index_generation_identity()
@@ -32005,12 +38905,12 @@ def reindex_session_from_raw(
             manifest["raw"]["path"] = str(
                 published_raw_path
             )
-            manifest["raw"]["line_count"] = len(events)
+            manifest["raw"]["line_count"] = total_event_count
             manifest["raw"]["bytes"] = (
                 staged_raw_path.stat().st_size
             )
-            manifest["raw"]["sha256"] = sha256_file(
-                staged_raw_path
+            manifest["raw"]["sha256"] = str(
+                raw_scan.get("raw_sha256") or ""
             )
             manifest["raw"]["indexing_status"] = "indexed"
             manifest["raw"]["blocks_index"] = raw_blocks.get(
@@ -32024,10 +38924,14 @@ def reindex_session_from_raw(
             if isinstance(manifest.get("source"), dict)
             else {}
         )
-        manifest["work_context"] = work_context_for_session_events(
-            source_payload,
-            events,
-        )
+        if not (
+            parent_tail_replay_from_line > 0
+            and isinstance(manifest.get("work_context"), dict)
+        ):
+            manifest["work_context"] = work_context_for_session_events(
+                source_payload,
+                events,
+            )
         refresh_semantic_name_anchors(session_dir, manifest)
         if (
             first_pass_distillation_max_events_per_type
@@ -32142,7 +39046,7 @@ def reindex_session_from_raw(
                     manifest["raw"].get("sha256") or ""
                 ),
                 raw_bytes=staged_raw_path.stat().st_size,
-                raw_line_count=len(events),
+                raw_line_count=total_event_count,
                 source_path=capture_source_path,
                 source_snapshot_before=(
                     capture_source_snapshot_before
@@ -32159,6 +39063,16 @@ def reindex_session_from_raw(
             ),
         )
         session_index_execution: dict[str, Any] = {}
+        event_aggregate_summary = (
+            merge_event_classification_block_summaries(
+                completed_classification_blocks[
+                    str(block.get("cache_key") or "")
+                ]
+                for block in scan_blocks
+            )
+            if streaming_incremental_mode
+            else None
+        )
         session_index_result = write_session_index(
             stage_dir,
             manifest,
@@ -32171,6 +39085,8 @@ def reindex_session_from_raw(
                 cooperative_deadline_monotonic
             ),
             execution_metrics_out=session_index_execution,
+            event_summary=event_aggregate_summary,
+            processed_to_line=total_event_count,
         )
         phase_timings_ms["session_index_generation"] = int(
             (time.monotonic() - phase_started) * 1000
@@ -32185,6 +39101,59 @@ def reindex_session_from_raw(
                     or "session_index_shards_in_progress"
                 )
             )
+        migration_receipt = (
+            session_projection_predecessor_migration_receipt(
+                session_id=str(
+                    manifest.get("session_id")
+                    or record.get("session_id")
+                    or ""
+                ),
+                publish_identity=publish_identity,
+                classification_execution=(
+                    work_state.get("classification_execution")
+                    if isinstance(
+                        work_state.get("classification_execution"), dict
+                    )
+                    else {}
+                ),
+                segment_execution=(
+                    work_state.get("segment_execution")
+                    if isinstance(
+                        work_state.get("segment_execution"), dict
+                    )
+                    else {}
+                ),
+                session_index_execution=session_index_execution,
+                recorded_at=now,
+            )
+        )
+        if migration_receipt:
+            prior_migration_receipts = (
+                manifest.get("generation_migration_receipts")
+                if isinstance(
+                    manifest.get("generation_migration_receipts"), list
+                )
+                else []
+            )
+            receipts_by_id = {
+                str(item.get("receipt_id") or ""): dict(item)
+                for item in prior_migration_receipts
+                if isinstance(item, dict)
+                and str(item.get("receipt_id") or "")
+            }
+            receipts_by_id[str(migration_receipt["receipt_id"])] = (
+                migration_receipt
+            )
+            manifest["generation_migration_receipts"] = [
+                receipts_by_id[key] for key in sorted(receipts_by_id)
+            ]
+            write_json(
+                stage_dir / "session.manifest.json",
+                manifest,
+            )
+        work_state["predecessor_migration_receipt"] = (
+            migration_receipt
+        )
         save_work_state("projection_complete_unpublished")
         if deadline_exhausted():
             return checkpointed_result(
@@ -32193,7 +39162,13 @@ def reindex_session_from_raw(
         phase_started = time.monotonic()
         current_raw_identity = (
             session_projection_publish_identity_from_scan(
-                scan_raw_event_classification_blocks(raw_path)
+                session_projection_classification_scan(
+                    raw_path=raw_path,
+                    session_dir=session_dir,
+                    manifest=read_json(
+                        session_dir / "session.manifest.json", {}
+                    ),
+                )
             )
         )
         if current_raw_identity != publish_identity:
@@ -32225,7 +39200,7 @@ def reindex_session_from_raw(
                 "work_id": work_identity["work_id"],
                 "work_dir": str(stage_dir),
                 "projection_publish": publish_identity,
-                "event_count": len(events),
+                "event_count": total_event_count,
                 "segment_count": len(segment_payloads),
                 "raw_block_count": len(
                     raw_blocks.get("blocks", [])
@@ -32241,6 +39216,21 @@ def reindex_session_from_raw(
                 ),
                 "classification_execution": work_state.get(
                     "classification_execution", {}
+                ),
+                "raw_scan_execution": work_state.get(
+                    "raw_scan_execution", {}
+                ),
+                "raw_snapshot_execution": work_state.get(
+                    "raw_snapshot_execution", {}
+                ),
+                "parent_rehydration_execution": work_state.get(
+                    "parent_rehydration_execution", {}
+                ),
+                "session_index_execution": work_state.get(
+                    "session_index_execution", {}
+                ),
+                "predecessor_migration_receipt": work_state.get(
+                    "predecessor_migration_receipt", {}
                 ),
                 "sensitive_literal_execution": work_state.get(
                     "sensitive_literal_execution", {}
@@ -32307,6 +39297,8 @@ def reindex_session_from_raw(
         manifest=manifest,
         reason="archive_reindexed_from_raw",
         checked_at=now,
+        component_changes=publish_result.get("changed_components"),
+        publication_outbox=publish_result.get("outbox"),
     )
     phase_timings_ms["search_graph_dirty_propagation"] = int(
         (time.monotonic() - phase_started) * 1000
@@ -32322,7 +39314,7 @@ def reindex_session_from_raw(
         "session_dir": str(session_dir),
         "status": "reindexed",
         "work_id": work_identity["work_id"],
-        "event_count": len(events),
+        "event_count": total_event_count,
         "segment_count": len(segment_payloads),
         "raw_block_count": len(raw_blocks.get("blocks", []) if isinstance(raw_blocks.get("blocks"), list) else []),
         "raw_blocks_index": raw_blocks.get("index"),
@@ -32345,6 +39337,21 @@ def reindex_session_from_raw(
         ),
         "classification_execution": work_state.get(
             "classification_execution", {}
+        ),
+        "raw_scan_execution": work_state.get(
+            "raw_scan_execution", {}
+        ),
+        "raw_snapshot_execution": work_state.get(
+            "raw_snapshot_execution", {}
+        ),
+        "parent_rehydration_execution": work_state.get(
+            "parent_rehydration_execution", {}
+        ),
+        "session_index_execution": work_state.get(
+            "session_index_execution", {}
+        ),
+        "predecessor_migration_receipt": work_state.get(
+            "predecessor_migration_receipt", {}
         ),
         "sensitive_literal_execution": work_state.get(
             "sensitive_literal_execution", {}
@@ -32440,16 +39447,9 @@ def publish_prebuilt_session_projection(
     owner_manifest = read_json(
         session_dir / "session.manifest.json", {}
     )
-    raw = (
-        owner_manifest.get("raw")
-        if isinstance(owner_manifest.get("raw"), dict)
-        else {}
-    )
-    raw_path = Path(
-        str(
-            raw.get("path")
-            or session_dir / "raw" / "session.raw.jsonl"
-        )
+    raw_path, _raw_source_mode = session_projection_build_raw_path(
+        session_dir=session_dir,
+        manifest=owner_manifest,
     )
     if not raw_path.is_file():
         return {
@@ -32459,7 +39459,11 @@ def publish_prebuilt_session_projection(
         }
     current_publish_identity = (
         session_projection_publish_identity_from_scan(
-            scan_raw_event_classification_blocks(raw_path)
+            session_projection_classification_scan(
+                raw_path=raw_path,
+                session_dir=session_dir,
+                manifest=owner_manifest,
+            )
         )
     )
     current_work_identity = session_projection_work_identity(
@@ -32507,6 +39511,8 @@ def publish_prebuilt_session_projection(
         manifest=published_manifest,
         reason="prebuilt_session_projection_published",
         checked_at=utc_now(),
+        component_changes=publish_result.get("changed_components"),
+        publication_outbox=publish_result.get("outbox"),
     )
     dirty_propagation_ms = int(
         (time.monotonic() - dirty_started) * 1000
@@ -32847,6 +39853,8 @@ def generated_session_metadata_stale_reasons(
 def generated_session_index_stale_reasons_for_session(
     session_dir: Path,
     session_index: dict[str, Any],
+    *,
+    verify_task_episode_semantic_digest: bool = True,
 ) -> list[str]:
     publish_reasons = (
         ["session_projection_publish_in_progress"]
@@ -32872,7 +39880,7 @@ def generated_session_index_stale_reasons_for_session(
         )
         else {}
     )
-    if declared_digest:
+    if declared_digest and verify_task_episode_semantic_digest:
         computed_digest = task_episode_semantic_digest_for_session_index(
             session_index,
             logical_root=session_dir,
@@ -33592,6 +40600,8 @@ def token_accounting_backfill_projection_only(
         manifest=manifest,
         reason="token_accounting_projection_backfilled",
         checked_at=utc_now(),
+        component_changes=publish_result.get("changed_components"),
+        publication_outbox=publish_result.get("outbox"),
     )
     raw_sha_after = sha256_file(raw_path)
     return {
@@ -37049,10 +44059,9 @@ def task_episode_semantic_digest_for_session_index(
         if isinstance(session_index.get("display"), dict)
         else {}
     )
-    task_episodes = (
-        session_index.get("task_episodes")
-        if isinstance(session_index.get("task_episodes"), list)
-        else []
+    task_episodes = session_index_task_episode_components(
+        logical_root,
+        session_index,
     )
     dependencies = (
         session_index.get("dependency_generation_identities")
@@ -37750,9 +44759,11 @@ def insert_episode_semantic_projection_for_session(
     )
     source_probe["generation_reasons"] = source_generation_reasons
     source_probe["task_episode_schema_version"] = int_value(session_index.get("task_episode_schema_version"))
-    source_probe["task_episode_count"] = len(
-        session_index.get("task_episodes") if isinstance(session_index.get("task_episodes"), list) else []
+    episodes = session_index_task_episode_components(
+        session_dir,
+        session_index,
     )
+    source_probe["task_episode_count"] = len(episodes)
     source_probe["task_episode_count_known"] = True
     episode_source_projection = episode_semantic_source_fingerprint(
         {**projection_state, "path": str(session_dir)},
@@ -37797,7 +44808,6 @@ def insert_episode_semantic_projection_for_session(
         "reasons": ["manifest_missing"],
     }
     source_task_episode_schema_version = int_value(session_index.get("task_episode_schema_version"))
-    episodes = session_index.get("task_episodes") if isinstance(session_index.get("task_episodes"), list) else []
     schema_compatible = (
         source_generation_compatible
         and (
@@ -39796,6 +46806,7 @@ def graph_dirty_states_for_published_session(
     session_dir: Path,
     manifest: dict[str, Any],
     reason: str,
+    changed_component_ids: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     session_id = str(manifest.get("session_id") or "")
     session_label = str(
@@ -39868,6 +46879,12 @@ def graph_dirty_states_for_published_session(
         segment_id = str(segment.get("segment_id") or "")
         if not segment_id or not segment.get("index"):
             continue
+        if (
+            changed_component_ids is not None
+            and f"segment:{segment_id}"
+            not in changed_component_ids
+        ):
+            continue
         append_state(
             source_type="segment",
             segment_id=segment_id,
@@ -39886,6 +46903,8 @@ def propagate_session_projection_dirty(
     manifest: dict[str, Any],
     reason: str,
     checked_at: str | None = None,
+    component_changes: list[dict[str, Any]] | None = None,
+    publication_outbox: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     checked = checked_at or utc_now()
     diagnostics: list[str] = []
@@ -39923,6 +46942,15 @@ def propagate_session_projection_dirty(
                     session_dir=session_dir,
                     manifest=manifest,
                     reason=reason,
+                    changed_component_ids=(
+                        {
+                            str(item.get("component_id") or "")
+                            for item in component_changes
+                            if isinstance(item, dict)
+                        }
+                        if component_changes is not None
+                        else None
+                    ),
                 )
             )
             ledger_update = (
@@ -39991,6 +47019,55 @@ def propagate_session_projection_dirty(
     graph_status = str(
         graph_state.get("status") or "unresolved"
     )
+    outbox_routing: dict[str, Any] = {
+        "ok": True,
+        "status": "not_available",
+        "semantic_completion": False,
+    }
+    outbox_path = Path(
+        str(
+            publication_outbox.get("path")
+            if isinstance(publication_outbox, dict)
+            else ""
+        )
+    )
+    if outbox_path.is_file():
+        outbox_routing = route_projection_outbox_record(
+            session_dir,
+            outbox_path=outbox_path,
+            consumer_statuses={
+                "exact_and_lexical_search": (
+                    "queued",
+                    "session_projection_component_delta_published",
+                ),
+                "episode_semantic": (
+                    "deferred",
+                    "awaiting_changed_task_episode_search_admission",
+                ),
+                "entity_registry": (
+                    "deferred",
+                    "awaiting_changed_component_entity_admission",
+                ),
+                "graph": (
+                    (
+                        "queued"
+                        if graph_status == "queued_dirty"
+                        else "deferred"
+                    ),
+                    (
+                        "changed_graph_sources_queued"
+                        if graph_status == "queued_dirty"
+                        else "graph_consumer_not_materialized_or_unavailable"
+                    ),
+                ),
+            },
+        )
+        if not outbox_routing.get("ok"):
+            diagnostics.extend(
+                str(item)
+                for item in outbox_routing.get("diagnostics", [])
+                if item
+            )
     return {
         "schema_version": 1,
         "artifact_type": (
@@ -40023,6 +47100,9 @@ def propagate_session_projection_dirty(
                 else ""
             ),
             "reason": reason,
+            "changed_component_count": len(
+                component_changes or []
+            ),
         },
         "projections": {
             "exact_and_lexical_search": {
@@ -40073,6 +47153,7 @@ def propagate_session_projection_dirty(
                 distillation_state
             ),
         },
+        "outbox_routing": outbox_routing,
         "next_route": {
             "kind": "cli_command",
             "status": "ready",
@@ -45321,6 +52402,21 @@ def maintain_indexes(
         "actions": action_results,
         "diagnostics": diagnostics,
     }
+    if payload["ok"]:
+        payload["outbox_completions"] = (
+            complete_entity_registry_outbox_consumers(
+                aoa_root,
+                limit=32,
+            )
+        )
+    else:
+        payload["outbox_completions"] = {
+            "ok": True,
+            "status": "not_checked_without_successful_index_maintenance",
+            "completed_count": 0,
+            "completions": [],
+            "deferred": [],
+        }
     if write_report:
         diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
         diagnostics_dir.mkdir(parents=True, exist_ok=True)
@@ -52197,6 +59293,10 @@ def session_projection_stage_promotion(
                     session_dir=owner_session_dir,
                     manifest=published_manifest,
                     reason="complete_orphan_stage_promoted",
+                    component_changes=publish_result.get(
+                        "changed_components"
+                    ),
+                    publication_outbox=publish_result.get("outbox"),
                 )
     status = (
         "promoted"
@@ -54302,24 +61402,160 @@ def auto_maintenance(
     }
     diagnostics: list[str] = []
     try:
-        query_demand_records = chronological_session_records(aoa_root)
-        query_demand = session_memory_query_demand_projection(query_demand_records)
+        capture_watch_reconciliation = reconcile_capture_watch(
+            aoa_root=aoa_root,
+            limit=max(1, effective_discovery_limit or 16),
+            apply=apply,
+            target=target,
+            now=now,
+        )
     except (OSError, ValueError) as exc:
-        query_demand_records = []
+        capture_watch_reconciliation = {
+            "schema_version": CAPTURE_WATCH_STATE_SCHEMA_VERSION,
+            "artifact_type": (
+                "session_memory_capture_watch_reconciliation"
+            ),
+            "generated_at": now,
+            "ok": False,
+            "status": "unavailable",
+            "apply": apply,
+            "results": [],
+            "diagnostics": [
+                "capture_watch_reconciliation_failed:"
+                f"{exc.__class__.__name__}:{exc}"
+            ],
+            "truth_status": (
+                "bounded_known_source_reconciliation_unavailable"
+            ),
+        }
+        diagnostics.extend(
+            capture_watch_reconciliation["diagnostics"]
+        )
+    outbox_ready = (
+        projection_outbox_ready_sessions(
+            aoa_root,
+            limit=max(1, effective_discovery_limit or 16),
+        )
+        if target == "all"
+        else {
+            "status": "not_requested_for_explicit_target",
+            "records": [],
+            "ready_session_count": 0,
+            "raw_bytes_read": 0,
+            "archive_manifest_scan_performed": False,
+        }
+    )
+    outbox_ready_records = (
+        outbox_ready.get("records")
+        if isinstance(outbox_ready.get("records"), list)
+        else []
+    )
+    event_driven_hot_queue = bool(
+        profile == "hot"
+        and target == "all"
+        and since is None
+        and since_days is None
+        and until is None
+        and limit is None
+    )
+    recovered_capture_results = [
+        dict(item)
+        for item in capture_watch_reconciliation.get("results", [])
+        if isinstance(item, dict) and bool(item.get("mutates"))
+    ]
+    if outbox_ready_records:
+        query_demand_records = [
+            dict(item)
+            for item in outbox_ready_records
+            if isinstance(item, dict)
+        ]
+        selected_records_override = list(query_demand_records)
         query_demand = {
             "schema_version": 1,
             "artifact_type": "session_memory_query_demand_projection",
             "generated_at": now,
-            "ok": False,
-            "status": "unavailable",
+            "ok": True,
+            "status": "skipped_event_driven_outbox_ready",
             "mutates": False,
             "priority_session_ids": [],
             "demand_counts": {},
             "evidence": [],
-            "diagnostics": [f"query_demand_projection_unavailable:{exc}"],
-            "truth_status": "structured_session_memory_query_invocations_not_observed",
-            "authority_boundary": "generated scheduling demand only; raw transcript and target session refs remain evidence authority",
+            "diagnostics": [],
+            "truth_status": "outbox_ready_queue_precedes_query_demand_discovery",
+            "authority_boundary": "component outbox schedules work; raw transcript and target session refs remain evidence authority",
         }
+        selection_scope = {
+            "mode": "event_driven_component_outbox",
+            "profile": profile,
+            "selected_count": len(selected_records_override),
+            "outbox": outbox_ready,
+        }
+    elif event_driven_hot_queue:
+        # The ordinary timer consumes explicit operational queues.  A capture
+        # recovery has already made its bounded live overlay queryable and is
+        # not permission to rediscover or rebuild the stable archive.  Full
+        # discovery remains available through catchup/deep/audit profiles.
+        query_demand_records = []
+        selected_records_override = []
+        query_demand = {
+            "schema_version": 1,
+            "artifact_type": "session_memory_query_demand_projection",
+            "generated_at": now,
+            "ok": True,
+            "status": "skipped_event_driven_empty_ready_queue",
+            "mutates": False,
+            "priority_session_ids": [],
+            "demand_counts": {},
+            "evidence": [],
+            "diagnostics": [],
+            "truth_status": (
+                "ordinary_hot_timer_consumes_explicit_ready_queues_only"
+            ),
+            "authority_boundary": (
+                "capture watch and component outbox schedule hot work; "
+                "deep audit owns archive reconciliation"
+            ),
+        }
+        selection_scope = {
+            "mode": "event_driven_hot_ready_queues",
+            "profile": profile,
+            "selected_count": 0,
+            "capture_recovered_count": len(
+                recovered_capture_results
+            ),
+            "capture_recovered_session_ids": [
+                str(item.get("session_id") or "")
+                for item in recovered_capture_results
+                if str(item.get("session_id") or "")
+            ],
+            "stable_projection_scheduled_from_capture": False,
+            "archive_manifest_scan_performed": False,
+            "raw_payload_read_for_unchanged_sources": False,
+            "outbox": outbox_ready,
+            "truth_status": (
+                "bounded_operational_queues_not_global_reconciliation"
+            ),
+        }
+    else:
+        try:
+            query_demand_records = chronological_session_records(aoa_root)
+            query_demand = session_memory_query_demand_projection(query_demand_records)
+        except (OSError, ValueError) as exc:
+            query_demand_records = []
+            query_demand = {
+                "schema_version": 1,
+                "artifact_type": "session_memory_query_demand_projection",
+                "generated_at": now,
+                "ok": False,
+                "status": "unavailable",
+                "mutates": False,
+                "priority_session_ids": [],
+                "demand_counts": {},
+                "evidence": [],
+                "diagnostics": [f"query_demand_projection_unavailable:{exc}"],
+                "truth_status": "structured_session_memory_query_invocations_not_observed",
+                "authority_boundary": "generated scheduling demand only; raw transcript and target session refs remain evidence authority",
+            }
     query_priority_session_ids = list(
         dict.fromkeys(
             str(item)
@@ -54623,7 +61859,14 @@ def auto_maintenance(
             payload["maintenance_coordinator"] = coordinator_finished
             return payload
 
-        if profile == "hot" and target == "all" and since is None and until is None:
+        if (
+            not outbox_ready_records
+            and selected_records_override is None
+            and profile == "hot"
+            and target == "all"
+            and since is None
+            and until is None
+        ):
             selected_records_override, selection_scope = hot_source_session_scope(
                 aoa_root,
                 since=effective_since,
@@ -54668,7 +61911,8 @@ def auto_maintenance(
                 ]
                 selected_records_override = stable_records
         elif (
-            target == "all"
+            not outbox_ready_records
+            and target == "all"
             and query_priority_session_ids
             and (effective_since is not None or until is not None or effective_limit is not None)
         ):
@@ -55886,6 +63130,9 @@ def auto_maintenance(
             "limit": effective_limit,
             "discovery_limit": effective_discovery_limit,
             "selection_scope": selection_scope,
+            "capture_watch_reconciliation": (
+                capture_watch_reconciliation
+            ),
             "query_demand": query_demand,
             "repair_limit": effective_repair_limit,
             "search_repair_limit": effective_search_repair_limit,
@@ -58771,6 +66018,23 @@ def handle_hook_event(
     )
     actions = ["hook_event_recorded"]
     errors: list[str] = []
+    if transcript_path is not None:
+        try:
+            register_capture_watch(
+                aoa_root=root,
+                session_id=session_id,
+                session_dir=session_dir,
+                transcript_path=transcript_path,
+                observed_at=now,
+            )
+            actions.append("capture_watch_registered")
+        except Exception as exc:
+            # Hook capture remains fail-open; the receipt keeps the recovery
+            # registration failure visible without blocking the agent runtime.
+            errors.append(
+                "capture_watch_registration_failed:"
+                f"{exc.__class__.__name__}:{exc}"
+            )
     start_hook_light = event_name == "SessionStart" and os.environ.get("AOA_SESSION_MEMORY_FULL_START_SYNC") != "1"
     if event_name == "UserPromptSubmit" and os.environ.get("AOA_SESSION_MEMORY_FULL_PROMPT_SYNC") != "1":
         typing_bridge = hook_user_prompt_typing_bridge(event)
@@ -60034,7 +67298,10 @@ def agent_event_audit(
                 "archive_path": str(session_dir),
             }
         )
-        task_episodes = session_index.get("task_episodes") if isinstance(session_index.get("task_episodes"), list) else []
+        task_episodes = session_index_task_episode_components(
+            session_dir,
+            session_index,
+        )
         task_episode_count += len(task_episodes)
         for episode in task_episodes:
             if not isinstance(episode, dict):
@@ -65488,6 +72755,23 @@ def refresh_entity_registry_search_documents_only(
         "phase_timings": phase_timings,
         "diagnostics": diagnostics,
     }
+    if payload["ok"]:
+        payload["outbox_completions"] = (
+            complete_entity_registry_outbox_consumers(
+                aoa_root,
+                limit=32,
+            )
+        )
+    else:
+        payload["outbox_completions"] = {
+            "ok": True,
+            "status": (
+                "not_checked_without_committed_registry_search_sync"
+            ),
+            "completed_count": 0,
+            "completions": [],
+            "deferred": [],
+        }
     if write_report:
         diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
         diagnostics_dir.mkdir(parents=True, exist_ok=True)
@@ -73396,15 +80680,10 @@ def episode_delegated_lifecycle_relation_gate(
             "generation_identity": generation_packet,
             "archive_integrity": archive_integrity,
         }
-    task_episodes = [
-        item
-        for item in (
-            session_index.get("task_episodes")
-            if isinstance(session_index.get("task_episodes"), list)
-            else []
-        )
-        if isinstance(item, dict)
-    ]
+    task_episodes = session_index_task_episode_components(
+        session_dir,
+        session_index,
+    )
     candidates = [
         (episode, episode_delegated_lifecycle_alignment(episode, query=query))
         for episode in task_episodes
@@ -91832,7 +99111,15 @@ def episode_semantic_search(
             "live_tail_scan_time_budget_exhausted": bool(
                 (live_tail_fallback.get("cost_profile") or {}).get("tail_scan_time_budget_exhausted")
             ),
-            "persistent_live_tail_index_written": False,
+            "persistent_live_tail_index_written": bool(
+                (
+                    live_tail_fallback.get("freshness")
+                    if isinstance(
+                        live_tail_fallback.get("freshness"), dict
+                    )
+                    else {}
+                ).get("persistent_overlay")
+            ),
         },
         "elapsed_ms": int((time.monotonic() - started) * 1000),
         "db_path": str(db_path),
@@ -94936,6 +102223,182 @@ def live_tail_search_limits(
     )
 
 
+def persistent_live_tail_source_snapshot(
+    *,
+    session_dir: Path,
+    source_path: Path,
+    archived_bytes: int,
+    archived_lines: int,
+    expected_prefix_sha256: str,
+    max_delta_bytes: int,
+    base: dict[str, Any],
+    started: float,
+) -> dict[str, Any] | None:
+    overlay = read_json(
+        persistent_live_tail_index_path(session_dir),
+        {},
+    )
+    if (
+        not isinstance(overlay, dict)
+        or int_value(overlay.get("schema_version"))
+        != PERSISTENT_LIVE_TAIL_INDEX_SCHEMA_VERSION
+        or overlay.get("artifact_type")
+        != "persistent_live_tail_overlay"
+        or str(overlay.get("source_path") or "")
+        != str(source_path)
+    ):
+        return None
+    materialization_path = Path(
+        str(overlay.get("materialization_path") or "")
+    )
+    ledger_path = Path(str(overlay.get("ledger_path") or ""))
+    if not ledger_path.is_file():
+        ledger_path = raw_capture_ledger_path(session_dir)
+    if not materialization_path.is_file():
+        materialization_path = (
+            session_dir
+            / "raw"
+            / RAW_CAPTURES_DIR
+            / materialization_path.name
+        )
+    ledger = read_json(ledger_path, {})
+    epochs = (
+        ledger.get("epochs")
+        if isinstance(ledger, dict)
+        and isinstance(ledger.get("epochs"), list)
+        else []
+    )
+    epoch = next(
+        (
+            item
+            for item in reversed(epochs)
+            if isinstance(item, dict)
+            and str(item.get("epoch_id") or "")
+            == str(overlay.get("epoch_id") or "")
+        ),
+        None,
+    )
+    if not isinstance(epoch, dict):
+        return None
+    captured_bytes = int_value(overlay.get("captured_bytes"), -1)
+    if captured_bytes <= archived_bytes:
+        return None
+    try:
+        source_stat = source_path.stat()
+        materialized_stat = materialization_path.stat()
+    except OSError:
+        return None
+    if not (
+        source_stat.st_dev == int_value(overlay.get("source_device"), -1)
+        and source_stat.st_ino == int_value(overlay.get("source_inode"), -1)
+        and source_stat.st_size == captured_bytes
+        and materialized_stat.st_size == captured_bytes
+        and int_value(epoch.get("captured_bytes"), -1) == captured_bytes
+        and str(epoch.get("chain_sha256") or "")
+        == str(overlay.get("ledger_chain_sha256") or "")
+        and captured_bytes >= archived_bytes
+    ):
+        return None
+    prefix_record = (
+        overlay.get("archive_prefixes", {}).get(str(archived_bytes))
+        if isinstance(overlay.get("archive_prefixes"), dict)
+        else None
+    )
+    if not (
+        isinstance(prefix_record, dict)
+        and prefix_record.get("matches") is True
+        and str(prefix_record.get("sha256") or "")
+        == expected_prefix_sha256
+    ):
+        return None
+    blocks = (
+        epoch.get("blocks")
+        if isinstance(epoch.get("blocks"), list)
+        else []
+    )
+    if blocks:
+        last = blocks[-1] if isinstance(blocks[-1], dict) else {}
+        last_path = Path(str(last.get("path") or ""))
+        if not last_path.is_file():
+            last_path = (
+                session_dir
+                / "raw"
+                / RAW_CAPTURE_BLOCKS_DIR
+                / last_path.name
+            )
+        if not (
+            last_path.is_file()
+            and last_path.stat().st_size
+            == int_value(last.get("byte_count"), -1)
+            and sha256_file(last_path) == str(last.get("sha256") or "")
+        ):
+            return None
+    delta_bytes = captured_bytes - archived_bytes
+    scan_end = min(captured_bytes, archived_bytes + max_delta_bytes)
+    byte_truncated = scan_end < captured_bytes
+    snapshot_id = hashlib.sha256(
+        (
+            f"{overlay.get('epoch_id')}:{overlay.get('ledger_chain_sha256')}:"
+            f"{captured_bytes}"
+        ).encode("utf-8")
+    ).hexdigest()[:24]
+    return {
+        **base,
+        "ok": True,
+        "status": "truncated" if byte_truncated else "persistent_overlay",
+        "fallback_reason": (
+            "persistent_live_tail_overlay_covers_unarchived_delta"
+        ),
+        "live_source_path": str(materialization_path),
+        "source_size": captured_bytes,
+        "source_mtime_ns": materialized_stat.st_mtime_ns,
+        "source_device": materialized_stat.st_dev,
+        "source_inode": materialized_stat.st_ino,
+        "owner_source_device": source_stat.st_dev,
+        "owner_source_inode": source_stat.st_ino,
+        "snapshot_id": snapshot_id,
+        "snapshot_end_offset": captured_bytes,
+        "scan_start_offset": archived_bytes,
+        "scan_end_offset": scan_end,
+        "delta_bytes": delta_bytes,
+        "scan_bytes": scan_end - archived_bytes,
+        "unscanned_bytes": max(0, captured_bytes - scan_end),
+        "line_start": archived_lines + 1,
+        "byte_truncated": byte_truncated,
+        "persistent_overlay": True,
+        "persistent_live_tail_index": str(
+            persistent_live_tail_index_path(session_dir)
+        ),
+        "persistent_live_tail_postings": str(
+            persistent_live_tail_postings_path(session_dir)
+        ),
+        "ledger_epoch_id": overlay.get("epoch_id"),
+        "ledger_chain_sha256": overlay.get(
+            "ledger_chain_sha256"
+        ),
+        "prefix_validation": {
+            "ok": True,
+            "status": "persistent_capture_archive_prefix_attested",
+            "expected_sha256": expected_prefix_sha256,
+            "sha256": prefix_record.get("sha256"),
+            "bytes_hashed": archived_bytes,
+            "archive_boundary_line_aligned": True,
+        },
+        "authority": {
+            "source": "persistent_captured_raw_overlay",
+            "projection": "none_query_time_candidate",
+            "archive_projection": "stale-readable",
+            "segment_ref_available": False,
+        },
+        "diagnostics": (
+            ["live_tail_byte_budget_truncated"]
+            if byte_truncated
+            else []
+        ),
+        "elapsed_ms": int((time.monotonic() - started) * 1000),
+    }
+
+
 def session_live_tail_source_snapshot(
     *,
     aoa_root: Path,
@@ -95008,6 +102471,18 @@ def session_live_tail_source_snapshot(
         "scan_budget_ms": LIVE_TAIL_SEARCH_SCAN_BUDGET_MS,
         "projection_freshness": manifest_live_source_snapshot_freshness(manifest),
     }
+    persistent_snapshot = persistent_live_tail_source_snapshot(
+        session_dir=session_dir,
+        source_path=source_path,
+        archived_bytes=archived_bytes,
+        archived_lines=archived_lines,
+        expected_prefix_sha256=expected_prefix_sha256,
+        max_delta_bytes=effective_max_bytes,
+        base=base,
+        started=started,
+    )
+    if persistent_snapshot is not None:
+        return persistent_snapshot
     diagnostics: list[str] = []
     if not source_path_text or not source_path.is_file():
         return {
@@ -96534,9 +104009,15 @@ def live_tail_fallback_reason(status: str) -> str:
 
 def live_tail_result_freshness(snapshot: dict[str, Any], scan: dict[str, Any]) -> dict[str, Any]:
     truncated = bool(snapshot.get("byte_truncated") or scan.get("truncated"))
+    persistent_overlay = bool(snapshot.get("persistent_overlay"))
     return {
         "status": "truncated" if truncated else "fallback",
-        "basis": "read_only_append_snapshot_with_full_archived_prefix_sha256",
+        "basis": (
+            "persistent_capture_ledger_with_attested_archived_prefix"
+            if persistent_overlay
+            else "read_only_append_snapshot_with_full_archived_prefix_sha256"
+        ),
+        "persistent_overlay": persistent_overlay,
         "archive_projection_status": "stale-readable",
         "projection_freshness_status": str((snapshot.get("projection_freshness") or {}).get("status") or "unverifiable"),
         "live_source_snapshot_status": "current_at_captured_end_offset",
@@ -97016,6 +104497,236 @@ def live_tail_exact_deduplicate_mirrored_messages(
     return deduplicated, collapsed_count
 
 
+def live_tail_exact_search_from_persistent_postings(
+    *,
+    snapshot: dict[str, Any],
+    needle: str,
+    limit: int,
+    event_id_before: str | None,
+    event_type: str | None,
+    family: str | None,
+    outcome: str | None,
+    date_from: str | None,
+    date_to: str | None,
+    exclude_agent_event_stream_copies: bool,
+) -> dict[str, Any] | None:
+    path = Path(
+        str(snapshot.get("persistent_live_tail_postings") or "")
+    )
+    postings = read_json(path, {}) if path.is_file() else {}
+    if not (
+        isinstance(postings, dict)
+        and int_value(postings.get("schema_version"))
+        == PERSISTENT_LIVE_TAIL_POSTINGS_SCHEMA_VERSION
+        and postings.get("artifact_type")
+        == "persistent_live_tail_postings"
+        and str(postings.get("session_id") or "")
+        == str(snapshot.get("session_id") or "")
+        and str(postings.get("epoch_id") or "")
+        == str(snapshot.get("ledger_epoch_id") or "")
+        and postings.get("generation_identity")
+        == persistent_live_tail_postings_generation_identity()
+        and int_value(postings.get("source_captured_bytes"))
+        == int_value(snapshot.get("snapshot_end_offset"))
+    ):
+        return None
+    query_tokens = persistent_live_tail_safe_tokens(needle)
+    token_postings = postings.get("token_postings")
+    posting_entries = postings.get("entries")
+    if not (
+        query_tokens
+        and isinstance(token_postings, dict)
+        and isinstance(posting_entries, list)
+    ):
+        return None
+    candidate_positions: set[int] | None = None
+    for token in query_tokens:
+        positions = token_postings.get(token)
+        if not isinstance(positions, list):
+            return None
+        normalized_positions = {
+            int_value(position, -1)
+            for position in positions
+            if 0 <= int_value(position, -1) < len(posting_entries)
+        }
+        candidate_positions = (
+            normalized_positions
+            if candidate_positions is None
+            else candidate_positions & normalized_positions
+        )
+        if not candidate_positions:
+            return None
+    archived_lines = int_value(snapshot.get("archived_line_count"))
+    entries = [
+        posting_entries[position]
+        for position in sorted(candidate_positions or set())
+        if isinstance(posting_entries[position], dict)
+        for item in [posting_entries[position]]
+        if isinstance(item, dict)
+        and int_value(item.get("line")) > archived_lines
+    ]
+    if not entries:
+        return None
+    source_path = Path(str(snapshot.get("live_source_path") or ""))
+    if not source_path.is_file():
+        return None
+    normalized_date_from = parse_date_arg(date_from) if date_from else None
+    normalized_date_to = parse_date_arg(date_to) if date_to else None
+    ordered_pattern = exact_raw_ordered_token_phrase_pattern(needle)
+    ordered_anchor = exact_raw_ordered_token_phrase_anchor(needle)
+    results: list[dict[str, Any]] = []
+    bytes_read = 0
+    for posting in reversed(entries):
+        byte_offset = int_value(posting.get("byte_offset"), -1)
+        byte_count = int_value(posting.get("byte_count"), 0)
+        if (
+            byte_offset < int_value(snapshot.get("scan_start_offset"))
+            or byte_count <= 0
+            or byte_offset + byte_count
+            > int_value(snapshot.get("snapshot_end_offset"))
+        ):
+            continue
+        with source_path.open("rb") as handle:
+            handle.seek(byte_offset)
+            raw_bytes = handle.read(byte_count)
+        bytes_read += len(raw_bytes)
+        if len(raw_bytes) != byte_count or not raw_bytes.endswith(b"\n"):
+            continue
+        raw_line = raw_bytes[:-1].decode("utf-8", errors="replace")
+        try:
+            loaded = json.loads(raw_line)
+            parsed = loaded if isinstance(loaded, dict) else None
+        except json.JSONDecodeError:
+            parsed = None
+        line_no = int_value(posting.get("line"))
+        event = classify_raw_event(raw_line, parsed, line_no)
+        evidence_text = exact_raw_event_evidence_text(
+            event,
+            raw_line,
+            {},
+        )
+        match_mode = exact_raw_query_match_mode(
+            evidence_text,
+            needle=needle,
+            ordered_token_phrase_pattern=ordered_pattern,
+            ordered_token_phrase_anchor=ordered_anchor,
+        )
+        if not match_mode:
+            continue
+        if exact_raw_event_structured_filter_rejections(
+            event,
+            event_id_before=event_id_before,
+            event_type=event_type,
+            family=family,
+            outcome=outcome,
+            exclude_agent_event_stream_copies=(
+                exclude_agent_event_stream_copies
+            ),
+        ):
+            continue
+        date_filter = exact_event_date_filter_decision(
+            event_timestamp=event.timestamp,
+            session_date=str(snapshot.get("session_date") or ""),
+            date_from=normalized_date_from,
+            date_to=normalized_date_to,
+        )
+        if not date_filter["accepted"]:
+            continue
+        score, _match = live_tail_exact_event_score(
+            event,
+            needle=needle,
+            raw=raw_line,
+            query_class=str(
+                literal_query_shape(needle).get("primary") or ""
+            ),
+        )
+        refs = live_tail_event_refs(snapshot, line_no)
+        results.append(
+            {
+                "rank": -round(score, 4),
+                "match_score": round(score, 4),
+                "match_channel": (
+                    "persistent_live_tail_posting_verified_raw"
+                ),
+                "raw_query_match_mode": match_mode,
+                "doc_id": (
+                    f"live-event:{snapshot.get('session_id')}:"
+                    f"{event.event_id}"
+                ),
+                "doc_type": "event",
+                "session_id": str(snapshot.get("session_id") or ""),
+                "session_label": str(
+                    snapshot.get("session_label") or ""
+                ),
+                "session_title": str(
+                    snapshot.get("session_title") or ""
+                ),
+                "session_date": str(
+                    snapshot.get("session_date") or ""
+                ),
+                "archive_status": "live_source_unarchived",
+                "event_id": event.event_id,
+                "raw_line": line_no,
+                "event_type": event.event_type,
+                "source_type": event.source_type,
+                "family": event.family,
+                "phase": event.phase,
+                "actor": event.actor,
+                "action": event.action,
+                "outcome": event.outcome,
+                "correlation_id": event.correlation_id or "",
+                "timestamp": event.timestamp or "",
+                "date_filter": date_filter,
+                "title": str(
+                    posting.get("event_type") or event.event_type
+                ),
+                "preview": str(posting.get("preview") or ""),
+                "refs": refs,
+                "raw_ref": refs["raw"],
+                "raw_path": refs["raw_path"],
+                "session_ref": refs["session"],
+                "byte_offset": byte_offset,
+                "byte_count": byte_count,
+                "freshness": {
+                    "status": "current_at_captured_watermark",
+                    "returned_evidence_current": True,
+                    "global_recall_complete": False,
+                },
+            }
+        )
+        if len(results) >= max(1, limit * 3):
+            break
+    if not results:
+        return None
+    results.sort(
+        key=lambda item: (
+            float(item.get("rank") or 0),
+            -int_value(item.get("raw_line")),
+        )
+    )
+    return {
+        "results": results[: max(1, limit)],
+        "scan": {
+            "status": "persistent_postings_selected_raw_verification",
+            "bytes_read": bytes_read,
+            "posting_entry_count": len(
+                postings.get("entries", [])
+                if isinstance(postings.get("entries"), list)
+                else []
+            ),
+            "posting_candidate_count": len(entries),
+            "posting_entries_examined": len(
+                candidate_positions or set()
+            ),
+            "posting_full_scan_performed": False,
+            "candidate_selection": "inverted_token_intersection",
+            "raw_verified_result_count": len(results),
+            "global_recall_complete": False,
+        },
+        "postings_path": str(path),
+    }
+
+
 def live_tail_exact_search(
     *,
     aoa_root: Path,
@@ -97136,6 +104847,71 @@ def live_tail_exact_search(
                 "prefix_hash_budget_ms": LIVE_TAIL_SEARCH_PREFIX_HASH_BUDGET_MS,
                 "bounded_prefix_validation": True,
             },
+        }
+    posting_result = live_tail_exact_search_from_persistent_postings(
+        snapshot=snapshot,
+        needle=needle,
+        limit=max(1, min(100, int_value(limit, 20))),
+        event_id_before=event_id_before,
+        event_type=event_type,
+        family=family,
+        outcome=outcome,
+        date_from=date_from,
+        date_to=date_to,
+        exclude_agent_event_stream_copies=(
+            exclude_agent_event_stream_copies
+        ),
+    )
+    if posting_result is not None:
+        posting_results = [
+            redact_derived_value(item)
+            for item in posting_result.get("results", [])
+            if isinstance(item, dict)
+        ]
+        return {
+            "schema_version": LIVE_TAIL_SEARCH_SCHEMA_VERSION,
+            "artifact_type": "live_tail_exact_search_results",
+            "generated_at": utc_now(),
+            "ok": True,
+            "mutates": False,
+            "query": safe_query,
+            "normalized_query": needle,
+            "session": session,
+            "route": {
+                "id": "persistent_live_tail_postings",
+                "reason": (
+                    "safe persistent posting selected bounded raw refs; "
+                    "only returned lines were reread and verified"
+                ),
+                "authority": "captured_raw_line_verification",
+            },
+            "snapshot": snapshot,
+            "scan": posting_result["scan"],
+            "result_count": len(posting_results),
+            "results": posting_results,
+            "abstention": {
+                "status": "exact_live_evidence_available",
+                "reason": "",
+            },
+            "cost_profile": {
+                "prefix_bytes_hashed": 0,
+                "tail_bytes_read": int_value(
+                    posting_result["scan"].get("bytes_read")
+                ),
+                "tail_lines_read": len(posting_results),
+                "persistent_index_written": True,
+                "persistent_postings_path": posting_result.get(
+                    "postings_path"
+                ),
+                "global_recall_complete": False,
+            },
+            "elapsed_ms": int(
+                (time.monotonic() - started) * 1000
+            ),
+            "diagnostics": [],
+            "truth_status": (
+                "verified_live_raw_evidence_current_global_recall_incomplete"
+            ),
         }
     session_date = str(snapshot.get("session_date") or "")
     normalized_date_from = parse_date_arg(date_from) if date_from else None
@@ -100126,9 +107902,13 @@ def search_documents_for_record(
         }
     )
 
-    task_episodes = session_index_payload.get("task_episodes") if isinstance(session_index_payload.get("task_episodes"), list) else []
+    task_episodes = session_index_task_episode_components(
+        session_dir,
+        session_index_payload,
+    )
     task_episode_ranges = session_index_task_episode_ranges(
-        session_index_payload
+        session_index_payload,
+        session_dir=session_dir,
     )
     event_episode_ids: dict[str, str] = {}
     for episode in task_episodes:
@@ -100513,6 +108293,7 @@ def search_documents_for_record(
     )
     return documents, {
         "status": "indexed",
+        "session_id": session_id,
         "session_label": session_label,
         "document_count": len(documents),
         "raw_text_status": raw_text_status,
@@ -101052,6 +108833,9 @@ def search_index_sessions(
                 max_raw_bytes=effective_max_raw_bytes,
                 include_raw_event_text=include_raw_event_text,
             )
+            result["source_fingerprint"] = str(
+                projection_state.get("fingerprint") or ""
+            )
             documents, omission_summary, omitted_route_ref_rows = apply_search_context_tail_omission_policy(
                 documents,
                 policy=effective_context_tail_omission_policy if not store_raw_text else SEARCH_CONTEXT_TAIL_OMISSION_POLICY_KEEP_ALL,
@@ -101588,6 +109372,67 @@ def search_index_sessions(
         if not catalog_refresh.get("ok"):
             payload["ok"] = False
             payload.setdefault("diagnostics", []).append(f"search_catalog_refresh_failed:{catalog_refresh.get('status')}")
+    outbox_completions: list[dict[str, Any]] = []
+    if payload["ok"]:
+        result_by_session_id = {
+            str(item.get("session_id") or ""): item
+            for item in session_results
+            if isinstance(item, dict)
+            and str(item.get("session_id") or "")
+        }
+        for record in records[:committed_count]:
+            session_dir = session_dir_from_record(record)
+            session_id = str(record.get("session_id") or "")
+            result = result_by_session_id.get(session_id, {})
+            episode_status = str(
+                (
+                    result.get("episode_semantic_projection")
+                    if isinstance(
+                        result.get("episode_semantic_projection"), dict
+                    )
+                    else {}
+                ).get("status")
+                or ""
+            )
+            completed_consumers = ["exact_and_lexical_search"]
+            if episode_status in {
+                "current",
+                "no_task_episodes",
+                "no_admitted_episode_text",
+            }:
+                completed_consumers.append("episode_semantic")
+            completion = complete_projection_outbox_consumers_for_session(
+                aoa_root=aoa_root,
+                session_dir=session_dir,
+                consumers=completed_consumers,
+                completion_receipt={
+                    "artifact_type": "search_consumer_transaction_receipt",
+                    "db_path": str(db_path),
+                    "db_size_bytes": (
+                        db_path.stat().st_size if db_path.is_file() else 0
+                    ),
+                    "source_fingerprint": str(
+                        result.get("source_fingerprint") or ""
+                    ),
+                    "lexical_generation_id": str(
+                        generation_identities["lexical_search"].get(
+                            "generation_id"
+                        )
+                        or ""
+                    ),
+                    "episode_semantic_generation_id": str(
+                        generation_identities["episode_semantic"].get(
+                            "generation_id"
+                        )
+                        or ""
+                    ),
+                    "episode_semantic_status": episode_status,
+                    "indexed_at": now,
+                },
+            )
+            if completion.get("completed_consumers"):
+                outbox_completions.append(completion)
+    payload["outbox_completions"] = outbox_completions
     if write_report:
         diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
         diagnostics_dir.mkdir(parents=True, exist_ok=True)
@@ -106918,7 +114763,15 @@ def search_sessions(
             "persistent_archived_raw_index_written": False,
             "live_tail_fallback_attempted": bool(live_tail_fallback.get("attempted")),
             "live_tail_fallback_result_count": int_value(live_tail_fallback.get("result_count")),
-            "persistent_live_tail_index_written": False,
+            "persistent_live_tail_index_written": bool(
+                (
+                    live_tail_fallback.get("freshness")
+                    if isinstance(
+                        live_tail_fallback.get("freshness"), dict
+                    )
+                    else {}
+                ).get("persistent_overlay")
+            ),
         },
         "literal_postings": literal_postings,
         "provider": {
@@ -107206,9 +115059,25 @@ def agent_event_bounded_timeout_summary(
     return summary
 
 
-def session_index_task_episode_ranges(session_index: dict[str, Any]) -> list[tuple[str, int, int]]:
+def session_index_task_episode_ranges(
+    session_index: dict[str, Any],
+    *,
+    session_dir: Path | None = None,
+) -> list[tuple[str, int, int]]:
     ranges: list[tuple[str, int, int]] = []
-    for episode in session_index.get("task_episodes", []) if isinstance(session_index.get("task_episodes"), list) else []:
+    episodes = (
+        session_index_task_episode_components(
+            session_dir,
+            session_index,
+        )
+        if session_dir is not None
+        else (
+            session_index.get("task_episodes", [])
+            if isinstance(session_index.get("task_episodes"), list)
+            else []
+        )
+    )
+    for episode in episodes:
         if not isinstance(episode, dict):
             continue
         episode_id = str(episode.get("episode_id") or "")
@@ -107602,7 +115471,10 @@ def search_structured_event_documents_from_session_indexes(
         expected_segment_raw_sha256,
     ) = session_manifest_projection_expectations(manifest)
     episode_ranges = (
-        session_index_task_episode_ranges(session_index)
+        session_index_task_episode_ranges(
+            session_index,
+            session_dir=session_dir,
+        )
         if isinstance(session_index, dict)
         else []
     )
@@ -108076,7 +115948,10 @@ def search_agent_event_documents_from_session_indexes(
         expected_segment_publish_id,
         expected_segment_raw_sha256,
     ) = session_manifest_projection_expectations(manifest)
-    episode_ranges = session_index_task_episode_ranges(session_index)
+    episode_ranges = session_index_task_episode_ranges(
+        session_index,
+        session_dir=session_dir,
+    )
     requested_episode_found = not task_episode_id or any(item[0] == task_episode_id for item in episode_ranges)
     segments = manifest.get("segments") if isinstance(manifest.get("segments"), list) else session_index.get("segments")
     if not isinstance(segments, list) or not segments:
@@ -109551,7 +117426,10 @@ def task_answer_chain_route_packet(
         display = index.get("display") if isinstance(index.get("display"), dict) else {}
         session_label = str(display.get("label") or record.get("session_label") or session_dir.name)
         session_id = str(index.get("session_id") or record.get("session_id") or "")
-        task_episodes = index.get("task_episodes", []) if isinstance(index.get("task_episodes"), list) else []
+        task_episodes = session_index_task_episode_components(
+            session_dir,
+            index,
+        )
         episode_items = list(reversed(task_episodes)) if order == "recent" else list(task_episodes)
         for item in episode_items:
             if not isinstance(item, dict):
@@ -109659,6 +117537,7 @@ def task_episode_route_search(
     results: list[dict[str, Any]] = []
     selected_count = 0
     incompatible_session_indexes: list[dict[str, Any]] = []
+    component_reads: list[dict[str, Any]] = []
     ordered_records = list(records)
     if order == "recent":
         ordered_records = list(reversed(ordered_records))
@@ -109671,6 +117550,7 @@ def task_episode_route_search(
             generated_session_index_stale_reasons_for_session(
                 session_dir,
                 index,
+                verify_task_episode_semantic_digest=False,
             )
         )
         if index_stale_reasons:
@@ -109691,26 +117571,91 @@ def task_episode_route_search(
             continue
         session_label = str(index.get("display", {}).get("label") if isinstance(index.get("display"), dict) else record.get("session_label") or session_dir.name)
         session_id = str(index.get("session_id") or record.get("session_id") or "")
-        task_episodes = index.get("task_episodes", []) if isinstance(index.get("task_episodes"), list) else []
-        episode_items = list(reversed(task_episodes)) if order == "recent" else list(task_episodes)
-        for item in episode_items:
+
+        def matches(candidate: dict[str, Any]) -> bool:
+            compact = compact_task_episode(
+                candidate,
+                session_label=session_label,
+                session_id=session_id,
+            )
+            if episode and str(compact.get("episode_id") or "") != episode:
+                return False
+            if status and str(compact.get("status") or "") != status:
+                return False
+            if (
+                verification_state
+                and compact.get("verification_state")
+                != verification_state
+            ):
+                return False
+            if (
+                failure_state
+                and compact.get("failure_state") != failure_state
+            ):
+                return False
+            return True
+
+        remaining_limit = max(1, limit) - len(results)
+        component_read = session_index_task_episode_component_read(
+            session_dir,
+            index,
+            order=order,
+            limit=remaining_limit,
+            selector=matches,
+        )
+        component_reads.append(
+            {
+                key: component_read.get(key)
+                for key in (
+                    "status",
+                    "reader_mode",
+                    "component_count",
+                    "hydrated_component_count",
+                    "selected_component_count",
+                    "scan_complete",
+                    "global_component_integrity",
+                    "diagnostics",
+                )
+            }
+            | {
+                "session_id": session_id,
+                "session_label": session_label,
+            }
+        )
+        if component_read.get("status") != "current":
+            incompatible_session_indexes.append(
+                {
+                    "session": session_id or session_label,
+                    "reasons": list(
+                        component_read.get("diagnostics", [])
+                    ),
+                    "next_command": (
+                        "python3 scripts/aoa_session_memory.py "
+                        "doctor --deep-projection-artifacts"
+                    ),
+                }
+            )
+            continue
+        selected_count += int_value(
+            component_read.get("hydrated_component_count")
+        )
+        for item in component_read.get("payloads", []):
             if not isinstance(item, dict):
                 continue
-            selected_count += 1
             compact = compact_task_episode(item, session_label=session_label, session_id=session_id)
-            if episode and str(compact.get("episode_id") or "") != episode:
-                continue
-            if status and str(compact.get("status") or "") != status:
-                continue
-            if verification_state and compact.get("verification_state") != verification_state:
-                continue
-            if failure_state and compact.get("failure_state") != failure_state:
-                continue
             results.append(compact)
             if len(results) >= max(1, limit):
                 break
         if len(results) >= max(1, limit):
             break
+    complete_session_scan = (
+        len(component_reads) == len(ordered_records)
+        and not incompatible_session_indexes
+        and all(
+            bool(item.get("scan_complete"))
+            for item in component_reads
+        )
+    )
     return {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "task_episode_route_results",
@@ -109728,6 +117673,32 @@ def task_episode_route_search(
         "result_count": len(results),
         "results": results,
         "incompatible_session_indexes": incompatible_session_indexes,
+        "component_reads": component_reads,
+        "cost_profile": {
+            "reader_mode": "manifest_first_selective_with_legacy_fallback",
+            "session_index_count": len(component_reads),
+            "component_count": sum(
+                int_value(item.get("component_count"))
+                for item in component_reads
+            ),
+            "hydrated_component_count": sum(
+                int_value(item.get("hydrated_component_count"))
+                for item in component_reads
+            ),
+            "selected_component_count": len(results),
+            "all_visited_components_verified": bool(component_reads)
+            and all(
+                item.get("global_component_integrity") == "verified"
+                for item in component_reads
+            ),
+            "opens_raw": False,
+            "uses_search": False,
+            "uses_graph": False,
+        },
+        "global_recall": {
+            "complete": complete_session_scan,
+            "negative_claims_admitted": complete_session_scan,
+        },
         "generation_identity": (
             task_episode_source_generation_identity()
         ),
@@ -109863,7 +117834,10 @@ def goal_lifecycle_route_search(
         session_label = str(display.get("label") or record.get("session_label") or session_dir.name)
         session_id = str(index.get("session_id") or record.get("session_id") or "")
         lifecycles = index.get("goal_lifecycles", []) if isinstance(index.get("goal_lifecycles"), list) else []
-        task_episodes = index.get("task_episodes", []) if isinstance(index.get("task_episodes"), list) else []
+        task_episodes = session_index_task_episode_components(
+            session_dir,
+            index,
+        )
         lifecycle_items = list(reversed(lifecycles)) if order == "recent" else list(lifecycles)
         for item in lifecycle_items:
             if not isinstance(item, dict):
@@ -112874,6 +120848,94 @@ def canonical_generation_identity(payload: dict[str, Any]) -> dict[str, Any]:
     return generation_identity_with_id(identity)
 
 
+def projection_generation_admission(
+    *,
+    projection: str,
+    stored_identity: Any,
+    expected_identity: dict[str, Any],
+) -> dict[str, Any]:
+    """Admit only the current identity or one explicitly attested predecessor."""
+    stored = stored_identity if isinstance(stored_identity, dict) else {}
+    stored_generation_id = str(stored.get("generation_id") or "")
+    expected_generation_id = str(
+        expected_identity.get("generation_id") or ""
+    )
+    base = {
+        "schema_version": PROJECTION_PREDECESSOR_ATTESTATION_VERSION,
+        "projection": projection,
+        "stored_generation_id": stored_generation_id,
+        "expected_generation_id": expected_generation_id,
+    }
+    if stored_generation_id and stored_generation_id == expected_generation_id:
+        return {
+            **base,
+            "status": "current",
+            "compatible": stored == expected_identity,
+            "requires_restamp": False,
+            "diagnostics": (
+                []
+                if stored == expected_identity
+                else ["generation_identity_payload_mismatch"]
+            ),
+        }
+    declared = DECLARED_PROJECTION_PREDECESSOR_GENERATION_IDS.get(
+        projection,
+        frozenset(),
+    )
+    if stored_generation_id in declared:
+        recomputed_stored = generation_identity_with_id(stored)
+        if (
+            str(recomputed_stored.get("generation_id") or "")
+            != stored_generation_id
+        ):
+            return {
+                **base,
+                "status": "incompatible",
+                "compatible": False,
+                "requires_restamp": False,
+                "diagnostics": [
+                    "declared_predecessor_identity_payload_mismatch"
+                ],
+            }
+        return {
+            **base,
+            "status": "declared_predecessor",
+            "compatible": True,
+            "requires_restamp": True,
+            "diagnostics": [],
+            "attestation": {
+                "version": PROJECTION_PREDECESSOR_ATTESTATION_VERSION,
+                "basis": (
+                    "exact_0_7_0_generation_id_with_stage_semantics_"
+                    "preserved_across_dependency_dag_correction"
+                ),
+                "scope": "reuse_then_restamp_only",
+            },
+        }
+    return {
+        **base,
+        "status": "incompatible",
+        "compatible": False,
+        "requires_restamp": False,
+        "diagnostics": ["generation_identity_not_current_or_attested"],
+    }
+
+
+def projection_generation_is_admitted(
+    *,
+    projection: str,
+    stored_identity: Any,
+    expected_identity: dict[str, Any],
+) -> bool:
+    return bool(
+        projection_generation_admission(
+            projection=projection,
+            stored_identity=stored_identity,
+            expected_identity=expected_identity,
+        ).get("compatible")
+    )
+
+
 def session_metadata_generation_identity(
     manifest: dict[str, Any],
 ) -> dict[str, Any]:
@@ -113027,7 +121089,7 @@ def projection_publish_id(payload: Any) -> str:
         else payload
     )
     return str(
-        identity.get("publish_id")
+        identity.get("publish_id") or ""
         if isinstance(identity, dict)
         else ""
     )
@@ -113074,11 +121136,16 @@ def session_memory_generation_common() -> dict[str, Any]:
 def task_episode_source_generation_identity(
     *,
     common: dict[str, Any] | None = None,
+    event_classification: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    effective_classification = event_classification or (
+        event_classification_generation_identity()
+    )
     return canonical_generation_identity(
         {
             **(common or session_memory_generation_common()),
             "projection": "task_episode_source",
+            "generation_dag_version": PROJECTION_GENERATION_DAG_VERSION,
             "schema_version": TASK_EPISODE_SCHEMA_VERSION,
             "conversation_act_schema_version": (
                 CONVERSATION_ACT_SCHEMA_VERSION
@@ -113094,6 +121161,11 @@ def task_episode_source_generation_identity(
                 TASK_EPISODE_EVIDENCE_INTEGRITY_VERSION
             ),
             "normalization": "unicode_casefold_whitespace_v1",
+            "dependency_generations": {
+                "event_classification": effective_classification[
+                    "generation_id"
+                ],
+            },
         }
     )
 
@@ -113101,18 +121173,17 @@ def task_episode_source_generation_identity(
 def segment_index_generation_identity(
     *,
     common: dict[str, Any] | None = None,
-    episode_source: dict[str, Any] | None = None,
+    event_classification: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     effective_common = common or session_memory_generation_common()
-    effective_episode = episode_source or (
-        task_episode_source_generation_identity(
-            common=effective_common
-        )
+    effective_classification = event_classification or (
+        event_classification_generation_identity()
     )
     return canonical_generation_identity(
         {
             **effective_common,
             "projection": "segment_index",
+            "generation_dag_version": PROJECTION_GENERATION_DAG_VERSION,
             "schema_version": SCHEMA_VERSION,
             "conversation_act_schema_version": (
                 CONVERSATION_ACT_SCHEMA_VERSION
@@ -113133,9 +121204,64 @@ def segment_index_generation_identity(
                 "raw_digest_block_and_line_range_v1"
             ),
             "dependency_generations": {
-                "task_episode_source": (
-                    effective_episode["generation_id"]
-                ),
+                "event_classification": effective_classification[
+                    "generation_id"
+                ],
+            },
+        }
+    )
+
+
+def review_rendering_generation_identity(
+    *,
+    common: dict[str, Any] | None = None,
+    segment_index: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    effective_segment = segment_index or (
+        segment_index_generation_identity(common=common)
+    )
+    return canonical_generation_identity(
+        {
+            **(common or session_memory_generation_common()),
+            "projection": "review_rendering",
+            "generation_dag_version": PROJECTION_GENERATION_DAG_VERSION,
+            "schema_version": 1,
+            "render_mode": "index_first_lazy_review_v1",
+            "redaction_policy_version": (
+                DERIVED_TEXT_REDACTION_POLICY_VERSION
+            ),
+            "dependency_generations": {
+                "segment_index": effective_segment["generation_id"],
+            },
+        }
+    )
+
+
+def goal_lifecycle_generation_identity(
+    *,
+    common: dict[str, Any] | None = None,
+    task_episode: dict[str, Any] | None = None,
+    segment_index: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    effective_common = common or session_memory_generation_common()
+    effective_task_episode = task_episode or (
+        task_episode_source_generation_identity(common=effective_common)
+    )
+    effective_segment = segment_index or (
+        segment_index_generation_identity(common=effective_common)
+    )
+    return canonical_generation_identity(
+        {
+            **effective_common,
+            "projection": "goal_lifecycles",
+            "generation_dag_version": PROJECTION_GENERATION_DAG_VERSION,
+            "schema_version": GOAL_LIFECYCLE_SCHEMA_VERSION,
+            "normalization": "typed_goal_event_lifecycle_v1",
+            "dependency_generations": {
+                "segment_index": effective_segment["generation_id"],
+                "task_episode_source": effective_task_episode[
+                    "generation_id"
+                ],
             },
         }
     )
@@ -113146,21 +121272,31 @@ def session_index_generation_identity(
     common: dict[str, Any] | None = None,
     episode_source: dict[str, Any] | None = None,
     segment_index: dict[str, Any] | None = None,
+    goal_lifecycles: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     effective_common = common or session_memory_generation_common()
     effective_episode = episode_source or (
-        task_episode_source_generation_identity(common=effective_common)
+        task_episode_source_generation_identity(
+            common=effective_common,
+        )
     )
     effective_segment = segment_index or (
         segment_index_generation_identity(
             common=effective_common,
-            episode_source=effective_episode,
+        )
+    )
+    effective_goals = goal_lifecycles or (
+        goal_lifecycle_generation_identity(
+            common=effective_common,
+            task_episode=effective_episode,
+            segment_index=effective_segment,
         )
     )
     return canonical_generation_identity(
         {
             **effective_common,
             "projection": "session_index",
+            "generation_dag_version": PROJECTION_GENERATION_DAG_VERSION,
             "schema_version": SCHEMA_VERSION,
             "session_act_schema_version": SESSION_ACT_SCHEMA_VERSION,
             "conversation_act_schema_version": (
@@ -113182,6 +121318,7 @@ def session_index_generation_identity(
                 "raw_digest_manifest_and_segment_refs_v1"
             ),
             "dependency_generations": {
+                "goal_lifecycles": effective_goals["generation_id"],
                 "segment_index": effective_segment["generation_id"],
                 "task_episode_source": effective_episode["generation_id"],
             },
@@ -113248,17 +121385,29 @@ def session_memory_expected_generation_identities(
 ) -> dict[str, dict[str, Any]]:
     common = session_memory_generation_common()
     entity_registry = entity_registry_generation_identity()
+    event_classification = event_classification_generation_identity()
     episode_source = task_episode_source_generation_identity(
-        common=common
+        common=common,
+        event_classification=event_classification,
     )
     segment_index = segment_index_generation_identity(
         common=common,
-        episode_source=episode_source,
+        event_classification=event_classification,
+    )
+    review_rendering = review_rendering_generation_identity(
+        common=common,
+        segment_index=segment_index,
+    )
+    goal_lifecycles = goal_lifecycle_generation_identity(
+        common=common,
+        task_episode=episode_source,
+        segment_index=segment_index,
     )
     session_index = session_index_generation_identity(
         common=common,
         episode_source=episode_source,
         segment_index=segment_index,
+        goal_lifecycles=goal_lifecycles,
     )
     episode_semantic = canonical_generation_identity(
         {
@@ -113443,9 +121592,12 @@ def session_memory_expected_generation_identities(
         )
     )
     return {
+        "event_classification": event_classification,
         "segment_index": segment_index,
+        "review_rendering": review_rendering,
         "session_index": session_index,
         "task_episode_source": episode_source,
+        "goal_lifecycles": goal_lifecycles,
         "episode_semantic": episode_semantic,
         "exact_literal": exact,
         "lexical_search": lexical,
@@ -119610,7 +127762,10 @@ def graph_contributions_for_record(
                     count=int_value(count, 1),
                 )
 
-        task_episodes = session_index.get("task_episodes") if isinstance(session_index.get("task_episodes"), list) else []
+        task_episodes = session_index_task_episode_components(
+            session_dir,
+            session_index,
+        )
         for episode in task_episodes:
             if not isinstance(episode, dict):
                 continue
@@ -130354,6 +138509,21 @@ def graph_maintenance(
             "schema/corruption recovery."
         ),
     }
+    if payload["ok"] and apply and mutation_applied:
+        payload["outbox_completions"] = (
+            complete_graph_outbox_consumers_from_ledger(
+                aoa_root,
+                limit=max(batch_limit * 2, 16),
+            )
+        )
+    else:
+        payload["outbox_completions"] = {
+            "ok": True,
+            "status": "not_checked_without_committed_graph_mutation",
+            "completed_count": 0,
+            "completions": [],
+            "deferred": [],
+        }
     if write_report:
         diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
         diagnostics_dir.mkdir(parents=True, exist_ok=True)
@@ -181260,6 +189430,56 @@ def command_sweep_codex_sessions(args: argparse.Namespace) -> int:
     return 0 if payload.get("ok") else 1
 
 
+def command_render_segment(args: argparse.Namespace) -> int:
+    explicit_workspace = (
+        Path(args.workspace_root) if args.workspace_root else None
+    )
+    root = aoa_root_for(
+        explicit_workspace,
+        Path(args.aoa_root) if args.aoa_root else None,
+    )
+    try:
+        record = resolve_session_record(root, args.session)
+        payload = render_segment_markdown_on_demand(
+            session_dir=session_dir_from_record(record),
+            segment=args.segment,
+        )
+    except (OSError, ValueError) as exc:
+        payload = {
+            "schema_version": 1,
+            "artifact_type": "segment_markdown_on_demand_render_receipt",
+            "status": "unresolved",
+            "diagnostics": [f"{type(exc).__name__}:{exc}"],
+        }
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("status") == "rendered" else 1
+
+
+def command_freshness_vector(args: argparse.Namespace) -> int:
+    explicit_workspace = (
+        Path(args.workspace_root) if args.workspace_root else None
+    )
+    root = aoa_root_for(
+        explicit_workspace,
+        Path(args.aoa_root) if args.aoa_root else None,
+    )
+    try:
+        record = resolve_session_record(root, args.session)
+        payload = session_projection_freshness_vector(
+            aoa_root=root,
+            session_dir=session_dir_from_record(record),
+        )
+    except (OSError, ValueError) as exc:
+        payload = {
+            "schema_version": 1,
+            "artifact_type": "session_projection_freshness_vector",
+            "status": "unresolved",
+            "diagnostics": [f"{type(exc).__name__}:{exc}"],
+        }
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("axes") else 1
+
+
 def command_reindex_sessions(args: argparse.Namespace) -> int:
     explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
     root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
@@ -186709,10 +194929,9 @@ def session_evidence_window(
         else ["missing_session_index"]
     )
     if isinstance(session_index, dict) and not episode_projection_reasons:
-        for candidate in (
-            session_index.get("task_episodes")
-            if isinstance(session_index.get("task_episodes"), list)
-            else []
+        for candidate in session_index_task_episode_components(
+            session_dir,
+            session_index,
         ):
             if not isinstance(candidate, dict):
                 continue
@@ -190196,6 +198415,7 @@ REQUIRED_ROOT_FILES = [
     "schemas/atlas-route-entry.schema.json",
     "schemas/hook-receipt.schema.json",
     "schemas/incident.schema.json",
+    "schemas/live-tail.postings.schema.json",
     "schemas/raw-capture-state.schema.json",
     "schemas/segment.index.schema.json",
     "schemas/session.manifest.schema.json",
@@ -190417,8 +198637,15 @@ def command_doctor(args: argparse.Namespace) -> int:
     deferred_live_problems: list[str] = []
     deferred_live_problem_sessions: dict[str, dict[str, Any]] = {}
     deep_segment_indexes = bool(getattr(args, "deep_segment_indexes", False))
+    deep_projection_artifacts = bool(
+        getattr(args, "deep_projection_artifacts", False)
+    )
     segment_index_event_validation_count = 0
     segment_index_event_validation_skipped_count = 0
+    projection_artifact_audit_session_count = 0
+    projection_artifact_audit_artifact_count = 0
+    projection_artifact_audit_bytes_read = 0
+    projection_artifact_audit_diagnostics: list[str] = []
     doctor_now_ts = time.time()
     doctor_quiet_seconds = GRAPH_HOT_LIVE_DEFER_SECONDS
     doctor_live_state_cache: dict[str, dict[str, Any]] = {}
@@ -190710,6 +198937,26 @@ def command_doctor(args: argparse.Namespace) -> int:
                         problems.append(f"invalid event type {event.get('type')}: {idx_path}")
                     if not event.get("raw_ref") or not event.get("md_anchor"):
                         problems.append(f"event missing raw_ref or md_anchor: {idx_path}")
+            if deep_projection_artifacts:
+                projection_artifact_audit_session_count += 1
+                artifact_audit = deep_audit_session_projection_artifacts(
+                    session_dir=session_path,
+                    manifest=manifest_payload,
+                )
+                projection_artifact_audit_artifact_count += int_value(
+                    artifact_audit.get("artifact_count")
+                )
+                projection_artifact_audit_bytes_read += int_value(
+                    artifact_audit.get("content_bytes_read")
+                )
+                session_diagnostics = [
+                    f"{session_path.name}:{diagnostic}"
+                    for diagnostic in artifact_audit.get("diagnostics", [])
+                ]
+                projection_artifact_audit_diagnostics.extend(
+                    session_diagnostics
+                )
+                problems.extend(session_diagnostics)
         elif archive_status == "raw_unavailable":
             if not list((session_path / "incidents").glob("*__INCIDENT.md")):
                 problems.append(f"raw_unavailable session missing incident markdown: {session_path}")
@@ -190763,6 +199010,30 @@ def command_doctor(args: argparse.Namespace) -> int:
                 f"{workspace_root} --aoa-root {root}"
             )
             if not deep_segment_indexes and segment_index_event_validation_skipped_count
+            else "",
+        },
+        "projection_artifact_audit": {
+            "mode": (
+                "full_sha256_rehash"
+                if deep_projection_artifacts
+                else "not_run"
+            ),
+            "session_count": projection_artifact_audit_session_count,
+            "artifact_count": projection_artifact_audit_artifact_count,
+            "content_bytes_read": projection_artifact_audit_bytes_read,
+            "diagnostic_count": len(
+                projection_artifact_audit_diagnostics
+            ),
+            "diagnostics": projection_artifact_audit_diagnostics[:80],
+            "diagnostics_omitted": max(
+                0,
+                len(projection_artifact_audit_diagnostics) - 80,
+            ),
+            "deep_route": (
+                "doctor --deep-projection-artifacts --workspace-root "
+                f"{workspace_root} --aoa-root {root}"
+            )
+            if not deep_projection_artifacts
             else "",
         },
         "user_skill": user_skill_state,
@@ -191112,6 +199383,37 @@ def build_parser() -> argparse.ArgumentParser:
     sweep_sessions.add_argument("--write-report", action="store_true", help="Write JSON and Markdown sweep reports under .aoa/diagnostics.")
     sweep_sessions.add_argument("--full", action="store_true", help="Print complete sweep results to stdout.")
     sweep_sessions.set_defaults(func=command_sweep_codex_sessions)
+
+    render_segment = sub.add_parser(
+        "render-segment",
+        help=(
+            "Render one disposable full redacted segment review view from "
+            "its index and raw refs."
+        ),
+    )
+    render_segment.add_argument(
+        "session", help="Session label, id, or title fragment."
+    )
+    render_segment.add_argument(
+        "segment", help="Segment id, index filename, or Markdown filename."
+    )
+    render_segment.add_argument("--workspace-root")
+    render_segment.add_argument("--aoa-root")
+    render_segment.set_defaults(func=command_render_segment)
+
+    freshness_vector = sub.add_parser(
+        "freshness-vector",
+        help=(
+            "Report independent raw, live-overlay, stable, search, episode, "
+            "entity, graph, returned-evidence, and global-recall freshness."
+        ),
+    )
+    freshness_vector.add_argument(
+        "session", help="Session label, id, or title fragment."
+    )
+    freshness_vector.add_argument("--workspace-root")
+    freshness_vector.add_argument("--aoa-root")
+    freshness_vector.set_defaults(func=command_freshness_vector)
 
     reindex = sub.add_parser("reindex-sessions", help="Regenerate generated segment Markdown and indexes from preserved raw JSONL.")
     reindex.add_argument("session", nargs="?", default="all", help="Session label/id/title fragment or all.")
@@ -193385,6 +201687,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--deep-segment-indexes",
         action="store_true",
         help="Parse every segment index and validate event records; default doctor stays metadata-only for large live archives.",
+    )
+    doctor.add_argument(
+        "--deep-projection-artifacts",
+        action="store_true",
+        help=(
+            "Re-hash immutable segment and classification artifacts that "
+            "the hot path admits by attested metadata."
+        ),
     )
     doctor.set_defaults(func=command_doctor)
     return parser
