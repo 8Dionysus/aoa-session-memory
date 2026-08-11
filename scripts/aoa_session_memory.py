@@ -1476,6 +1476,7 @@ AUTO_MAINTENANCE_PROFILES = {
         "resource_demand_epoch": "v4",
         "automatic_heavy_projection_lane": False,
         "budget_seconds": 600,
+        "resource_startup_grace_seconds": 180,
         "hard_timeout_grace_seconds": 120,
         "timeout_sec": 900,
         "index_drip_on_block": False,
@@ -1511,6 +1512,7 @@ AUTO_MAINTENANCE_PROFILES = {
         "resource_demand_epoch": "v4",
         "automatic_heavy_projection_lane": True,
         "budget_seconds": 900,
+        "resource_startup_grace_seconds": 180,
         "hard_timeout_grace_seconds": 180,
         "timeout_sec": 3600,
         "index_drip_on_block": False,
@@ -1552,6 +1554,7 @@ AUTO_MAINTENANCE_PROFILES = {
         "resource_demand_epoch": "v6",
         "automatic_heavy_projection_lane": False,
         "budget_seconds": 600,
+        "resource_startup_grace_seconds": 180,
         "hard_timeout_grace_seconds": 60,
         "timeout_sec": 1800,
         "index_drip_on_block": False,
@@ -1595,6 +1598,7 @@ AUTO_MAINTENANCE_PROFILES = {
         "resource_demand_epoch": "v4",
         "automatic_heavy_projection_lane": True,
         "budget_seconds": 1200,
+        "resource_startup_grace_seconds": 180,
         "hard_timeout_grace_seconds": 300,
         "timeout_sec": 7200,
         "index_drip_on_block": False,
@@ -56219,6 +56223,10 @@ def auto_maintenance_runtime_envelope(
         if budget_seconds is not None and float(budget_seconds) > 0
         else profile_budget_seconds
     )
+    resource_startup_grace_seconds = max(
+        1.0,
+        float(settings.get("resource_startup_grace_seconds") or 120.0),
+    )
     grace_seconds = max(
         1.0,
         float(settings.get("hard_timeout_grace_seconds") or 120.0),
@@ -56232,10 +56240,18 @@ def auto_maintenance_runtime_envelope(
     )
     hard_timeout_seconds = min(
         configured_timeout_ceiling_seconds,
-        max(1.0, math.ceil(effective_budget_seconds + grace_seconds)),
+        max(
+            1.0,
+            math.ceil(
+                effective_budget_seconds
+                + resource_startup_grace_seconds
+                + grace_seconds
+            ),
+        ),
     )
     return {
         "budget_seconds": effective_budget_seconds,
+        "resource_startup_grace_seconds": resource_startup_grace_seconds,
         "hard_timeout_grace_seconds": grace_seconds,
         "configured_timeout_ceiling_seconds": configured_timeout_ceiling_seconds,
         "hard_timeout_seconds": hard_timeout_seconds,
@@ -58591,6 +58607,7 @@ def auto_maintenance_resource_markdown(payload: dict[str, Any]) -> str:
         f"- resource_kind: `{payload.get('resource_kind')}`",
         f"- budget_seconds: `{payload.get('budget_seconds')}`",
         f"- timeout_sec: `{payload.get('timeout_sec')}`",
+        f"- resource_startup_grace_seconds: `{payload.get('resource_startup_grace_seconds')}`",
         f"- hard_timeout_grace_seconds: `{payload.get('hard_timeout_grace_seconds')}`",
         f"- configured_timeout_ceiling_sec: `{payload.get('configured_timeout_ceiling_sec')}`",
         f"- wrapper_timeout_sec: `{payload.get('wrapper_timeout_sec')}`",
@@ -61635,6 +61652,9 @@ def auto_maintenance_resource_launch(
         "resource_kind": settings.get("resource_kind"),
         "budget_seconds": effective_budget_seconds,
         "timeout_sec": effective_hard_timeout_seconds,
+        "resource_startup_grace_seconds": runtime_envelope.get(
+            "resource_startup_grace_seconds"
+        ),
         "hard_timeout_grace_seconds": runtime_envelope.get(
             "hard_timeout_grace_seconds"
         ),

@@ -54894,34 +54894,37 @@ def test_projection_catchup_resource_launch_has_separate_demand_identity(tmp_pat
     assert command[command.index("--demand-owner") + 1] == "aoa-session-memory"
 
 
-def test_auto_maintenance_runtime_envelope_bounds_hard_timeout_to_budget_plus_grace() -> None:
+def test_auto_maintenance_runtime_envelope_preserves_startup_and_completion_grace() -> None:
     assert module.auto_maintenance_runtime_envelope("hot") == {
         "budget_seconds": 600.0,
+        "resource_startup_grace_seconds": 180.0,
         "hard_timeout_grace_seconds": 120.0,
         "configured_timeout_ceiling_seconds": 900.0,
-        "hard_timeout_seconds": 720,
-        "wrapper_timeout_seconds": 840.0,
+        "hard_timeout_seconds": 900.0,
+        "wrapper_timeout_seconds": 1020.0,
     }
     assert module.auto_maintenance_runtime_envelope("backlog") == {
         "budget_seconds": 900.0,
+        "resource_startup_grace_seconds": 180.0,
         "hard_timeout_grace_seconds": 180.0,
         "configured_timeout_ceiling_seconds": 3600.0,
-        "hard_timeout_seconds": 1080,
-        "wrapper_timeout_seconds": 1200.0,
+        "hard_timeout_seconds": 1260,
+        "wrapper_timeout_seconds": 1380.0,
     }
     assert module.auto_maintenance_runtime_envelope(
         "backlog",
         budget_seconds=30,
-    )["hard_timeout_seconds"] == 210
+    )["hard_timeout_seconds"] == 390
     assert module.auto_maintenance_runtime_envelope(
         "catchup",
         budget_seconds=900,
     ) == {
         "budget_seconds": 900.0,
+        "resource_startup_grace_seconds": 180.0,
         "hard_timeout_grace_seconds": 60.0,
         "configured_timeout_ceiling_seconds": 1800.0,
-        "hard_timeout_seconds": 960,
-        "wrapper_timeout_seconds": 1080.0,
+        "hard_timeout_seconds": 1140,
+        "wrapper_timeout_seconds": 1260.0,
     }
     assert module.auto_maintenance_runtime_envelope(
         "deep",
@@ -54951,7 +54954,7 @@ def test_auto_maintenance_resource_launch_reports_host_hard_timeout_and_retries(
                 "request": {
                     "class": "medium",
                     "kind": "indexing",
-                    "timeout_sec": 210,
+                    "timeout_sec": 390,
                 },
                 "execution": {
                     "ok": False,
@@ -54982,13 +54985,14 @@ def test_auto_maintenance_resource_launch_reports_host_hard_timeout_and_retries(
     )
 
     command = calls["command"]
-    assert command[command.index("--timeout") + 1] == "210"
-    assert calls["timeout"] == 330.0
+    assert command[command.index("--timeout") + 1] == "390"
+    assert calls["timeout"] == 510.0
     assert command[command.index("--budget-seconds") + 1] == "30"
     assert payload["ok"] is False
     assert payload["status"] == "resource_hard_timeout"
     assert payload["budget_seconds"] == 30.0
-    assert payload["timeout_sec"] == 210.0
+    assert payload["timeout_sec"] == 390.0
+    assert payload["resource_startup_grace_seconds"] == 180.0
     assert payload["hard_timeout_grace_seconds"] == 180.0
     assert payload["configured_timeout_ceiling_sec"] == 3600.0
     assert payload["execution"]["returncode"] == 124
@@ -55169,7 +55173,7 @@ def test_auto_maintenance_resource_launch_uses_live_tail_fast_path_for_catchup(t
     assert calls["command"][:3] == ["abyss-machine", "resource", "launch"]
     assert "--force" in calls["command"]
     assert calls["command"][calls["command"].index("--demand-key") + 1] == (
-        "aoa-session-memory:auto-maintenance:catchup:index-maintenance-v4"
+        "aoa-session-memory:auto-maintenance:catchup:index-maintenance-v6"
     )
     assert calls["command"][calls["command"].index("--demand-owner") + 1] == "aoa-session-memory"
     assert child[:4] == ["python3", str(Path(module.__file__).resolve()), "index-maintenance", session_label]

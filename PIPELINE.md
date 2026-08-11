@@ -752,8 +752,11 @@ signals do not make a projection current.
 
 The host launcher timeout is a hard runtime envelope, not an alternate work
 budget. For automatic profiles it is the smaller of the profile's absolute
-timeout ceiling and the effective cooperative budget plus a bounded grace
-period. Full search and atlas rebuild paths receive the same remaining
+timeout ceiling and the effective cooperative budget plus separate bounded
+allowances for resource-process startup and in-flight atomic completion. The
+startup allowance prevents interpreter/module initialization before the
+cooperative clock starts from consuming the atomic-completion allowance. Full
+search and atlas rebuild paths receive the same remaining
 cooperative budget as incremental work; rebuilds publish from temporary state
 only after completion. A host-enforced termination is reported as
 `resource_hard_timeout`, never as semantic completion, and remains eligible for
