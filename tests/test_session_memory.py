@@ -96299,6 +96299,73 @@ def test_session_sensitive_literal_policy_prefilter_preserves_assignment_detecti
     )
 
 
+def test_sensitive_literal_candidate_ranges_avoid_historical_block_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_path = tmp_path / "candidate-ranges.raw.jsonl"
+    secret = "opaque-range-secret-987654321"
+    payload = (
+        ("ordinary benign payload " + "x" * 4096 + "\n") * 64
+        + f"password={secret}\n"
+        + ("ordinary trailing payload " + "y" * 4096 + "\n") * 64
+    ).encode("utf-8")
+    raw_path.write_bytes(payload)
+    block = {
+        "cache_key": "candidate-range-block",
+        "byte_start": 0,
+        "byte_count": len(payload),
+        "raw_sha256": hashlib.sha256(payload).hexdigest(),
+    }
+
+    discovered = module.sensitive_literal_candidate_ranges_task(
+        (str(raw_path), block, {})
+    )
+    marker = discovered["structural_marker"]
+
+    assert discovered["scan_mode"] == (
+        "full_block_scan_with_range_discovery_v1"
+    )
+    assert discovered["source_bytes_read"] == len(payload)
+    assert marker["candidate_present"] is True
+    assert marker["candidate_line_count"] == 1
+    assert marker["literal_values_persisted"] is False
+    assert secret not in json.dumps(marker, sort_keys=True)
+
+    invalid_marker = {
+        **marker,
+        "candidate_ranges": [
+            {"byte_start": len(payload), "byte_count": 1}
+        ],
+    }
+    fail_closed = module.sensitive_literal_candidate_ranges_task(
+        (str(raw_path), block, invalid_marker)
+    )
+    assert fail_closed["scan_mode"] == (
+        "full_block_scan_with_range_discovery_v1"
+    )
+    assert fail_closed["source_bytes_read"] == len(payload)
+    assert fail_closed["values_by_kind"] == discovered["values_by_kind"]
+
+    def forbid_full_block(*_args: Any, **_kwargs: Any) -> bytes:
+        raise AssertionError("historical block fallback was used")
+
+    monkeypatch.setattr(
+        module,
+        "raw_classification_block_bytes",
+        forbid_full_block,
+    )
+    admitted = module.sensitive_literal_candidate_ranges_task(
+        (str(raw_path), block, marker)
+    )
+
+    assert admitted["scan_mode"] == (
+        "admitted_candidate_line_ranges_v1"
+    )
+    assert admitted["values_by_kind"] == discovered["values_by_kind"]
+    assert admitted["source_bytes_read"] < len(payload) // 100
+
+
 def test_derived_privacy_prefilters_skip_expensive_matchers_for_benign_text(
     monkeypatch,
 ) -> None:

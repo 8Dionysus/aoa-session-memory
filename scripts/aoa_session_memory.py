@@ -39642,6 +39642,136 @@ def published_session_event_summary(
     }
 
 
+def sensitive_literal_candidate_ranges_task(
+    task: tuple[str, dict[str, Any], dict[str, Any]],
+) -> dict[str, Any]:
+    """Recover secret values from raw while persisting only candidate ranges."""
+    raw_path_text, block, prior_marker = task
+    raw_path = Path(raw_path_text)
+    block_byte_start = int_value(block.get("byte_start"))
+    block_byte_count = int_value(block.get("byte_count"))
+    marker_ranges = (
+        prior_marker.get("candidate_ranges")
+        if isinstance(prior_marker.get("candidate_ranges"), list)
+        and prior_marker.get("candidate_range_mode")
+        == "exact_candidate_lines_relative_to_raw_block_v1"
+        else None
+    )
+    if (
+        marker_ranges is not None
+        and bool(prior_marker.get("candidate_present"))
+        != bool(marker_ranges)
+    ):
+        marker_ranges = None
+    values_by_kind: dict[str, set[str]] = defaultdict(set)
+    candidate_ranges: list[dict[str, int]] = []
+    source_bytes_read = 0
+    scan_mode = "full_block_scan_with_range_discovery_v1"
+
+    def merge_values(values: dict[str, set[str]]) -> None:
+        for kind, candidates in values.items():
+            values_by_kind[str(kind)].update(candidates)
+
+    if marker_ranges is not None:
+        validated_ranges: list[tuple[int, int]] = []
+        previous_end = 0
+        for item in marker_ranges:
+            if not isinstance(item, dict):
+                validated_ranges = []
+                break
+            relative_start = int_value(item.get("byte_start"), -1)
+            byte_count = int_value(item.get("byte_count"), -1)
+            relative_end = relative_start + byte_count
+            if (
+                relative_start < previous_end
+                or byte_count <= 0
+                or relative_end > block_byte_count
+            ):
+                validated_ranges = []
+                break
+            validated_ranges.append((relative_start, byte_count))
+            previous_end = relative_end
+        if len(validated_ranges) == len(marker_ranges):
+            scan_mode = "admitted_candidate_line_ranges_v1"
+            with raw_path.open("rb") as handle:
+                for relative_start, byte_count in validated_ranges:
+                    handle.seek(block_byte_start + relative_start)
+                    payload = handle.read(byte_count)
+                    if len(payload) != byte_count:
+                        raise ValueError(
+                            "sensitive_candidate_range_short_read"
+                        )
+                    source_bytes_read += len(payload)
+                    merge_values(
+                        derived_session_sensitive_literal_values_from_texts(
+                            [payload.decode("utf-8", errors="replace")]
+                        )
+                    )
+                    candidate_ranges.append(
+                        {
+                            "byte_start": relative_start,
+                            "byte_count": byte_count,
+                        }
+                    )
+            if (
+                bool(prior_marker.get("candidate_present"))
+                and not values_by_kind
+            ):
+                marker_ranges = None
+                candidate_ranges = []
+                values_by_kind.clear()
+        else:
+            marker_ranges = None
+
+    if marker_ranges is None:
+        raw_payload = raw_classification_block_bytes(raw_path, block)
+        source_bytes_read = len(raw_payload)
+        relative_start = 0
+        for raw_line in raw_payload.splitlines(keepends=True):
+            line_values = (
+                derived_session_sensitive_literal_values_from_texts(
+                    [raw_line.decode("utf-8", errors="replace")]
+                )
+            )
+            if line_values:
+                merge_values(line_values)
+                candidate_ranges.append(
+                    {
+                        "byte_start": relative_start,
+                        "byte_count": len(raw_line),
+                    }
+                )
+            relative_start += len(raw_line)
+
+    marker = {
+        "schema_version": SENSITIVE_STRUCTURAL_MARKER_VERSION,
+        "candidate_present": bool(values_by_kind),
+        "kind_counts": {
+            str(kind): len(values)
+            for kind, values in sorted(values_by_kind.items())
+            if values
+        },
+        "candidate_range_mode": (
+            "exact_candidate_lines_relative_to_raw_block_v1"
+        ),
+        "candidate_ranges": candidate_ranges,
+        "candidate_line_count": len(candidate_ranges),
+        "literal_values_persisted": False,
+        "reversible_literal_digests_persisted": False,
+    }
+    return {
+        "cache_key": block.get("cache_key"),
+        "values_by_kind": {
+            kind: sorted(values)
+            for kind, values in values_by_kind.items()
+            if values
+        },
+        "structural_marker": marker,
+        "source_bytes_read": source_bytes_read,
+        "scan_mode": scan_mode,
+    }
+
+
 def session_projection_build_raw_path(
     *,
     session_dir: Path,
@@ -40347,6 +40477,9 @@ def reindex_session_from_raw(
         sensitive_values_by_kind: dict[str, set[str]] = {}
         privacy_markers_by_key: dict[str, dict[str, Any]] = {}
         sensitive_scan_fallback_reason = ""
+        sensitive_candidate_source_bytes_read = 0
+        sensitive_candidate_range_admitted_block_count = 0
+        sensitive_candidate_full_block_scan_count = 0
 
         def structural_marker_for_block(
             block: dict[str, Any],
@@ -40420,12 +40553,24 @@ def reindex_session_from_raw(
         )
 
         def merge_sensitive_scan(result: dict[str, Any]) -> None:
+            nonlocal sensitive_candidate_source_bytes_read
+            nonlocal sensitive_candidate_range_admitted_block_count
+            nonlocal sensitive_candidate_full_block_scan_count
             cache_key = str(result.get("cache_key") or "")
             structural_marker = result.get("structural_marker")
             if cache_key and isinstance(structural_marker, dict):
                 privacy_markers_by_key[cache_key] = dict(
                     structural_marker
                 )
+            sensitive_candidate_source_bytes_read += int_value(
+                result.get("source_bytes_read")
+            )
+            if result.get("scan_mode") == (
+                "admitted_candidate_line_ranges_v1"
+            ):
+                sensitive_candidate_range_admitted_block_count += 1
+            else:
+                sensitive_candidate_full_block_scan_count += 1
             values_by_kind = result.get("values_by_kind")
             if not isinstance(values_by_kind, dict):
                 return
@@ -40443,9 +40588,13 @@ def reindex_session_from_raw(
                     mp_context=multiprocessing.get_context("fork"),
                 ) as executor:
                     results = executor.map(
-                        sensitive_literal_block_task,
+                        sensitive_literal_candidate_ranges_task,
                         [
-                            (str(raw_path), block)
+                            (
+                                str(raw_path),
+                                block,
+                                structural_marker_for_block(block),
+                            )
                             for block in sensitive_scan_blocks
                         ],
                     )
@@ -40457,6 +40606,9 @@ def reindex_session_from_raw(
                 )
                 sensitive_values_by_kind = {}
                 privacy_markers_by_key = {}
+                sensitive_candidate_source_bytes_read = 0
+                sensitive_candidate_range_admitted_block_count = 0
+                sensitive_candidate_full_block_scan_count = 0
                 for block in scan_blocks:
                     marker = structural_marker_for_block(block)
                     if (
@@ -40473,8 +40625,12 @@ def reindex_session_from_raw(
         ):
             for block in sensitive_scan_blocks:
                 merge_sensitive_scan(
-                    sensitive_literal_block_task(
-                        (str(raw_path), block)
+                    sensitive_literal_candidate_ranges_task(
+                        (
+                            str(raw_path),
+                            block,
+                            structural_marker_for_block(block),
+                        )
                     )
                 )
         literal_policy = DerivedSessionSensitiveLiteralPolicy(
@@ -40505,6 +40661,15 @@ def reindex_session_from_raw(
             "selected_raw_bytes": sum(
                 int_value(block.get("byte_count"))
                 for block in sensitive_scan_blocks
+            ),
+            "candidate_source_bytes_read": (
+                sensitive_candidate_source_bytes_read
+            ),
+            "range_admitted_block_count": (
+                sensitive_candidate_range_admitted_block_count
+            ),
+            "full_block_scan_count": (
+                sensitive_candidate_full_block_scan_count
             ),
             "policy_report": literal_policy.report(),
         }

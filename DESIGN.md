@@ -611,7 +611,11 @@ raw blocks and their compatible block-local token summaries while preserving
 raw authority and atomic publication. Privacy scanning likewise uses a
 necessary-label prefilter before the exact sensitive-assignment matcher; the
 prefilter is a semantic no-op and removes the dominant benign-input
-backtracking cost.
+backtracking cost. Root-bound privacy markers may retain only exact relative
+byte ranges of candidate-bearing raw lines, never literal values or literal
+digests. After one full block discovery pass, hot policy reconstruction reads
+those ranges from raw authority; malformed or unavailable ranges fail over to
+the full block scan.
 
 Raw publication is independently componentized. If capture state and its
 content-addressed block ledger prove the exact build watermark, atomic stable

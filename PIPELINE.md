@@ -261,6 +261,10 @@ receipt combines named per-component roots. A current
 segment-index receipt supplies its canonical semantic SHA and a current
 Markdown receipt supplies its content SHA without reopening either artifact;
 legacy or drifted receipts take the exact-content fallback and are restamped.
+The records root also binds privacy structural markers. Candidate-bearing
+markers may identify exact raw-line byte ranges without storing values or
+digests; repeat policy construction reads only those ranges from raw authority,
+while absent or malformed range metadata selects a full raw-block scan.
 Upstream, event classification uses append-stable content-addressed raw line
 blocks.
 Each completed block is checkpointed, so a cooperative deadline can preserve

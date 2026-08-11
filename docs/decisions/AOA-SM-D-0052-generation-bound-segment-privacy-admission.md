@@ -55,6 +55,14 @@ The admission implementation lives inside the segment producer contract. It
 changes the segment generation while leaving the raw-event-classification
 generation unchanged, so the optimization invalidates only its owning stage.
 
+The classification cache's root-bound structural marker may additionally
+record exact byte ranges of candidate-bearing raw lines, relative to its bound
+raw block. It never records literal values or literal digests. The first
+eligible scan discovers those ranges while validating the complete raw block;
+later appends reconstruct the ephemeral whole-session literal policy by reading
+only the admitted candidate lines from raw authority. A missing, malformed, or
+unrooted range map falls back to the complete block scan.
+
 ## Rationale
 
 Privacy proof should compose across an integrity-checked projection boundary
@@ -72,6 +80,8 @@ reclassification.
   improves from `3.883127 s` to `1.067364 s` (`3.638x`).
 - Positive: the classification generation and its reusable checkpoints remain
   stable.
+- Positive: repeated policy reconstruction reads candidate lines rather than
+  every byte of candidate-bearing historical blocks.
 - Tradeoff: the writer now has two explicit privacy routes whose equivalence
   requires regression coverage.
 - Tradeoff: context-sensitive facet maps continue to pay the full policy cost.
@@ -96,9 +106,9 @@ cold-projection latency or authorize live deployment.
 
 ## Follow-Up Route
 
-Run a clean resource-admitted 430 MB cold projection without a competing heavy
-lane, then use stage timings to choose the next bottleneck rather than
-increasing timeouts.
+Run a migration append and a repeated steady-state append on the actual 430 MB
+fixture, recording candidate block bytes versus admitted candidate-line bytes,
+then use stage timings to choose the next bottleneck.
 
 ## Verification
 
