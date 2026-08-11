@@ -78,6 +78,11 @@ def test_session_projection_benchmark_smoke_proves_parity_and_reuse(
     assert payload["cold_parallel_summary"]["run_count"] == 1
     assert payload["cold_serial_summary"]["wall_seconds_p95"] > 0
     assert payload["cold_parallel_summary"]["wall_seconds_p95"] > 0
+    assert payload["cold_parallel_summary"][
+        "cgroup_measurement_run_count"
+    ] in {0, 1}
+    assert "cgroup_memory" in payload["cold_parallel"]
+    assert "available" in payload["cold_parallel"]["cgroup_memory"]
     assert payload["growing_session"]["capture_execution"][
         "appended_bytes"
     ] == payload["growing_session"]["capture_execution"][
@@ -213,6 +218,91 @@ def test_session_projection_benchmark_supports_parallel_only_repetitions(
     assert payload["cold_parallel_summary"]["run_count"] == 2
     assert payload["serial_parallel_semantic_parity"] is None
     assert payload["parallel_internal_semantic_parity"] is True
+
+
+def test_session_projection_benchmark_reads_cgroup_v2_without_path(
+    tmp_path: Path,
+) -> None:
+    benchmark_spec = importlib.util.spec_from_file_location(
+        "session_projection_benchmark", BENCHMARK_SCRIPT
+    )
+    assert benchmark_spec and benchmark_spec.loader
+    benchmark_module = importlib.util.module_from_spec(benchmark_spec)
+    benchmark_spec.loader.exec_module(benchmark_module)
+    cgroup_root = tmp_path / "cgroup"
+    unit_root = cgroup_root / "user.slice" / "benchmark.scope"
+    unit_root.mkdir(parents=True)
+    proc_cgroup = tmp_path / "proc-self-cgroup"
+    proc_cgroup.write_text(
+        "0::/user.slice/benchmark.scope\n", encoding="utf-8"
+    )
+    counters = {
+        "memory.current": "1024\n",
+        "memory.peak": "4096\n",
+        "memory.swap.current": "0\n",
+        "memory.swap.peak": "0\n",
+        "memory.swap.max": "0\n",
+    }
+    for name, value in counters.items():
+        (unit_root / name).write_text(value, encoding="utf-8")
+
+    snapshot = benchmark_module.cgroup_memory_snapshot(
+        proc_cgroup=proc_cgroup,
+        cgroup_root=cgroup_root,
+    )
+
+    assert snapshot == {
+        "available": True,
+        "memory_current_bytes": 1024,
+        "memory_peak_bytes": 4096,
+        "swap_current_bytes": 0,
+        "swap_peak_bytes": 0,
+        "swap_max_bytes": 0,
+        "truth_status": (
+            "current_process_cgroup_v2_counters_without_path"
+        ),
+    }
+    assert "benchmark.scope" not in json.dumps(snapshot)
+
+
+def test_session_projection_benchmark_summarizes_cgroup_swap_gate() -> None:
+    benchmark_spec = importlib.util.spec_from_file_location(
+        "session_projection_benchmark_summary", BENCHMARK_SCRIPT
+    )
+    assert benchmark_spec and benchmark_spec.loader
+    benchmark_module = importlib.util.module_from_spec(benchmark_spec)
+    benchmark_spec.loader.exec_module(benchmark_module)
+    summary = benchmark_module.benchmark_run_summary(
+        [
+            {
+                "wall_seconds": 1.0,
+                "cpu_seconds": 2.0,
+                "cgroup_memory": {
+                    "available": True,
+                    "swap_peak_after_bytes": 0,
+                    "swap_peak_delta_bytes": 0,
+                    "swap_max_bytes": 0,
+                },
+            },
+            {
+                "wall_seconds": 2.0,
+                "cpu_seconds": 3.0,
+                "cgroup_memory": {
+                    "available": True,
+                    "swap_peak_after_bytes": 0,
+                    "swap_peak_delta_bytes": 0,
+                    "swap_max_bytes": 0,
+                },
+            },
+        ]
+    )
+
+    assert summary["cgroup_measurement_run_count"] == 2
+    assert summary["cgroup_swap_peak_bytes"] == 0
+    assert summary["cgroup_swap_peak_growth_bytes"] == 0
+    assert summary["cgroup_swap_max_bytes"] == 0
+    assert summary["cgroup_swap_disabled"] is True
+    assert summary["cgroup_swap_observed"] is False
 
 
 def test_best_effort_progress_emitter_quarantines_broken_pipe() -> None:

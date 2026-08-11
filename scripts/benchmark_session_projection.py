@@ -163,6 +163,119 @@ def usage_snapshot() -> dict[str, float]:
     }
 
 
+def _read_cgroup_counter(path: Path) -> int | str | None:
+    try:
+        value = path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError):
+        return None
+    if value == "max":
+        return value
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def cgroup_memory_snapshot(
+    *,
+    proc_cgroup: Path = Path("/proc/self/cgroup"),
+    cgroup_root: Path = Path("/sys/fs/cgroup"),
+) -> dict[str, Any]:
+    """Read non-identifying cgroup-v2 memory counters for the current unit."""
+    try:
+        rows = proc_cgroup.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        rows = []
+    relative: str | None = None
+    for row in rows:
+        parts = row.split(":", 2)
+        if len(parts) == 3 and parts[0] == "0" and parts[1] == "":
+            relative = parts[2].lstrip("/")
+            break
+    if relative is None:
+        return {
+            "available": False,
+            "reason": "cgroup_v2_membership_unavailable",
+        }
+    base = cgroup_root / relative
+    counters = {
+        "memory_current_bytes": _read_cgroup_counter(
+            base / "memory.current"
+        ),
+        "memory_peak_bytes": _read_cgroup_counter(base / "memory.peak"),
+        "swap_current_bytes": _read_cgroup_counter(
+            base / "memory.swap.current"
+        ),
+        "swap_peak_bytes": _read_cgroup_counter(
+            base / "memory.swap.peak"
+        ),
+        "swap_max_bytes": _read_cgroup_counter(base / "memory.swap.max"),
+    }
+    if not any(value is not None for value in counters.values()):
+        return {
+            "available": False,
+            "reason": "cgroup_v2_memory_counters_unavailable",
+        }
+    return {
+        "available": True,
+        **counters,
+        "truth_status": "current_process_cgroup_v2_counters_without_path",
+    }
+
+
+def cgroup_memory_delta(
+    before: dict[str, Any],
+    after: dict[str, Any],
+) -> dict[str, Any]:
+    available = bool(before.get("available") and after.get("available"))
+    if not available:
+        return {
+            "available": False,
+            "reason": str(
+                after.get("reason")
+                or before.get("reason")
+                or "cgroup_v2_memory_counters_unavailable"
+            ),
+        }
+
+    def integer(key: str, source: dict[str, Any]) -> int | None:
+        value = source.get(key)
+        return value if isinstance(value, int) else None
+
+    swap_current_before = integer("swap_current_bytes", before)
+    swap_current_after = integer("swap_current_bytes", after)
+    swap_peak_before = integer("swap_peak_bytes", before)
+    swap_peak_after = integer("swap_peak_bytes", after)
+    return {
+        "available": True,
+        "memory_current_before_bytes": integer(
+            "memory_current_bytes", before
+        ),
+        "memory_current_after_bytes": integer(
+            "memory_current_bytes", after
+        ),
+        "memory_peak_after_bytes": integer("memory_peak_bytes", after),
+        "swap_current_before_bytes": swap_current_before,
+        "swap_current_after_bytes": swap_current_after,
+        "swap_current_delta_bytes": (
+            swap_current_after - swap_current_before
+            if swap_current_before is not None
+            and swap_current_after is not None
+            else None
+        ),
+        "swap_peak_before_bytes": swap_peak_before,
+        "swap_peak_after_bytes": swap_peak_after,
+        "swap_peak_delta_bytes": (
+            max(0, swap_peak_after - swap_peak_before)
+            if swap_peak_before is not None
+            and swap_peak_after is not None
+            else None
+        ),
+        "swap_max_bytes": after.get("swap_max_bytes"),
+        "truth_status": "current_process_cgroup_v2_delta_without_path",
+    }
+
+
 def percentile(values: list[float], percentile_value: float) -> float:
     """Return a deterministic nearest-rank percentile for benchmark receipts."""
     if not values:
@@ -183,6 +296,27 @@ def benchmark_run_summary(
 ) -> dict[str, Any]:
     wall = [float(run.get("wall_seconds") or 0.0) for run in runs]
     cpu = [float(run.get("cpu_seconds") or 0.0) for run in runs]
+    cgroup_rows = [
+        run.get("cgroup_memory", {})
+        for run in runs
+        if isinstance(run.get("cgroup_memory"), dict)
+        and run.get("cgroup_memory", {}).get("available") is True
+    ]
+    swap_peaks = [
+        int(row["swap_peak_after_bytes"])
+        for row in cgroup_rows
+        if isinstance(row.get("swap_peak_after_bytes"), int)
+    ]
+    swap_peak_growth = [
+        int(row["swap_peak_delta_bytes"])
+        for row in cgroup_rows
+        if isinstance(row.get("swap_peak_delta_bytes"), int)
+    ]
+    swap_limits = {
+        row.get("swap_max_bytes")
+        for row in cgroup_rows
+        if row.get("swap_max_bytes") is not None
+    }
     return {
         "run_count": len(runs),
         "wall_seconds_p50": round(percentile(wall, 0.50), 6),
@@ -199,6 +333,22 @@ def benchmark_run_summary(
         ),
         "swap_delta": sum(
             int(run.get("swap_delta") or 0) for run in runs
+        ),
+        "cgroup_measurement_run_count": len(cgroup_rows),
+        "cgroup_swap_peak_bytes": max(swap_peaks, default=None),
+        "cgroup_swap_peak_growth_bytes": max(
+            swap_peak_growth, default=None
+        ),
+        "cgroup_swap_max_bytes": (
+            next(iter(swap_limits)) if len(swap_limits) == 1 else None
+        ),
+        "cgroup_swap_disabled": bool(
+            cgroup_rows
+            and len(cgroup_rows) == len(runs)
+            and swap_limits == {0}
+        ),
+        "cgroup_swap_observed": bool(
+            swap_peaks and max(swap_peaks) > 0
         ),
         "semantic_digests": sorted(
             {
@@ -225,6 +375,7 @@ def benchmark_build(
     )
     raw_sha_before = session_memory.sha256_file(raw_path)
     usage_before = usage_snapshot()
+    cgroup_before = cgroup_memory_snapshot()
     started = time.monotonic()
     result = session_memory.reindex_session_from_raw(
         aoa_root,
@@ -233,6 +384,7 @@ def benchmark_build(
     )
     wall_seconds = time.monotonic() - started
     usage_after = usage_snapshot()
+    cgroup_after = cgroup_memory_snapshot()
     cpu_seconds = max(
         0.0,
         usage_after["cpu_seconds"] - usage_before["cpu_seconds"],
@@ -266,6 +418,9 @@ def benchmark_build(
         ),
         "swap_delta": int(
             usage_after["swaps"] - usage_before["swaps"]
+        ),
+        "cgroup_memory": cgroup_memory_delta(
+            cgroup_before, cgroup_after
         ),
         "event_count": int(result.get("event_count") or 0),
         "segment_count": int(result.get("segment_count") or 0),
