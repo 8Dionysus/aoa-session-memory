@@ -18611,14 +18611,38 @@ def task_episode_counts_for_episodes(episodes: list[dict[str, Any]]) -> dict[str
 
 
 def segment_for_line(segments: list[dict[str, Any]], line_no: int) -> dict[str, Any]:
-    for segment in segments:
-        if not isinstance(segment, dict):
-            continue
-        source_range = segment.get("source_range") if isinstance(segment.get("source_range"), dict) else {}
-        from_line = int_value(source_range.get("from_line"), 0)
-        to_line = int_value(source_range.get("to_line"), 0)
-        if from_line and to_line and from_line <= line_no <= to_line:
-            return segment
+    # Generated segment manifests are ordered by non-overlapping source range.
+    # Episode construction resolves several refs per event, so a linear scan
+    # makes the full reduction proportional to events times segment count.
+    low = 0
+    high = len(segments)
+    while low < high:
+        midpoint = (low + high) // 2
+        candidate = segments[midpoint]
+        source_range = (
+            candidate.get("source_range")
+            if isinstance(candidate, dict)
+            and isinstance(candidate.get("source_range"), dict)
+            else {}
+        )
+        if int_value(source_range.get("from_line"), 0) <= line_no:
+            low = midpoint + 1
+        else:
+            high = midpoint
+    if low <= 0:
+        return {}
+    segment = segments[low - 1]
+    if not isinstance(segment, dict):
+        return {}
+    source_range = (
+        segment.get("source_range")
+        if isinstance(segment.get("source_range"), dict)
+        else {}
+    )
+    from_line = int_value(source_range.get("from_line"), 0)
+    to_line = int_value(source_range.get("to_line"), 0)
+    if from_line and to_line and from_line <= line_no <= to_line:
+        return segment
     return {}
 
 
@@ -18830,6 +18854,8 @@ def task_episode_is_structured_verification_action(
 def task_episode_is_correlation_matched_verification_result(
     event: RawEvent,
     linked_action_record: dict[str, Any],
+    *,
+    semantic_text: str | None = None,
 ) -> bool:
     """Require a matched verification action and an explicit semantic success."""
     return bool(
@@ -18837,7 +18863,13 @@ def task_episode_is_correlation_matched_verification_result(
         and event.correlation_id
         and linked_action_record.get("verification_action") is True
         and event.outcome not in {"failed", "blocked"}
-        and has_success_signal(event_semantic_text(event).casefold())
+        and has_success_signal(
+            (
+                event_semantic_text(event)
+                if semantic_text is None
+                else semantic_text
+            ).casefold()
+        )
     )
 
 
@@ -18851,7 +18883,12 @@ def task_episode_is_correlated_agent_activity_status(event: RawEvent) -> bool:
     )
 
 
-def task_episode_representation_role(event: RawEvent, agent_class: str) -> tuple[str, int, str]:
+def task_episode_representation_role(
+    event: RawEvent,
+    agent_class: str,
+    *,
+    semantic_text: str | None = None,
+) -> tuple[str, int, str]:
     payload = task_episode_payload(event)
     payload_type = str(payload.get("type") or "")
     message_role = str(payload.get("role") or "") if payload_type == "message" else ""
@@ -18892,7 +18929,11 @@ def task_episode_representation_role(event: RawEvent, agent_class: str) -> tuple
         "assistant_handoff_or_resume",
     }:
         return "outcomes", 72, "assistant_observation"
-    if agent_class == "assistant_reasoning_boundary" and event_semantic_text(event):
+    if agent_class == "assistant_reasoning_boundary" and (
+        event_semantic_text(event)
+        if semantic_text is None
+        else semantic_text
+    ):
         return "reasoning", 35, "assistant_reasoning_summary"
     return "", 0, "not_semantically_admitted"
 
@@ -19161,7 +19202,11 @@ def task_episode_retrieval_control_structured_payload(
     return ""
 
 
-def task_episode_retrieval_control_command(event: RawEvent) -> str:
+def task_episode_retrieval_control_command(
+    event: RawEvent,
+    *,
+    semantic_text: str | None = None,
+) -> str:
     payload = task_episode_payload(event)
     structured_control = task_episode_retrieval_control_structured_payload(payload)
     if structured_control:
@@ -19173,7 +19218,11 @@ def task_episode_retrieval_control_command(event: RawEvent) -> str:
     }
     if not structured_action and event.event_type not in {"COMMAND", "FILE_READ", "TOOL_CALL"}:
         return ""
-    return task_episode_retrieval_control_semantic(event_semantic_text(event))
+    return task_episode_retrieval_control_semantic(
+        event_semantic_text(event)
+        if semantic_text is None
+        else semantic_text
+    )
 
 
 def task_episode_retrieval_control_result_semantic(semantic: str) -> str:
@@ -19189,10 +19238,18 @@ def task_episode_retrieval_control_result_semantic(semantic: str) -> str:
     return ""
 
 
-def task_episode_retrieval_control_result_command(event: RawEvent) -> str:
+def task_episode_retrieval_control_result_command(
+    event: RawEvent,
+    *,
+    semantic_text: str | None = None,
+) -> str:
     if not task_episode_is_structured_result(event):
         return ""
-    return task_episode_retrieval_control_result_semantic(event_semantic_text(event))
+    return task_episode_retrieval_control_result_semantic(
+        event_semantic_text(event)
+        if semantic_text is None
+        else semantic_text
+    )
 
 
 def task_episode_retrieval_control_typed_anchors(
@@ -19326,21 +19383,36 @@ def task_episode_representation_entry(
     *,
     linked_action: str = "",
     linked_action_event_type: str = "",
+    semantic_text: str | None = None,
 ) -> dict[str, Any] | None:
     structured_skill = isinstance(event.facets.get("structured_skill_input"), dict)
     if structured_skill:
         return None
-    semantic = event_semantic_text(event)
+    semantic = (
+        event_semantic_text(event)
+        if semantic_text is None
+        else semantic_text
+    )
     if event.event_type == "INTER_AGENT_TASK":
         semantic = task_episode_inter_agent_task_text(event)
     if event.event_type == "USER_INTENT" and naming_evidence_text_is_runtime_envelope(semantic):
         return None
     agent_class = agent_event_class_for_event(event)
-    role, score, admission_basis = task_episode_representation_role(event, agent_class)
+    role, score, admission_basis = task_episode_representation_role(
+        event,
+        agent_class,
+        semantic_text=semantic,
+    )
     if not role:
         return None
-    retrieval_command = task_episode_retrieval_control_command(event)
-    retrieval_result_command = task_episode_retrieval_control_result_command(event)
+    retrieval_command = task_episode_retrieval_control_command(
+        event,
+        semantic_text=semantic,
+    )
+    retrieval_result_command = task_episode_retrieval_control_result_command(
+        event,
+        semantic_text=semantic,
+    )
     linked_retrieval_control = str(linked_action or "").startswith(TASK_EPISODE_RETRIEVAL_CONTROL_PREFIX)
     if retrieval_command:
         semantic = f"{TASK_EPISODE_RETRIEVAL_CONTROL_PREFIX} invocation: {retrieval_command}"
@@ -20233,7 +20305,11 @@ class TaskEpisodeBuilder:
                 transition_reason=conversation_kind or "user_prompt",
             )
             self.episodes.append(self.current)
-            intent_entry = task_episode_representation_entry(event, self.segments)
+            intent_entry = task_episode_representation_entry(
+                event,
+                self.segments,
+                semantic_text=semantic_text,
+            )
             if intent_entry is not None:
                 self.current["_representation_candidates"].append(intent_entry)
             return
@@ -20453,6 +20529,7 @@ class TaskEpisodeBuilder:
             self.segments,
             linked_action=linked_action,
             linked_action_event_type=linked_action_event_type,
+            semantic_text=semantic_text,
         )
         if representation is not None:
             if semantic_query_control_action:
@@ -20504,6 +20581,7 @@ class TaskEpisodeBuilder:
                     task_episode_is_correlation_matched_verification_result(
                         event,
                         linked_action_record,
+                        semantic_text=semantic_text,
                     )
                 ):
                     verification_representation = {
@@ -23498,6 +23576,7 @@ def session_index_task_episode_shard_envelope(
         dict[str, Any],
         DerivedSessionSensitiveLiteralPolicy,
         dict[str, Any],
+        dict[str, Any] | None,
     ],
 ) -> tuple[int, str, dict[str, Any]]:
     (
@@ -23506,10 +23585,15 @@ def session_index_task_episode_shard_envelope(
         episode,
         literal_policy,
         source_identity,
+        pre_redacted_payload,
     ) = task
-    payload = redact_derived_value(
-        episode,
-        literal_policy=literal_policy,
+    payload = (
+        dict(pre_redacted_payload)
+        if isinstance(pre_redacted_payload, dict)
+        else redact_derived_value(
+            episode,
+            literal_policy=literal_policy,
+        )
     )
     envelope = {
         "schema_version": SESSION_INDEX_SHARD_SCHEMA_VERSION,
@@ -23707,6 +23791,7 @@ def materialize_session_index_task_episode_shards(
             dict[str, Any],
             DerivedSessionSensitiveLiteralPolicy,
             dict[str, Any],
+            dict[str, Any] | None,
         ]
     ] = []
     reused_count = 0
@@ -23722,15 +23807,19 @@ def materialize_session_index_task_episode_shards(
                 generation_identity=generation_identity,
             )
         )
-        expected_payload = redact_derived_value(
-            episode,
-            literal_policy=literal_policy,
-        )
-        expected_payload_sha256 = (
-            session_index_shard_payload_sha256(expected_payload)
-        )
         prior = existing.get(component_key)
+        expected_payload: dict[str, Any] | None = None
+        expected_payload_sha256 = ""
         if prior is not None:
+            expected_payload = redact_derived_value(
+                episode,
+                literal_policy=literal_policy,
+            )
+            expected_payload_sha256 = (
+                session_index_shard_payload_sha256(
+                    expected_payload
+                )
+            )
             envelope, record = prior
             prior_source_identity = (
                 envelope.get("source_identity")
@@ -23800,6 +23889,7 @@ def materialize_session_index_task_episode_shards(
                             episode,
                             literal_policy,
                             component_source_identity,
+                            expected_payload,
                         )
                     )
                 )
@@ -23821,6 +23911,7 @@ def materialize_session_index_task_episode_shards(
                 episode,
                 literal_policy,
                 component_source_identity,
+                expected_payload,
             )
         )
 

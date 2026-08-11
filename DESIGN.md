@@ -608,6 +608,15 @@ metadata, and an empty compatibility field. Legacy indexes without component
 storage may still expose their embedded array. The shard store remains a
 rebuildable projection, not a second evidence owner.
 
+Task-episode reduction computes each event's normalized semantic text once and
+passes that immutable value to its deterministic admission consumers. Ordered,
+non-overlapping segment ranges are resolved logarithmically. A new shard is
+privacy-projected once in its worker; when a prior shard must be compared or
+restamped, the parent computes that exact redacted payload once and transfers
+it to the worker. These are producer-ABI changes for task episodes and the
+dependent session index only; classification and segment generations remain
+independent.
+
 Segment publication is index first. The machine index and compact Markdown
 synopsis preserve typed metadata, stable anchors, and exact raw/block refs, but
 ordinary builds do not duplicate full raw event bodies. A selected segment can

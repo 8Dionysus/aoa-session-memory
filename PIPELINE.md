@@ -201,6 +201,15 @@ to verify the whole component set. Other readers share the manifest-first
 loader; `session.index.json` keeps aggregate metadata and an empty compatibility
 field. A legacy index without component storage may still use its embedded
 array.
+
+Episode reduction derives semantic text once per event and reuses it across
+admission checks, while ordered segment ranges use logarithmic lookup. Cold
+shard publication performs one whole-session-literal redaction pass. A prior
+shard comparison also performs one pass, then supplies that exact payload to
+the worker for reuse or restamping instead of scanning it again. Any missing
+payload proof falls back to worker redaction; persistent shard contents and
+privacy policy are unchanged.
+
 Credential matchers retain their exact admitting expressions; cheap
 necessary-marker prefilters skip only matchers that cannot possibly match the
 current text, while opaque-credential detection remains unconditional.

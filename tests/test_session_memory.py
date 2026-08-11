@@ -2312,6 +2312,82 @@ def test_task_episode_semantics_admits_compact_success_observation_but_not_sourc
     assert source_result.get("typed_anchors", []) == []
 
 
+def test_task_episode_builder_computes_semantic_text_once_per_event(
+    monkeypatch: Any,
+) -> None:
+    rows = [
+        {
+            "timestamp": "2026-08-11T00:00:00Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "Inspect the current projection",
+                    }
+                ],
+            },
+        },
+        {
+            "timestamp": "2026-08-11T00:00:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "arguments": json.dumps({"cmd": "session-memory status"}),
+                "call_id": "call-semantic-once",
+            },
+        },
+        {
+            "timestamp": "2026-08-11T00:00:02Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call-semantic-once",
+                "output": "Process exited with code 0",
+            },
+        },
+    ]
+    events = [
+        module.classify_raw_event(json.dumps(row), row, line_no)
+        for line_no, row in enumerate(rows, start=1)
+    ]
+    original = module.event_semantic_text
+    observed_lines: list[int] = []
+
+    def counted(event: Any) -> str:
+        observed_lines.append(event.line_no)
+        return original(event)
+
+    monkeypatch.setattr(module, "event_semantic_text", counted)
+    episodes = module.generated_task_episodes_for_events(events, [])
+
+    assert episodes
+    assert observed_lines == [1, 2, 3]
+
+
+def test_segment_for_line_uses_ordered_ranges_without_losing_boundaries() -> None:
+    segments = [
+        {
+            "segment_id": f"{ordinal:03d}",
+            "source_range": {
+                "from_line": (ordinal * 10) + 1,
+                "to_line": (ordinal * 10) + 8,
+            },
+        }
+        for ordinal in range(644)
+    ]
+
+    assert module.segment_for_line(segments, 1)["segment_id"] == "000"
+    assert module.segment_for_line(segments, 3211)["segment_id"] == "321"
+    assert module.segment_for_line(segments, 6438)["segment_id"] == "643"
+    assert module.segment_for_line(segments, 9) == {}
+    assert module.segment_for_line(segments, 0) == {}
+    assert module.segment_for_line([], 1) == {}
+
+
 def test_task_episode_replayed_intent_after_turn_abort_stays_in_one_semantic_lifecycle() -> None:
     rows = [
         {
@@ -92258,6 +92334,56 @@ def test_session_index_task_episode_shards_checkpoint_and_resume(
     )
     assert b"shard-redaction-marker-13579" not in shard_bytes
     assert module.DERIVED_TEXT_REDACTION_MARKER.encode() in shard_bytes
+
+
+def test_cold_task_episode_shard_redacts_each_payload_once(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    stage_dir = tmp_path / "session-stage"
+    episode = {
+        "episode_id": "task-0001",
+        "stable_id": "session:task-0001:event-1",
+        "identity": {"canonical_id": "episode:canonical-1"},
+        "status": "closed",
+        "semantic_text": "single-pass-redaction-marker-24680",
+        "event_range": {"from_line": 1, "to_line": 1},
+    }
+    policy = module.DerivedSessionSensitiveLiteralPolicy(
+        values_by_kind={
+            "fixture": {"single-pass-redaction-marker-24680"}
+        }
+    )
+    original = module.redact_derived_value
+    calls = 0
+
+    def counted(*args: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        if not str(kwargs.get("field_name") or ""):
+            calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(module, "redact_derived_value", counted)
+    result = module.materialize_session_index_task_episode_shards(
+        stage_dir,
+        [episode],
+        publish_identity={
+            "source": {
+                "raw_sha256": "a" * 64,
+                "raw_bytes": 100,
+                "raw_line_count": 1,
+            },
+            "publish_id": "b" * 64,
+        },
+        literal_policy=policy,
+        workers=1,
+    )
+
+    assert result["complete"] is True
+    assert calls == 1
+    assert result["payloads"][0]["semantic_text"] == (
+        module.DERIVED_TEXT_REDACTION_MARKER
+    )
 
 
 def test_session_index_shard_manifest_validates_manifest_first_components(
