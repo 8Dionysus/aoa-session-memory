@@ -16355,83 +16355,6 @@ def event_msg_type(event: RawEvent) -> str:
     return str(payload.get("type") or "")
 
 
-def event_classification_cache_record_summary(
-    *,
-    cache_root: Path,
-    block: dict[str, Any],
-    record: Any,
-) -> dict[str, Any]:
-    """Load one immutable block summary omitted from the compact index."""
-    if not isinstance(record, dict) or record.get("block") != block:
-        raise ValueError("classification_cache_summary_record_mismatch")
-    artifact_path = cache_root / str(record.get("artifact") or "")
-    artifact = read_gzip_json(artifact_path)
-    summary = (
-        artifact.get("summary")
-        if isinstance(artifact.get("summary"), dict)
-        else {}
-    )
-    line_range = (
-        summary.get("line_range")
-        if isinstance(summary.get("line_range"), dict)
-        else {}
-    )
-    if (
-        artifact.get("block") != block
-        or int_value(summary.get("schema_version")) != 1
-        or int_value(summary.get("event_count"))
-        != int_value(block.get("line_count"))
-        or int_value(line_range.get("from_line"))
-        != int_value(block.get("line_start"))
-        or int_value(line_range.get("to_line"))
-        != int_value(block.get("line_end"))
-    ):
-        raise ValueError(
-            "classification_cache_summary_missing_or_incompatible"
-        )
-    return dict(summary)
-
-
-def published_session_event_summary(
-    index: Any,
-    *,
-    prefix_line_count: int,
-) -> dict[str, Any] | None:
-    """Form the mergeable aggregate owned by an exact published prefix."""
-    scalar_keys = (
-        "event_counts",
-        "family_counts",
-        "phase_counts",
-        "actor_counts",
-        "outcome_counts",
-        "conversation_act_counts",
-        "session_act_counts",
-        "agent_event_counts",
-    )
-    if (
-        not isinstance(index, dict)
-        or prefix_line_count <= 0
-        or int_value(index.get("event_count")) != prefix_line_count
-        or any(not isinstance(index.get(key), dict) for key in scalar_keys)
-        or not isinstance(index.get("route_signal_counts"), dict)
-    ):
-        return None
-    return {
-        "schema_version": 1,
-        "event_count": prefix_line_count,
-        "line_range": {
-            "from_line": 1,
-            "to_line": prefix_line_count,
-        },
-        **{key: dict(index[key]) for key in scalar_keys},
-        "route_signal_counts": dict(index["route_signal_counts"]),
-        "raw_text_persisted": False,
-        "truth_status": (
-            "exact_published_session_aggregate_prefix_not_raw_authority"
-        ),
-    }
-
-
 def compacted_event_cluster_end(events: list[RawEvent], start_index: int) -> int:
     event = events[start_index]
     if event.source_type != "compacted":
@@ -25137,14 +25060,6 @@ def write_session_index_impl(
         "classification_block_summary_merge_v1"
         if aggregate_mode
         else "full_event_reduction_v1"
-    )
-    execution_metrics["event_aggregate_source_mode"] = str(
-        aggregate.get("aggregation_mode")
-        or (
-            "classification_block_summary_merge_v1"
-            if aggregate_mode
-            else "full_event_reduction_v1"
-        )
     )
     phase_started = time.monotonic()
     task_episode_segments = (
@@ -39650,6 +39565,83 @@ def reusable_event_classification_cache_record(
     return None
 
 
+def event_classification_cache_record_summary(
+    *,
+    cache_root: Path,
+    block: dict[str, Any],
+    record: Any,
+) -> dict[str, Any]:
+    """Load one immutable block summary omitted from the compact index."""
+    if not isinstance(record, dict) or record.get("block") != block:
+        raise ValueError("classification_cache_summary_record_mismatch")
+    artifact_path = cache_root / str(record.get("artifact") or "")
+    artifact = read_gzip_json(artifact_path)
+    summary = (
+        artifact.get("summary")
+        if isinstance(artifact.get("summary"), dict)
+        else {}
+    )
+    line_range = (
+        summary.get("line_range")
+        if isinstance(summary.get("line_range"), dict)
+        else {}
+    )
+    if (
+        artifact.get("block") != block
+        or int_value(summary.get("schema_version")) != 1
+        or int_value(summary.get("event_count"))
+        != int_value(block.get("line_count"))
+        or int_value(line_range.get("from_line"))
+        != int_value(block.get("line_start"))
+        or int_value(line_range.get("to_line"))
+        != int_value(block.get("line_end"))
+    ):
+        raise ValueError(
+            "classification_cache_summary_missing_or_incompatible"
+        )
+    return dict(summary)
+
+
+def published_session_event_summary(
+    index: Any,
+    *,
+    prefix_line_count: int,
+) -> dict[str, Any] | None:
+    """Form the mergeable aggregate owned by an exact published prefix."""
+    scalar_keys = (
+        "event_counts",
+        "family_counts",
+        "phase_counts",
+        "actor_counts",
+        "outcome_counts",
+        "conversation_act_counts",
+        "session_act_counts",
+        "agent_event_counts",
+    )
+    if (
+        not isinstance(index, dict)
+        or prefix_line_count <= 0
+        or int_value(index.get("event_count")) != prefix_line_count
+        or any(not isinstance(index.get(key), dict) for key in scalar_keys)
+        or not isinstance(index.get("route_signal_counts"), dict)
+    ):
+        return None
+    return {
+        "schema_version": 1,
+        "event_count": prefix_line_count,
+        "line_range": {
+            "from_line": 1,
+            "to_line": prefix_line_count,
+        },
+        **{key: dict(index[key]) for key in scalar_keys},
+        "route_signal_counts": dict(index["route_signal_counts"]),
+        "raw_text_persisted": False,
+        "truth_status": (
+            "exact_published_session_aggregate_prefix_not_raw_authority"
+        ),
+    }
+
+
 def session_projection_build_raw_path(
     *,
     session_dir: Path,
@@ -42133,6 +42125,14 @@ def reindex_session_from_raw(
             execution_metrics_out=session_index_execution,
             event_summary=event_aggregate_summary,
             processed_to_line=total_event_count,
+        )
+        session_index_execution["event_aggregate_source_mode"] = str(
+            (
+                event_aggregate_summary.get("aggregation_mode")
+                if isinstance(event_aggregate_summary, dict)
+                else ""
+            )
+            or "full_event_reduction_v1"
         )
         phase_timings_ms["session_index_generation"] = int(
             (time.monotonic() - phase_started) * 1000
