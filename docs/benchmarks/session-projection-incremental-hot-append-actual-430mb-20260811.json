@@ -119,7 +119,12 @@
     "captured_append_full_replay_semantic_parity_test": true,
     "deep_artifact_audit_test": true,
     "malformed_candidate_range_full_scan_fallback_test": true,
-    "full_source_suite_pending_at_receipt_write": true
+    "full_source_suite": {
+      "revision": "5f58221cdf2141cc5928c0a7f03c8932e3a3439f",
+      "passed": 1328,
+      "elapsed_seconds": 548.07,
+      "ok": true
+    }
   },
   "authority_boundary": "Raw capture and immutable raw refs remain evidence authority. Physical input block counters include executable, filesystem-cache, and spawned-worker reads and are not claimed as exact logical projection input. One shared cgroup sample observed unrelated swap growth; the dedicated no-swap scope is the isolated memory proof.",
   "truth_status": "four_sample_actual_430mb_hot_append_receipt_with_isolated_no_swap_proof_not_a_long_horizon_production_percentile",

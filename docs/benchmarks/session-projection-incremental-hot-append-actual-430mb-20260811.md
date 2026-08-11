@@ -42,8 +42,9 @@ Raw capture and immutable raw refs remain evidence authority. Physical input
 block counters include executable, filesystem-cache, and spawned-worker reads;
 they are retained in the machine receipt but are not presented as exact logical
 projection input. Captured-append/full-replay parity, malformed-range fallback,
-deep audit, and crash-resume behavior have focused tests. Full-suite and fresh
-portable-export gates are recorded separately.
+deep audit, and crash-resume behavior have focused tests. The final source
+revision passed all `1,328` source tests in `548.07 s`; fresh portable-export
+evidence is recorded separately.
 
 Exact per-sample data is in
 `session-projection-incremental-hot-append-actual-430mb-20260811.json`.

@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "artifact_type": "session_projection_incremental_core_portability_final_receipt",
+  "generated_at": "2026-08-11T15:06:47Z",
+  "truth_status": "clean_standalone_export_and_isolated_artifact_verification_not_live_deployment_or_registry_admission",
+  "source": {
+    "branch": "agent/session-memory-incremental-core-20260810",
+    "revision": "5f58221cdf2141cc5928c0a7f03c8932e3a3439f",
+    "checkout_kind": "isolated_worktree",
+    "canonical_checkout_mutated": false,
+    "live_install_mutated": false,
+    "github_mutated": false
+  },
+  "clean_export": {
+    "ok": true,
+    "tests_included": true,
+    "sessions_included": false,
+    "scanned_files": 320,
+    "scanned_bytes": 15008065,
+    "issue_count": 0,
+    "public_safety_status": "current"
+  },
+  "standalone_validation": {
+    "ok": true,
+    "check_count": 27,
+    "failed_checks": []
+  },
+  "portable_completion_audit": {
+    "ok": true,
+    "completion_ready": true,
+    "remaining": [],
+    "local_git_initialized": true,
+    "existing_public_fetch_origin_configured": true,
+    "push_url_remained_fail_closed": true,
+    "remote_write_performed": false
+  },
+  "full_source_suite": {
+    "revision": "5f58221cdf2141cc5928c0a7f03c8932e3a3439f",
+    "passed": 1328,
+    "elapsed_seconds": 548.07,
+    "ok": true
+  },
+  "artifact_trust_prepare": {
+    "artifact_class": "aoa_session_memory_portable_bundle",
+    "producer_profile_status": "owner_local_producer_validated",
+    "source_ref": "5f58221cdf2141cc5928c0a7f03c8932e3a3439f",
+    "subject_digest": "sha256:4bafbd5760271acb580a476c24f598f248fe59950cbebd531bc143bef868ea44",
+    "bundle_verification_ok": true,
+    "release_check_ok": true,
+    "required_controls": [
+      "abi_signature",
+      "sbom",
+      "slsa_in_toto"
+    ],
+    "verified_controls": [
+      "abi_signature",
+      "sbom",
+      "slsa_in_toto"
+    ]
+  },
+  "consumer_admission": {
+    "consumer_intent": "update_client",
+    "verdict": "unknown",
+    "allow": false,
+    "blockers": [
+      "no_registry_record"
+    ],
+    "registry_mutated": false,
+    "promotion_performed": false,
+    "claim_limit": "The isolated prepared bundle is verified, but an empty isolated registry cannot admit it for consumer use."
+  },
+  "authority_boundary": "This receipt proves a clean portable export, standalone validation, full source tests, and isolated ABI/SBOM/SLSA artifact verification at the exact source revision. It does not deploy the bundle, mutate live session evidence, register or promote an artifact, change GitHub, or claim consumer admission from an empty registry."
+}
