@@ -44,6 +44,12 @@ only validates publication. Changing receipt plumbing therefore invalidates
 semantic receipts without needlessly restamping every segment payload; changing
 segment construction still changes the segment generation.
 
+The atomic-publication outbox snapshot uses the same manifest-persisted segment
+input and generation identities. It must not reopen every immutable segment
+index merely to discover identities already covered by the manifest and its
+validated receipts. Projections predating component identities retain a
+fail-closed compatibility fallback that opens the referenced index once.
+
 An unchanged component root is admitted only when the existing exact artifact
 receipt remains current by size, mtime, and ctime. A legacy receipt without a
 semantic root, or any metadata drift, causes that component to be opened and
@@ -62,6 +68,8 @@ silently trusting incomplete receipts.
 
 - Current append validation performs zero segment-index reads and zero segment
   Markdown hashes for unchanged components.
+- Current outbox diffing performs zero segment-index reads; its old and staged
+  component snapshots are timed independently in the rebuild receipt.
 - The first append over legacy receipts may read each historical index once to
   migrate its semantic root; subsequent appends are metadata-only.
 - The aggregate digest changes from v1 streamed canonical JSON to v2 named
@@ -93,5 +101,6 @@ raw snapshot fallback.
 ## Verification
 
 Focused tests prove the v2 aggregate root against a materialized reference,
-prove current segment receipts avoid both JSON reads and Markdown hashes, and
-retain captured-growth semantic parity plus crash/atomic-publish behavior.
+prove current segment receipts and outbox snapshots avoid historical segment
+JSON reads, and retain captured-growth semantic parity plus
+crash/atomic-publish behavior.

@@ -25582,10 +25582,6 @@ def projection_component_snapshot(
         projection_dir / "session.manifest.json",
         {},
     )
-    session_index = read_json(
-        projection_dir / SESSION_INDEX_JSON,
-        {},
-    )
 
     def add_component(
         component_id: str,
@@ -25625,17 +25621,23 @@ def projection_component_snapshot(
         )
     session_index_path = projection_dir / SESSION_INDEX_JSON
     if session_index_path.is_file():
+        index_schema = (
+            manifest.get("index_schema")
+            if isinstance(manifest, dict)
+            and isinstance(manifest.get("index_schema"), dict)
+            else {}
+        )
+        session_index_generation_id = str(
+            index_schema.get("session_index_generation_id") or ""
+        )
         add_component(
             "session:index",
             component_type="session_component_manifest",
             digest=sha256_file(session_index_path),
             source_ref=SESSION_INDEX_JSON,
             generation_identity=(
-                session_index.get("generation_identity")
-                if isinstance(session_index, dict)
-                and isinstance(
-                    session_index.get("generation_identity"), dict
-                )
+                {"generation_id": session_index_generation_id}
+                if session_index_generation_id
                 else {}
             ),
         )
@@ -25653,24 +25655,51 @@ def projection_component_snapshot(
         index_path = projection_dir / "segments" / index_name
         if not segment_id or not index_path.is_file():
             continue
-        segment_index = read_json(index_path, {})
-        segment_generation = (
-            segment_index.get("generation_identity")
-            if isinstance(segment_index, dict)
-            and isinstance(
-                segment_index.get("generation_identity"), dict
+        component_identity = (
+            segment.get("component_identity")
+            if isinstance(segment.get("component_identity"), dict)
+            else {}
+        )
+        segment_generation_id = str(
+            component_identity.get("generation_id") or ""
+        )
+        segment_input_digest = str(
+            component_identity.get("input_digest")
+            or segment.get("input_digest")
+            or ""
+        )
+        if not segment_generation_id:
+            # Compatibility fallback for projections produced before segment
+            # component identities were persisted in the manifest.  Current
+            # projections never hydrate immutable segment indexes merely to
+            # compute the publication outbox diff.
+            segment_index = read_json(index_path, {})
+            segment_generation = (
+                segment_index.get("generation_identity")
+                if isinstance(segment_index, dict)
+                and isinstance(
+                    segment_index.get("generation_identity"), dict
+                )
+                else {}
             )
+            segment_generation_id = str(
+                segment_generation.get("generation_id") or ""
+            )
+            segment_input_digest = str(
+                segment_index.get("input_digest")
+                if isinstance(segment_index, dict)
+                else ""
+            )
+        segment_generation = (
+            {"generation_id": segment_generation_id}
+            if segment_generation_id
             else {}
         )
         semantic_digest = hashlib.sha256(
             json.dumps(
                 {
-                    "input_digest": str(
-                        segment_index.get("input_digest") or ""
-                    ),
-                    "generation_id": str(
-                        segment_generation.get("generation_id") or ""
-                    ),
+                    "input_digest": segment_input_digest,
+                    "generation_id": segment_generation_id,
                 },
                 ensure_ascii=False,
                 sort_keys=True,
@@ -28518,8 +28547,16 @@ def atomic_publish_session_projection(
             "staged_session_projection_invalid:"
             + ",".join(validation.get("diagnostics", []))
         )
+    component_snapshot_started = time.monotonic()
     old_snapshot = projection_component_snapshot(session_dir)
+    old_component_snapshot_ms = int(
+        (time.monotonic() - component_snapshot_started) * 1000
+    )
+    component_snapshot_started = time.monotonic()
     new_snapshot = projection_component_snapshot(stage_dir)
+    new_component_snapshot_ms = int(
+        (time.monotonic() - component_snapshot_started) * 1000
+    )
     old_manifest = read_json(
         session_dir / "session.manifest.json",
         {},
@@ -28680,6 +28717,12 @@ def atomic_publish_session_projection(
         ],
         "phase_timings_ms": {
             "projection_validation": validation_ms,
+            "old_component_snapshot": old_component_snapshot_ms,
+            "new_component_snapshot": new_component_snapshot_ms,
+            "component_snapshots": (
+                old_component_snapshot_ms
+                + new_component_snapshot_ms
+            ),
             "atomic_publish": int(
                 (time.monotonic() - publish_started) * 1000
             ),
@@ -41685,6 +41728,15 @@ def reindex_session_from_raw(
         )
         phase_timings_ms["projection_validation"] = int_value(
             publish_phase_timings.get("projection_validation")
+        )
+        phase_timings_ms["component_snapshots"] = int_value(
+            publish_phase_timings.get("component_snapshots")
+        )
+        phase_timings_ms["old_component_snapshot"] = int_value(
+            publish_phase_timings.get("old_component_snapshot")
+        )
+        phase_timings_ms["new_component_snapshot"] = int_value(
+            publish_phase_timings.get("new_component_snapshot")
         )
         phase_timings_ms["atomic_publish"] = int_value(
             publish_phase_timings.get("atomic_publish")

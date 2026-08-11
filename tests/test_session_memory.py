@@ -1603,6 +1603,67 @@ def test_outbox_consumers_complete_only_from_exact_committed_dependencies(
     ]
 
 
+def test_projection_component_snapshot_uses_manifest_segment_identity(
+    tmp_path: Path,
+) -> None:
+    projection_dir = tmp_path / "projection"
+    segment_dir = projection_dir / "segments"
+    segment_dir.mkdir(parents=True)
+    segment_index = segment_dir / "000.index.json"
+    segment_index.write_text(
+        "not-json-and-must-not-be-hydrated", encoding="utf-8"
+    )
+    input_digest = "a" * 64
+    generation_id = "b" * 64
+    module.write_json(
+        projection_dir / "session.manifest.json",
+        {
+            "index_schema": {
+                "session_index_generation_id": "c" * 64,
+            },
+            "segments": [
+                {
+                    "segment_id": "000",
+                    "index": str(segment_index),
+                    "input_digest": input_digest,
+                    "component_identity": {
+                        "input_digest": input_digest,
+                        "generation_id": generation_id,
+                    },
+                }
+            ],
+        },
+    )
+    module.write_json(
+        projection_dir / module.SESSION_INDEX_JSON,
+        {"payload": "index"},
+    )
+
+    snapshot = module.projection_component_snapshot(projection_dir)
+
+    expected_digest = hashlib.sha256(
+        json.dumps(
+            {
+                "input_digest": input_digest,
+                "generation_id": generation_id,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    assert snapshot["segment:000"] == {
+        "component_id": "segment:000",
+        "component_type": "segment_index",
+        "digest": expected_digest,
+        "source_ref": "segments/000.index.json",
+        "generation_identity": {"generation_id": generation_id},
+    }
+    assert snapshot["session:index"]["generation_identity"] == {
+        "generation_id": "c" * 64,
+    }
+
+
 def test_outbox_completion_crash_replay_is_durable_and_idempotent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
