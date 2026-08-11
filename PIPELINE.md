@@ -35,12 +35,41 @@ processing. Source metadata records origin, size, line count, and digest.
 Missing or unreadable raw material remains an explicit diagnostic state.
 
 Capture and indexing advance independently. When bounded foreground work
-cannot publish a complete session generation, it preserves a content-addressed
-raw snapshot and atomically advances `raw/capture.latest.json`. A capture ahead
-of the indexed digest makes dependent answer projections stale; it does not
-replace the last-good `raw/session.raw.jsonl`, manifest, segments, or indexes.
-Repeated capture of identical bytes is idempotent. Operational hook
-observations remain outside the semantic projection.
+cannot publish a complete session generation, it appends only new bytes to
+immutable content-addressed blocks, advances a hash-chained source epoch in
+`raw/capture-ledger.json`, and atomically advances `raw/capture.latest.json` plus
+`raw/live-tail.index.json` and a redacted `raw/live-tail.postings.json`.
+New block bytes and the compatibility suffix are fsynced before the ledger
+watermark is replaced and its parent directory is fsynced. A process crash
+before that replacement leaves the old watermark authoritative; retry truncates
+any uncommitted compatibility suffix and deterministically replays the delta.
+Device/inode change, truncation, or a mismatch at
+the last committed block opens a new epoch instead of splicing histories. A
+capture ahead of the indexed digest makes dependent answer projections stale;
+it does not replace the last-good `raw/session.raw.jsonl`, manifest, segments,
+or indexes. Repeated capture of identical bytes is idempotent and reads no raw
+payload. Operational hook observations remain outside the semantic projection.
+
+The live-tail reader may use the persistent overlay only when its source
+identity and captured size, ledger epoch and chain head, compatibility-view
+size, last immutable block receipt, and archived-prefix attestation all match.
+The postings frontier consumes only newly completed captured lines, persists
+safe tokens, an inverted token-to-entry map, redacted previews, typed fields,
+and exact byte ranges, and never
+persists raw line bodies or reversible secret digests. A positive posting hit
+intersects the map, then reads and reclassifies only the selected raw ranges
+before returning evidence.
+A miss falls back to bounded direct-source validation or remains unresolved;
+it cannot support an exhaustive negative claim, and the overlay never upgrades
+semantic projections by itself.
+
+The capture ledger persists portable SHA-256 continuation state. Appending a
+delta hashes only that delta while retaining the exact conventional digest of
+the complete captured stream. Hook-observed paths enter a bounded capture-watch
+frontier. An ordinary hot timer reads this frontier and component-outbox
+readiness only; it performs no archive discovery and no raw read for an
+unchanged watched source. Catchup, deep, and audit remain the global
+reconciliation routes.
 
 Raw preservation is append-oriented. Repair may regenerate derived material,
 but ordinary cleanup never deletes raw session evidence.
@@ -58,9 +87,11 @@ same evidence gap without inventing a boundary.
 
 ## 4. Readable segments
 
-Every raw interval produces a readable segment and a sibling machine index.
-The segment is for review; the index is for routing. Both point back to raw
-line or block refs.
+Every raw interval produces a sibling machine index and a compact readable
+segment synopsis. The index is the default routing surface; both preserve raw
+line or block refs. Full redacted event-body Markdown is materialized only for
+one selected segment through `render-segment` or an explicit audit/export path,
+and is stored separately under `segments/rendered/` with a render receipt.
 
 Segment generation may classify event type, conversation act, session act,
 agent event, task episode, route signals, relationships, and token counts.
@@ -101,16 +132,46 @@ complete prior generation and removes its stage and backup; it never repairs a
 mixed tree in place. Physical raw-block compression and confirmed plaintext
 removal use the same boundary while keeping stable evidence refs.
 
-Task episodes inside session assembly also materialize as immutable
+The same journal commits a deterministic immutable component-delta outbox
+record before the publication is marked complete. A pre-commit crash removes
+that new record while restoring last-good. A committed journal is finalized,
+not rolled back. Search, episode-semantic, entity, and graph consumer states
+begin as queued or deferred and require a separate exact completion receipt.
+Graph propagation queues the session contribution and only segment IDs whose
+semantic component digest changed; it does not enqueue every sealed segment on
+an ordinary tail append.
+
+Exact search acknowledgement requires a committed changed-component search
+generation. Episode semantic is acknowledged from the same per-session result
+only for `current`, `no_task_episodes`, or `no_admitted_episode_text`. Entity
+acknowledgement additionally requires that exact-search
+receipt and a current registry route dependency. Graph acknowledgement requires
+a successful mutation and a source-ledger entry carrying the exact outbox
+publish identity. Other consumers remain pending until their own receipts are
+proved.
+
+`freshness-vector <session>` reports capture, live overlay, stable projection,
+search, episode-semantic, entity, graph, returned-evidence, and global-recall
+axes separately. A current positive live-tail result does not admit an
+exhaustive negative search or a global-current claim.
+
+Task episodes inside session assembly materialize as immutable
 content-addressed shards under `session-index-shards/`. Each shard is redacted
 under the ephemeral whole-session literal policy before persistence, and its
-manifest binds raw source identity, task-episode generation, policy versions,
-artifact and payload hashes, and the current projection publish identity.
-Completed shard waves remain reusable inside the exact projection-work
-identity after a cooperative deadline. Atomic validation requires ordered
-payload parity with the embedded `session.index.json` compatibility view. The
-compatibility view remains present until CLI and MCP readers complete a
-separate selective-hydration migration.
+manifest binds episode-local source identity, task-episode generation, policy
+versions, artifact and payload hashes, order, and the current projection
+publish identity. Closed compatible shards remain reusable across an unrelated
+tail append. A persisted builder frontier reuses the sealed compatible prefix
+and replays only the final two boundary-adjacent episodes with the new tail.
+Atomic validation reads and verifies the ordered shard payloads. The bounded
+task-episode CLI/MCP route verifies and hydrates only the ordered shards needed
+to satisfy its limit. Its receipt reports total versus hydrated components and
+keeps global recall and negative claims false unless every selected session was
+fully scanned. Full semantic-digest, audit, and projection consumers continue
+to verify the whole component set. Other readers share the manifest-first
+loader; `session.index.json` keeps aggregate metadata and an empty compatibility
+field. A legacy index without component storage may still use its embedded
+array.
 Credential matchers retain their exact admitting expressions; cheap
 necessary-marker prefilters skip only matchers that cannot possibly match the
 current text, while opaque-credential detection remains unconditional.
@@ -135,20 +196,42 @@ it does not claim either derived projection is fresh.
 
 A long session rebuild uses a sibling content-addressed
 `.projection-work-<work-id>` directory rather than one disposable stage. Its
-checkpoint binds the raw publish identity, all producer generations, and the
-privacy, redaction, and token-accounting policy versions. Completed raw blocks
-and segments carry size-and-SHA receipts and are reused only while those
-receipts remain current. Before either layer, event classification uses
-append-stable content-addressed raw line blocks. Each completed block is
-checkpointed, so a cooperative deadline can preserve progress before segment
-generation and a growing session can reuse its sealed prefix. The cache stores
-derived classification fields only: raw text, parsed payloads, and exact
-sensitive literals remain excluded. Rehydration verifies and rereads raw
-authority, then performs global correlation reconciliation in canonical order.
-Cooperative deadlines are checked between phases and bounded classification or
-segment waves; a timeout preserves compatible work and the published last-good
-generation. Source, producer, or policy drift selects a new work ID instead of
-resuming incompatible artifacts.
+umbrella identity binds raw publication and atomic-publication contracts only.
+Independent stage checkpoints bind capture, classification, correlation
+summaries, segment index, review rendering, task episodes, goal lifecycles, and
+the session component manifest to their exact upstream stage identities and
+local contracts. Completed raw blocks and segments carry size-and-SHA receipts.
+The ordinary append lane admits an exact records-root/component identity plus
+size/mtime attestation and relinks the immutable file without opening it;
+periodic `doctor --deep-projection-artifacts` bypasses the stat-keyed digest
+cache and re-hashes every admitted classification and segment artifact. Before either layer,
+event classification uses append-stable content-addressed raw line blocks.
+Each completed block is checkpointed, so a cooperative deadline can preserve
+progress before segment generation and a growing session can reuse its sealed
+prefix. The cache stores derived classification fields and mergeable raw-free
+block summaries only: raw text, parsed payloads, and exact sensitive literals
+remain excluded. On an ordinary append, rehydration materializes only a bounded
+raw/classification tail, merges historical block summaries in canonical order,
+and reuses attested sealed raw blocks and segment topology. Cold migration or
+small-session compatibility selects the explicit full-replay fallback. A goal
+signal expands the bounded replay frontier to the start of the crossing open
+lifecycle, then merges rebuilt tail lifecycles with stable prior ranges.
+Cooperative deadlines are checked between
+phases and bounded classification or segment waves; a timeout preserves
+compatible work and the published last-good generation. Source growth changes
+the umbrella raw identity, while a stage producer or policy change invalidates
+only that stage and its declared downstream checkpoints.
+
+The work identity follows the core producer DAG rather than a circular global
+source epoch: classification precedes segment and task-episode production, and
+the session index follows both. During the declared 0.7.0 transition, a cache
+block or segment from one exact predecessor generation may cross that boundary
+only after its full identity payload, raw-block/input digest, and artifact
+receipt validate. The staged copy is rewritten with the current generation
+before publication. No schema-wide or caller-declared compatibility route is
+available. Any such crossing adds a deterministic migration receipt to the
+atomic session manifest with exact predecessor/target IDs, artifact counts,
+raw fingerprint, publish ID, and rollback posture.
 
 For a growing session, each published raw block is admitted for reuse only
 when its role, line range, byte size, declared SHA-256, and freshly measured
@@ -483,9 +566,12 @@ sources in the sweep remain eligible. Segment
 generation uses a deterministic process pool with a default of four workers
 and a bounded one-to-six range, falling back visibly to serial execution when
 the pool cannot start. Segment processes use the isolated `spawn` start method
-and receive only their bounded event slice, so they do not inherit the
-whole-session reconciled event graph retained by the parent. Event
-classification uses the same bounded worker
+and receive immutable classification-block refs, exact line ranges, bounded
+reconciliation patches, and raw-block refs. They load only overlapping block
+ranges and receive no serialized `RawEvent` slice. On ordinary append work the
+parent also retains only the bounded replay tail and mergeable historical block
+summaries instead of a whole-session `RawEvent` graph. Event classification
+uses the same bounded worker
 envelope and persists a receipt after every completed block. Every other
 oversized deferred candidate is also
 excluded from the remainder of that locked cycle; otherwise a second heavy

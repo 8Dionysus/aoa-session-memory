@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "artifact_type": "session_projection_incremental_core_portability_receipt",
+  "generated_at": "2026-08-11T02:27:46Z",
+  "truth_status": "clean_export_and_install_portability_proof_not_live_runtime_freshness",
+  "source": {
+    "branch": "agent/session-memory-incremental-core-20260810",
+    "checkout_kind": "isolated_worktree",
+    "canonical_checkout_mutated": false,
+    "github_mutated": false
+  },
+  "export": {
+    "ok": true,
+    "tests_included": true,
+    "sessions_included": false,
+    "portable_public_safety": {
+      "ok": true,
+      "status": "current",
+      "scanned_files": 292,
+      "scanned_bytes": 14605736,
+      "issue_count": 0,
+      "truth_status": "bounded_portable_tree_audit_complete"
+    }
+  },
+  "install": {
+    "ok": true,
+    "shape": "workspace_local_aoa_root",
+    "tests_included": true,
+    "sessions_included": false,
+    "live_hooks_written": false
+  },
+  "doctor": {
+    "ok": true,
+    "status": "current",
+    "truth_status": "doctor_full_filesystem_contract",
+    "deep_projection_artifact_mode": "full_sha256_rehash",
+    "session_count": 0,
+    "artifact_count": 0,
+    "diagnostic_count": 0,
+    "warnings": [],
+    "problems": []
+  },
+  "portable_audit": {
+    "ok": true,
+    "completion_ready": true,
+    "audit_mode": "portable_bundle",
+    "covered_requirement_count": 17,
+    "remaining": []
+  },
+  "installed_validation": {
+    "ok": true,
+    "pipeline": "end_to_end_synthetic_fixture",
+    "check_count": 27,
+    "raw_capture_committed_with_projection": true,
+    "raw_block_referential_integrity": "reader_ready",
+    "session_projection_generation_current": true,
+    "segment_projection_generation_current": true
+  },
+  "installed_focused_tests": {
+    "ok": true,
+    "passed": 7,
+    "deselected": 1102,
+    "elapsed_seconds": 31.08,
+    "coverage": [
+      "end_to_end_validation",
+      "clean_portable_install",
+      "portable_completion_audit",
+      "portable_artifact_manifest",
+      "portable_public_safety",
+      "manifest_first_selective_reader",
+      "task_episode_cli_selective_hydration"
+    ]
+  },
+  "decision_indexes": {
+    "ok": true,
+    "decision_records": 51,
+    "generated_indexes": 6
+  },
+  "authority_boundary": "This receipt proves a clean public-safe export, workspace-local installation, owner validation, deep doctor, portable audit, and focused installed tests. It does not claim freshness of any private or live archive and contains no private session evidence or host checkout paths."
+}

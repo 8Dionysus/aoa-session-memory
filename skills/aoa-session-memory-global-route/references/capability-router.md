@@ -2,7 +2,7 @@
 
 Generated from owner capability contracts. This card is a retrieval read model, not procedure or proof authority.
 
-Source graph hash: `06c191c4291e42c644eba74bf47039a9f9cd8290b58f73898d9d23af2b7a2ec2`
+Source graph hash: `611282572c3c966e5c7ca14b15d100980e0a7169f3d22ee81c0cce0b092b5eab`
 Federation: `aoa-session-memory` specializes `aoa-skills:sessions`.
 
 | skill | visibility | use when | do not use when | version | fingerprint |
