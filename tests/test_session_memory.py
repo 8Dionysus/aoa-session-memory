@@ -1164,6 +1164,10 @@ def test_hook_archives_raw_and_builds_segments(tmp_path: Path) -> None:
         "mode": "index_first_compact_v1",
         "full_raw_views_rendered": False,
         "on_demand_supported": True,
+        "synopsis_event_limit": (
+            module.SEGMENT_COMPACT_REVIEW_EVENT_LIMIT
+        ),
+        "synopsis_event_count": 5,
     }
     rendered = module.render_segment_markdown_on_demand(
         session_dir=session_dir,
@@ -1208,6 +1212,97 @@ def test_hook_archives_raw_and_builds_segments(tmp_path: Path) -> None:
     assert registry_record["raw"]["indexing_status"] == "indexed"
     assert registry_record["raw"]["blocks_index"] == str(session_dir / "raw" / "blocks.index.json")
     assert registry_record["raw_blocks"]["block_count"] == 2
+
+
+def test_segment_compact_markdown_is_bounded_but_index_remains_complete(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "bounded-segment-session.jsonl"
+    rows: list[dict[str, Any]] = [
+        {
+            "timestamp": "2026-08-08T12:00:00Z",
+            "type": "session_meta",
+            "payload": {"id": "bounded-segment", "cwd": str(workspace)},
+        }
+    ]
+    rows.extend(
+        {
+            "timestamp": f"2026-08-08T12:00:{ordinal:02d}Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": f"bounded synopsis event {ordinal}",
+                    }
+                ],
+            },
+        }
+        for ordinal in range(1, 21)
+    )
+    rows.append(
+        {
+            "timestamp": "2026-08-08T12:00:59Z",
+            "type": "turn_context",
+            "payload": {"summary": "bounded segment boundary"},
+        }
+    )
+    write_jsonl(transcript, rows)
+
+    receipt = module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "bounded-segment",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    assert receipt["ok"] is True
+    session_dir = Path(receipt["session_dir"])
+    manifest = json.loads(
+        (session_dir / "session.manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    first_segment = manifest["segments"][0]
+    segment_index = json.loads(
+        Path(first_segment["index"]).read_text(encoding="utf-8")
+    )
+    segment_markdown = Path(first_segment["markdown"]).read_text(
+        encoding="utf-8"
+    )
+    materialized = [
+        event
+        for event in segment_index["events"]
+        if event["markdown_anchor_materialized"] is True
+    ]
+    omitted = [
+        event
+        for event in segment_index["events"]
+        if event["markdown_anchor_materialized"] is False
+    ]
+
+    assert len(segment_index["events"]) > (
+        module.SEGMENT_COMPACT_REVIEW_EVENT_LIMIT
+    )
+    assert len(materialized) == module.SEGMENT_COMPACT_REVIEW_EVENT_LIMIT
+    assert len(omitted) == (
+        len(segment_index["events"])
+        - module.SEGMENT_COMPACT_REVIEW_EVENT_LIMIT
+    )
+    assert segment_markdown.count("## EVENT ") == (
+        module.SEGMENT_COMPACT_REVIEW_EVENT_LIMIT
+    )
+    assert "Events omitted from synopsis:" in segment_markdown
+    assert all("#" not in event["md_anchor"] for event in omitted)
 
 
 def test_outbox_consumers_complete_only_from_exact_committed_dependencies(

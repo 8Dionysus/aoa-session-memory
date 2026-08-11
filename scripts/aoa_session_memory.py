@@ -69,6 +69,7 @@ DERIVED_PRIVATE_KEY_REDACTION_MARKER = "".join(
     ["[REDACTED:", "private-key]"]
 )
 DERIVED_SEGMENT_RAW_VIEW_MAX_CHARS = 32_000
+SEGMENT_COMPACT_REVIEW_EVENT_LIMIT = 12
 DERIVED_NESTED_JSON_REDACTION_MAX_CHARS = 1_000_000
 DERIVED_SESSION_SENSITIVE_LITERAL_MIN_CHARS = 8
 DERIVED_SESSION_SENSITIVE_LITERAL_MAX_CHARS = 1024
@@ -21441,8 +21442,14 @@ def event_index_record(
     relationships: list[dict[str, Any]] | None = None,
     *,
     literal_policy: DerivedSessionSensitiveLiteralPolicy | None = None,
+    token_observations: list[dict[str, Any]] | None = None,
+    markdown_anchor_materialized: bool = True,
 ) -> dict[str, Any]:
-    token_observations = token_accounting_for_event(event)
+    observed_tokens = (
+        token_accounting_for_event(event)
+        if token_observations is None
+        else token_observations
+    )
     record = {
         "event_id": event.event_id,
         "line": event.line_no,
@@ -21457,7 +21464,12 @@ def event_index_record(
         "title": event.title,
         "importance": event.importance,
         "tags": event.tags,
-        "md_anchor": f"{md_name}#{anchor_for(event)}",
+        "md_anchor": (
+            f"{md_name}#{anchor_for(event)}"
+            if markdown_anchor_materialized
+            else md_name
+        ),
+        "markdown_anchor_materialized": markdown_anchor_materialized,
         "raw_ref": f"raw:line:{event.line_no}",
         "timestamp": event.timestamp,
         "source_type": event.source_type,
@@ -21466,12 +21478,12 @@ def event_index_record(
         record["correlation_id"] = event.correlation_id
     if event.facets:
         record["facets"] = event.facets
-    if token_observations:
+    if observed_tokens:
         record["token_accounting"] = (
-            token_observations[0]
-            if len(token_observations) == 1
+            observed_tokens[0]
+            if len(observed_tokens) == 1
             else token_accounting_summary_for_observations(
-                token_observations,
+                observed_tokens,
                 scope={"kind": "event", "event_id": event.event_id, "raw_ref": f"raw:line:{event.line_no}"},
                 include_observations=True,
             )
@@ -22074,6 +22086,20 @@ def write_segment(
         raw_block=raw_block,
     )
     full_markdown_render = markdown_render_mode == "full_review_v1"
+    compact_review_limit = max(2, SEGMENT_COMPACT_REVIEW_EVENT_LIMIT)
+    compact_review_head = compact_review_limit // 2
+    compact_review_tail = compact_review_limit - compact_review_head
+    compact_review_events = (
+        list(events)
+        if len(events) <= compact_review_limit
+        else [
+            *events[:compact_review_head],
+            *events[-compact_review_tail:],
+        ]
+    )
+    compact_review_event_ids = {
+        event.event_id for event in compact_review_events
+    }
     event_views = (
         [
             (
@@ -22185,10 +22211,13 @@ def write_segment(
                 "",
                 "Raw event bodies are rendered only on explicit review demand.",
                 "The sibling JSON index and raw refs are the primary navigation surface.",
+                f"Total events: {len(events)}.",
+                f"Synopsis events: {len(compact_review_events)}.",
+                f"Events omitted from synopsis: {max(0, len(events) - len(compact_review_events))}.",
                 "",
             ]
         )
-        for event in events:
+        for event in compact_review_events:
             lines.extend(
                 [
                     f'<a id="{anchor_for(event)}"></a>',
@@ -22219,15 +22248,24 @@ def write_segment(
     )
 
     relationship_map = event_relationships(events)
-    records = [
-        event_index_record(
-            event,
-            md_name,
-            relationship_map.get(event.event_id, []),
-            literal_policy=literal_policy,
+    token_observations: list[dict[str, Any]] = []
+    records: list[dict[str, Any]] = []
+    for event in events:
+        event_token_observations = token_accounting_for_event(event)
+        token_observations.extend(event_token_observations)
+        records.append(
+            event_index_record(
+                event,
+                md_name,
+                relationship_map.get(event.event_id, []),
+                literal_policy=literal_policy,
+                token_observations=event_token_observations,
+                markdown_anchor_materialized=(
+                    full_markdown_render
+                    or event.event_id in compact_review_event_ids
+                ),
+            )
         )
-        for event in events
-    ]
     by_type: dict[str, list[str]] = defaultdict(list)
     by_tag: dict[str, list[str]] = defaultdict(list)
     by_source_type: dict[str, list[str]] = defaultdict(list)
@@ -22269,10 +22307,15 @@ def write_segment(
         for tag in event.tags:
             by_tag[tag].append(event.event_id)
 
-    token_accounting = token_accounting_summary_for_events(
-        events,
+    token_accounting = token_accounting_summary_for_observations(
+        token_observations,
         scope={"kind": "segment", "segment_id": segment_id, "segment_role": role},
         include_observations=True,
+    )
+    compact_token_accounting = token_accounting_summary_for_observations(
+        token_observations,
+        scope={"kind": "segment", "segment_id": segment_id, "segment_role": role},
+        include_observations=False,
     )
     generation_identity = segment_index_generation_identity()
     source_range = {"from_line": first_line, "to_line": last_line}
@@ -22301,6 +22344,16 @@ def write_segment(
             "mode": markdown_render_mode,
             "full_raw_views_rendered": full_markdown_render,
             "on_demand_supported": True,
+            "synopsis_event_limit": (
+                None
+                if full_markdown_render
+                else compact_review_limit
+            ),
+            "synopsis_event_count": (
+                len(events)
+                if full_markdown_render
+                else len(compact_review_events)
+            ),
         },
         "segment_id": segment_id,
         "segment_role": role,
@@ -22351,11 +22404,7 @@ def write_segment(
         "raw_block": raw_block if isinstance(raw_block, dict) else None,
         "component_identity": component_identity,
         "artifact_receipts": artifact_receipts,
-        "token_accounting": token_accounting_summary_for_events(
-            events,
-            scope={"kind": "segment", "segment_id": segment_id, "segment_role": role},
-            include_observations=False,
-        ),
+        "token_accounting": compact_token_accounting,
         "markdown_render": index["markdown_render"],
     }
 
@@ -38495,6 +38544,8 @@ def reindex_session_from_raw(
             segment_no: int,
             role: str,
             segment_payload: dict[str, Any],
+            *,
+            persist_work_state: bool = True,
         ) -> None:
             nonlocal immutable_component_link_count
             nonlocal immutable_component_content_bytes_skipped
@@ -38546,7 +38597,8 @@ def reindex_session_from_raw(
                 "artifacts": artifacts,
             }
             segment_payload_by_id[segment_id] = segment_payload
-            save_work_state("segments_in_progress")
+            if persist_work_state:
+                save_work_state("segments_in_progress")
 
         reused_published_segment_count = 0
         if streaming_incremental_mode:
@@ -38737,7 +38789,9 @@ def reindex_session_from_raw(
                                 completed_no,
                                 completed_role,
                                 segment_payload,
+                                persist_work_state=False,
                             )
+                        save_work_state("segments_in_progress")
                         if deadline_exhausted():
                             phase_timings_ms[
                                 "segment_generation"
@@ -38839,20 +38893,30 @@ def reindex_session_from_raw(
             or record.get("session_id")
             or "unknown"
         )
-        if parent_tail_replay_from_line > 0:
+        raw_block_summaries = [
+            block.get("token_accounting", {})
+            for block in raw_blocks.get("blocks", [])
+            if isinstance(block, dict)
+        ]
+        raw_block_summaries_current = bool(
+            raw_block_summaries
+            and len(raw_block_summaries)
+            == len(raw_blocks.get("blocks", []))
+            and all(
+                token_accounting_summary_schema_current(summary)
+                for summary in raw_block_summaries
+            )
+        )
+        if raw_block_summaries_current:
             token_accounting = token_accounting_merge_summaries(
-                (
-                    block.get("token_accounting", {})
-                    for block in raw_blocks.get("blocks", [])
-                    if isinstance(block, dict)
-                ),
+                raw_block_summaries,
                 scope={
                     "kind": "session",
                     "session_id": current_session_id,
                 },
             )
             token_accounting_mode = (
-                "merge_current_segment_components_v1"
+                "merge_current_raw_block_components_v1"
             )
         else:
             token_accounting = token_accounting_summary_for_session(
@@ -121202,6 +121266,9 @@ def segment_index_generation_identity(
             ),
             "source_fingerprint_mode": (
                 "raw_digest_block_and_line_range_v1"
+            ),
+            "compact_review_event_limit": (
+                SEGMENT_COMPACT_REVIEW_EVENT_LIMIT
             ),
             "dependency_generations": {
                 "event_classification": effective_classification[
