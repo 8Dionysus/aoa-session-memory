@@ -86625,6 +86625,19 @@ def test_event_classification_checkpoint_resumes_without_persisting_literals(
     )
     assert interrupted["completed_classification_block_count"] == 1
     assert module.sha256_file(raw_path) == raw_sha_before
+    checkpoint = module.read_json(
+        module.session_projection_work_checkpoint_path(
+            Path(str(interrupted["work_dir"]))
+        ),
+        {},
+    )
+    assert checkpoint["classification_blocks"] == {}
+    assert checkpoint["classification_checkpoint"][
+        "completed_block_count"
+    ] == 1
+    assert synthetic_literal not in json.dumps(
+        checkpoint, sort_keys=True
+    )
 
     fake_clock[0] = 0.0
     calls.clear()

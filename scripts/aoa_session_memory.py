@@ -39898,6 +39898,10 @@ def reindex_session_from_raw(
                 pending_stage_invalidations.append(downstream_stage)
         if changed_stages & {"capture", "classification"}:
             work_state["classification_blocks"] = {}
+            work_state.pop("classification_checkpoint", None)
+            remove_projection_publish_path(
+                event_classification_cache_root(stage_dir)
+            )
         if changed_stages & {
             "correlation_summaries",
             "segment_index",
@@ -39936,11 +39940,28 @@ def reindex_session_from_raw(
         )
         work_state["stage_invalidations"] = sorted(changed_stages)
         write_json(checkpoint_path, work_state)
+    classification_generation = (
+        event_classification_generation_identity()
+    )
+    staged_classification_index = read_json(
+        event_classification_cache_index_path(
+            event_classification_cache_root(stage_dir)
+        ),
+        {},
+    )
+    staged_classification_blocks = (
+        staged_classification_index.get("blocks")
+        if isinstance(staged_classification_index, dict)
+        and staged_classification_index.get("generation_identity")
+        == classification_generation
+        and isinstance(staged_classification_index.get("blocks"), dict)
+        else {}
+    )
     completed_classification_blocks = (
-        work_state.get("classification_blocks")
-        if isinstance(
-            work_state.get("classification_blocks"), dict
-        )
+        dict(staged_classification_blocks)
+        if staged_classification_blocks
+        else dict(work_state.get("classification_blocks"))
+        if isinstance(work_state.get("classification_blocks"), dict)
         else {}
     )
     completed_segments = (
@@ -40012,9 +40033,25 @@ def reindex_session_from_raw(
                 "updated_at": utc_now(),
                 "phase": phase,
                 "phase_timings_ms": dict(phase_timings_ms),
-                "classification_blocks": (
-                    completed_classification_blocks
-                ),
+                # The generation-bound cache index is the resumable owner of
+                # block records.  Duplicating its multi-megabyte summaries in
+                # every umbrella checkpoint made phase saves proportional to
+                # total history.
+                "classification_blocks": {},
+                "classification_checkpoint": {
+                    "index": str(
+                        event_classification_cache_index_path(
+                            event_classification_cache_root(stage_dir)
+                        )
+                    ),
+                    "generation_id": str(
+                        classification_generation.get("generation_id")
+                        or ""
+                    ),
+                    "completed_block_count": len(
+                        completed_classification_blocks
+                    ),
+                },
                 "segments": completed_segments,
             }
         )
@@ -40125,9 +40162,6 @@ def reindex_session_from_raw(
     try:
         if deadline_exhausted():
             return checkpointed_result("planned")
-        classification_generation = (
-            event_classification_generation_identity()
-        )
         classification_cache_root = (
             event_classification_cache_root(stage_dir)
         )
@@ -40470,6 +40504,8 @@ def reindex_session_from_raw(
                 )
             }
             rebuilt_classification_block_count += 1
+
+        def checkpoint_classification_progress() -> None:
             write_event_classification_cache_index(
                 cache_root=classification_cache_root,
                 generation_identity=classification_generation,
@@ -40517,6 +40553,7 @@ def reindex_session_from_raw(
                         ):
                             future.result()
                             record_classification_completion(block)
+                        checkpoint_classification_progress()
                         if deadline_exhausted():
                             phase_timings_ms[
                                 "event_classification"
@@ -40538,7 +40575,10 @@ def reindex_session_from_raw(
             actual_classification_workers <= 1
             or classification_fallback_reason
         ):
-            for block in pending_classification_blocks:
+            for pending_ordinal, block in enumerate(
+                pending_classification_blocks,
+                start=1,
+            ):
                 cache_key = str(block.get("cache_key") or "")
                 if event_classification_cache_record_current(
                     cache_root=classification_cache_root,
@@ -40563,6 +40603,11 @@ def reindex_session_from_raw(
                     )
                 )
                 record_classification_completion(block)
+                if (
+                    pending_ordinal % configured_segment_workers == 0
+                    or deadline_exhausted()
+                ):
+                    checkpoint_classification_progress()
                 if deadline_exhausted():
                     phase_timings_ms[
                         "event_classification"
@@ -40610,6 +40655,11 @@ def reindex_session_from_raw(
         }
         phase_timings_ms["event_classification"] = int(
             (time.monotonic() - classification_started) * 1000
+        )
+        write_event_classification_cache_index(
+            cache_root=classification_cache_root,
+            generation_identity=classification_generation,
+            records=completed_classification_blocks,
         )
         save_work_state("classification_blocks_complete")
         if deadline_exhausted():

@@ -37,6 +37,13 @@ attested published prefix. Reused published segments are recorded in memory as
 a batch and the work checkpoint is persisted once per reuse batch; newly built
 worker waves retain their existing crash checkpoints.
 
+The generation-bound classification cache index is the sole resumable owner of
+completed block records and their mergeable summaries. The umbrella work
+checkpoint stores only its ref, generation, and completed count; it must not
+duplicate the complete classification map at every phase. Newly classified
+blocks publish that index once per bounded worker wave rather than once per
+individual completion.
+
 Task-episode shard reuse first admits the published component manifest. A shard
 may skip content I/O only when its content-addressed filename, component key,
 source identity, payload digest, byte count, and exact size/mtime/ctime receipt
@@ -71,6 +78,8 @@ remain unchanged.
   migration; tail blocks remain selected for scanning.
 - Reused segment checkpoint writes are bounded by reuse batches, not segment
   count; newly generated work remains checkpointed by worker wave.
+- Umbrella checkpoint size is independent of historical classification-summary
+  volume; resume rehydrates the exact generation-bound cache index.
 - Current task-episode shards avoid historical content reads on the fast path.
 - Receipt drift fails closed to the existing deep-read path, and scheduled deep
   audit remains the independent corruption detector.
@@ -78,9 +87,9 @@ remain unchanged.
 ## Boundaries
 
 This does not make derived caches authoritative, replace deep audit, admit
-unknown generation identities, or remove crash recovery. It also does not by
-itself solve monolithic raw snapshot copying or full semantic projection
-validation; those require separate owner decisions and proof.
+unknown generation identities, or remove crash recovery. Raw publication and
+semantic component validation remain governed by their separate owner
+decisions and proof.
 
 ## Source Surfaces
 
@@ -91,13 +100,14 @@ validation; those require separate owner decisions and proof.
 
 ## Follow-Up Route
 
-Eliminate monolithic raw snapshot copying and make semantic validation consume
-component-root receipts without weakening last-good or deep-audit guarantees,
-then rerun the actual 430 MB no-swap growth benchmark.
+Shard or aggregate the classification summary read model so an append no longer
+rewrites the complete summary map, then rerun the actual 430 MB no-swap growth
+benchmark.
 
 ## Verification
 
 Focused tests prove one records-root computation across many lookups, bounded
 `segments_in_progress` checkpoints across captured growth, crash/resume parity,
-privacy-marker reuse from a root-valid current work view, and task-shard reuse
-without reading or hashing published shard content.
+privacy-marker reuse from a root-valid current work view, classification resume
+without bulk records or literal values in the umbrella checkpoint, and
+task-shard reuse without reading or hashing published shard content.
