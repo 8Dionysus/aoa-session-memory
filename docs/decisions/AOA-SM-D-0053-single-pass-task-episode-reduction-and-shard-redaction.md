@@ -84,6 +84,13 @@ session-component artifacts even when the umbrella raw publish identity is
 unchanged. Crash resume may reuse classification evidence, but cannot publish
 artifacts produced under a different rehydration plan.
 
+The compact session-index root applies its recursive metadata redaction before
+attaching immutable segment manifests and raw-block records. Segment-derived
+text was already redacted at the segment boundary; raw-block records contain
+refs, digests, ranges, and count-only metadata. Reprocessing both complete
+historical collections at every append adds no privacy coverage and is outside
+the root metadata pass.
+
 ## Rationale
 
 The reducer already owns one event observation, the segment manifest already
@@ -99,6 +106,8 @@ persisting a new cache, weakening redaction, or changing evidence authority.
 - Positive: one paired 311-shard publication improves from `95.127284 s` to
   `33.562716 s` (`2.834x`) with exact payload SHA-256 parity.
 - Positive: classification and segment checkpoints survive this change.
+- Positive: root session-index redaction is independent of historical segment
+  and raw-block manifest volume.
 - Positive: an orchestration-only optimization no longer invalidates episode
   semantics, and an actual semantic incompatibility cannot silently truncate
   the historical episode projection to its replay tail.

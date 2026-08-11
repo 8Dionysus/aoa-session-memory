@@ -595,6 +595,11 @@ Current size/mtime/ctime receipts admit unchanged components without opening
 them. A legacy or drifted receipt is recomputed once, while deep audit remains
 the independent full-content proof lane.
 
+The compact session-index root redacts fresh metadata, lifecycles, and other
+root-owned text before attaching already-redacted immutable segment manifests
+and raw-block refs/digests/counts. This keeps the root privacy pass bounded by
+new root material instead of recursively revisiting historical components.
+
 Raw-block reuse is independently evidence-bearing. Current event bytes are
 hashed and compared with both the prior record and the actual published block
 before an immutable link is staged. This lets a growing projection reuse sealed

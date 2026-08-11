@@ -25355,8 +25355,13 @@ def write_session_index_impl(
         "goal_lifecycles": goal_lifecycle_payload["goal_lifecycles"],
         "goal_events": goal_lifecycle_payload["goal_events"],
         "route_signal_counts": route_signal_counts,
-        "segments": manifest.get("segments", []),
-        "raw_blocks": manifest.get("raw_blocks", {}),
+        # Immutable segment components were redacted at their own generation
+        # boundary; raw-block records contain refs, digests, and count-only
+        # metadata rather than derived raw text.  Attach both after the root
+        # metadata pass so a hot append does not recursively traverse all
+        # historical component records again.
+        "segments": [],
+        "raw_blocks": {},
         "read_order": [
             "session.manifest.json",
             SESSION_INDEX_JSON,
@@ -25381,6 +25386,8 @@ def write_session_index_impl(
         session_index_json,
         literal_policy=literal_policy,
     )
+    session_index_json["segments"] = manifest.get("segments", [])
+    session_index_json["raw_blocks"] = manifest.get("raw_blocks", {})
     execution_metrics["root_redaction_ms"] = int(
         (time.monotonic() - phase_started) * 1000
     )
