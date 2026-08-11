@@ -38997,9 +38997,13 @@ def event_classification_cache_candidate_roots(
         ),
         reverse=True,
     )
+    # Published last-good is the normal hot path and must be considered
+    # before abandoned work.  At most four newest work roots are inspected
+    # for crash recovery or a bounded predecessor migration; append cost
+    # must not grow with maintenance history.
     return [
-        *work_roots,
         event_classification_cache_root(session_dir),
+        *work_roots[:4],
     ]
 
 
@@ -39043,16 +39047,36 @@ def event_classification_cache_candidate_indexes(
                 }
             )
         )
+        records_metadata_current = bool(
+            records
+            and all(
+                event_classification_cache_record_current(
+                    cache_root=cache_root,
+                    record=record,
+                    block=(
+                        record.get("block")
+                        if isinstance(record, dict)
+                        else {}
+                    ),
+                    verify_content=False,
+                )
+                for record in records.values()
+            )
+        )
         candidates.append(
             {
                 "cache_root": cache_root,
                 "records": records,
                 "records_root_current": records_root_current,
+                "records_metadata_current": (
+                    records_metadata_current
+                ),
                 "generation_admission": generation_admission,
             }
         )
         if (
             records_root_current
+            and records_metadata_current
             and not generation_admission.get("requires_restamp")
             and int_value(index.get("block_count"), -1)
             == len(records)

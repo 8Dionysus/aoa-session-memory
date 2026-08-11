@@ -26,13 +26,16 @@ already validated manifest-first receipt.
 
 One projection build validates each candidate classification index and its
 records root once, then performs block lookup against that admitted immutable
-view. Candidate work roots are inspected newest first; the first complete,
-exact-current, root-valid view terminates the search so abandoned work history
-cannot amplify every append. Its privacy structural markers are admitted before
-the sensitive-literal pass, but only for blocks under the attested published
-prefix. Reused published segments are recorded in memory as a batch and the
-work checkpoint is persisted once per reuse batch; newly built worker waves
-retain their existing crash checkpoints.
+view. Published last-good is inspected first. Only four newest work roots may
+follow for crash recovery or bounded predecessor migration, so abandoned work
+history cannot amplify every append. Search stops only at a complete,
+exact-current, root-valid view whose artifact metadata receipts are also
+current; a valid index must not hide a stronger published candidate when its
+hardlinked artifacts have drifted metadata. Privacy structural markers are
+admitted before the sensitive-literal pass, but only for blocks under the
+attested published prefix. Reused published segments are recorded in memory as
+a batch and the work checkpoint is persisted once per reuse batch; newly built
+worker waves retain their existing crash checkpoints.
 
 Task-episode shard reuse first admits the published component manifest. A shard
 may skip content I/O only when its content-addressed filename, component key,

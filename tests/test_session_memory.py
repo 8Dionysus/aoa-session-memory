@@ -86880,7 +86880,7 @@ def test_classification_candidate_index_root_is_validated_once_per_build(
         generation_identity=generation_identity,
     )
     assert root_calls == 1
-    assert candidates[0]["cache_root"] == prior_work_cache
+    assert candidates[0]["cache_root"] == cache_root
 
     for block in blocks:
         reusable = module.reusable_event_classification_cache_record(
@@ -86974,6 +86974,9 @@ def test_captured_append_extends_classification_plan_from_attested_tail(
         published_cache_root,
         module.event_classification_cache_root(prior_work_dir),
     )
+    prior_work_cache_root = (
+        module.event_classification_cache_root(prior_work_dir)
+    )
     published_cache_index = module.read_json(
         module.event_classification_cache_index_path(
             published_cache_root
@@ -86989,6 +86992,14 @@ def test_captured_append_extends_classification_plan_from_attested_tail(
             module.event_classification_generation_identity()
         ),
         records=published_records,
+    )
+    monkeypatch.setattr(
+        module,
+        "event_classification_cache_candidate_roots",
+        lambda **_kwargs: [
+            prior_work_cache_root,
+            published_cache_root,
+        ],
     )
     current_manifest = module.read_json(
         session_dir / "session.manifest.json", {}
