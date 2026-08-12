@@ -203,6 +203,7 @@ def test_session_projection_benchmark_uses_stable_read_only_snapshot(
             "1",
             "--growth-segments",
             "1",
+            "--capture-only",
             "--temp-root",
             str(tmp_path),
         ],
@@ -39061,8 +39062,12 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(
     )
     archived_session_label = next(path.name for path in (aoa_root / "sessions").iterdir() if path.is_dir())
     search_index = module.search_index_sessions(aoa_root=aoa_root, target="all")
-    graph = module.build_session_graph(aoa_root=aoa_root, target="all", write=True)
-    streaming_graph = module.build_session_graph(aoa_root=aoa_root, target="all", write=True, include_rows=False)
+    graph = module.build_session_graph(
+        aoa_root=aoa_root,
+        target="all",
+        write=True,
+        include_rows=False,
+    )
     atlas = module.build_agent_atlas(aoa_root=aoa_root, target="all", clean=True)
     conn = sqlite3.connect(str(module.search_db_path(aoa_root)))
     conn.execute("UPDATE meta SET value = ? WHERE key = ?", ("2999-01-01T00:00:00Z", "generated_at"))
@@ -39071,12 +39076,17 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(
 
     assert search_index["ok"] is True
     assert graph["ok"] is True
-    assert streaming_graph["ok"] is True
-    assert streaming_graph["builder"] == "sqlite_graph_store"
-    assert streaming_graph["nodes_sample"]
-    assert streaming_graph["edges_sample"]
-    assert "nodes" not in streaming_graph
-    assert "edges" not in streaming_graph
+    assert graph["builder"] == "sqlite_graph_store"
+    assert graph["nodes_sample"]
+    assert graph["edges_sample"]
+    assert "nodes" not in graph
+    assert "edges" not in graph
+    graph_store = module.GraphSqliteStore(aoa_root)
+    try:
+        graph["nodes"] = graph_store.all_payloads("nodes")
+        graph["edges"] = graph_store.all_payloads("edges")
+    finally:
+        graph_store.close()
     assert atlas["ok"] is True
     assert (aoa_root / "graph" / "nodes.jsonl").exists()
     assert (aoa_root / "graph" / "edges.jsonl").exists()
@@ -93084,12 +93094,9 @@ def test_doctor_accepts_runtime_install_without_local_tests(
         unmarked_payload["problems"]
     )
 
-    module.install_portable_bundle(
-        source_aoa_root=source_aoa,
-        workspace_root=workspace,
-        aoa_root=aoa_root,
-        include_tests=False,
-        overwrite=True,
+    module.write_json(
+        install_profile_path,
+        install_payload["install_profile"],
     )
     (aoa_root / "tests").mkdir()
     (aoa_root / "tests" / "AGENTS.md").write_text(
@@ -93346,7 +93353,12 @@ def test_completion_audit_portable_bundle_accepts_clean_source_without_runtime_s
     source_aoa = SCRIPT.parents[1]
     workspace = tmp_path / "TargetWorkspace"
     bundle_root = tmp_path / "aoa-session-memory"
-    module.copy_portable_bundle(source_aoa_root=source_aoa, target_aoa_root=bundle_root, overwrite=True)
+    module.copy_portable_bundle(
+        source_aoa_root=source_aoa,
+        target_aoa_root=bundle_root,
+        overwrite=True,
+        audit_public_safety=False,
+    )
     (bundle_root / ".git").mkdir()
 
     def fake_remote(repo_root: Path, remote: str = "origin") -> str | None:
@@ -93402,6 +93414,7 @@ def test_completion_audit_requires_skill_usage_receipt_schema(
         source_aoa_root=source_aoa,
         target_aoa_root=bundle_root,
         overwrite=True,
+        audit_public_safety=False,
     )
     (bundle_root / ".git").mkdir()
     receipt_schema = bundle_root / "schemas" / "skill-usage-receipt.schema.json"
@@ -99312,6 +99325,72 @@ def test_derived_privacy_prefilters_skip_expensive_matchers_for_benign_text(
     assert projection["text"] == benign
 
 
+def test_derived_privacy_skips_opaque_rewrite_when_all_matches_are_benign(
+    monkeypatch,
+) -> None:
+    original = module.DERIVED_TEXT_OPAQUE_CREDENTIAL_RE
+
+    class FindOnlyOpaqueMatcher:
+        def finditer(self, source: str):
+            return original.finditer(source)
+
+        def sub(self, _replacement, _source: str):
+            raise AssertionError("benign opaque candidates triggered rewrite")
+
+    monkeypatch.setattr(
+        module,
+        "DERIVED_TEXT_OPAQUE_CREDENTIAL_RE",
+        FindOnlyOpaqueMatcher(),
+    )
+    benign = (
+        "source_sha256="
+        "0123456789abcdef0123456789abcdef"
+        "0123456789abcdef0123456789abcdef"
+    )
+
+    projection = module.derived_text_privacy_projection(benign)
+
+    assert projection["status"] == "unchanged"
+    assert projection["text"] == benign
+    assert projection["redaction_count"] == 0
+
+
+def test_derived_privacy_skips_named_rewrite_for_safe_metadata(
+    monkeypatch,
+) -> None:
+    class FindOnlyNamedMatcher:
+        def __init__(self, original):
+            self.original = original
+
+        def match(self, source: str, start: int = 0):
+            return self.original.match(source, start)
+
+        def sub(self, _replacement, _source: str):
+            raise AssertionError("safe named metadata triggered rewrite")
+
+    for name in (
+        "DERIVED_TEXT_NAMED_QUOTED_ASSIGNMENT_RE",
+        "DERIVED_TEXT_NAMED_BARE_ASSIGNMENT_RE",
+        "DERIVED_TEXT_SENSITIVE_FLAG_RE",
+    ):
+        monkeypatch.setattr(
+            module,
+            name,
+            FindOnlyNamedMatcher(getattr(module, name)),
+        )
+    benign = (
+        'API_KEY_STATUS="configured" '\
+        "token_status_path=/srv/example/token-status.json "
+        "--access-token '${ACCESS_TOKEN}'"
+    )
+
+    projection = module.derived_text_privacy_projection(benign)
+
+    assert projection["status"] == "unchanged"
+    assert projection["text"] == benign
+    assert projection["redaction_count"] == 0
+
+
 @pytest.mark.parametrize(
     "label,separator,secret",
     [
@@ -99773,6 +99852,39 @@ def test_portable_public_safety_audit_reports_classes_not_values(
     rendered = json.dumps(payload, ensure_ascii=False)
     assert secret_value not in rendered
     assert "private-operator" not in rendered
+
+
+def test_portable_public_safety_host_path_prefilters_preserve_all_routes() -> None:
+    counts = module.portable_public_safety_host_path_counts(
+        "\n".join(
+            [
+                "unix="
+                + "/".join(
+                    ["", "Users", "private-unix", "workspace", "owner.json"]
+                ),
+                "windows="
+                + "\\".join(
+                    [
+                        "C:",
+                        "uSeRs",
+                        "private-windows",
+                        "workspace",
+                        "owner.json",
+                    ]
+                ),
+                "service="
+                + "/".join(
+                    ["", "srv", "private-service", "workspace", "owner.json"]
+                ),
+            ]
+        )
+    )
+
+    assert counts == {
+        "host_srv_path": 1,
+        "private_home_path": 1,
+        "private_windows_home_path": 1,
+    }
 
 
 def test_projection_producer_contract_is_bounded_and_change_sensitive() -> None:

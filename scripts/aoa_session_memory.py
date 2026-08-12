@@ -3062,18 +3062,21 @@ def portable_public_safety_safe_relative_path(
 
 def portable_public_safety_host_path_counts(text: str) -> dict[str, int]:
     counts: Counter[str] = Counter()
-    for match in PORTABLE_PUBLIC_SAFETY_HOME_PATH_RE.finditer(text):
-        account = str(match.group("account") or "").casefold()
-        if account not in PORTABLE_PUBLIC_SAFETY_ALLOWED_HOME_ACCOUNTS:
-            counts["private_home_path"] += 1
-    for match in PORTABLE_PUBLIC_SAFETY_WINDOWS_HOME_PATH_RE.finditer(text):
-        account = str(match.group("account") or "").casefold()
-        if account not in PORTABLE_PUBLIC_SAFETY_ALLOWED_HOME_ACCOUNTS:
-            counts["private_windows_home_path"] += 1
-    for match in PORTABLE_PUBLIC_SAFETY_SRV_PATH_RE.finditer(text):
-        root_name = str(match.group("root") or "").casefold()
-        if root_name not in PORTABLE_PUBLIC_SAFETY_ALLOWED_SRV_ROOTS:
-            counts["host_srv_path"] += 1
+    if "/home/" in text or "/Users/" in text:
+        for match in PORTABLE_PUBLIC_SAFETY_HOME_PATH_RE.finditer(text):
+            account = str(match.group("account") or "").casefold()
+            if account not in PORTABLE_PUBLIC_SAFETY_ALLOWED_HOME_ACCOUNTS:
+                counts["private_home_path"] += 1
+    if "users" in text.casefold():
+        for match in PORTABLE_PUBLIC_SAFETY_WINDOWS_HOME_PATH_RE.finditer(text):
+            account = str(match.group("account") or "").casefold()
+            if account not in PORTABLE_PUBLIC_SAFETY_ALLOWED_HOME_ACCOUNTS:
+                counts["private_windows_home_path"] += 1
+    if "/srv/" in text:
+        for match in PORTABLE_PUBLIC_SAFETY_SRV_PATH_RE.finditer(text):
+            root_name = str(match.group("root") or "").casefold()
+            if root_name not in PORTABLE_PUBLIC_SAFETY_ALLOWED_SRV_ROOTS:
+                counts["host_srv_path"] += 1
     return dict(sorted(counts.items()))
 
 
@@ -3337,6 +3340,7 @@ def copy_portable_bundle(
     include_tests: bool = True,
     overwrite: bool = False,
     audit_public_safety: bool = True,
+    portable_indexes: bool = True,
     preserve_runtime_generated: bool = False,
 ) -> dict[str, Any]:
     source_aoa_root = source_aoa_root.resolve()
@@ -3417,7 +3421,7 @@ def copy_portable_bundle(
         write_sessions_directory_index(
             target_aoa_root,
             existing_records,
-            portable=audit_public_safety,
+            portable=portable_indexes,
         )
     else:
         write_json(
@@ -3432,7 +3436,7 @@ def copy_portable_bundle(
         write_sessions_directory_index(
             target_aoa_root,
             [],
-            portable=audit_public_safety,
+            portable=portable_indexes,
         )
 
     legacy_root = target_aoa_root / LEGACY_SESSION_ROOT
@@ -3462,6 +3466,7 @@ def copy_portable_bundle(
         "include_sessions": include_sessions,
         "include_tests": include_tests,
         "copied": copied,
+        "portable_indexes": portable_indexes,
         "preserve_runtime_generated": preserve_runtime_generated,
         "restored_runtime_generated": restored_runtime_generated,
         "public_safety": public_safety,
@@ -3527,6 +3532,7 @@ def install_portable_bundle(
         include_tests=include_tests,
         overwrite=overwrite,
         audit_public_safety=False,
+        portable_indexes=False,
         preserve_runtime_generated=True,
     )
     hook_config = build_user_hooks_config(workspace_root, aoa_root)
@@ -5114,6 +5120,66 @@ def derived_text_looks_like_opaque_credential(
     return bool(strong_base64_shape or sensitive_context)
 
 
+def derived_text_named_redaction_required(value: Any) -> bool:
+    """Admit the exact named-value matchers from one cheap stem scan."""
+    source = str(value or "")
+
+    def label_character(character: str) -> bool:
+        return bool(
+            character
+            and (
+                "a" <= character <= "z"
+                or "A" <= character <= "Z"
+                or "0" <= character <= "9"
+                or character in {"_", "-"}
+            )
+        )
+
+    for stem in DERIVED_TEXT_SENSITIVE_LABEL_PREFILTER_RE.finditer(source):
+        run_start = stem.start()
+        while run_start > 0 and label_character(source[run_start - 1]):
+            run_start -= 1
+        candidate_starts = {run_start}
+        candidate_starts.update(
+            index + 1
+            for index in range(run_start, stem.start())
+            if source[index] == "-"
+        )
+        for start in sorted(candidate_starts):
+            for pattern in (
+                DERIVED_TEXT_NAMED_QUOTED_ASSIGNMENT_RE,
+                DERIVED_TEXT_NAMED_BARE_ASSIGNMENT_RE,
+            ):
+                match = pattern.match(source, start)
+                if (
+                    match is not None
+                    and match.start("label") <= stem.start()
+                    and match.end("label") >= stem.end()
+                    and not derived_text_privacy_named_value_is_safe(
+                        str(match.group("label") or ""),
+                        str(match.group("value") or ""),
+                    )
+                ):
+                    return True
+            flag_start = start - 2
+            if flag_start >= 0 and source[flag_start:start] == "--":
+                match = DERIVED_TEXT_SENSITIVE_FLAG_RE.match(
+                    source,
+                    flag_start,
+                )
+                if (
+                    match is not None
+                    and match.start("label") <= stem.start()
+                    and match.end("label") >= stem.end()
+                    and not derived_text_privacy_named_value_is_safe(
+                        str(match.group("label") or ""),
+                        str(match.group("value") or ""),
+                    )
+                ):
+                    return True
+    return False
+
+
 def derived_text_privacy_projection(
     value: Any,
     *,
@@ -5155,8 +5221,12 @@ def derived_text_privacy_projection(
 
     redacted = source
     if "-----BEGIN" in redacted:
-        redacted = DERIVED_TEXT_PEM_PRIVATE_KEY_RE.sub(redact_pem, redacted)
-    if DERIVED_TEXT_SENSITIVE_LABEL_PREFILTER_RE.search(redacted):
+        if DERIVED_TEXT_PEM_PRIVATE_KEY_RE.search(redacted):
+            redacted = DERIVED_TEXT_PEM_PRIVATE_KEY_RE.sub(
+                redact_pem,
+                redacted,
+            )
+    if derived_text_named_redaction_required(redacted):
         redacted = DERIVED_TEXT_NAMED_QUOTED_ASSIGNMENT_RE.sub(
             redact_named,
             redacted,
@@ -5178,22 +5248,28 @@ def derived_text_privacy_projection(
         )
 
     if "://" in redacted and "@" in redacted:
-        redacted = DERIVED_TEXT_URL_CREDENTIAL_RE.sub(redact_url, redacted)
+        if DERIVED_TEXT_URL_CREDENTIAL_RE.search(redacted):
+            redacted = DERIVED_TEXT_URL_CREDENTIAL_RE.sub(
+                redact_url,
+                redacted,
+            )
 
     def redact_authorization(match: re.Match[str]) -> str:
         return f"{match.group('prefix')}{record('token', 'Authorization')}"
 
     redacted_casefold = redacted.casefold()
     if "authorization" in redacted_casefold or "bearer" in redacted_casefold:
-        redacted = DERIVED_TEXT_AUTHORIZATION_RE.sub(
-            redact_authorization,
-            redacted,
-        )
+        if DERIVED_TEXT_AUTHORIZATION_RE.search(redacted):
+            redacted = DERIVED_TEXT_AUTHORIZATION_RE.sub(
+                redact_authorization,
+                redacted,
+            )
     if DERIVED_TEXT_KNOWN_CREDENTIAL_PREFILTER_RE.search(redacted):
-        redacted = DERIVED_TEXT_KNOWN_CREDENTIAL_RE.sub(
-            lambda _match: record("token"),
-            redacted,
-        )
+        if DERIVED_TEXT_KNOWN_CREDENTIAL_RE.search(redacted):
+            redacted = DERIVED_TEXT_KNOWN_CREDENTIAL_RE.sub(
+                lambda _match: record("token"),
+                redacted,
+            )
 
     def redact_opaque(match: re.Match[str]) -> str:
         token = str(match.group("value") or "")
@@ -5206,10 +5282,26 @@ def derived_text_privacy_projection(
             return token
         return record("opaque_credential")
 
-    redacted = DERIVED_TEXT_OPAQUE_CREDENTIAL_RE.sub(
-        redact_opaque,
-        redacted,
+    # Most authored source files contain many long identifiers and digests,
+    # but none that pass the entropy/context admission below.  Calling
+    # ``Pattern.sub`` unconditionally still rebuilds the complete string and
+    # pays callback overhead for every benign match.  The read-only pass uses
+    # the exact same predicate; only a value that would be redacted admits the
+    # rewriting pass, so this skips work without weakening detection.
+    opaque_redaction_required = any(
+        derived_text_looks_like_opaque_credential(
+            str(match.group("value") or ""),
+            nearby_text=redacted[
+                max(0, match.start() - 80):match.start()
+            ],
+        )
+        for match in DERIVED_TEXT_OPAQUE_CREDENTIAL_RE.finditer(redacted)
     )
+    if opaque_redaction_required:
+        redacted = DERIVED_TEXT_OPAQUE_CREDENTIAL_RE.sub(
+            redact_opaque,
+            redacted,
+        )
     safe_text = (
         short_text(redacted, max_chars=max_chars)
         if max_chars is not None
