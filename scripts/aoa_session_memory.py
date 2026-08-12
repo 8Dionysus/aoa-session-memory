@@ -196009,6 +196009,15 @@ def command_search_index(args: argparse.Namespace) -> int:
             write_report=args.write_report,
             budget_seconds=args.budget_seconds,
             progress_every=args.progress_every,
+            defer_global_derivatives=(
+                os.environ.get(
+                    "AOA_SESSION_MEMORY_SEARCH_DEFER_GLOBAL_DERIVATIVES",
+                    "0",
+                )
+                .strip()
+                .casefold()
+                in {"1", "true", "yes", "on"}
+            ),
         )
 
     payload = run_with_maintenance_lock(

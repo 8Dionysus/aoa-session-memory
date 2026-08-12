@@ -688,6 +688,12 @@ and forces shard readers to fall back to the now-current monolith, so selected
 evidence is immediately queryable without presenting stale shard topology as
 current. The maintenance result names these global derivatives as unresolved;
 backlog, deep, or the explicit catalog/registry routes own their convergence.
+Manual targeted recovery can set
+`AOA_SESSION_MEMORY_SEARCH_DEFER_GLOBAL_DERIVATIVES=1` for scoped
+`search-index <session> --no-rebuild` commands to use the same bounded
+publication contract without changing a producer identity through a new CLI
+surface. Run the global catalog and entity-registry refresh once after the
+target batch instead of paying that whole-database cost after every session.
 The recurring drip also admits only `light` search work and caps route raw
 repair at 32 MiB. Warm and heavy sessions remain explicit live-tail targets or
 backlog/deep work; a single old session cannot consume the freshness timer's

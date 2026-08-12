@@ -57018,6 +57018,46 @@ def test_bounded_search_update_defers_global_derivatives_and_falls_back_to_monol
     )
 
 
+def test_search_index_cli_can_defer_global_derivatives(
+    tmp_path: Path, monkeypatch: Any, capsys: Any
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    seen: dict[str, Any] = {}
+
+    def fake_search_index_sessions(**kwargs: Any) -> dict[str, Any]:
+        seen.update(kwargs)
+        return {"ok": True}
+
+    monkeypatch.setattr(module, "search_index_sessions", fake_search_index_sessions)
+    monkeypatch.setattr(
+        module,
+        "run_with_maintenance_lock",
+        lambda _root, operation, **_kwargs: operation(),
+    )
+    monkeypatch.setenv(
+        "AOA_SESSION_MEMORY_SEARCH_DEFER_GLOBAL_DERIVATIVES",
+        "1",
+    )
+    args = module.build_parser().parse_args(
+        [
+            "search-index",
+            "target-session",
+            "--workspace-root",
+            str(workspace),
+            "--aoa-root",
+            str(aoa_root),
+            "--no-rebuild",
+        ]
+    )
+
+    assert module.command_search_index(args) == 0
+    assert seen["target"] == "target-session"
+    assert seen["rebuild"] is False
+    assert seen["defer_global_derivatives"] is True
+    assert json.loads(capsys.readouterr().out)["ok"] is True
+
+
 def test_bounded_maintenance_planning_never_reads_global_derivative_state(
     tmp_path: Path, monkeypatch: Any
 ) -> None:

@@ -105,3 +105,15 @@ catalog builder or entity-registry status route, require the catalog to be
 marked stale, require shard search to fall back to the current monolith, and
 retain full-route catalog and registry tests. Live receipts must show selected
 publication and process completion within the bounded timer envelope.
+
+## Review 2026-08-12
+
+The same publication boundary applies to an explicit manual target batch.
+Setting `AOA_SESSION_MEMORY_SEARCH_DEFER_GLOBAL_DERIVATIVES=1` for scoped
+`search-index <session> --no-rebuild` commands commits each selected session to
+the monolith and records global derivative staleness; the operator then runs
+the complete catalog and entity-registry owners once after the batch. The
+environment switch deliberately avoids expanding the identity-bearing CLI
+parser while exposing the already-admitted bounded contract to recovery. It
+does not make a deferred batch globally complete or permit shard readers to
+bypass the stale catalog fallback.
