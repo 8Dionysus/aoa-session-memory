@@ -27417,8 +27417,9 @@ def test_auto_maintenance_refreshes_stale_entity_registry_search_docs(tmp_path: 
     payload = module.auto_maintenance(
         workspace_root=workspace,
         aoa_root=aoa_root,
-        profile="catchup",
+        profile="backlog",
         apply=True,
+        discovery_limit=0,
         max_raw_bytes=1,
         budget_seconds=30,
     )
@@ -49109,6 +49110,54 @@ def test_graph_maintenance_queue_candidate_window_honors_explicit_pool_limit(
     assert len(observed["source_key_filters"]) == 4
 
 
+def test_graph_maintenance_session_coherent_queue_window_packs_complete_sessions() -> None:
+    candidates = [
+        {
+            "source_key": f"segment:{session_id}:{index:03d}",
+            "session_id": session_id,
+        }
+        for session_id, count in (("large", 4), ("does-not-fit", 3), ("small", 1))
+        for index in range(count)
+    ]
+
+    selected, detail = module.graph_maintenance_session_coherent_queue_window(
+        candidates,
+        limit=5,
+    )
+
+    assert [item["session_id"] for item in selected] == [
+        "large",
+        "large",
+        "large",
+        "large",
+        "small",
+    ]
+    assert detail["selected_source_count"] == 5
+    assert detail["selected_session_count"] == 2
+    assert detail["skipped_session_group_count"] == 1
+    assert detail["oversized_split_group_count"] == 0
+    assert detail["session_coherent"] is True
+
+
+def test_graph_maintenance_session_coherent_queue_window_bounds_oversized_session() -> None:
+    candidates = [
+        {
+            "source_key": f"segment:oversized:{index:03d}",
+            "session_id": "oversized",
+        }
+        for index in range(7)
+    ]
+
+    selected, detail = module.graph_maintenance_session_coherent_queue_window(
+        candidates,
+        limit=5,
+    )
+
+    assert len(selected) == 5
+    assert detail["oversized_split_group_count"] == 1
+    assert detail["session_coherent"] is False
+
+
 def test_graph_maintenance_preserves_last_good_contribution_when_reindex_is_required(
     tmp_path: Path,
     monkeypatch: Any,
@@ -55076,7 +55125,7 @@ def test_auto_maintenance_resource_launch_scopes_hot_demand_identity(tmp_path: P
 
     assert command[command.index("--class") + 1] == "medium"
     assert command[command.index("--demand-key") + 1] == (
-        "aoa-session-memory:auto-maintenance:hot:auto-maintenance-v4"
+        "aoa-session-memory:auto-maintenance:hot:auto-maintenance-v5"
     )
     assert command[command.index("--demand-owner") + 1] == "aoa-session-memory"
     assert command[command.index("--memory-demand-mib") + 1] == "3400"
@@ -55101,7 +55150,13 @@ def test_auto_maintenance_resource_launch_scopes_hot_demand_identity(tmp_path: P
 
 
 def test_auto_maintenance_resource_demand_epoch_tracks_each_bounded_profile_envelope() -> None:
-    for profile in ("hot", "backlog", "catchup", "deep"):
+    expected_epochs = {
+        "hot": "v5",
+        "backlog": "v4",
+        "catchup": "v7",
+        "deep": "v4",
+    }
+    for profile, epoch in expected_epochs.items():
         child_command = [
             "python3",
             str(Path(module.__file__).resolve()),
@@ -55109,7 +55164,7 @@ def test_auto_maintenance_resource_demand_epoch_tracks_each_bounded_profile_enve
             profile,
         ]
         assert module.auto_maintenance_resource_demand_key(profile, child_command) == (
-            f"aoa-session-memory:auto-maintenance:{profile}:auto-maintenance-v4"
+            f"aoa-session-memory:auto-maintenance:{profile}:auto-maintenance-{epoch}"
         )
 
 
@@ -55456,7 +55511,7 @@ def test_auto_maintenance_resource_launch_uses_live_tail_fast_path_for_catchup(t
     assert calls["command"][:3] == ["abyss-machine", "resource", "launch"]
     assert "--force" in calls["command"]
     assert calls["command"][calls["command"].index("--demand-key") + 1] == (
-        "aoa-session-memory:auto-maintenance:catchup:index-maintenance-v6"
+        "aoa-session-memory:auto-maintenance:catchup:index-maintenance-v7"
     )
     assert calls["command"][calls["command"].index("--demand-owner") + 1] == "aoa-session-memory"
     assert child[:4] == ["python3", str(Path(module.__file__).resolve()), "index-maintenance", session_label]
@@ -56657,7 +56712,7 @@ def test_catchup_auto_maintenance_resource_prefers_explicit_bounded_index_drip(
     assert len(calls) == 1
     assert calls[0][3:5] == ["--class", "probe"]
     assert calls[0][calls[0].index("--demand-key") + 1] == (
-        "aoa-session-memory:auto-maintenance:catchup:index-drip-v6"
+        "aoa-session-memory:auto-maintenance:catchup:index-drip-v7"
     )
     assert calls[0][calls[0].index("--demand-owner") + 1] == "aoa-session-memory"
     assert "index-maintenance" in calls[0]
@@ -57832,7 +57887,11 @@ def test_graph_queue_apply_tops_up_demanded_sources_from_nonempty_ledger(
         "segment:demanded:000",
         "segment:demanded:001",
     ]
-    assert set(observed["source_key_filters"]) == set(sources)
+    assert set(observed["source_key_filters"]) == {
+        "segment:demanded:000",
+        "segment:demanded:001",
+    }
+    assert payload["maintenance_detail"]["queue_selection"]["session_coherent"] is True
     remaining_queue = module.read_graph_maintenance_queue(aoa_root)["items"]
     assert {item["session_id"] for item in remaining_queue.values()} == {"backlog"}
 
@@ -84541,6 +84600,7 @@ def test_hot_auto_maintenance_processes_recent_live_outbox_without_quiet_wait(tm
     assert hot["status"] == "applied_with_remaining_backlog"
     assert hot["mutates"] is True
     assert hot["deferred_live_after"] is False
+    assert hot["deferred_global_derivatives"] is True
     assert hot["deferred_live_selection_count"] == 0
     assert hot["selection_scope"]["mode"] == "event_driven_component_outbox"
     assert hot["selection_scope"]["outbox"]["archive_manifest_scan_performed"] is False
@@ -84623,9 +84683,10 @@ def test_auto_maintenance_hands_off_deferred_live_after_quiet_window(tmp_path: P
     catchup = module.auto_maintenance(
         workspace_root=workspace,
         aoa_root=aoa_root,
-        profile="hot",
+        profile="backlog",
         target="all",
         apply=True,
+        discovery_limit=0,
         budget_seconds=120,
     )
     assert catchup["ok"] is True

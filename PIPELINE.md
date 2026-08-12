@@ -825,6 +825,15 @@ job's cooperative budget therefore begins around a bounded source window; an
 old queued graph intent cannot monopolize the shared maintenance lease merely
 because the archive continued to grow before that job was resumed.
 
+An applying graph-queue consumer packs complete session groups into its hard
+source-count batch limit. It may skip a group that does not fit the remaining
+capacity and admit a later complete group; only a single session larger than
+the whole limit is split, and that split is explicit in the maintenance
+packet. This aligns contribution hydration with its session boundary and
+prevents a larger planning window from repeatedly parsing sources that the
+current transaction cannot commit. Dry exact-cost planning retains its
+declared candidate window and does not claim this mutation posture.
+
 Conversely, a child may commit bounded mutations and then return deferred or
 budget-exhausted. Explicit allowlisted mutation counters in the action result
 admit only that bounded progress; generic processed, current, attempted,

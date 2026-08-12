@@ -26326,6 +26326,7 @@ def projection_outbox_ready_sessions(
         candidate = {
             "path": str(session_dir),
             "session_id": session_id,
+            "projection_outbox_ready": True,
             "session_label": str(
                 display.get("label")
                 or manifest.get("session_label")
@@ -52254,7 +52255,10 @@ def bounded_search_cost_prefilter(
             record,
             persisted_document_count=persisted_document_count,
         )
-        if persisted_hint.get("deferred_live"):
+        if (
+            persisted_hint.get("deferred_live")
+            and not record.get("projection_outbox_ready")
+        ):
             deferred.append(
                 {
                     "session_id": session_id,
@@ -53454,6 +53458,13 @@ def maintain_indexes(
         SEARCH_SOURCE_SET_REMOVED_REASON
         in search_full_rebuild_reasons
     )
+    global_derivatives_deferred = bool(
+        bounded_discovery
+        and not (
+            search_source_set_replacement_required
+            and maintenance_profile == "deep"
+        )
+    )
     if search_source_set_replacement_required:
         search_shards_repair_needed = bool(
             repair_indexes
@@ -54600,7 +54611,7 @@ def maintain_indexes(
                         ],
                         reason="bounded_projection_state_refresh",
                     )
-                    if bounded_discovery
+                    if global_derivatives_deferred
                     else build_search_catalog(
                         aoa_root,
                         write=True,
@@ -54728,7 +54739,7 @@ def maintain_indexes(
                             if search_source_set_replacement_required
                             else None
                         ),
-                        defer_global_derivatives=bounded_discovery,
+                        defer_global_derivatives=global_derivatives_deferred,
                     )
                     note_dense_upstream_changes(result)
                     search_action["status"] = "applied" if result.get("ok") else ("deferred_budget_exhausted" if result.get("budget_exhausted") else "failed")
@@ -55194,7 +55205,7 @@ def maintain_indexes(
                         selected_records=None if refreshed_search_rebuild_required else (refreshed_search_dirty_records or refreshed_records),
                         budget_seconds=budget_remaining(),
                         progress_every=progress_every,
-                        defer_global_derivatives=bounded_discovery,
+                            defer_global_derivatives=global_derivatives_deferred,
                     )
                     note_dense_upstream_changes(result)
                     post_search_action["status"] = "applied" if result.get("ok") else ("deferred_budget_exhausted" if result.get("budget_exhausted") else "failed")
@@ -55519,6 +55530,15 @@ def maintain_indexes(
                     max_refresh_nodes=effective_graph_max_refresh_nodes,
                     max_refresh_edges=effective_graph_max_refresh_edges,
                     budget_seconds=budget_remaining(),
+                    mode=(
+                        "deep"
+                        if search_source_set_replacement_required
+                        or maintenance_profile == "deep"
+                        else "hot"
+                    ),
+                    export_sidecar=(
+                        maintenance_profile in {"backlog", "deep"}
+                    ),
                     write_report=write_report,
                     reason="index_maintenance",
                     selected_records=(
@@ -55687,7 +55707,7 @@ def maintain_indexes(
             final_atlas_state = atlas_index_state(aoa_root, final_latest_source_mtime, final_records)
             final_entity_registry_state = (
                 entity_registry_state
-                if bounded_discovery
+                if global_derivatives_deferred
                 else entity_registry_maintenance_status(aoa_root)
             )
             final_episode_semantic_state = episode_semantic_projection_state(aoa_root, records=final_records)
@@ -55884,7 +55904,7 @@ def maintain_indexes(
         "selection_scope": selection_scope or {},
         "final_snapshot_scope": (
             "selected_records_global_derivatives_unresolved"
-            if bounded_discovery
+            if global_derivatives_deferred
             else "declared_selection_scope"
         ),
         "global_derivatives": (
@@ -55898,7 +55918,7 @@ def maintain_indexes(
                 "query_availability": "monolith_search_current_shard_routes_fail_closed_to_monolith",
                 "truth_status": "selected_search_projection_current_global_navigation_derivatives_unresolved",
             }
-            if bounded_discovery
+            if global_derivatives_deferred
             else {"status": "checked_by_declared_scope"}
         ),
         "query_demand_observation_requested": bool(observe_query_demand),
@@ -64598,9 +64618,20 @@ def deferred_scope_search_shard_diagnostic(diagnostic: str) -> bool:
 def deferred_graph_maintenance_diagnostic(diagnostic: str) -> bool:
     return diagnostic in {
         "graph_maintenance_needed",
+        "graph_store_missing",
         "graph_source_ledger_store_count_mismatch",
         "graph_sidecar_export_needed",
         "offline_graph_build_needed",
+    }
+
+
+def deferred_global_derivative_diagnostic(diagnostic: str) -> bool:
+    return diagnostic in {
+        "bounded_search_cost_pre_admission_deferred",
+        "index_maintenance_needed",
+        "entity_registry_missing_or_stale",
+        "source_newer_than_entity_registry",
+        "search_catalog_global_refresh_deferred_bounded_scope",
     }
 
 
@@ -64836,6 +64867,27 @@ def auto_maintenance_has_deferred_scope_search_shards(
     )
 
 
+def auto_maintenance_has_deferred_global_derivatives(
+    maintenance: dict[str, Any],
+) -> bool:
+    action_counts = (
+        maintenance.get("action_counts")
+        if isinstance(maintenance.get("action_counts"), dict)
+        else {}
+    )
+    global_derivatives = (
+        maintenance.get("global_derivatives")
+        if isinstance(maintenance.get("global_derivatives"), dict)
+        else {}
+    )
+    return bool(
+        int_value(action_counts.get("failed")) <= 0
+        and global_derivatives.get("status") == "deferred_bounded_scope"
+        and global_derivatives.get("query_availability")
+        == "monolith_search_current_shard_routes_fail_closed_to_monolith"
+    )
+
+
 def auto_maintenance_has_budget_remaining_backlog(maintenance: dict[str, Any]) -> bool:
     action_counts = maintenance.get("action_counts") if isinstance(maintenance.get("action_counts"), dict) else {}
     if int_value(action_counts.get("failed")) > 0:
@@ -65043,6 +65095,9 @@ def auto_maintenance_expected_remaining_backlog(
         maintenance,
         post_freshness=post_freshness,
     )
+    deferred_global_derivatives = auto_maintenance_has_deferred_global_derivatives(
+        maintenance
+    )
     budget_remaining = auto_maintenance_has_budget_remaining_backlog(maintenance) and (
         bool(diagnostics) or not bool(maintenance.get("ok"))
     )
@@ -65064,6 +65119,7 @@ def auto_maintenance_expected_remaining_backlog(
         or auto_maintenance_has_remaining_route_readiness_backlog(maintenance)
         or auto_maintenance_has_remaining_graph_backlog(maintenance)
         or entity_registry_followup.get("eligible") is True
+        or deferred_global_derivatives
         or budget_remaining
         or post_freshness_probe_deferred
     )
@@ -65084,6 +65140,10 @@ def auto_maintenance_expected_remaining_backlog(
                 "entity_registry_missing_or_stale",
                 "source_newer_than_entity_registry",
             }
+        )
+        and not (
+            deferred_global_derivatives
+            and deferred_global_derivative_diagnostic(str(item))
         )
     ]
     return not hard_diagnostics, hard_diagnostics
@@ -67056,6 +67116,10 @@ def auto_maintenance(
             apply
             and auto_maintenance_has_deferred_scope_search_shards(maintenance)
         )
+        deferred_global_derivatives = bool(
+            apply
+            and auto_maintenance_has_deferred_global_derivatives(maintenance)
+        )
         deferred_scope_hard_diagnostics = [
             item
             for item in diagnostics
@@ -67184,6 +67248,7 @@ def auto_maintenance(
             "graph_deferred_by_budget": graph_deferred_by_budget,
             "expected_deferred_live_remaining": expected_deferred_live_remaining,
             "deferred_scope_search_shards": deferred_scope_search_shards,
+            "deferred_global_derivatives": deferred_global_derivatives,
             "expected_deferred_scope_search_shards": expected_deferred_scope_search_shards,
             "deferred_scope_search_shard_count": int_value(
                 maintenance.get("search_shards_repair_out_of_scope_count")
@@ -134960,7 +135025,7 @@ def graph_entity_registry_materialization_compatibility(
         )
 
     counts: Counter[str] = Counter()
-    aggregate_route_payloads: dict[str, dict[str, Any]] = {}
+    expected_aggregate_pairs: set[tuple[str, str]] = set()
     aggregate_registry_pairs: set[tuple[str, str]] = set()
     aggregate_node_mismatches: list[dict[str, Any]] = []
     for row in conn.execute(
@@ -134983,7 +135048,15 @@ def graph_entity_registry_materialization_compatibility(
         if not isinstance(payload, dict):
             counts["malformed_payload_count"] += 1
             continue
-        aggregate_route_payloads[str(row["id"])] = payload
+        node_id = str(row["id"])
+        registry_node_id = graph_registry_materialization_route_target(
+            payload,
+            registry_index,
+        )
+        if registry_node_id:
+            expected_aggregate_pairs.add(
+                (registry_node_id, node_id)
+            )
         if str(row["node_type"] or "") == "entity_registry":
             counts["aggregate_registry_node_count"] += 1
             mismatched_fields = (
@@ -135016,17 +135089,6 @@ def graph_entity_registry_materialization_compatibility(
                 str(row["target_node"] or ""),
             )
         )
-    expected_aggregate_pairs = {
-        (registry_node_id, node_id)
-        for node_id, payload in aggregate_route_payloads.items()
-        if (
-            registry_node_id
-            := graph_registry_materialization_route_target(
-                payload,
-                registry_index,
-            )
-        )
-    }
     missing_aggregate_pairs = (
         expected_aggregate_pairs - aggregate_registry_pairs
     )
@@ -135034,10 +135096,9 @@ def graph_entity_registry_materialization_compatibility(
         aggregate_registry_pairs - expected_aggregate_pairs
     )
 
-    contribution_route_payloads: dict[
-        tuple[str, str],
-        dict[str, Any],
-    ] = {}
+    expected_contribution_pairs: set[
+        tuple[str, str, str]
+    ] = set()
     contribution_node_mismatches: list[dict[str, Any]] = []
     for row in conn.execute(
         """
@@ -135066,9 +135127,14 @@ def graph_entity_registry_materialization_compatibility(
         if not isinstance(payload, dict):
             counts["malformed_payload_count"] += 1
             continue
-        contribution_route_payloads[(source_key, node_id)] = (
-            payload
+        registry_node_id = graph_registry_materialization_route_target(
+            payload,
+            registry_index,
         )
+        if registry_node_id:
+            expected_contribution_pairs.add(
+                (source_key, registry_node_id, node_id)
+            )
         if str(row["node_type"] or "") == "entity_registry":
             counts["contribution_registry_node_count"] += 1
             mismatched_fields = (
@@ -135106,20 +135172,6 @@ def graph_entity_registry_materialization_compatibility(
                 str(row["target_node"] or ""),
             )
         )
-    expected_contribution_pairs = {
-        (source_key, registry_node_id, node_id)
-        for (
-            source_key,
-            node_id,
-        ), payload in contribution_route_payloads.items()
-        if (
-            registry_node_id
-            := graph_registry_materialization_route_target(
-                payload,
-                registry_index,
-            )
-        )
-    }
     missing_contribution_pairs = (
         expected_contribution_pairs
         - contribution_registry_pairs
@@ -142921,8 +142973,9 @@ def graph_maintenance_source_size_bytes(state: dict[str, Any]) -> int:
         return 0
 
 
-def graph_maintenance_actionable_sort_key(item: dict[str, Any]) -> tuple[int, int, int, str]:
+def graph_maintenance_actionable_sort_key(item: dict[str, Any]) -> tuple[int, int, int, int, str]:
     return (
+        0 if str(item.get("status") or "") == "orphaned" else 1,
         int_value(item.get("stored_edge_count")),
         int_value(item.get("stored_node_count")),
         graph_maintenance_source_size_bytes(item) if str(item.get("status") or "") == "missing" else 0,
@@ -142933,12 +142986,70 @@ def graph_maintenance_actionable_sort_key(item: dict[str, Any]) -> tuple[int, in
 def graph_maintenance_priority_sort_key(
     item: dict[str, Any],
     priority_rank: dict[str, int],
-) -> tuple[int, int, int, int, int, str]:
+) -> tuple[int, int, int, int, int, int, str]:
     session_id = str(item.get("session_id") or "")
     cost_key = graph_maintenance_actionable_sort_key(item)
+    orphan_rank = cost_key[0]
     if session_id in priority_rank:
-        return (0, priority_rank[session_id], *cost_key)
-    return (1, len(priority_rank), *cost_key)
+        return (orphan_rank, 0, priority_rank[session_id], *cost_key[1:])
+    return (orphan_rank, 1, len(priority_rank), *cost_key[1:])
+
+
+def graph_maintenance_session_coherent_queue_window(
+    candidates: list[dict[str, Any]],
+    *,
+    limit: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Select a bounded queue window without splitting ordinary sessions."""
+    effective_limit = max(1, int_value(limit, 1))
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for item in candidates:
+        source_key = str(item.get("source_key") or "")
+        session_id = str(item.get("session_id") or "")
+        group_key = session_id or f"source:{source_key}"
+        grouped.setdefault(group_key, []).append(item)
+
+    selected: list[dict[str, Any]] = []
+    skipped_group_count = 0
+    oversized_split_group_count = 0
+    for group in grouped.values():
+        remaining = effective_limit - len(selected)
+        if remaining <= 0:
+            break
+        if len(group) <= remaining:
+            selected.extend(group)
+            continue
+        if not selected and len(group) > effective_limit:
+            # A single session larger than the whole bounded pass cannot be
+            # kept atomic. Preserve the hard bound and report the one
+            # unavoidable split instead of starving every later pass.
+            selected.extend(group[:effective_limit])
+            oversized_split_group_count += 1
+            break
+        skipped_group_count += 1
+
+    if not selected and candidates:
+        selected = candidates[:effective_limit]
+        oversized_split_group_count = 1
+
+    selected_session_ids = list(
+        dict.fromkeys(
+            str(item.get("session_id") or "")
+            for item in selected
+            if item.get("session_id")
+        )
+    )
+    return selected, {
+        "selection_limit": effective_limit,
+        "candidate_count": len(candidates),
+        "candidate_session_count": len(grouped),
+        "selected_source_count": len(selected),
+        "selected_session_count": len(selected_session_ids),
+        "selected_session_ids": selected_session_ids[:40],
+        "skipped_session_group_count": skipped_group_count,
+        "oversized_split_group_count": oversized_split_group_count,
+        "session_coherent": oversized_split_group_count == 0,
+    }
 
 
 def graph_maintenance_missing_add_only_batch_summary(state: dict[str, Any]) -> dict[str, Any]:
@@ -143425,6 +143536,7 @@ def graph_maintenance(
     queue_priority_top_up: dict[str, Any] = {}
     queue_selected_source_keys: list[str] = []
     queue_candidate_window_limit = 0
+    queue_selection: dict[str, Any] = {}
     if seed_queue_from_ledger and not requested_source_keys and selected_records is None:
         effective_queue_seed_limit = (
             max(batch_limit * 10, batch_limit)
@@ -143466,9 +143578,27 @@ def graph_maintenance(
             if candidate_pool_limit is not None and int_value(candidate_pool_limit) > 0
             else max(batch_limit * 10, batch_limit)
         )
+        if apply:
+            queue_selected_candidates, queue_selection = (
+                graph_maintenance_session_coherent_queue_window(
+                    queue_candidates,
+                    limit=min(batch_limit, queue_candidate_window_limit),
+                )
+            )
+        else:
+            queue_selected_candidates = queue_candidates[
+                :queue_candidate_window_limit
+            ]
+            queue_selection = {
+                "selection_limit": queue_candidate_window_limit,
+                "candidate_count": len(queue_candidates),
+                "selected_source_count": len(queue_selected_candidates),
+                "session_coherent": False,
+                "reason": "dry_run_preserves_exact_candidate_window",
+            }
         queue_selected_source_keys = [
             str(item.get("source_key") or "")
-            for item in queue_candidates[:queue_candidate_window_limit]
+            for item in queue_selected_candidates
             if item.get("source_key")
         ]
         if queue_selected_source_keys:
@@ -143791,6 +143921,7 @@ def graph_maintenance(
         "queue_priority_top_up": queue_priority_top_up,
         "queue_selected_source_count": len(queue_selected_source_keys),
         "queue_candidate_window_limit": queue_candidate_window_limit,
+        "queue_selection": queue_selection,
         "queue_path": str(graph_paths(aoa_root)["maintenance_queue"]),
         "candidate_pool_policy": candidate_pool_policy,
         "explicit_candidate_pool_limit": explicit_candidate_pool_limit,

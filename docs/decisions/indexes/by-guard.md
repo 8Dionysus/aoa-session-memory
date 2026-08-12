@@ -82,6 +82,7 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0066 Set-Wise Append-Only Graph Batches](../AOA-SM-D-0066-set-wise-append-only-graph-batches.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0066-set-wise-append-only-graph-batches.md` |
+| [AOA-SM-D-0068 Session-Coherent Graph Queue Windows](../AOA-SM-D-0068-session-coherent-graph-queue-windows.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0068-session-coherent-graph-queue-windows.md` |
 
 ## atomic publication
 
@@ -154,6 +155,7 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0066 Set-Wise Append-Only Graph Batches](../AOA-SM-D-0066-set-wise-append-only-graph-batches.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0066-set-wise-append-only-graph-batches.md` |
+| [AOA-SM-D-0068 Session-Coherent Graph Queue Windows](../AOA-SM-D-0068-session-coherent-graph-queue-windows.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0068-session-coherent-graph-queue-windows.md` |
 
 ## bounded catch-up
 
@@ -370,6 +372,7 @@
 | [AOA-SM-D-0046 Content-Addressed Session-Index Components With Compatibility View](../AOA-SM-D-0046-content-addressed-session-index-components-with-compatibility-view.md) | 2026-08-09 | Accepted | `docs/decisions/AOA-SM-D-0046-content-addressed-session-index-components-with-compatibility-view.md` |
 | [AOA-SM-D-0047 Exclusive Heavy Projection Lane and Isolated Segment Workers](../AOA-SM-D-0047-exclusive-heavy-projection-lane-and-isolated-segment-workers.md) | 2026-08-09 | Accepted | `docs/decisions/AOA-SM-D-0047-exclusive-heavy-projection-lane-and-isolated-segment-workers.md` |
 | [AOA-SM-D-0066 Set-Wise Append-Only Graph Batches](../AOA-SM-D-0066-set-wise-append-only-graph-batches.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0066-set-wise-append-only-graph-batches.md` |
+| [AOA-SM-D-0068 Session-Coherent Graph Queue Windows](../AOA-SM-D-0068-session-coherent-graph-queue-windows.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0068-session-coherent-graph-queue-windows.md` |
 
 ## cooperative work budget
 
@@ -1303,6 +1306,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0021 Raw-Preserving Derived-Text Privacy Boundary](../AOA-SM-D-0021-raw-preserving-derived-text-privacy-boundary.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0021-raw-preserving-derived-text-privacy-boundary.md` |
+
+## session coherence
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0068 Session-Coherent Graph Queue Windows](../AOA-SM-D-0068-session-coherent-graph-queue-windows.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0068-session-coherent-graph-queue-windows.md` |
 
 ## session scope
 

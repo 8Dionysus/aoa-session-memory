@@ -233,6 +233,7 @@
 | [AOA-SM-D-0065 Registry Cost Admission Precedes Semantic Fingerprints](../AOA-SM-D-0065-registry-cost-admission-precedes-semantic-fingerprints.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0065-registry-cost-admission-precedes-semantic-fingerprints.md` |
 | [AOA-SM-D-0066 Set-Wise Append-Only Graph Batches](../AOA-SM-D-0066-set-wise-append-only-graph-batches.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0066-set-wise-append-only-graph-batches.md` |
 | [AOA-SM-D-0067 Guarded Graph Generation Rebind](../AOA-SM-D-0067-guarded-graph-generation-rebind.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0067-guarded-graph-generation-rebind.md` |
+| [AOA-SM-D-0068 Session-Coherent Graph Queue Windows](../AOA-SM-D-0068-session-coherent-graph-queue-windows.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0068-session-coherent-graph-queue-windows.md` |
 
 ## freshness contract
 
@@ -291,6 +292,7 @@
 | [AOA-SM-D-0044 Content-Addressed Resumable Projection Work](../AOA-SM-D-0044-content-addressed-resumable-projection-work.md) | 2026-08-08 | Accepted | `docs/decisions/AOA-SM-D-0044-content-addressed-resumable-projection-work.md` |
 | [AOA-SM-D-0066 Set-Wise Append-Only Graph Batches](../AOA-SM-D-0066-set-wise-append-only-graph-batches.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0066-set-wise-append-only-graph-batches.md` |
 | [AOA-SM-D-0067 Guarded Graph Generation Rebind](../AOA-SM-D-0067-guarded-graph-generation-rebind.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0067-guarded-graph-generation-rebind.md` |
+| [AOA-SM-D-0068 Session-Coherent Graph Queue Windows](../AOA-SM-D-0068-session-coherent-graph-queue-windows.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0068-session-coherent-graph-queue-windows.md` |
 
 ## graph maintenance
 
@@ -350,6 +352,7 @@
 | [AOA-SM-D-0064 Freshness Drip Admits Only Light Session Work](../AOA-SM-D-0064-freshness-drip-admits-only-light-session-work.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0064-freshness-drip-admits-only-light-session-work.md` |
 | [AOA-SM-D-0065 Registry Cost Admission Precedes Semantic Fingerprints](../AOA-SM-D-0065-registry-cost-admission-precedes-semantic-fingerprints.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0065-registry-cost-admission-precedes-semantic-fingerprints.md` |
 | [AOA-SM-D-0066 Set-Wise Append-Only Graph Batches](../AOA-SM-D-0066-set-wise-append-only-graph-batches.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0066-set-wise-append-only-graph-batches.md` |
+| [AOA-SM-D-0068 Session-Coherent Graph Queue Windows](../AOA-SM-D-0068-session-coherent-graph-queue-windows.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0068-session-coherent-graph-queue-windows.md` |
 
 ## index discovery
 
@@ -443,6 +446,7 @@
 | [AOA-SM-D-0064 Freshness Drip Admits Only Light Session Work](../AOA-SM-D-0064-freshness-drip-admits-only-light-session-work.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0064-freshness-drip-admits-only-light-session-work.md` |
 | [AOA-SM-D-0065 Registry Cost Admission Precedes Semantic Fingerprints](../AOA-SM-D-0065-registry-cost-admission-precedes-semantic-fingerprints.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0065-registry-cost-admission-precedes-semantic-fingerprints.md` |
 | [AOA-SM-D-0066 Set-Wise Append-Only Graph Batches](../AOA-SM-D-0066-set-wise-append-only-graph-batches.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0066-set-wise-append-only-graph-batches.md` |
+| [AOA-SM-D-0068 Session-Coherent Graph Queue Windows](../AOA-SM-D-0068-session-coherent-graph-queue-windows.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0068-session-coherent-graph-queue-windows.md` |
 
 ## physical storage transition
 
@@ -653,6 +657,7 @@
 | [AOA-SM-D-0063 Bounded Freshness Defers Global Derivatives](../AOA-SM-D-0063-bounded-freshness-defers-global-derivatives.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0063-bounded-freshness-defers-global-derivatives.md` |
 | [AOA-SM-D-0064 Freshness Drip Admits Only Light Session Work](../AOA-SM-D-0064-freshness-drip-admits-only-light-session-work.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0064-freshness-drip-admits-only-light-session-work.md` |
 | [AOA-SM-D-0065 Registry Cost Admission Precedes Semantic Fingerprints](../AOA-SM-D-0065-registry-cost-admission-precedes-semantic-fingerprints.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0065-registry-cost-admission-precedes-semantic-fingerprints.md` |
+| [AOA-SM-D-0068 Session-Coherent Graph Queue Windows](../AOA-SM-D-0068-session-coherent-graph-queue-windows.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0068-session-coherent-graph-queue-windows.md` |
 
 ## search
 
