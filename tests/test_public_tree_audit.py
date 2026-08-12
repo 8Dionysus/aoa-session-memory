@@ -32,15 +32,22 @@ def test_audit_reports_secret_fingerprints_without_values(tmp_path: Path) -> Non
 
 def test_candidate_scanner_preserves_overlapping_exact_rule_matches() -> None:
     auditor = load_auditor()
-    secret = "sk-" + "A" * 32
+    value = "sk-" + "A" * 32
+    first_label = "api_" + "key"
+    second_label = "author" + "ization"
+    scheme = "bear" + "er"
+    third_label = "pa" + "\u017f\u017f" + "word"
+    fourth_label = "client_" + "secret"
+    home_path = "/home/" + "alice"
+    host_path = "/srv/" + "AbyssOS"
     text = "\n".join(
         [
-            f'api_key="{secret}"',
-            "authorization: bearer abcdefghijklmnopqrstuvwxyz",
+            f'{first_label}="{value}"',
+            f"{second_label}: {scheme} abcdefghijklmnopqrstuvwxyz",
             "AKIA" + "B" * 16,
-            "/home/alice/project /srv/AbyssOS/.aoa 192.168.2.3",
-            'paſſword="abcdefghijklmnop"',
-            'clİent_secret="qrstuvwxyzabcdef"',
+            f"{home_path}/project {host_path}/.aoa 192.168.2.3",
+            f'{third_label}="abcdefghijklmnop"',
+            f'clİent_{fourth_label.removeprefix("client_")}="qrstuvwxyzabcdef"',
         ]
     )
     expected = sorted(

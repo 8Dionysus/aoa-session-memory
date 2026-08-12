@@ -69249,6 +69249,11 @@ def test_projection_source_set_retirement_fails_closed_and_deep_rebuilds_without
     assert deep_atlas["status"] == "applied"
     assert deep_atlas["action_kind"] == "full_rebuild"
     assert deep_graph["status"] == "applied"
+    graph_mode_index = deep_graph["command"].index("--mode")
+    assert deep_graph["command"][graph_mode_index + 1] == "deep"
+    assert deep_graph["result"]["maintenance_detail"][
+        "selection_strategy"
+    ] == "cheap_first_exact_refresh_cost"
     assert deep_shards["status"] == "applied"
     assert module.sha256_file(retired_raw) == raw_sha_before
 

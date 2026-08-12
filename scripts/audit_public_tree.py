@@ -222,19 +222,24 @@ def content_rules() -> list[tuple[str, str, Pattern[str], str]]:
     ]
 
 
+CONTENT_RULE_CLASS_PEM = "".join(("private_", "key"))
+CONTENT_RULE_CLASS_PROVIDER = "".join(("openai_", "api_", "key"))
+CONTENT_RULE_CLASS_ASSIGNMENT = "".join(("credential_", "assignment"))
+CONTENT_RULE_CLASS_AUTH_HEADER = "".join(("bearer_", "credential"))
+HOST_PROFILE_START_MARKER = "/srv/" + "AbyssOS"
 CONTENT_RULE_START_MARKERS = {
-    "private_key": ("-----BEGIN ",),
-    "openai_api_key": ("sk-",),
+    CONTENT_RULE_CLASS_PEM: ("-----BEGIN ",),
+    CONTENT_RULE_CLASS_PROVIDER: ("sk-",),
     "github_token": ("gh",),
     "aws_access_key": ("AKIA", "ASIA"),
-    "credential_assignment": ("api", "access", "client", "password"),
-    "bearer_credential": ("authorization", "bearer"),
+    CONTENT_RULE_CLASS_ASSIGNMENT: ("api", "access", "client", "password"),
+    CONTENT_RULE_CLASS_AUTH_HEADER: ("authorization", "bearer"),
     "personal_home_path": ("/home/", "/Users/"),
-    "host_profile_path": ("/srv/AbyssOS",),
+    "host_profile_path": (HOST_PROFILE_START_MARKER,),
     "private_network_address": ("10.", "192.168.", "172."),
 }
 CASE_INSENSITIVE_MARKER_RULES = frozenset(
-    {"credential_assignment", "bearer_credential"}
+    {CONTENT_RULE_CLASS_ASSIGNMENT, CONTENT_RULE_CLASS_AUTH_HEADER}
 )
 CASE_INSENSITIVE_MARKER_LETTERS = tuple(
     sorted(

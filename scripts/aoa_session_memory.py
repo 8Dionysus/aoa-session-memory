@@ -54785,6 +54785,11 @@ def maintain_indexes(
             + [
                 "graph-maintenance",
                 "all" if search_source_set_replacement_required else target,
+                *(
+                    ["--mode", "deep"]
+                    if search_source_set_replacement_required
+                    else []
+                ),
                 *root_args,
                 "--apply",
                 "--batch-limit",
@@ -56486,6 +56491,11 @@ def maintain_indexes(
                         else limit
                     ),
                     apply=True,
+                    mode=(
+                        "deep"
+                        if search_source_set_replacement_required
+                        else "hot"
+                    ),
                     batch_limit=effective_graph_batch_limit,
                     refresh_chunk_size=effective_graph_refresh_chunk_size,
                     max_refresh_nodes=effective_graph_max_refresh_nodes,

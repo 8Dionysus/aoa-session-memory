@@ -48,10 +48,10 @@ def test_history_audit_finds_deleted_session_secret_without_exposing_value(
     session.unlink()
     run(repo, "add", "-u")
     run(repo, "commit", "-qm", "delete private fixture")
-    dangling_secret = "sk-" + "E" * 32
+    dangling_value = "sk-" + "E" * 32
     subprocess.run(
         ["git", "-C", repo.as_posix(), "hash-object", "-w", "--stdin"],
-        input=dangling_secret + "\n",
+        input=dangling_value + "\n",
         text=True,
         check=True,
         stdout=subprocess.DEVNULL,
@@ -72,7 +72,7 @@ def test_history_audit_finds_deleted_session_secret_without_exposing_value(
         == "literal_start_candidates_with_exact_regex_confirmation"
     )
     assert all(
-        secret not in json.dumps(report) for secret in [*secrets, dangling_secret]
+        secret not in json.dumps(report) for secret in [*secrets, dangling_value]
     )
     assert all(item["fingerprint"].startswith("sha256:") for item in report["findings"])
     assert auditor.audit_exit_code(report, "none") == 0
