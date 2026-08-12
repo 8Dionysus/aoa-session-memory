@@ -43,10 +43,12 @@ The hook worker translates only explicit
 session-generation reindex jobs. This applies both to a new graph result and to
 the latest still-applicable no-progress report held by the graph drip circuit;
 the circuit schedules its named predecessor instead of reopening the same
-graph attempt. Each job owns one session, uses the existing split publish lock
-and cooperative checkpoint route, and remains in the deferred queue while
-checkpointed. A global or scoped graph continuation is queued only after a
-direct session-index generation probe reports current.
+graph attempt. Each job owns one session, runs beneath the hook worker's
+already-held shared maintenance lock, uses the cooperative checkpoint route,
+and remains in the deferred queue while checkpointed or temporarily blocked.
+It must not reacquire the same publish lock from inside the worker. A global or
+scoped graph continuation is queued only after a direct session-index
+generation probe reports current.
 
 ## Rationale
 
@@ -56,6 +58,8 @@ the reindex in a separate worker job preserves projection ownership and lets
 the graph transaction finish before the upstream mutation starts. Dedupe and a
 small handoff limit prevent one graph batch from flooding the worker queue;
 checkpoint retention makes a large session resumable rather than terminal.
+A hard reindex failure is retained in the failed queue and cannot be mislabeled
+as completed work.
 
 ## Consequences
 
@@ -73,8 +77,9 @@ checkpoint retention makes a large session resumable rather than terminal.
 ## Boundaries
 
 This decision does not make a blocked source current, relax graph generation
-compatibility, bypass the shared publish lock, or claim that the whole graph
-queue is drained. Hard reindex failures remain visible and do not enqueue a
+compatibility, bypass the shared maintenance lock, or claim that the whole
+graph queue is drained. The predecessor publish occurs under the lock already
+owned by the worker. Hard reindex failures remain visible and do not enqueue a
 successor graph mutation.
 
 ## Source Surfaces

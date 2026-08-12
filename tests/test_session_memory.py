@@ -58075,8 +58075,10 @@ def test_hook_worker_reindex_predecessor_resumes_then_queues_graph_followup(
     )
     assert queued is not None
     attempts = {"count": 0}
+    reindex_kwargs: list[dict[str, Any]] = []
 
-    def fake_reindex_sessions(**_kwargs: Any) -> dict[str, Any]:
+    def fake_reindex_sessions(**kwargs: Any) -> dict[str, Any]:
+        reindex_kwargs.append(kwargs)
         attempts["count"] += 1
         if attempts["count"] == 1:
             return {
@@ -58141,6 +58143,10 @@ def test_hook_worker_reindex_predecessor_resumes_then_queues_graph_followup(
     assert second["results"][0][
         "session_index_generation_current"
     ] is True
+    assert all(
+        kwargs["split_publish_lock"] is False
+        for kwargs in reindex_kwargs
+    )
     pending_jobs = [
         json.loads(path.read_text(encoding="utf-8"))
         for path in dirs["pending"].glob("*.json")
@@ -58148,6 +58154,120 @@ def test_hook_worker_reindex_predecessor_resumes_then_queues_graph_followup(
     assert len(pending_jobs) == 1
     assert pending_jobs[0]["job_type"] == "graph_maintenance"
     assert pending_jobs[0]["target"] == "all"
+
+
+def test_hook_worker_reindex_predecessor_lock_conflict_stays_deferred(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    session_id = "temporarily-locked-predecessor"
+    session_dir = aoa_root / "sessions" / session_id
+    session_dir.mkdir(parents=True)
+    (session_dir / module.SESSION_INDEX_JSON).write_text(
+        "{}\n", encoding="utf-8"
+    )
+    assert module.enqueue_session_generation_reindex_job(
+        aoa_root,
+        session_id=session_id,
+        reason="test_temporary_lock_conflict",
+    ) is not None
+
+    monkeypatch.setattr(
+        module,
+        "reindex_sessions",
+        lambda **_kwargs: {
+            "status": "completed",
+            "budget_exhausted": False,
+            "completed_session_ids": [],
+            "results": [{"status": "skipped_lock_held"}],
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "resolve_session_record",
+        lambda *_args, **_kwargs: {
+            "session_id": session_id,
+            "path": str(session_dir),
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "generated_session_index_stale_reasons_from_file",
+        lambda _path: ["session_index_generation_identity_changed"],
+    )
+
+    payload = module.run_hook_worker(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        limit=1,
+    )
+    dirs = module.hook_worker_dirs(aoa_root)
+
+    assert payload["ok"] is True
+    assert payload["results"][0]["status"] == (
+        "deferred_session_generation_reindex"
+    )
+    assert payload["results"][0]["retry_required"] is True
+    assert len(list(dirs["deferred"].glob("*.json"))) == 1
+    assert not list(dirs["done"].glob("*.json"))
+    assert not list(dirs["failed"].glob("*.json"))
+
+
+def test_hook_worker_reindex_predecessor_hard_failure_is_not_done(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    session_id = "broken-predecessor"
+    session_dir = aoa_root / "sessions" / session_id
+    session_dir.mkdir(parents=True)
+    (session_dir / module.SESSION_INDEX_JSON).write_text(
+        "{}\n", encoding="utf-8"
+    )
+    assert module.enqueue_session_generation_reindex_job(
+        aoa_root,
+        session_id=session_id,
+        reason="test_hard_failure",
+    ) is not None
+
+    monkeypatch.setattr(
+        module,
+        "reindex_sessions",
+        lambda **_kwargs: {
+            "status": "completed",
+            "budget_exhausted": False,
+            "completed_session_ids": [],
+            "results": [{"status": "diagnostic"}],
+            "diagnostics": ["unrecoverable_test_failure"],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "resolve_session_record",
+        lambda *_args, **_kwargs: {
+            "session_id": session_id,
+            "path": str(session_dir),
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "generated_session_index_stale_reasons_from_file",
+        lambda _path: ["session_index_generation_identity_changed"],
+    )
+
+    payload = module.run_hook_worker(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        limit=1,
+    )
+    dirs = module.hook_worker_dirs(aoa_root)
+
+    assert payload["ok"] is False
+    assert payload["results"][0]["status"] == "failed"
+    assert len(list(dirs["failed"].glob("*.json"))) == 1
+    assert not list(dirs["done"].glob("*.json"))
 
 
 def test_hook_worker_defers_graph_job_until_drip_circuit_closes(

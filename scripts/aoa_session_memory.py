@@ -33468,7 +33468,12 @@ def run_hook_worker(*, workspace_root: Path | None, aoa_root: Path, limit: int =
                             max_raw_bytes=None,
                             write_report=True,
                             budget_seconds=budget_seconds,
-                            split_publish_lock=True,
+                            # command_hook_worker owns the shared maintenance
+                            # lock for the whole worker batch. Publishing the
+                            # completed predecessor must stay under that lock
+                            # instead of trying to reacquire it from the same
+                            # process and manufacturing a lock conflict.
+                            split_publish_lock=False,
                         )
                         stale_reasons: list[str] = [
                             "session_index_currentness_unresolved"
@@ -33538,6 +33543,21 @@ def run_hook_worker(*, workspace_root: Path | None, aoa_root: Path, limit: int =
                                 if isinstance(item, dict)
                             )
                         )
+                        retryable = bool(
+                            checkpointed
+                            or any(
+                                str(item.get("status") or "")
+                                == "skipped_lock_held"
+                                for item in (
+                                    reindexed.get("results")
+                                    if isinstance(
+                                        reindexed.get("results"), list
+                                    )
+                                    else []
+                                )
+                                if isinstance(item, dict)
+                            )
+                        )
                         result = {
                             "job": str(running_path),
                             "status": (
@@ -33545,7 +33565,7 @@ def run_hook_worker(*, workspace_root: Path | None, aoa_root: Path, limit: int =
                                 if generation_current
                                 else (
                                     "deferred_session_generation_reindex"
-                                    if checkpointed
+                                    if retryable
                                     else "failed"
                                 )
                             ),
@@ -33570,12 +33590,16 @@ def run_hook_worker(*, workspace_root: Path | None, aoa_root: Path, limit: int =
                                 followup_graph_job or ""
                             ),
                             "retry_required": bool(
-                                not generation_current and checkpointed
+                                not generation_current and retryable
                             ),
                             "job_disposition": (
                                 "deferred"
-                                if not generation_current and checkpointed
-                                else "done"
+                                if not generation_current and retryable
+                                else (
+                                    "failed"
+                                    if not generation_current
+                                    else "done"
+                                )
                             ),
                         }
                     elif job_type == "index_maintenance":
@@ -33960,6 +33984,20 @@ def run_hook_worker(*, workspace_root: Path | None, aoa_root: Path, limit: int =
                         result["deferred_job"] = str(
                             deferred_path
                         )
+                    elif result.get("job_disposition") == "failed":
+                        failed_path = (
+                            dirs["failed"] / running_path.name
+                        )
+                        write_json(
+                            failed_path,
+                            {
+                                **job,
+                                "failed_at": utc_now(),
+                                "result": result,
+                            },
+                        )
+                        running_path.unlink(missing_ok=True)
+                        result["failed_job"] = str(failed_path)
                     else:
                         done_path = (
                             dirs["done"] / running_path.name
