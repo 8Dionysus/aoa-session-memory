@@ -30,6 +30,34 @@ def test_audit_reports_secret_fingerprints_without_values(tmp_path: Path) -> Non
     assert all(item["fingerprint"].startswith("sha256:") for item in report["findings"])
 
 
+def test_candidate_scanner_preserves_overlapping_exact_rule_matches() -> None:
+    auditor = load_auditor()
+    secret = "sk-" + "A" * 32
+    text = "\n".join(
+        [
+            f'api_key="{secret}"',
+            "authorization: bearer abcdefghijklmnopqrstuvwxyz",
+            "AKIA" + "B" * 16,
+            "/home/alice/project /srv/AbyssOS/.aoa 192.168.2.3",
+            'paſſword="abcdefghijklmnop"',
+            'clİent_secret="qrstuvwxyzabcdef"',
+        ]
+    )
+    expected = sorted(
+        (class_name, match.start(), match.group(0))
+        for class_name, _severity, pattern, _reason in auditor.content_rules()
+        for match in pattern.finditer(text)
+    )
+    actual = sorted(
+        (class_name, match.start(), match.group(0))
+        for class_name, _severity, match, _reason in auditor.iter_content_rule_matches(
+            text
+        )
+    )
+
+    assert actual == expected
+
+
 def test_audit_blocks_runtime_material_and_non_generic_home_paths(tmp_path: Path) -> None:
     auditor = load_auditor()
     session_dir = tmp_path / "sessions" / "private-session"

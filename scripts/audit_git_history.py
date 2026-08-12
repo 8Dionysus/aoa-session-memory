@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -15,8 +17,8 @@ from audit_public_tree import (
     CACHE_PARTS,
     RUNTIME_PARTS,
     SEVERITY_RANK,
-    content_rules,
     fingerprint,
+    iter_content_rule_matches,
 )
 
 
@@ -78,8 +80,18 @@ class FindingAccumulator:
             }
             self._items[key] = item
         item["occurrence_count"] += 1
-        if len(item["samples"]) < 5 and sample not in item["samples"]:
+        if sample not in item["samples"]:
             item["samples"].append(sample)
+            item["samples"].sort(
+                key=lambda value: (
+                    value["object"],
+                    value["path"],
+                    value.get("line", -1),
+                    value.get("size", -1),
+                    value["historical_only"],
+                )
+            )
+            del item["samples"][5:]
 
     def sorted_items(self) -> list[dict[str, Any]]:
         return sorted(
@@ -119,6 +131,24 @@ def head_blob_ids(repo: Path) -> set[str]:
     return result
 
 
+def ref_snapshot(repo: Path) -> dict[str, Any]:
+    refs = sorted(
+        git(
+            repo,
+            "for-each-ref",
+            "--format=%(refname)%00%(objectname)%00%(*objectname)",
+        ).splitlines()
+    )
+    head = git(repo, "rev-parse", "--verify", "HEAD").strip()
+    payload = ("HEAD\0" + head + "\n" + "\n".join(refs) + "\n").encode(
+        "utf-8"
+    )
+    return {
+        "ref_count": len(refs),
+        "digest": "sha256:" + hashlib.sha256(payload).hexdigest(),
+    }
+
+
 def virtual_path_rules(path: str) -> list[tuple[str, str, str]]:
     relative = Path(path)
     parts = set(relative.parts)
@@ -140,18 +170,24 @@ def virtual_path_rules(path: str) -> list[tuple[str, str, str]]:
 
 
 class GitObjectReader:
-    def __init__(self, repo: Path) -> None:
+    def __init__(self, repo: Path, object_ids: list[str]) -> None:
+        self._input = tempfile.TemporaryFile()
+        self._expected_count = len(object_ids)
+        self._read_count = 0
+        self._closed = False
+        self._input.write(
+            "".join(f"{object_id}\n" for object_id in object_ids).encode("ascii")
+        )
+        self._input.seek(0)
         self.process = subprocess.Popen(
             ["git", "-C", repo.as_posix(), "cat-file", "--batch"],
-            stdin=subprocess.PIPE,
+            stdin=self._input,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
 
     def read(self, object_id: str, expected_type: str, expected_size: int) -> bytes:
-        assert self.process.stdin is not None and self.process.stdout is not None
-        self.process.stdin.write(object_id.encode("ascii") + b"\n")
-        self.process.stdin.flush()
+        assert self.process.stdout is not None
         header = self.process.stdout.readline().decode("ascii").strip().split()
         if len(header) != 3:
             raise RuntimeError(f"cannot read Git object metadata: {object_id}")
@@ -160,22 +196,60 @@ class GitObjectReader:
         if actual_id != object_id or actual_type != expected_type or size != expected_size:
             raise RuntimeError(f"Git object metadata changed during audit: {object_id}")
         data = self.process.stdout.read(size)
-        if len(data) != size or self.process.stdout.read(1) != b"\n":
-            raise RuntimeError(f"incomplete Git object read: {object_id}")
+        if len(data) != size:
+            raise RuntimeError(f"incomplete Git object content: {object_id}")
+        if self.process.stdout.read(1) != b"\n":
+            raise RuntimeError(f"missing Git object batch terminator: {object_id}")
+        self._read_count += 1
         return data
 
     def close(self) -> None:
-        if self.process.stdin is not None:
-            self.process.stdin.close()
-        returncode = self.process.wait(timeout=30)
+        if self._closed:
+            return
+        if self._read_count != self._expected_count:
+            self.abort()
+            raise RuntimeError(
+                "Git object batch was not fully consumed: "
+                f"{self._read_count}/{self._expected_count}"
+            )
+        try:
+            returncode = self.process.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            self.abort()
+            raise RuntimeError("git cat-file --batch did not exit after full consumption") from None
+        self._input.close()
+        self._closed = True
         if returncode != 0:
             assert self.process.stderr is not None
             detail = self.process.stderr.read().decode("utf-8", errors="replace").strip()
             raise RuntimeError(detail or "git cat-file --batch failed")
 
+    def abort(self) -> None:
+        if self._closed:
+            return
+        if self.process.poll() is None:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait(timeout=5)
+        self._input.close()
+        self._closed = True
+
+    def __enter__(self) -> GitObjectReader:
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        if exc_type is None:
+            self.close()
+        else:
+            self.abort()
+
 
 def audit(repo: Path) -> dict[str, Any]:
     repo = repo.expanduser().resolve()
+    refs_before = ref_snapshot(repo)
     object_paths, metadata = object_inventory(repo)
     current_blobs = head_blob_ids(repo)
     findings = FindingAccumulator()
@@ -188,12 +262,12 @@ def audit(repo: Path) -> dict[str, Any]:
         r"(?:git@github\.com:|https://github\.com/)8Dionysus/[A-Za-z0-9_.-]+(?:\.git)?"
     )
     commit_email_pattern = re.compile(r"(?m)^(?:author|committer) .+ <([^>]+)>")
-    compiled_content_rules = content_rules()
-    object_reader = GitObjectReader(repo)
-
+    scannable_metadata: dict[str, tuple[str, int]] = {}
     for object_id in sorted(metadata):
         object_type, size = metadata[object_id]
-        paths = sorted(object_paths.get(object_id) or {f"@object/{object_type}/{object_id}"})
+        paths = sorted(
+            object_paths.get(object_id) or {f"@object/{object_type}/{object_id}"}
+        )
         historical_only = object_type == "blob" and object_id not in current_blobs
         if object_type == "blob":
             blob_count += 1
@@ -235,12 +309,21 @@ def audit(repo: Path) -> dict[str, Any]:
                 size=size,
             )
             continue
-        data = object_reader.read(object_id, object_type, size)
-        scanned_bytes += len(data)
-        scanned_object_count += 1
-        text = data.decode("utf-8", errors="ignore")
-        for class_name, severity, pattern, reason in compiled_content_rules:
-            for match in pattern.finditer(text):
+        scannable_metadata[object_id] = (object_type, size)
+
+    scannable_object_ids = sorted(scannable_metadata)
+    with GitObjectReader(repo, scannable_object_ids) as object_reader:
+        for object_id in scannable_object_ids:
+            object_type, size = scannable_metadata[object_id]
+            data = object_reader.read(object_id, object_type, size)
+            paths = sorted(
+                object_paths.get(object_id) or {f"@object/{object_type}/{object_id}"}
+            )
+            historical_only = object_type == "blob" and object_id not in current_blobs
+            scanned_bytes += len(data)
+            scanned_object_count += 1
+            text = data.decode("utf-8", errors="ignore")
+            for class_name, severity, match, reason in iter_content_rule_matches(text):
                 matched_value = match.group(0).encode("utf-8")
                 matched_fingerprint = fingerprint(class_name, matched_value)
                 declared_synthetic = (
@@ -251,62 +334,105 @@ def audit(repo: Path) -> dict[str, Any]:
                     class_name,
                     "review" if declared_synthetic else severity,
                     matched_value,
-                    "declared synthetic redaction test fixture" if declared_synthetic else reason,
+                    (
+                        "declared synthetic redaction test fixture"
+                        if declared_synthetic
+                        else reason
+                    ),
                     object_id=object_id,
                     path=paths[0],
                     historical_only=historical_only,
                     line=text.count("\n", 0, match.start()) + 1,
                 )
-        for owner_url in owner_url_pattern.finditer(text):
-            findings.add(
-                "owner_repository_url",
-                "review",
-                owner_url.group(0).encode("utf-8"),
-                "owner-namespace repository URL requires visibility classification",
-                object_id=object_id,
-                path=paths[0],
-                historical_only=historical_only,
-                line=text.count("\n", 0, owner_url.start()) + 1,
-            )
-        if object_type == "commit":
-            for email_match in commit_email_pattern.finditer(text):
-                email = email_match.group(1)
-                if email.casefold().endswith("@users.noreply.github.com"):
+            owner_url_positions: set[int] = set()
+            for marker in ("git@github.com:", "https://github.com/"):
+                position = text.find(marker)
+                while position >= 0:
+                    owner_url_positions.add(position)
+                    position = text.find(marker, position + 1)
+            for position in sorted(owner_url_positions):
+                owner_url = owner_url_pattern.match(text, position)
+                if owner_url is None:
                     continue
                 findings.add(
-                    "commit_identity_email",
+                    "owner_repository_url",
                     "review",
-                    email.encode("utf-8"),
-                    "commit identity is exposed when history becomes public",
+                    owner_url.group(0).encode("utf-8"),
+                    "owner-namespace repository URL requires visibility classification",
                     object_id=object_id,
                     path=paths[0],
-                    historical_only=False,
-                    line=text.count("\n", 0, email_match.start()) + 1,
+                    historical_only=historical_only,
+                    line=text.count("\n", 0, owner_url.start()) + 1,
                 )
-    object_reader.close()
+            if object_type == "commit":
+                for email_match in commit_email_pattern.finditer(text):
+                    email = email_match.group(1)
+                    if email.casefold().endswith("@users.noreply.github.com"):
+                        continue
+                    findings.add(
+                        "commit_identity_email",
+                        "review",
+                        email.encode("utf-8"),
+                        "commit identity is exposed when history becomes public",
+                        object_id=object_id,
+                        path=paths[0],
+                        historical_only=False,
+                        line=text.count("\n", 0, email_match.start()) + 1,
+                    )
+    refs_after = ref_snapshot(repo)
+    refs_stable = refs_before == refs_after
+    if not refs_stable:
+        findings.add(
+            "history_ref_drift",
+            "blocking",
+            (refs_before["digest"] + "\0" + refs_after["digest"]).encode("ascii"),
+            "Git refs changed during the history audit",
+            object_id=refs_after["digest"],
+            path="@refs",
+            historical_only=False,
+        )
     finding_items = findings.sorted_items()
     counts = {
         severity: sum(1 for item in finding_items if item["severity"] == severity)
         for severity in ("blocking", "review")
     }
-    refs = git(repo, "for-each-ref", "--format=%(refname)").splitlines()
     return {
         "schema": "aoa_session_memory_git_history_audit_v1",
         "ok": counts["blocking"] == 0 and skipped_object_count == 0,
         "coverage": {
-            "ref_count": len(refs),
-            "commit_count": int(git(repo, "rev-list", "--all", "--count").strip()),
+            "ref_count": refs_before["ref_count"],
+            "refs_before_digest": refs_before["digest"],
+            "refs_after_digest": refs_after["digest"],
+            "refs_stable": refs_stable,
+            "commit_count": sum(
+                object_type == "commit" for object_type, _size in metadata.values()
+            ),
             "reachable_object_count": len(metadata),
             "blob_count": blob_count,
             "historical_only_blob_count": historical_only_blob_count,
             "scanned_object_count": scanned_object_count,
             "scanned_bytes": scanned_bytes,
             "skipped_object_count": skipped_object_count,
+            "object_reader": "single_git_cat_file_batch_stream",
+            "content_matcher": "literal_start_candidates_with_exact_regex_confirmation",
         },
         "counts": counts,
         "findings": finding_items,
         "value_exposure": "class, object, path, line, reason, occurrence count, and safe fingerprint only",
     }
+
+
+def audit_exit_code(result: dict[str, Any], fail_on: str) -> int:
+    coverage = result["coverage"]
+    if not coverage["refs_stable"] or coverage["skipped_object_count"] != 0:
+        return 1
+    threshold = SEVERITY_RANK[fail_on]
+    return int(
+        any(
+            SEVERITY_RANK[item["severity"]] >= threshold
+            for item in result["findings"]
+        )
+    )
 
 
 def main() -> int:
@@ -316,8 +442,7 @@ def main() -> int:
     args = parser.parse_args()
     result = audit(args.repo)
     print(json.dumps(result, indent=2, sort_keys=True))
-    threshold = SEVERITY_RANK[args.fail_on]
-    return 1 if any(SEVERITY_RANK[item["severity"]] >= threshold for item in result["findings"]) else 0
+    return audit_exit_code(result, args.fail_on)
 
 
 if __name__ == "__main__":
