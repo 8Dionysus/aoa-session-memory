@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "runner_contexts": {
+    "owner_local_cli": {
+      "role": "developer and agent feedback",
+      "runner_type": "local_process",
+      "requires_private_host_state": false
+    },
+    "host_resource_scheduler": {
+      "role": "resource-admitted local proof",
+      "runner_type": "abyss_machine_resource_launch",
+      "requires_private_host_state": true
+    },
+    "release_pipeline": {
+      "role": "standalone hosted release proof",
+      "runner_type": "github_actions",
+      "requires_private_host_state": false
+    }
+  },
+  "command_sequences": {
+    "standalone_full": [
+      {
+        "label": "decision index parity",
+        "command": ["python", "scripts/generate_decision_indexes.py", "--check"]
+      },
+      {
+        "label": "current public tree audit",
+        "command": ["python", "scripts/audit_public_tree.py", "--root", ".", "--fail-on", "blocking"]
+      },
+      {
+        "label": "retained Git history inventory",
+        "command": ["python", "scripts/audit_git_history.py", "--repo", ".", "--fail-on", "none"]
+      },
+      {
+        "label": "validation graph contract tests",
+        "command": [
+          "python",
+          "-m",
+          "pytest",
+          "-q",
+          "-p",
+          "no:cacheprovider",
+          "tests/test_validation_evidence_graph.py",
+          "tests/test_validation_scheduler_experiment.py"
+        ]
+      },
+      {
+        "label": "portable source tests",
+        "command": [
+          "python",
+          "-m",
+          "pytest",
+          "-q",
+          "-p",
+          "no:cacheprovider",
+          "tests/test_session_memory.py",
+          "tests/test_public_tree_audit.py",
+          "tests/test_git_history_audit.py"
+        ]
+      },
+      {
+        "label": "MCP package release check",
+        "command": ["python", "packages/aoa-session-memory-mcp/scripts/release_check.py"]
+      },
+      {
+        "label": "reproducible artifacts and installed protocol",
+        "command": ["python", "scripts/validate_release_artifacts.py"]
+      },
+      {
+        "label": "post-build public tree audit",
+        "command": ["python", "scripts/audit_public_tree.py", "--root", ".", "--fail-on", "blocking"]
+      }
+    ]
+  },
+  "lanes": {
+    "standalone-full": {
+      "command_sequence": "standalone_full",
+      "owner_surface": "portable source, MCP package, reproducible artifact, and clean installed protocol",
+      "failure_route": "aoa-session-memory owner review",
+      "runner_contexts": ["owner_local_cli", "host_resource_scheduler", "release_pipeline"],
+      "public_safe": false
+    }
+  }
+}
