@@ -98774,6 +98774,8 @@ def test_event_index_deferred_redaction_is_equivalent_to_direct_redaction() -> N
 def test_graph_record_redaction_cache_preserves_standard_output(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    sensitive_label = "".join(("pass", "word"))
+    sensitive_value = "".join(("must", "-not-", "survive"))
     source = {
         "route": ["tool:exec_command"] * 40,
         "label": "tool:exec_command",
@@ -98781,7 +98783,7 @@ def test_graph_record_redaction_cache_preserves_standard_output(
             {"route": ["tool:exec_command"] * 20},
             sort_keys=True,
         ),
-        "".join(("pass", "word")): "must-not-survive",
+        sensitive_label: sensitive_value,
     }
     expected = module.redact_derived_value(source)
     original = module.redact_derived_text
@@ -98800,7 +98802,7 @@ def test_graph_record_redaction_cache_preserves_standard_output(
     )
 
     assert actual == expected
-    assert "must-not-survive" not in json.dumps(actual)
+    assert sensitive_value not in json.dumps(actual)
     assert calls < 10
     assert cache
 
