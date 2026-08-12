@@ -1491,7 +1491,7 @@ AUTO_MAINTENANCE_PROFILES = {
         "deferred_graph_job_budget_seconds": 120,
         "resource_class": "medium",
         "resource_kind": "indexing",
-        "resource_demand_epoch": "v4",
+        "resource_demand_epoch": "v5",
         "automatic_heavy_projection_lane": False,
         "budget_seconds": 600,
         "resource_startup_grace_seconds": 180,
@@ -1569,7 +1569,7 @@ AUTO_MAINTENANCE_PROFILES = {
         "deferred_graph_job_budget_seconds": 600,
         "resource_class": "medium",
         "resource_kind": "indexing",
-        "resource_demand_epoch": "v6",
+        "resource_demand_epoch": "v7",
         "automatic_heavy_projection_lane": False,
         "budget_seconds": 600,
         "resource_startup_grace_seconds": 180,
@@ -52125,7 +52125,11 @@ def session_record_declared_raw_bytes(record: dict[str, Any]) -> int:
     )
 
 
-def session_record_declared_search_cost_class(record: dict[str, Any]) -> str:
+def session_record_declared_search_cost_class(
+    record: dict[str, Any],
+    *,
+    persisted_document_count: int = 0,
+) -> str:
     """Classify a registry record without opening projection payloads.
 
     This is a conservative pre-admission gate for bounded freshness workers.
@@ -52133,7 +52137,10 @@ def session_record_declared_search_cost_class(record: dict[str, Any]) -> str:
     classification for admitted records.
     """
     raw_bytes = session_record_declared_raw_bytes(record)
-    event_count = int_value(record.get("event_count"))
+    event_count = max(
+        int_value(record.get("event_count")),
+        max(0, int_value(persisted_document_count)),
+    )
     segment_count = int_value(record.get("segment_count"))
     if (
         raw_bytes >= SEARCH_REPAIR_COST_HEAVY_RAW_BYTES
@@ -52150,10 +52157,72 @@ def session_record_declared_search_cost_class(record: dict[str, Any]) -> str:
     return "light"
 
 
+def bounded_search_persisted_cost_hints(
+    aoa_root: Path,
+    records: list[dict[str, Any]],
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    """Read cheap persisted scheduling hints for one bounded discovery window."""
+    session_ids = list(
+        dict.fromkeys(
+            str(record.get("session_id") or "")
+            for record in records
+            if str(record.get("session_id") or "")
+        )
+    )
+    db_path = search_db_path(aoa_root)
+    if not session_ids or not db_path.is_file():
+        return {}, []
+    conn: sqlite3.Connection | None = None
+    hints: dict[str, dict[str, Any]] = {}
+    diagnostics: list[str] = []
+    try:
+        conn = connect_existing_search_db(db_path)
+        placeholders = ",".join("?" for _ in session_ids)
+        for table_name in ("session_index_state", "search_freshness_state"):
+            if not sqlite_table_exists(conn, table_name):
+                continue
+            columns = {
+                str(row[1])
+                for row in conn.execute(
+                    f"PRAGMA table_info({table_name})"
+                ).fetchall()
+            }
+            if not {"session_id", "document_count"}.issubset(columns):
+                continue
+            status_expr = "status" if "status" in columns else "'' AS status"
+            for row in conn.execute(
+                f"SELECT session_id, document_count, {status_expr} FROM {table_name} "
+                f"WHERE session_id IN ({placeholders})",
+                session_ids,
+            ).fetchall():
+                session_id = str(row["session_id"] or "")
+                if session_id:
+                    previous = hints.get(session_id, {})
+                    hints[session_id] = {
+                        "document_count": max(
+                            int_value(previous.get("document_count")),
+                            max(0, int_value(row["document_count"])),
+                        ),
+                        "deferred_live": bool(
+                            previous.get("deferred_live")
+                            or str(row["status"] or "") == "deferred_live"
+                        ),
+                    }
+    except sqlite3.Error as exc:
+        diagnostics.append(
+            f"bounded_search_persisted_cost_hints_unavailable:{sqlite_error_diagnostic(exc)}"
+        )
+    finally:
+        if conn is not None:
+            conn.close()
+    return hints, diagnostics
+
+
 def bounded_search_cost_prefilter(
     records: list[dict[str, Any]],
     *,
     max_cost_class: str,
+    aoa_root: Path | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     cost_rank = {"light": 0, "warm": 1, "heavy": 2}
     normalized = str(max_cost_class or "auto").lower()
@@ -52166,10 +52235,39 @@ def bounded_search_cost_prefilter(
             "deferred_sessions": [],
         }
     max_rank = cost_rank[normalized]
+    persisted_hints: dict[str, dict[str, Any]] = {}
+    persisted_hint_diagnostics: list[str] = []
+    if aoa_root is not None:
+        (
+            persisted_hints,
+            persisted_hint_diagnostics,
+        ) = bounded_search_persisted_cost_hints(aoa_root, records)
     admitted: list[dict[str, Any]] = []
     deferred: list[dict[str, Any]] = []
     for record in records:
-        cost_class = session_record_declared_search_cost_class(record)
+        session_id = str(record.get("session_id") or "")
+        persisted_hint = persisted_hints.get(session_id, {})
+        persisted_document_count = int_value(
+            persisted_hint.get("document_count")
+        )
+        cost_class = session_record_declared_search_cost_class(
+            record,
+            persisted_document_count=persisted_document_count,
+        )
+        if persisted_hint.get("deferred_live"):
+            deferred.append(
+                {
+                    "session_id": session_id,
+                    "session_label": str(record.get("session_label") or ""),
+                    "cost_class": cost_class,
+                    "declared_raw_bytes": session_record_declared_raw_bytes(record),
+                    "event_count": int_value(record.get("event_count")),
+                    "segment_count": int_value(record.get("segment_count")),
+                    "persisted_document_count": persisted_document_count,
+                    "reason": "persisted_deferred_live_excluded_from_bounded_discovery",
+                }
+            )
+            continue
         if cost_rank[cost_class] <= max_rank:
             admitted.append(record)
             continue
@@ -52181,17 +52279,32 @@ def bounded_search_cost_prefilter(
                 "declared_raw_bytes": session_record_declared_raw_bytes(record),
                 "event_count": int_value(record.get("event_count")),
                 "segment_count": int_value(record.get("segment_count")),
+                "persisted_document_count": persisted_document_count,
                 "reason": "declared_cost_above_bounded_freshness_lane",
             }
         )
     return admitted, {
         "enabled": True,
-        "mode": "registry_metadata_pre_admission",
+        "mode": (
+            "registry_and_persisted_search_state_pre_admission"
+            if aoa_root is not None
+            else "registry_metadata_pre_admission"
+        ),
         "max_cost_class": normalized,
         "input_count": len(records),
         "admitted_count": len(admitted),
         "deferred_count": len(deferred),
         "deferred_sessions": deferred,
+        "persisted_document_count_hint_count": len(
+            persisted_hints
+        ),
+        "deferred_live_count": sum(
+            1
+            for item in deferred
+            if item.get("reason")
+            == "persisted_deferred_live_excluded_from_bounded_discovery"
+        ),
+        "diagnostics": persisted_hint_diagnostics,
         "truth_status": "pre_admission_only_semantic_fingerprint_remains_authoritative_for_admitted_records",
     }
 
@@ -52913,6 +53026,7 @@ def maintain_indexes(
         records, bounded_cost_scope = bounded_search_cost_prefilter(
             records,
             max_cost_class=search_max_cost_class,
+            aoa_root=aoa_root,
         )
         selection_scope = {
             **(

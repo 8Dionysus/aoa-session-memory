@@ -56820,6 +56820,81 @@ def test_bounded_search_cost_prefilter_rejects_heavy_registry_records_before_fin
     assert scope["deferred_sessions"][0]["cost_class"] == "warm"
 
 
+def test_bounded_search_cost_prefilter_uses_persisted_document_count(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    db_path = module.search_db_path(aoa_root)
+    db_path.parent.mkdir(parents=True)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE session_index_state "
+        "(session_id TEXT PRIMARY KEY, document_count INTEGER)"
+    )
+    conn.execute(
+        "INSERT INTO session_index_state(session_id, document_count) VALUES (?, ?)",
+        ("persisted-heavy-session", module.SEARCH_REPAIR_COST_HEAVY_DOCUMENT_COUNT),
+    )
+    conn.commit()
+    conn.close()
+    record = {
+        "session_id": "persisted-heavy-session",
+        "session_label": "2026-07-02__003__persisted-heavy-session",
+        "raw": {"bytes": 1024},
+    }
+
+    admitted, scope = module.bounded_search_cost_prefilter(
+        [record],
+        max_cost_class="warm",
+        aoa_root=aoa_root,
+    )
+
+    assert admitted == []
+    assert scope["mode"] == "registry_and_persisted_search_state_pre_admission"
+    assert scope["persisted_document_count_hint_count"] == 1
+    assert scope["deferred_sessions"][0]["cost_class"] == "heavy"
+    assert scope["deferred_sessions"][0]["persisted_document_count"] == (
+        module.SEARCH_REPAIR_COST_HEAVY_DOCUMENT_COUNT
+    )
+
+
+def test_bounded_search_cost_prefilter_excludes_persisted_deferred_live(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    db_path = module.search_db_path(aoa_root)
+    db_path.parent.mkdir(parents=True)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE search_freshness_state "
+        "(session_id TEXT PRIMARY KEY, document_count INTEGER, status TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO search_freshness_state(session_id, document_count, status) "
+        "VALUES (?, ?, ?)",
+        ("live-session", 8, "deferred_live"),
+    )
+    conn.commit()
+    conn.close()
+    record = {
+        "session_id": "live-session",
+        "session_label": "2026-07-02__004__live-session",
+        "raw": {"bytes": 1024},
+    }
+
+    admitted, scope = module.bounded_search_cost_prefilter(
+        [record],
+        max_cost_class="warm",
+        aoa_root=aoa_root,
+    )
+
+    assert admitted == []
+    assert scope["deferred_live_count"] == 1
+    assert scope["deferred_sessions"][0]["reason"] == (
+        "persisted_deferred_live_excluded_from_bounded_discovery"
+    )
+
+
 def test_light_freshness_selection_defers_priority_warm_session() -> None:
     light_record = {
         "session_id": "light-session",

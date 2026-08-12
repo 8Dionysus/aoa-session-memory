@@ -694,12 +694,18 @@ backlog/deep work; a single old session cannot consume the freshness timer's
 entire wall-clock budget.
 
 For bounded freshness, the cost ceiling is applied twice. Session-registry raw
-bytes, event counts, and segment counts first reject obviously warm or heavy
-records before semantic projection files are opened. The discovery cursor
-still advances across the original window and the deferral remains visible.
-Semantic fingerprints then provide authoritative dirty-state classification
-only for the admitted subset. Registry pre-admission is a resource guard, not
-freshness proof; incomplete cheap metadata is admitted rather than trusted.
+bytes, event counts, and segment counts, augmented by the selected sessions'
+persisted search document counts when that database is available, first reject
+obviously warm or heavy records before semantic projection files are opened.
+The persisted count lookup is one bounded indexed query over the discovery
+window; it never scans document payloads. The same lookup excludes a persisted
+`deferred_live` session from global bounded discovery, including its
+round-robin reserve; an explicit live-tail target remains its repair owner. The
+discovery cursor still advances across the original window and the deferral
+remains visible. Semantic fingerprints then provide authoritative dirty-state
+classification only for the admitted subset. Pre-admission is a resource
+guard, not freshness proof; unavailable or incomplete cheap metadata is
+admitted rather than trusted.
 The materially changed index-drip execution shape uses a fresh resource-demand
 epoch so obsolete learned peaks cannot silently restore the old admission cost.
 Segment generation uses a deterministic process pool with a default of four workers
