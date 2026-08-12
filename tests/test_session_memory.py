@@ -102,9 +102,21 @@ def test_session_projection_benchmark_smoke_proves_parity_and_reuse(
     ] == payload["growing_session"]["capture_execution"][
         "sha256_delta_bytes_hashed"
     ]
-    assert payload["growing_session"]["capture_execution"][
+    growing_gate = payload["growing_incremental_gate"]
+    assert growing_gate["ok"] is True
+    assert 0 <= growing_gate[
         "sha256_state_bootstrap_bytes_read"
-    ] == 0
+    ] < 64
+    assert growing_gate["maximum_sha256_state_bootstrap_bytes"] == 63
+    assert growing_gate["prefix_bytes_reused"] == payload["fixture"][
+        "raw_bytes"
+    ]
+    assert growing_gate["tail_bytes_read"] == growing_gate[
+        "appended_bytes"
+    ]
+    assert growing_gate["source_bytes_read"] <= growing_gate[
+        "appended_bytes"
+    ] + 1
     assert payload["growing_session"]["raw_scan_execution"][
         "scan_mode"
     ] == "attested_prefix_plus_captured_tail_v1"

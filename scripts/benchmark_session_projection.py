@@ -1096,6 +1096,72 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         if serial_runs
         else None
     )
+    growing_capture = (
+        growing.get("capture_execution")
+        if isinstance(growing.get("capture_execution"), dict)
+        else {}
+    )
+    growing_raw_scan = (
+        growing.get("raw_scan_execution")
+        if isinstance(growing.get("raw_scan_execution"), dict)
+        else {}
+    )
+    growing_bootstrap_bytes = int(
+        growing_capture.get("sha256_state_bootstrap_bytes_read") or 0
+    )
+    growing_appended_bytes = int(
+        growing_capture.get("appended_bytes") or 0
+    )
+    growing_continuation_mode = str(
+        growing_capture.get("sha256_continuation_mode") or ""
+    )
+    growing_aligned_tail_bytes = raw_bytes % 64
+    growing_incremental_gate = {
+        "ok": bool(
+            growing_appended_bytes
+            == int(growing_capture.get("sha256_delta_bytes_hashed") or 0)
+            and 0 <= growing_bootstrap_bytes < 64
+            and (
+                growing_bootstrap_bytes == 0
+                or (
+                    growing_continuation_mode
+                    == "native_portable_aligned_sha256_v1"
+                    and growing_bootstrap_bytes
+                    == growing_aligned_tail_bytes
+                )
+            )
+            and growing_raw_scan.get("scan_mode")
+            == "attested_prefix_plus_captured_tail_v1"
+            and int(growing_raw_scan.get("prefix_bytes_reused") or 0)
+            == raw_bytes
+            and int(growing_raw_scan.get("tail_bytes_read") or 0)
+            == growing_appended_bytes
+            and int(growing_raw_scan.get("source_bytes_read") or 0)
+            <= growing_appended_bytes + 1
+        ),
+        "sha256_state_bootstrap_bytes_read": growing_bootstrap_bytes,
+        "maximum_sha256_state_bootstrap_bytes": 63,
+        "aligned_prefix_tail_bytes": growing_aligned_tail_bytes,
+        "sha256_continuation_mode": growing_continuation_mode,
+        "appended_bytes": growing_appended_bytes,
+        "sha256_delta_bytes_hashed": int(
+            growing_capture.get("sha256_delta_bytes_hashed") or 0
+        ),
+        "raw_scan_mode": str(growing_raw_scan.get("scan_mode") or ""),
+        "prefix_bytes_reused": int(
+            growing_raw_scan.get("prefix_bytes_reused") or 0
+        ),
+        "tail_bytes_read": int(
+            growing_raw_scan.get("tail_bytes_read") or 0
+        ),
+        "source_bytes_read": int(
+            growing_raw_scan.get("source_bytes_read") or 0
+        ),
+        "policy": (
+            "append_delta_plus_at_most_one_sha256_block_tail_without_"
+            "historical_stream_rehash_v1"
+        ),
+    }
     return {
         **benchmark_receipt_base(args, raw_bytes=raw_bytes),
         "ok": bool(
@@ -1119,6 +1185,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                 run.get("raw_unchanged") is True
                 for run in serial_runs + parallel_runs
             )
+            and growing_incremental_gate["ok"] is True
             and live_route.get("ok") is True
         ),
         "status": "complete",
@@ -1131,6 +1198,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         "cold_parallel_summary": parallel_summary,
         "fresh_session": fresh,
         "growing_session": growing,
+        "growing_incremental_gate": growing_incremental_gate,
         "live_route": live_route,
         "serial_parallel_semantic_parity": serial_parallel_parity,
         "parallel_internal_semantic_parity": parallel_internal_parity,
