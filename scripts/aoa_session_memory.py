@@ -132063,6 +132063,9 @@ def _graph_contributions_for_record(
             graph_source_candidates_for_record(
                 record,
                 source_key_filters=source_filter,
+                source_hash_cache_entries=source_hash_cache,
+                source_hash_cache_updates=source_hash_cache,
+                source_hash_stats=source_hash_stats,
             )
         )
         blocked_contributions: list[dict[str, Any]] = []
@@ -132597,23 +132600,39 @@ def _graph_contributions_for_record(
                 "recovery=aoa-session-memory --root "
                 f"{aoa_root_for_registry} reindex-sessions {session_id}"
             )
-            blocked_candidates, _candidate_diagnostics = (
-                graph_source_candidates_for_record(
-                    record,
-                    source_key_filters={segment_source_key},
-                )
+            blocked_source = graph_source_metadata(
+                source_type="segment",
+                session_id=session_id,
+                session_label=session_label,
+                segment_id=segment_id,
+                source_paths=[
+                    manifest_path,
+                    session_index_path,
+                    segment_index_path,
+                ],
+                identity={
+                    "session_title": session_title,
+                    "segment": segment,
+                    "session_index_generation_id": (
+                        session_index.get("generation_id")
+                    ),
+                    "segment_index_generation_id": (
+                        segment_index.get("generation_id")
+                    ),
+                },
+                source_hash_cache_entries=source_hash_cache,
+                source_hash_cache_updates=source_hash_cache,
+                source_hash_stats=source_hash_stats,
             )
-            for candidate in blocked_candidates:
-                source = dict(candidate)
-                source["status"] = "blocked"
-                source["diagnostics"] = [diagnostic]
-                contributions.append(
-                    {
-                        "source": source,
-                        "nodes": [],
-                        "edges": [],
-                    }
-                )
+            blocked_source["status"] = "blocked"
+            blocked_source["diagnostics"] = [diagnostic]
+            contributions.append(
+                {
+                    "source": blocked_source,
+                    "nodes": [],
+                    "edges": [],
+                }
+            )
             continue
         segment_events = [
             item

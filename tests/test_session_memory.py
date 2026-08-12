@@ -96899,6 +96899,140 @@ def test_graph_record_builder_restores_gc_state(
         module.gc.enable()
 
 
+def test_graph_blocked_segment_reuses_loaded_record_sources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    session_dir = aoa_root / "sessions" / "fixture-session"
+    segment_path = session_dir / "segments" / "001.index.json"
+    write_json(
+        session_dir / "session.manifest.json",
+        {
+            "session_id": "fixture-session",
+            "session_label": "fixture-session",
+            "segments": [
+                {
+                    "segment_id": "001",
+                    "index": str(segment_path),
+                }
+            ],
+        },
+    )
+    write_json(
+        session_dir / module.SESSION_INDEX_JSON,
+        {"generation_id": "fixture-session-generation"},
+    )
+    write_json(
+        segment_path,
+        {"generation_id": "stale-segment-generation", "events": []},
+    )
+    monkeypatch.setattr(
+        module,
+        "generated_session_index_stale_reasons_for_session",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        module,
+        "generated_segment_index_stale_reasons",
+        lambda *_args, **_kwargs: ["fixture_segment_stale"],
+    )
+
+    def forbid_candidate_rescan(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("blocked segment rescanned complete session")
+
+    monkeypatch.setattr(
+        module,
+        "graph_source_candidates_for_record",
+        forbid_candidate_rescan,
+    )
+    contributions, diagnostics = module.graph_contributions_for_record(
+        {"session_id": "fixture-session", "path": str(session_dir)},
+        entity_registry_index={},
+    )
+
+    assert diagnostics == []
+    assert len(contributions) == 2
+    blocked = contributions[1]
+    assert blocked["source"]["source_key"] == (
+        "segment:fixture-session:001"
+    )
+    assert blocked["source"]["status"] == "blocked"
+    assert blocked["nodes"] == []
+    assert blocked["edges"] == []
+
+
+def test_graph_blocked_session_reuses_source_fingerprints(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    session_dir = aoa_root / "sessions" / "fixture-session"
+    manifest_path = session_dir / "session.manifest.json"
+    session_index_path = session_dir / module.SESSION_INDEX_JSON
+    segment_paths = [
+        session_dir / "segments" / f"00{ordinal}.index.json"
+        for ordinal in range(2)
+    ]
+    write_json(
+        manifest_path,
+        {
+            "session_id": "fixture-session",
+            "session_label": "fixture-session",
+            "segments": [
+                {
+                    "segment_id": f"00{ordinal}",
+                    "index": str(segment_path),
+                }
+                for ordinal, segment_path in enumerate(segment_paths)
+            ],
+        },
+    )
+    write_json(
+        session_index_path,
+        {"generation_id": "stale-session-generation"},
+    )
+    for ordinal, segment_path in enumerate(segment_paths):
+        write_json(
+            segment_path,
+            {"generation_id": f"segment-generation-{ordinal}"},
+        )
+    monkeypatch.setattr(
+        module,
+        "generated_session_index_stale_reasons_for_session",
+        lambda *_args, **_kwargs: ["fixture_session_stale"],
+    )
+    computed_paths: list[Path] = []
+    original_fingerprint = module.projection_semantic_file_fingerprint
+
+    def count_fingerprint(path: Path, **kwargs: Any) -> dict[str, Any]:
+        computed_paths.append(path)
+        return original_fingerprint(path, **kwargs)
+
+    monkeypatch.setattr(
+        module,
+        "projection_semantic_file_fingerprint",
+        count_fingerprint,
+    )
+
+    contributions, diagnostics = module.graph_contributions_for_record(
+        {"session_id": "fixture-session", "path": str(session_dir)},
+        source_keys={
+            "segment:fixture-session:000",
+            "segment:fixture-session:001",
+        },
+        entity_registry_index={},
+    )
+
+    assert diagnostics == []
+    assert len(contributions) == 2
+    assert all(item["source"]["status"] == "blocked" for item in contributions)
+    assert computed_paths.count(manifest_path) == 1
+    assert computed_paths.count(session_index_path) == 1
+    assert computed_paths.count(segment_paths[0]) == 1
+    assert computed_paths.count(segment_paths[1]) == 1
+
+
 def test_graph_store_resolves_registry_index_only_once_per_store(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
