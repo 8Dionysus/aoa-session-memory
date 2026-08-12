@@ -254,6 +254,7 @@ def test_session_projection_benchmark_supports_parallel_only_repetitions(
             "0",
             "--parallel-repetitions",
             "2",
+            "--cold-only",
             "--temp-root",
             str(tmp_path),
         ],
@@ -265,11 +266,15 @@ def test_session_projection_benchmark_supports_parallel_only_repetitions(
 
     assert completed.returncode == 0, completed.stderr
     assert payload["ok"] is True
+    assert payload["status"] == "cold_only_complete"
+    assert payload["fixture"]["cold_only"] is True
     assert payload["cold_serial"] is None
     assert payload["cold_serial_summary"]["run_count"] == 0
     assert payload["cold_parallel_summary"]["run_count"] == 2
     assert payload["serial_parallel_semantic_parity"] is None
     assert payload["parallel_internal_semantic_parity"] is True
+    assert "fresh_session" not in payload
+    assert "growing_session" not in payload
 
 
 def test_session_projection_benchmark_reads_cgroup_v2_without_path(

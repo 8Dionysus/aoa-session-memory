@@ -764,6 +764,7 @@ def benchmark_receipt_base(
         "parallel_repetitions": args.parallel_repetitions,
         "live_route_repetitions": args.live_route_repetitions,
         "capture_only": bool(args.capture_only),
+        "cold_only": bool(args.cold_only),
     }
     if source_transcript:
         fixture["snapshot_copy"] = dict(
@@ -967,6 +968,68 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             )
         serial = serial_runs[0] if serial_runs else None
         parallel = parallel_runs[0]
+
+        if args.cold_only:
+            serial_summary = benchmark_run_summary(serial_runs)
+            parallel_summary = benchmark_run_summary(parallel_runs)
+            serial_digests = set(serial_summary["semantic_digests"])
+            parallel_digests = set(
+                parallel_summary["semantic_digests"]
+            )
+            serial_parallel_parity = (
+                bool(
+                    serial_digests
+                    and serial_digests == parallel_digests
+                    and len(serial_digests) == 1
+                )
+                if serial_runs
+                else None
+            )
+            parallel_internal_parity = bool(
+                parallel_digests and len(parallel_digests) == 1
+            )
+            speedup = (
+                float(serial_summary["wall_seconds_p50"])
+                / float(parallel_summary["wall_seconds_p50"])
+                if serial_runs
+                and float(parallel_summary["wall_seconds_p50"]) > 0
+                else 0.0
+            )
+            cold_runs = serial_runs + parallel_runs
+            return {
+                **benchmark_receipt_base(args, raw_bytes=raw_bytes),
+                "ok": bool(
+                    all(
+                        run.get("status") == "reindexed"
+                        for run in cold_runs
+                    )
+                    and all(
+                        run.get("raw_unchanged") is True
+                        for run in cold_runs
+                    )
+                    and parallel_internal_parity
+                    and (
+                        serial_parallel_parity is True
+                        if serial_runs
+                        else True
+                    )
+                ),
+                "status": "cold_only_complete",
+                "initial_capture_execution": initial_capture,
+                "cold_serial": serial,
+                "cold_parallel": parallel,
+                "cold_serial_runs": serial_runs,
+                "cold_parallel_runs": parallel_runs,
+                "cold_serial_summary": serial_summary,
+                "cold_parallel_summary": parallel_summary,
+                "serial_parallel_semantic_parity": (
+                    serial_parallel_parity
+                ),
+                "parallel_internal_semantic_parity": (
+                    parallel_internal_parity
+                ),
+                "parallel_speedup": round(speedup, 4),
+            }
 
         fresh_transcript = root / "fresh.jsonl"
         write_jsonl(
@@ -1233,6 +1296,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--cold-only",
+        action="store_true",
+        help=(
+            "Run only the requested repeatable cold projection builds; "
+            "fresh, append-growth, and live-route scenarios remain separate "
+            "proof obligations."
+        ),
+    )
+    parser.add_argument(
         "--serial-repetitions",
         type=int,
         help="Override cold serial repetitions; zero admits parallel-only receipts.",
@@ -1285,6 +1357,12 @@ def main() -> int:
         raise SystemExit("payload must be nonnegative and workers must be 1..6")
     if args.source_transcript and not Path(args.source_transcript).is_file():
         raise SystemExit("source transcript must be a readable file")
+    if args.capture_only and args.cold_only:
+        raise SystemExit("capture-only and cold-only are mutually exclusive")
+    if args.cold_only and args.live_route_repetitions:
+        raise SystemExit(
+            "cold-only does not admit live-route repetitions"
+        )
     payload = run_benchmark(args)
     text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
     if args.output:
