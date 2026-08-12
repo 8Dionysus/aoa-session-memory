@@ -41512,6 +41512,50 @@ def test_storage_status_reports_orphaned_graph_rebuild_tmp(tmp_path: Path, monke
     assert storage["graph_rebuild_temps"]["orphaned_bytes"] == 256
 
 
+def test_maintenance_cleanup_graph_surface_skips_unrelated_scans(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    graph_root = aoa_root / module.GRAPH_ROOT
+    graph_root.mkdir(parents=True)
+    tmp_store = graph_root / ".graph.sqlite3.333444.rebuild.tmp"
+    tmp_store.write_bytes(b"g" * 256)
+    monkeypatch.setattr(module, "process_is_alive", lambda pid: False)
+
+    def unrelated_scan(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("unrelated cleanup surface scanned")
+
+    monkeypatch.setattr(module, "search_rebuild_tmp_status", unrelated_scan)
+    monkeypatch.setattr(
+        module,
+        "session_projection_stage_status",
+        unrelated_scan,
+    )
+    monkeypatch.setattr(
+        module,
+        "session_projection_work_status",
+        unrelated_scan,
+    )
+
+    applied = module.maintenance_cleanup(
+        aoa_root=aoa_root,
+        apply=True,
+        surface="graph",
+    )
+
+    assert applied["ok"] is True
+    assert applied["status"] == "applied"
+    assert applied["surface"] == "graph"
+    assert applied["graph_rebuild_temps"]["orphaned_count"] == 0
+    assert applied["search_rebuild_temps"]["status"] == "not_selected"
+    assert applied["session_projection_stages"]["status"] == (
+        "not_selected"
+    )
+    assert applied["action_counts"]["graph_rebuild_tmp_removed"] == 1
+    assert not tmp_store.exists()
+
+
 def test_maintenance_cleanup_detects_orphaned_graph_rebuild_tmp_journal_without_base(tmp_path: Path, monkeypatch: Any) -> None:
     aoa_root = tmp_path / ".aoa"
     graph_root = aoa_root / module.GRAPH_ROOT
@@ -41699,6 +41743,12 @@ def test_graph_store_rebuild_refreshes_duplicate_aggregate_evidence(tmp_path: Pa
 
     assert rebuilt["duplicate_node_refresh"]["requested_count"] == 1
     assert rebuilt["duplicate_edge_refresh"]["requested_count"] == 1
+    assert rebuilt["duplicate_node_refresh"]["refresh_strategy"] == (
+        "bulk_rebuild_single_scan_summary_with_selective_representative"
+    )
+    assert rebuilt["duplicate_edge_refresh"]["refresh_strategy"] == (
+        "bulk_rebuild_single_scan_summary"
+    )
     assert int(node_row["count"]) == 2
     assert int(edge_row["count"]) == 2
     assert stored_node["count"] == 2
@@ -41730,6 +41780,84 @@ def test_graph_store_rebuild_refreshes_duplicate_aggregate_evidence(tmp_path: Pa
     assert "segment_index" not in edge_contrib["evidence_refs"][0]["refs"]
     assert {ref["session_id"] for ref in hydrated_node["evidence_refs"]} == {"first", "second"}
     assert {ref["session_id"] for ref in hydrated_edge["evidence_refs"]} == {"first", "second"}
+
+
+def test_graph_store_rebuild_bulk_refresh_crosses_chunk_boundary(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    duplicate_count = 513
+    nodes = [
+        {
+            "id": f"route:tool:bulk-refresh-{index:04d}",
+            "type": "tool",
+        }
+        for index in range(duplicate_count)
+    ]
+    edges = [
+        {
+            "id": f"edge:bulk-refresh-{index:04d}",
+            "source": node["id"],
+            "target": node["id"],
+            "type": "route_signal_related_to_route_signal",
+        }
+        for index, node in enumerate(nodes)
+    ]
+
+    def contribution(source_key: str) -> dict[str, Any]:
+        return {
+            "source": {
+                "source_key": source_key,
+                "source_type": "segment",
+                "session_id": source_key,
+                "session_label": source_key,
+                "segment_id": "000",
+                "source_path": f"sessions/{source_key}/segments/000.index.json",
+                "source_paths": [
+                    f"sessions/{source_key}/segments/000.index.json"
+                ],
+                "source_sha": f"sha-{source_key}",
+                "source_mtime": 1,
+                "graph_schema_version": module.GRAPH_SCHEMA_VERSION,
+                "graph_store_schema_version": (
+                    module.GRAPH_STORE_SCHEMA_VERSION
+                ),
+                "route_signal_classifier_version": (
+                    module.ROUTE_SIGNAL_CLASSIFIER_VERSION
+                ),
+            },
+            "nodes": nodes,
+            "edges": edges,
+        }
+
+    store = module.GraphSqliteStore(aoa_root, reset=True)
+    try:
+        rebuilt = store.rebuild(
+            [contribution("bulk-first"), contribution("bulk-second")]
+        )
+        node_counts = store.conn.execute(
+            "SELECT COUNT(*), MIN(count), MAX(count) FROM nodes"
+        ).fetchone()
+        edge_counts = store.conn.execute(
+            "SELECT COUNT(*), MIN(count), MAX(count) FROM edges"
+        ).fetchone()
+    finally:
+        store.close()
+
+    node_refresh = rebuilt["duplicate_node_refresh"]
+    edge_refresh = rebuilt["duplicate_edge_refresh"]
+    assert node_refresh["requested_count"] == duplicate_count
+    assert edge_refresh["requested_count"] == duplicate_count
+    assert node_refresh["chunk_count"] == 2
+    assert edge_refresh["chunk_count"] == 2
+    assert node_refresh["refresh_strategy"] == (
+        "bulk_rebuild_single_scan_summary_with_selective_representative"
+    )
+    assert edge_refresh["refresh_strategy"] == (
+        "bulk_rebuild_single_scan_summary"
+    )
+    assert tuple(node_counts) == (duplicate_count, 2, 2)
+    assert tuple(edge_counts) == (duplicate_count, 2, 2)
 
 
 def test_graph_store_creates_edge_type_composite_indexes(tmp_path: Path) -> None:

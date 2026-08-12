@@ -852,6 +852,10 @@ last-good session files, and raw evidence untouched. Legacy unowned session
 stages require an exact reported content digest; a mismatch causes no mutation.
 An active writer defers cleanup rather than racing publication. Debris removal
 is operational progress and always reports `semantic_progress=false`.
+Operators may use `--surface graph`, `--surface search`, or
+`--surface session-projection` to inspect and clean only that generated surface.
+This prevents a bounded debris repair from paying unrelated raw-authority scan
+cost; the default `--surface all` remains the complete cleanup audit.
 
 Graph incremental mutation checks its pinned registry dependency before
 mutation and before commit. A dependency race rolls back the transaction.
@@ -859,6 +863,13 @@ Full rebuild publishes a temporary store only after the same recheck, so a
 rejected rebuild leaves the previous graph intact. A graph store from before
 the dependency contract requires an explicit full rebuild; a bounded
 maintenance batch cannot silently upgrade its global semantics.
+During that explicit rebuild, duplicate aggregate refresh is set-based: the
+complete duplicate-ID set is materialized once, contribution counts are
+summarized by one grouped scan per contribution table, and only the bounded
+representative rows required by the aggregate payload policy are ranked. The
+summary may be consumed in memory-bounded chunks, but those chunks must not
+repeat the contribution-table aggregation. Incremental maintenance retains its
+bounded ID-chunk refresh because it operates on a small dirty-source frontier.
 Known same-epoch dependency drift instead routes through the complete
 registry-derived materialization proof and atomic rebind. Unknown epochs,
 schema or canonicalization changes, malformed legacy bindings, and rejected

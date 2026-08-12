@@ -63712,10 +63712,34 @@ def maintenance_cleanup(
     aoa_root: Path,
     apply: bool = False,
     write_report: bool = False,
+    surface: str = "all",
     confirmed_unowned_session_stage_digests: set[str]
     | None = None,
 ) -> dict[str, Any]:
     now = utc_now()
+    selected_surface = str(surface or "all").strip().lower()
+    if selected_surface not in {
+        "all",
+        "graph",
+        "search",
+        "session-projection",
+    }:
+        raise ValueError(
+            "maintenance_cleanup_surface_must_be_all_graph_search_or_"
+            "session_projection"
+        )
+    include_graph = selected_surface in {"all", "graph"}
+    include_search = selected_surface in {"all", "search"}
+    include_session_projection = selected_surface in {
+        "all",
+        "session-projection",
+    }
+    empty_surface_status = {
+        "status": "not_selected",
+        "needs_cleanup": False,
+        "entries": [],
+        "diagnostics": [],
+    }
     confirmed_unowned_digests = {
         str(value).strip().lower()
         for value in (
@@ -63745,14 +63769,28 @@ def maintenance_cleanup(
 
     state = read_maintenance_coordinator_state(aoa_root)
     active_job = state.get("active_job") if isinstance(state.get("active_job"), dict) else {}
-    stale_active_job = bool(active_job) and not lock_active
-    graph_tmp_status = graph_rebuild_tmp_status(aoa_root)
-    search_tmp_status = search_rebuild_tmp_status(aoa_root)
-    session_stage_status = session_projection_stage_status(
-        aoa_root
+    stale_active_job = bool(active_job) and not lock_active and (
+        selected_surface == "all"
     )
-    session_work_status = session_projection_work_status(
-        aoa_root
+    graph_tmp_status = (
+        graph_rebuild_tmp_status(aoa_root)
+        if include_graph
+        else dict(empty_surface_status)
+    )
+    search_tmp_status = (
+        search_rebuild_tmp_status(aoa_root)
+        if include_search
+        else dict(empty_surface_status)
+    )
+    session_stage_status = (
+        session_projection_stage_status(aoa_root)
+        if include_session_projection
+        else dict(empty_surface_status)
+    )
+    session_work_status = (
+        session_projection_work_status(aoa_root)
+        if include_session_projection
+        else dict(empty_surface_status)
     )
     removable_graph_tmp_entries = [
         entry
@@ -64105,14 +64143,17 @@ def maintenance_cleanup(
                     except OSError:
                         pass
                 lease_handle.close()
-        graph_tmp_status = graph_rebuild_tmp_status(aoa_root)
-        search_tmp_status = search_rebuild_tmp_status(aoa_root)
-        session_stage_status = (
-            session_projection_stage_status(aoa_root)
-        )
-        session_work_status = session_projection_work_status(
-            aoa_root
-        )
+        if include_graph:
+            graph_tmp_status = graph_rebuild_tmp_status(aoa_root)
+        if include_search:
+            search_tmp_status = search_rebuild_tmp_status(aoa_root)
+        if include_session_projection:
+            session_stage_status = (
+                session_projection_stage_status(aoa_root)
+            )
+            session_work_status = session_projection_work_status(
+                aoa_root
+            )
 
     if lock_handle is not None:
         if lock_acquired:
@@ -64195,6 +64236,7 @@ def maintenance_cleanup(
             remaining_cleanup_needed
         ),
         "apply": apply,
+        "surface": selected_surface,
         "status": status,
         "aoa_root": str(aoa_root),
         "lock_path": str(lock_path),
@@ -136416,6 +136458,248 @@ class GraphSqliteStore:
         stats["elapsed_ms"] = graph_phase_elapsed_ms(started)
         return stats
 
+    def _refresh_rebuild_duplicate_nodes(
+        self,
+        node_ids: set[str],
+    ) -> dict[str, Any]:
+        """Refresh duplicate bulk-build nodes with one contribution scan.
+
+        Incremental maintenance deliberately refreshes bounded ID chunks.  A
+        full rebuild can contain thousands of duplicate IDs, however, and
+        repeating one indexed GROUP BY per chunk turns the final proof pass
+        into many logical rereads of the same contribution store.  Materialize
+        the complete duplicate summary once, then update aggregate payloads in
+        bounded summary chunks without weakening the representative-payload
+        rules used by ``_refresh_nodes``.
+        """
+
+        started = graph_phase_timer_start()
+        ordered_ids = sorted({value for value in node_ids if value})
+        stats = {
+            "requested_count": len(ordered_ids),
+            "chunk_count": 0,
+            "row_count": 0,
+            "missing_count": 0,
+            "aggregate_row_count": 0,
+            "representative_payload_count": 0,
+            "existing_payload_reused_count": 0,
+            "minimal_payload_count": 0,
+            "invalid_existing_payload_count": 0,
+            "fresh_representative_row_limit": (
+                GRAPH_MAINTENANCE_FRESH_REPRESENTATIVE_ROW_LIMIT
+            ),
+            "refresh_strategy": (
+                "bulk_rebuild_single_scan_summary_with_selective_"
+                "representative"
+            ),
+        }
+        if not ordered_ids:
+            stats["elapsed_ms"] = graph_phase_elapsed_ms(started)
+            return stats
+
+        id_table = "graph_rebuild_duplicate_node_ids"
+        summary_table = "graph_rebuild_duplicate_node_summary"
+        representative_table = (
+            "graph_rebuild_duplicate_node_representatives"
+        )
+        try:
+            for table in (
+                representative_table,
+                summary_table,
+                id_table,
+            ):
+                self.conn.execute(f"DROP TABLE IF EXISTS temp.{table}")
+            self.conn.execute(
+                f"CREATE TEMP TABLE {id_table} "
+                "(id TEXT PRIMARY KEY) WITHOUT ROWID"
+            )
+            self.conn.executemany(
+                f"INSERT INTO {id_table}(id) VALUES (?)",
+                ((node_id,) for node_id in ordered_ids),
+            )
+            self.conn.execute(
+                f"""
+                CREATE TEMP TABLE {summary_table} AS
+                SELECT c.node_id,
+                       SUM(c.count) AS aggregate_count,
+                       COUNT(*) AS contrib_row_count
+                FROM node_contribs AS c
+                JOIN {id_table} AS requested
+                  ON requested.id = c.node_id
+                GROUP BY c.node_id
+                """
+            )
+            self.conn.execute(
+                f"CREATE UNIQUE INDEX temp.idx_{summary_table}_id "
+                f"ON {summary_table}(node_id)"
+            )
+            skip_types = sorted(
+                GRAPH_MAINTENANCE_EXISTING_NODE_FRESH_REPRESENTATIVE_SKIP_TYPES
+            )
+            skip_placeholders = ",".join("?" for _ in skip_types)
+            self.conn.execute(
+                f"""
+                CREATE TEMP TABLE {representative_table} AS
+                WITH ranked AS (
+                    SELECT c.node_id,
+                           c.node_type,
+                           c.payload_json,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY c.node_id
+                               ORDER BY LENGTH(c.payload_json) DESC,
+                                        c.source_key
+                           ) AS rn
+                    FROM node_contribs AS c
+                    JOIN {summary_table} AS summary
+                      ON summary.node_id = c.node_id
+                    LEFT JOIN nodes AS aggregate
+                      ON aggregate.id = c.node_id
+                    WHERE aggregate.id IS NULL
+                       OR (
+                           summary.contrib_row_count <= ?
+                           AND (
+                               summary.contrib_row_count = 1
+                               OR COALESCE(aggregate.node_type, 'unknown')
+                                  NOT IN ({skip_placeholders})
+                           )
+                       )
+                )
+                SELECT node_id, node_type, payload_json
+                FROM ranked
+                WHERE rn = 1
+                """,
+                (
+                    GRAPH_MAINTENANCE_FRESH_REPRESENTATIVE_ROW_LIMIT,
+                    *skip_types,
+                ),
+            )
+            self.conn.execute(
+                f"CREATE UNIQUE INDEX "
+                f"temp.idx_{representative_table}_id "
+                f"ON {representative_table}(node_id)"
+            )
+
+            last_id = ""
+            while True:
+                rows = self.conn.execute(
+                    f"""
+                    SELECT summary.node_id,
+                           summary.aggregate_count,
+                           summary.contrib_row_count,
+                           aggregate.node_type AS existing_node_type,
+                           aggregate.payload_json AS existing_payload_json,
+                           representative.node_type AS representative_node_type,
+                           representative.payload_json AS representative_payload_json
+                    FROM {summary_table} AS summary
+                    LEFT JOIN nodes AS aggregate
+                      ON aggregate.id = summary.node_id
+                    LEFT JOIN {representative_table} AS representative
+                      ON representative.node_id = summary.node_id
+                    WHERE summary.node_id > ?
+                    ORDER BY summary.node_id
+                    LIMIT ?
+                    """,
+                    (last_id, self.refresh_chunk_size),
+                ).fetchall()
+                if not rows:
+                    break
+                stats["chunk_count"] += 1
+                for row in rows:
+                    node_id = str(row["node_id"] or "")
+                    last_id = node_id
+                    aggregate_count = int_value(
+                        row["aggregate_count"],
+                        1,
+                    )
+                    contrib_row_count = int_value(
+                        row["contrib_row_count"]
+                    )
+                    stats["row_count"] += contrib_row_count
+                    stats["aggregate_row_count"] += 1
+                    representative_payload_json = row[
+                        "representative_payload_json"
+                    ]
+                    existing_payload_json = row[
+                        "existing_payload_json"
+                    ]
+                    payload: dict[str, Any] = {}
+                    if representative_payload_json is not None:
+                        stats["representative_payload_count"] += 1
+                        try:
+                            parsed = json.loads(
+                                str(representative_payload_json)
+                            )
+                        except json.JSONDecodeError:
+                            parsed = {}
+                        if isinstance(parsed, dict):
+                            payload = parsed
+                    elif existing_payload_json is not None:
+                        try:
+                            parsed = json.loads(
+                                str(existing_payload_json)
+                            )
+                        except json.JSONDecodeError:
+                            parsed = {}
+                            stats[
+                                "invalid_existing_payload_count"
+                            ] += 1
+                        if isinstance(parsed, dict):
+                            payload = parsed
+                            stats[
+                                "existing_payload_reused_count"
+                            ] += 1
+                    if not payload:
+                        stats["minimal_payload_count"] += 1
+                    node_type = str(
+                        row["representative_node_type"]
+                        or row["existing_node_type"]
+                        or "unknown"
+                    )
+                    payload["id"] = node_id
+                    payload["type"] = node_type
+                    payload["count"] = aggregate_count
+                    payload["evidence_ref_count"] = max(
+                        int_value(
+                            payload.get("evidence_ref_count"),
+                            0,
+                        ),
+                        min(
+                            contrib_row_count,
+                            graph_aggregate_evidence_limit("node"),
+                        ),
+                    )
+                    self.conn.execute(
+                        """
+                        INSERT OR REPLACE INTO nodes(
+                          id, node_type, payload_json, count
+                        ) VALUES (?, ?, ?, ?)
+                        """,
+                        (
+                            node_id,
+                            node_type,
+                            graph_json(
+                                graph_compact_aggregate_payload(
+                                    payload,
+                                    kind="node",
+                                )
+                            ),
+                            aggregate_count,
+                        ),
+                    )
+        finally:
+            for table in (
+                representative_table,
+                summary_table,
+                id_table,
+            ):
+                self.conn.execute(f"DROP TABLE IF EXISTS temp.{table}")
+        stats["missing_count"] = max(
+            0,
+            stats["requested_count"] - stats["aggregate_row_count"],
+        )
+        stats["elapsed_ms"] = graph_phase_elapsed_ms(started)
+        return stats
+
     def _refresh_edges(self, edge_ids: set[str], *, budget_deadline: float | None = None) -> dict[str, Any]:
         started = graph_phase_timer_start()
         stats = {
@@ -136598,6 +136882,241 @@ class GraphSqliteStore:
                 )
             if stats["row_count"] % 1000 == 0:
                 graph_check_budget(budget_deadline)
+        stats["elapsed_ms"] = graph_phase_elapsed_ms(started)
+        return stats
+
+    def _refresh_rebuild_duplicate_edges(
+        self,
+        edge_ids: set[str],
+    ) -> dict[str, Any]:
+        """Refresh duplicate bulk-build edges from one grouped scan."""
+
+        started = graph_phase_timer_start()
+        ordered_ids = sorted({value for value in edge_ids if value})
+        stats = {
+            "requested_count": len(ordered_ids),
+            "chunk_count": 0,
+            "row_count": 0,
+            "missing_count": 0,
+            "aggregate_row_count": 0,
+            "representative_payload_count": 0,
+            "existing_payload_reused_count": 0,
+            "minimal_payload_count": 0,
+            "invalid_existing_payload_count": 0,
+            "fresh_representative_row_limit": 1,
+            "refresh_strategy": "bulk_rebuild_single_scan_summary",
+        }
+        if not ordered_ids:
+            stats["elapsed_ms"] = graph_phase_elapsed_ms(started)
+            return stats
+
+        id_table = "graph_rebuild_duplicate_edge_ids"
+        summary_table = "graph_rebuild_duplicate_edge_summary"
+        representative_table = (
+            "graph_rebuild_duplicate_edge_representatives"
+        )
+        try:
+            for table in (
+                representative_table,
+                summary_table,
+                id_table,
+            ):
+                self.conn.execute(f"DROP TABLE IF EXISTS temp.{table}")
+            self.conn.execute(
+                f"CREATE TEMP TABLE {id_table} "
+                "(id TEXT PRIMARY KEY) WITHOUT ROWID"
+            )
+            self.conn.executemany(
+                f"INSERT INTO {id_table}(id) VALUES (?)",
+                ((edge_id,) for edge_id in ordered_ids),
+            )
+            self.conn.execute(
+                f"""
+                CREATE TEMP TABLE {summary_table} AS
+                SELECT c.edge_id,
+                       SUM(c.count) AS aggregate_count,
+                       COUNT(*) AS contrib_row_count
+                FROM edge_contribs AS c
+                JOIN {id_table} AS requested
+                  ON requested.id = c.edge_id
+                GROUP BY c.edge_id
+                """
+            )
+            self.conn.execute(
+                f"CREATE UNIQUE INDEX temp.idx_{summary_table}_id "
+                f"ON {summary_table}(edge_id)"
+            )
+            self.conn.execute(
+                f"""
+                CREATE TEMP TABLE {representative_table} AS
+                WITH ranked AS (
+                    SELECT c.edge_id,
+                           c.edge_type,
+                           c.source_node,
+                           c.target_node,
+                           c.payload_json,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY c.edge_id
+                               ORDER BY LENGTH(c.payload_json) DESC,
+                                        c.source_key
+                           ) AS rn
+                    FROM edge_contribs AS c
+                    JOIN {summary_table} AS summary
+                      ON summary.edge_id = c.edge_id
+                    LEFT JOIN edges AS aggregate
+                      ON aggregate.id = c.edge_id
+                    WHERE aggregate.id IS NULL
+                       OR summary.contrib_row_count = 1
+                )
+                SELECT edge_id, edge_type, source_node,
+                       target_node, payload_json
+                FROM ranked
+                WHERE rn = 1
+                """
+            )
+            self.conn.execute(
+                f"CREATE UNIQUE INDEX "
+                f"temp.idx_{representative_table}_id "
+                f"ON {representative_table}(edge_id)"
+            )
+
+            last_id = ""
+            while True:
+                rows = self.conn.execute(
+                    f"""
+                    SELECT summary.edge_id,
+                           summary.aggregate_count,
+                           summary.contrib_row_count,
+                           aggregate.edge_type AS existing_edge_type,
+                           aggregate.source_node AS existing_source_node,
+                           aggregate.target_node AS existing_target_node,
+                           aggregate.payload_json AS existing_payload_json,
+                           representative.edge_type AS representative_edge_type,
+                           representative.source_node AS representative_source_node,
+                           representative.target_node AS representative_target_node,
+                           representative.payload_json AS representative_payload_json
+                    FROM {summary_table} AS summary
+                    LEFT JOIN edges AS aggregate
+                      ON aggregate.id = summary.edge_id
+                    LEFT JOIN {representative_table} AS representative
+                      ON representative.edge_id = summary.edge_id
+                    WHERE summary.edge_id > ?
+                    ORDER BY summary.edge_id
+                    LIMIT ?
+                    """,
+                    (last_id, self.refresh_chunk_size),
+                ).fetchall()
+                if not rows:
+                    break
+                stats["chunk_count"] += 1
+                for row in rows:
+                    edge_id = str(row["edge_id"] or "")
+                    last_id = edge_id
+                    aggregate_count = int_value(
+                        row["aggregate_count"],
+                        1,
+                    )
+                    contrib_row_count = int_value(
+                        row["contrib_row_count"]
+                    )
+                    stats["row_count"] += contrib_row_count
+                    stats["aggregate_row_count"] += 1
+                    representative_payload_json = row[
+                        "representative_payload_json"
+                    ]
+                    existing_payload_json = row[
+                        "existing_payload_json"
+                    ]
+                    payload: dict[str, Any] = {}
+                    if representative_payload_json is not None:
+                        stats["representative_payload_count"] += 1
+                        try:
+                            parsed = json.loads(
+                                str(representative_payload_json)
+                            )
+                        except json.JSONDecodeError:
+                            parsed = {}
+                        if isinstance(parsed, dict):
+                            payload = parsed
+                    elif existing_payload_json is not None:
+                        try:
+                            parsed = json.loads(
+                                str(existing_payload_json)
+                            )
+                        except json.JSONDecodeError:
+                            parsed = {}
+                            stats[
+                                "invalid_existing_payload_count"
+                            ] += 1
+                        if isinstance(parsed, dict):
+                            payload = parsed
+                            stats[
+                                "existing_payload_reused_count"
+                            ] += 1
+                    if not payload:
+                        stats["minimal_payload_count"] += 1
+                    edge_type = str(
+                        row["representative_edge_type"]
+                        or row["existing_edge_type"]
+                        or "unknown"
+                    )
+                    source_node = str(
+                        row["representative_source_node"]
+                        or row["existing_source_node"]
+                        or ""
+                    )
+                    target_node = str(
+                        row["representative_target_node"]
+                        or row["existing_target_node"]
+                        or ""
+                    )
+                    payload["id"] = edge_id
+                    payload["type"] = edge_type
+                    payload["source"] = source_node
+                    payload["target"] = target_node
+                    payload["count"] = aggregate_count
+                    payload["evidence_ref_count"] = max(
+                        int_value(
+                            payload.get("evidence_ref_count"),
+                            0,
+                        ),
+                        min(
+                            contrib_row_count,
+                            graph_aggregate_evidence_limit("edge"),
+                        ),
+                    )
+                    self.conn.execute(
+                        """
+                        INSERT OR REPLACE INTO edges(
+                          id, edge_type, source_node, target_node,
+                          payload_json, count
+                        ) VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            edge_id,
+                            edge_type,
+                            source_node,
+                            target_node,
+                            graph_json(
+                                graph_compact_aggregate_payload(
+                                    payload,
+                                    kind="edge",
+                                )
+                            ),
+                            aggregate_count,
+                        ),
+                    )
+        finally:
+            for table in (
+                representative_table,
+                summary_table,
+                id_table,
+            ):
+                self.conn.execute(f"DROP TABLE IF EXISTS temp.{table}")
+        stats["missing_count"] = max(
+            0,
+            stats["requested_count"] - stats["aggregate_row_count"],
+        )
         stats["elapsed_ms"] = graph_phase_elapsed_ms(started)
         return stats
 
@@ -137310,8 +137829,16 @@ class GraphSqliteStore:
             seen_node_ids.update(node_ids)
             seen_edge_ids.update(edge_ids)
             results.append(self.replace_source(contribution, bulk=True))
-        duplicate_node_refresh = self._refresh_nodes(duplicate_node_ids)
-        duplicate_edge_refresh = self._refresh_edges(duplicate_edge_ids)
+        duplicate_node_refresh = (
+            self._refresh_rebuild_duplicate_nodes(
+                duplicate_node_ids
+            )
+        )
+        duplicate_edge_refresh = (
+            self._refresh_rebuild_duplicate_edges(
+                duplicate_edge_ids
+            )
+        )
         now = utc_now()
         self._upsert_metadata("generated_at", now)
         self._upsert_metadata("updated_at", now)
@@ -195365,6 +195892,7 @@ def command_maintenance_cleanup(args: argparse.Namespace) -> int:
         aoa_root=root,
         apply=args.apply,
         write_report=args.write_report,
+        surface=args.surface,
         confirmed_unowned_session_stage_digests=set(
             getattr(
                 args,
@@ -205135,6 +205663,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     maintenance_cleanup_parser.add_argument("--workspace-root")
     maintenance_cleanup_parser.add_argument("--aoa-root")
+    maintenance_cleanup_parser.add_argument(
+        "--surface",
+        choices=("all", "graph", "search", "session-projection"),
+        default="all",
+        help=(
+            "Limit discovery and cleanup to one generated surface. The "
+            "default 'all' preserves the complete cleanup audit."
+        ),
+    )
     maintenance_cleanup_parser.add_argument("--apply", action="store_true", help="Apply cleanup. Default is a dry-run plan.")
     maintenance_cleanup_parser.add_argument(
         "--confirm-unowned-session-stage-digest",
