@@ -26194,6 +26194,56 @@ def test_graph_dependency_auto_refresh_preserves_authoritative_registry_policy(
     )
 
 
+def test_graph_dependency_snapshot_reuses_exact_semantic_digest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    monkeypatch.setattr(
+        module,
+        "entity_registry_runtime_source_entries",
+        lambda _aoa_root: [],
+    )
+    module.build_entity_registry(
+        aoa_root=aoa_root,
+        write=True,
+        include_runtime=True,
+        observed_source="none",
+    )
+    module._ENTITY_REGISTRY_SEMANTIC_DIGEST_PROCESS_CACHE.clear()
+    original = module.entity_registry_semantic_digest
+    calls = 0
+
+    def counted(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        module,
+        "entity_registry_semantic_digest",
+        counted,
+    )
+    first = module.graph_entity_registry_dependency_snapshot(
+        aoa_root,
+        include_index=False,
+    )
+    second = module.graph_entity_registry_dependency_snapshot(
+        aoa_root,
+        include_index=False,
+    )
+
+    assert first["semantic_digest_verified"] is True
+    assert first["index"] == {}
+    assert first["semantic_digest_verification_mode"] == (
+        "recomputed_exact_semantic_digest"
+    )
+    assert second["semantic_digest_verification_mode"] == (
+        "process_cache_exact_file_identity"
+    )
+    assert calls == 1
+
+
 def test_graph_registry_content_growth_preserves_semantic_epoch_and_routes_rebind(
     tmp_path: Path,
 ) -> None:
@@ -96785,6 +96835,78 @@ def test_event_index_deferred_redaction_is_equivalent_to_direct_redaction() -> N
         literal_policy=policy,
     ) == direct
     assert secret not in json.dumps(direct, ensure_ascii=False)
+
+
+def test_graph_record_redaction_cache_preserves_standard_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = {
+        "route": ["tool:exec_command"] * 40,
+        "label": "tool:exec_command",
+        "nested": json.dumps(
+            {"route": ["tool:exec_command"] * 20},
+            sort_keys=True,
+        ),
+        "password": "must-not-survive",
+    }
+    expected = module.redact_derived_value(source)
+    original = module.redact_derived_text
+    calls = 0
+
+    def counted(value: Any, **kwargs: Any) -> str:
+        nonlocal calls
+        calls += 1
+        return original(value, **kwargs)
+
+    monkeypatch.setattr(module, "redact_derived_text", counted)
+    cache: dict[tuple[str, str], str] = {}
+    actual = module.graph_redact_derived_value(
+        source,
+        text_cache=cache,
+    )
+
+    assert actual == expected
+    assert "must-not-survive" not in json.dumps(actual)
+    assert calls < 10
+    assert cache
+
+
+def test_graph_store_resolves_registry_index_only_once_per_store(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def dependency_snapshot(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        return {
+            "status": "current",
+            "current": True,
+            "dependency_id": "fixture-dependency",
+            "index": {},
+        }
+
+    monkeypatch.setattr(
+        module,
+        "graph_entity_registry_dependency_snapshot",
+        dependency_snapshot,
+    )
+    store = module.GraphSqliteStore(
+        tmp_path / ".aoa",
+        reset=True,
+        entity_registry_dependency={
+            "status": "current",
+            "dependency_id": "fixture-dependency",
+        },
+    )
+    try:
+        assert store._current_entity_registry_index() == {}
+        assert store._current_entity_registry_index() == {}
+    finally:
+        store.close()
+
+    assert calls == 1
 
 
 def test_segment_pre_redacted_classification_fast_path_preserves_output_and_privacy(

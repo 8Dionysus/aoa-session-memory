@@ -10191,12 +10191,20 @@ def graph_entity_registry_dependency_snapshot(
     *,
     ensure_current: bool = False,
     allow_ephemeral: bool = False,
+    include_index: bool = True,
 ) -> dict[str, Any]:
     registry_path = aoa_root / ENTITY_REGISTRY_PATH
     refreshed = False
     ephemeral = False
+    snapshot_identity_before_read: (
+        tuple[str, int, int, int, int, int] | None
+    ) = None
 
     def read_persisted() -> dict[str, Any]:
+        nonlocal snapshot_identity_before_read
+        snapshot_identity_before_read = (
+            entity_registry_snapshot_file_identity(registry_path)
+        )
         value = read_json(registry_path, {})
         return value if isinstance(value, dict) else {}
 
@@ -10255,14 +10263,19 @@ def graph_entity_registry_dependency_snapshot(
         stored_semantic_sha256 = str(
             stored_semantic_digest.get("sha256") or ""
         )
-        calculated_semantic_digest = (
-            entity_registry_semantic_digest(
+        if payload:
+            (
+                calculated_semantic_digest,
+                semantic_digest_verification_mode,
+            ) = entity_registry_semantic_digest_for_unchanged_snapshot(
                 payload,
                 aoa_root=aoa_root,
+                path=registry_path,
+                identity_before_read=snapshot_identity_before_read,
             )
-            if payload
-            else {}
-        )
+        else:
+            calculated_semantic_digest = {}
+            semantic_digest_verification_mode = "not_checked"
         calculated_semantic_sha256 = str(
             calculated_semantic_digest.get("sha256") or ""
         )
@@ -10414,13 +10427,16 @@ def graph_entity_registry_dependency_snapshot(
             source_fingerprint_verified
         ),
         "semantic_digest_verified": semantic_digest_verified,
+        "semantic_digest_verification_mode": (
+            semantic_digest_verification_mode
+        ),
         "runtime_overlay_required": runtime_overlay_required,
         "runtime_overlay_state": runtime_overlay_state,
         "entry_count": len(entries),
         "entries": entries,
         "index": (
             entity_registry_entry_index_from_snapshot(payload)
-            if current
+            if current and include_index
             else {}
         ),
         "reasons": reasons,
@@ -130467,9 +130483,112 @@ def graph_contribution_evidence_limit(kind: str) -> int:
     return GRAPH_STORE_CONTRIB_EDGE_EVIDENCE_LIMIT if kind in {"edge", "edges", "edge_contribs"} else GRAPH_STORE_CONTRIB_NODE_EVIDENCE_LIMIT
 
 
-def graph_compact_contribution_payload(payload: dict[str, Any], *, kind: str) -> dict[str, Any]:
+def graph_redact_derived_value(
+    value: Any,
+    *,
+    field_name: str = "",
+    text_cache: dict[tuple[str, str], str] | None = None,
+) -> Any:
+    """Apply the standard redaction with a graph-record-local text cache."""
+
+    if isinstance(value, dict):
+        redacted_mapping: dict[Any, Any] = {}
+        for key, item in value.items():
+            redacted_item = graph_redact_derived_value(
+                item,
+                field_name=str(key),
+                text_cache=text_cache,
+            )
+            if key not in redacted_mapping:
+                redacted_mapping[key] = redacted_item
+            elif (
+                isinstance(redacted_mapping[key], list)
+                and isinstance(redacted_item, list)
+            ):
+                redacted_mapping[key] = [
+                    *redacted_mapping[key],
+                    *redacted_item,
+                ]
+            elif (
+                isinstance(redacted_mapping[key], (int, float))
+                and not isinstance(redacted_mapping[key], bool)
+                and isinstance(redacted_item, (int, float))
+                and not isinstance(redacted_item, bool)
+            ):
+                redacted_mapping[key] += redacted_item
+        return redacted_mapping
+    if isinstance(value, list):
+        return [
+            graph_redact_derived_value(
+                item,
+                field_name=field_name,
+                text_cache=text_cache,
+            )
+            for item in value
+        ]
+    if isinstance(value, tuple):
+        return tuple(
+            graph_redact_derived_value(
+                item,
+                field_name=field_name,
+                text_cache=text_cache,
+            )
+            for item in value
+        )
+    if isinstance(value, str):
+        if derived_text_sensitive_value_key(field_name) and value:
+            return DERIVED_TEXT_REDACTION_MARKER
+        cache_key = (
+            (field_name, value)
+            if text_cache is not None and len(value) <= 4096
+            else None
+        )
+        if cache_key is not None and cache_key in text_cache:
+            return text_cache[cache_key]
+        stripped = value.strip()
+        if (
+            len(stripped) <= DERIVED_NESTED_JSON_REDACTION_MAX_CHARS
+            and len(stripped) >= 2
+            and (stripped[0], stripped[-1]) in {
+                ("{", "}"),
+                ("[", "]"),
+            }
+        ):
+            try:
+                nested = json.loads(stripped)
+            except json.JSONDecodeError:
+                nested = None
+            if isinstance(nested, (dict, list)):
+                redacted = json.dumps(
+                    graph_redact_derived_value(
+                        nested,
+                        text_cache=text_cache,
+                    ),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                if cache_key is not None and len(text_cache) < 65536:
+                    text_cache[cache_key] = redacted
+                return redacted
+        redacted = redact_derived_text(value)
+        if cache_key is not None and len(text_cache) < 65536:
+            text_cache[cache_key] = redacted
+        return redacted
+    return value
+
+
+def graph_compact_contribution_payload(
+    payload: dict[str, Any],
+    *,
+    kind: str,
+    redaction_text_cache: dict[tuple[str, str], str] | None = None,
+) -> dict[str, Any]:
     canonical_kind = "edge" if kind in {"edge", "edges", "edge_contribs"} else "node"
-    compact = redact_derived_value(payload)
+    compact = graph_redact_derived_value(
+        payload,
+        text_cache=redaction_text_cache,
+    )
     fallback_refs = compact.get("refs")
     compact.pop("refs", None)
     if isinstance(compact.get("route_signals"), list):
@@ -130493,9 +130612,17 @@ def graph_compact_contribution_payload(payload: dict[str, Any], *, kind: str) ->
     return compact
 
 
-def graph_add_node(nodes: dict[str, dict[str, Any]], node: dict[str, Any]) -> None:
+def graph_add_node(
+    nodes: dict[str, dict[str, Any]],
+    node: dict[str, Any],
+    *,
+    redaction_text_cache: dict[tuple[str, str], str] | None = None,
+) -> None:
     original_node_id = str(node.get("id") or "")
-    node = redact_derived_value(node)
+    node = graph_redact_derived_value(
+        node,
+        text_cache=redaction_text_cache,
+    )
     node_id = str(node.get("id") or "")
     if node_id != original_node_id:
         return
@@ -131242,12 +131369,20 @@ def graph_relation_projection_state_from_connection(
     }
 
 
-def graph_add_edge(edges: dict[str, dict[str, Any]], edge: dict[str, Any]) -> None:
+def graph_add_edge(
+    edges: dict[str, dict[str, Any]],
+    edge: dict[str, Any],
+    *,
+    redaction_text_cache: dict[tuple[str, str], str] | None = None,
+) -> None:
     original_identity = tuple(
         str(edge.get(key) or "")
         for key in ("id", "source", "target")
     )
-    edge = redact_derived_value(edge)
+    edge = graph_redact_derived_value(
+        edge,
+        text_cache=redaction_text_cache,
+    )
     redacted_identity = tuple(
         str(edge.get(key) or "")
         for key in ("id", "source", "target")
@@ -131459,6 +131594,7 @@ def graph_assert_entity_registry_dependency_current(
         aoa_root,
         ensure_current=False,
         allow_ephemeral=False,
+        include_index=False,
     )
     current_dependency_id = str(
         current.get("dependency_id") or ""
@@ -131565,8 +131701,16 @@ def graph_aggregate_evidence_limit(table_or_kind: str) -> int:
     return 20 if value in {"edge", "edges", "edge_contribs"} else 30
 
 
-def graph_compact_aggregate_payload(payload: dict[str, Any], *, kind: str) -> dict[str, Any]:
-    compact = redact_derived_value(payload)
+def graph_compact_aggregate_payload(
+    payload: dict[str, Any],
+    *,
+    kind: str,
+    redaction_text_cache: dict[tuple[str, str], str] | None = None,
+) -> dict[str, Any]:
+    compact = graph_redact_derived_value(
+        payload,
+        text_cache=redaction_text_cache,
+    )
     compact.pop("refs", None)
     compact.pop("contrib_payload_mode", None)
     if isinstance(compact.get("route_signals"), list):
@@ -131936,12 +132080,24 @@ def graph_contributions_for_record(
 
     session_nodes: dict[str, dict[str, Any]] = {}
     session_edges: dict[str, dict[str, Any]] = {}
+    # Repeated graph payloads share session, segment, route, and ref strings.
+    # Keep their privacy-projection cache local to this one record so speed
+    # does not require a process-global cache of source text.
+    redaction_text_cache: dict[tuple[str, str], str] = {}
 
     def add_session_node(node: dict[str, Any]) -> None:
-        graph_add_node(session_nodes, node)
+        graph_add_node(
+            session_nodes,
+            node,
+            redaction_text_cache=redaction_text_cache,
+        )
 
     def add_session_edge(edge: dict[str, Any]) -> None:
-        graph_add_edge(session_edges, edge)
+        graph_add_edge(
+            session_edges,
+            edge,
+            redaction_text_cache=redaction_text_cache,
+        )
 
     registry_index = (
         entity_registry_index
@@ -132374,10 +132530,18 @@ def graph_contributions_for_record(
         segment_route_signal_evidence_refs: dict[tuple[str, str, str], list[Any]] = defaultdict(list)
 
         def add_segment_node(node: dict[str, Any]) -> None:
-            graph_add_node(segment_nodes, node)
+            graph_add_node(
+                segment_nodes,
+                node,
+                redaction_text_cache=redaction_text_cache,
+            )
 
         def add_segment_edge(edge: dict[str, Any]) -> None:
-            graph_add_edge(segment_edges, edge)
+            graph_add_edge(
+                segment_edges,
+                edge,
+                redaction_text_cache=redaction_text_cache,
+            )
 
         segment_node_id = f"segment:{session_id}:{segment_id}"
         segment_index_path = graph_path_from_ref(segment.get("index"), base=session_dir) if segment.get("index") else session_dir / "segments" / f"{segment_id}.index.json"
@@ -135383,6 +135547,10 @@ class GraphSqliteStore:
             if isinstance(dependency.get("index"), dict)
             else {}
         )
+        self._entity_registry_index_resolved = isinstance(
+            dependency.get("index"),
+            dict,
+        )
         self.entity_registry_dependency_id = str(
             dependency.get("dependency_id") or ""
         )
@@ -135695,6 +135863,7 @@ class GraphSqliteStore:
                 self.aoa_root,
                 ensure_current=True,
                 allow_ephemeral=False,
+                include_index=False,
             )
             dependency_id = str(
                 dependency.get("dependency_id") or ""
@@ -135745,6 +135914,29 @@ class GraphSqliteStore:
                         "current_persisted_registry_dependency_verified"
                     ),
                 }
+
+            indexed_dependency = (
+                graph_entity_registry_dependency_snapshot(
+                    self.aoa_root,
+                    ensure_current=False,
+                    allow_ephemeral=False,
+                    include_index=True,
+                )
+            )
+            if (
+                indexed_dependency.get("status") != "current"
+                or str(
+                    indexed_dependency.get("dependency_id") or ""
+                )
+                != dependency_id
+            ):
+                attempt["status"] = "retry_dependency_changed"
+                attempt["diagnostics"] = [
+                    "graph_entity_registry_dependency_changed_"
+                    "while_loading_index"
+                ]
+                continue
+            dependency = indexed_dependency
 
             savepoint = (
                 f"graph_registry_reconcile_{attempt_number}"
@@ -135810,6 +136002,10 @@ class GraphSqliteStore:
                     dependency.get("index")
                     if isinstance(dependency.get("index"), dict)
                     else {}
+                )
+                self._entity_registry_index_resolved = isinstance(
+                    dependency.get("index"),
+                    dict,
                 )
                 self.entity_registry_dependency_id = dependency_id
                 self.entity_registry_dependency_json = (
@@ -135929,7 +136125,13 @@ class GraphSqliteStore:
     def _current_entity_registry_index(
         self,
     ) -> dict[tuple[str, str], dict[str, Any]]:
-        if self.entity_registry_index:
+        # A rebuild binds one immutable registry dependency and verifies that
+        # binding again before publication.  Resolve its index at most once;
+        # rediscovering and semantically hashing the full registry for every
+        # graph source is both redundant and capable of dominating rebuild
+        # time.  Empty is also a valid resolved index, so truthiness is not a
+        # suitable cache sentinel.
+        if self._entity_registry_index_resolved:
             return self.entity_registry_index
         current = graph_entity_registry_dependency_snapshot(
             self.aoa_root,
@@ -135943,7 +136145,12 @@ class GraphSqliteStore:
             and isinstance(current.get("index"), dict)
         ):
             self.entity_registry_index = current["index"]
-        return self.entity_registry_index
+            self._entity_registry_index_resolved = True
+            return self.entity_registry_index
+        raise GraphEntityRegistryDependencyChanged(
+            "graph_entity_registry_dependency_changed_while_"
+            "resolving_index"
+        )
 
     def _insert_source_row(self, contribution: dict[str, Any], *, status: str = "current") -> None:
         source = contribution.get("source") if isinstance(contribution.get("source"), dict) else {}
@@ -136010,7 +136217,14 @@ class GraphSqliteStore:
             ),
         )
 
-    def _insert_contrib_rows(self, contribution: dict[str, Any]) -> tuple[set[str], set[str]]:
+    def _insert_contrib_rows(
+        self,
+        contribution: dict[str, Any],
+        *,
+        redaction_text_cache: (
+            dict[tuple[str, str], str] | None
+        ) = None,
+    ) -> tuple[set[str], set[str]]:
         source = contribution.get("source") if isinstance(contribution.get("source"), dict) else {}
         source_key = str(source.get("source_key") or "")
         node_ids: set[str] = set()
@@ -136021,7 +136235,11 @@ class GraphSqliteStore:
             original = dict(node)
             node_id = str(original.get("id") or "")
             node_type = str(original.get("type") or "unknown")
-            payload = graph_compact_contribution_payload(original, kind="node")
+            payload = graph_compact_contribution_payload(
+                original,
+                kind="node",
+                redaction_text_cache=redaction_text_cache,
+            )
             payload["count"] = int_value(payload.get("count"), 1)
             node_ids.add(node_id)
             self.conn.execute(
@@ -136038,7 +136256,11 @@ class GraphSqliteStore:
             target_node = str(original.get("target") or "")
             edge_type = str(original.get("type") or "")
             edge_id = str(original.get("id") or graph_edge_id(source_node, target_node, edge_type))
-            payload = graph_compact_contribution_payload(original, kind="edge")
+            payload = graph_compact_contribution_payload(
+                original,
+                kind="edge",
+                redaction_text_cache=redaction_text_cache,
+            )
             payload["count"] = int_value(payload.get("count"), 1)
             edge_ids.add(edge_id)
             self.conn.execute(
@@ -136280,6 +136502,10 @@ class GraphSqliteStore:
     def _merge_rebuild_aggregate_node(
         self,
         node: dict[str, Any],
+        *,
+        redaction_text_cache: (
+            dict[tuple[str, str], str] | None
+        ) = None,
     ) -> None:
         """Merge one node while preserving the richest rebuild payload."""
 
@@ -136290,7 +136516,11 @@ class GraphSqliteStore:
         payload["count"] = int_value(payload.get("count"), 1)
         node_type = str(payload.get("type") or "unknown")
         payload_json = graph_json(
-            graph_compact_aggregate_payload(payload, kind="node")
+            graph_compact_aggregate_payload(
+                payload,
+                kind="node",
+                redaction_text_cache=redaction_text_cache,
+            )
         )
         count = int_value(payload.get("count"), 1)
         self.conn.execute(
@@ -136318,6 +136548,10 @@ class GraphSqliteStore:
     def _merge_rebuild_aggregate_edge(
         self,
         edge: dict[str, Any],
+        *,
+        redaction_text_cache: (
+            dict[tuple[str, str], str] | None
+        ) = None,
     ) -> None:
         """Merge one edge while preserving the richest rebuild payload."""
 
@@ -136336,7 +136570,11 @@ class GraphSqliteStore:
         )
         payload["count"] = int_value(payload.get("count"), 1)
         payload_json = graph_json(
-            graph_compact_aggregate_payload(payload, kind="edge")
+            graph_compact_aggregate_payload(
+                payload,
+                kind="edge",
+                redaction_text_cache=redaction_text_cache,
+            )
         )
         count = int_value(payload.get("count"), 1)
         self.conn.execute(
@@ -138157,8 +138395,12 @@ class GraphSqliteStore:
                     }
                 )
                 continue
+            redaction_text_cache: dict[tuple[str, str], str] = {}
             inserted_node_ids, inserted_edge_ids = (
-                self._insert_contrib_rows(contribution)
+                self._insert_contrib_rows(
+                    contribution,
+                    redaction_text_cache=redaction_text_cache,
+                )
             )
             self._insert_source_row(contribution, status="current")
             for node in (
@@ -138167,14 +138409,20 @@ class GraphSqliteStore:
                 else []
             ):
                 if isinstance(node, dict):
-                    self._merge_rebuild_aggregate_node(node)
+                    self._merge_rebuild_aggregate_node(
+                        node,
+                        redaction_text_cache=redaction_text_cache,
+                    )
             for edge in (
                 contribution.get("edges", [])
                 if isinstance(contribution.get("edges"), list)
                 else []
             ):
                 if isinstance(edge, dict):
-                    self._merge_rebuild_aggregate_edge(edge)
+                    self._merge_rebuild_aggregate_edge(
+                        edge,
+                        redaction_text_cache=redaction_text_cache,
+                    )
             results.append(
                 {
                     "source_key": source_key,
@@ -139806,7 +140054,7 @@ def build_session_graph(
             reset=True,
             db_path=tmp_store_path,
             entity_registry_dependency=(
-                entity_registry_dependency_packet
+                entity_registry_dependency
             ),
         )
         payload: dict[str, Any] = {}
@@ -143167,7 +143415,7 @@ def graph_maintenance(
                 aoa_root,
                 refresh_chunk_size=refresh_chunk_size,
                 entity_registry_dependency=(
-                    entity_registry_dependency_packet
+                    entity_registry_dependency
                     if apply
                     else None
                 ),
