@@ -136490,7 +136490,7 @@ class GraphSqliteStore:
             ),
             "refresh_strategy": (
                 "bulk_rebuild_single_scan_summary_with_selective_"
-                "representative"
+                "indexed_representative"
             ),
         }
         if not ordered_ids:
@@ -136540,33 +136540,39 @@ class GraphSqliteStore:
             self.conn.execute(
                 f"""
                 CREATE TEMP TABLE {representative_table} AS
-                WITH ranked AS (
-                    SELECT c.node_id,
-                           c.node_type,
-                           c.payload_json,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY c.node_id
-                               ORDER BY LENGTH(c.payload_json) DESC,
-                                        c.source_key
-                           ) AS rn
-                    FROM node_contribs AS c
-                    JOIN {summary_table} AS summary
-                      ON summary.node_id = c.node_id
-                    LEFT JOIN nodes AS aggregate
-                      ON aggregate.id = c.node_id
-                    WHERE aggregate.id IS NULL
-                       OR (
-                           summary.contrib_row_count <= ?
-                           AND (
-                               summary.contrib_row_count = 1
-                               OR COALESCE(aggregate.node_type, 'unknown')
-                                  NOT IN ({skip_placeholders})
-                           )
-                       )
+                SELECT c.node_id, c.node_type, c.payload_json
+                FROM {summary_table} AS summary
+                CROSS JOIN node_contribs AS c
+                  INDEXED BY idx_node_contribs_node
+                  ON c.node_id = summary.node_id
+                LEFT JOIN nodes AS aggregate
+                  ON aggregate.id = c.node_id
+                WHERE (
+                    aggregate.id IS NULL
+                    OR (
+                        summary.contrib_row_count <= ?
+                        AND (
+                            summary.contrib_row_count = 1
+                            OR COALESCE(aggregate.node_type, 'unknown')
+                               NOT IN ({skip_placeholders})
+                        )
+                    )
                 )
-                SELECT node_id, node_type, payload_json
-                FROM ranked
-                WHERE rn = 1
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM node_contribs AS better
+                           INDEXED BY idx_node_contribs_node
+                      WHERE better.node_id = c.node_id
+                        AND (
+                            LENGTH(better.payload_json)
+                              > LENGTH(c.payload_json)
+                            OR (
+                                LENGTH(better.payload_json)
+                                  = LENGTH(c.payload_json)
+                                AND better.source_key < c.source_key
+                            )
+                        )
+                  )
                 """,
                 (
                     GRAPH_MAINTENANCE_FRESH_REPRESENTATIVE_ROW_LIMIT,
@@ -136904,7 +136910,10 @@ class GraphSqliteStore:
             "minimal_payload_count": 0,
             "invalid_existing_payload_count": 0,
             "fresh_representative_row_limit": 1,
-            "refresh_strategy": "bulk_rebuild_single_scan_summary",
+            "refresh_strategy": (
+                "bulk_rebuild_single_scan_summary_with_"
+                "indexed_representative"
+            ),
         }
         if not ordered_ids:
             stats["elapsed_ms"] = graph_phase_elapsed_ms(started)
@@ -136949,29 +136958,33 @@ class GraphSqliteStore:
             self.conn.execute(
                 f"""
                 CREATE TEMP TABLE {representative_table} AS
-                WITH ranked AS (
-                    SELECT c.edge_id,
-                           c.edge_type,
-                           c.source_node,
-                           c.target_node,
-                           c.payload_json,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY c.edge_id
-                               ORDER BY LENGTH(c.payload_json) DESC,
-                                        c.source_key
-                           ) AS rn
-                    FROM edge_contribs AS c
-                    JOIN {summary_table} AS summary
-                      ON summary.edge_id = c.edge_id
-                    LEFT JOIN edges AS aggregate
-                      ON aggregate.id = c.edge_id
-                    WHERE aggregate.id IS NULL
-                       OR summary.contrib_row_count = 1
+                SELECT c.edge_id, c.edge_type, c.source_node,
+                       c.target_node, c.payload_json
+                FROM {summary_table} AS summary
+                CROSS JOIN edge_contribs AS c
+                  INDEXED BY idx_edge_contribs_edge
+                  ON c.edge_id = summary.edge_id
+                LEFT JOIN edges AS aggregate
+                  ON aggregate.id = c.edge_id
+                WHERE (
+                    aggregate.id IS NULL
+                    OR summary.contrib_row_count = 1
                 )
-                SELECT edge_id, edge_type, source_node,
-                       target_node, payload_json
-                FROM ranked
-                WHERE rn = 1
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM edge_contribs AS better
+                           INDEXED BY idx_edge_contribs_edge
+                      WHERE better.edge_id = c.edge_id
+                        AND (
+                            LENGTH(better.payload_json)
+                              > LENGTH(c.payload_json)
+                            OR (
+                                LENGTH(better.payload_json)
+                                  = LENGTH(c.payload_json)
+                                AND better.source_key < c.source_key
+                            )
+                        )
+                  )
                 """
             )
             self.conn.execute(

@@ -41744,10 +41744,11 @@ def test_graph_store_rebuild_refreshes_duplicate_aggregate_evidence(tmp_path: Pa
     assert rebuilt["duplicate_node_refresh"]["requested_count"] == 1
     assert rebuilt["duplicate_edge_refresh"]["requested_count"] == 1
     assert rebuilt["duplicate_node_refresh"]["refresh_strategy"] == (
-        "bulk_rebuild_single_scan_summary_with_selective_representative"
+        "bulk_rebuild_single_scan_summary_with_selective_indexed_"
+        "representative"
     )
     assert rebuilt["duplicate_edge_refresh"]["refresh_strategy"] == (
-        "bulk_rebuild_single_scan_summary"
+        "bulk_rebuild_single_scan_summary_with_indexed_representative"
     )
     assert int(node_row["count"]) == 2
     assert int(edge_row["count"]) == 2
@@ -41851,10 +41852,11 @@ def test_graph_store_rebuild_bulk_refresh_crosses_chunk_boundary(
     assert node_refresh["chunk_count"] == 2
     assert edge_refresh["chunk_count"] == 2
     assert node_refresh["refresh_strategy"] == (
-        "bulk_rebuild_single_scan_summary_with_selective_representative"
+        "bulk_rebuild_single_scan_summary_with_selective_indexed_"
+        "representative"
     )
     assert edge_refresh["refresh_strategy"] == (
-        "bulk_rebuild_single_scan_summary"
+        "bulk_rebuild_single_scan_summary_with_indexed_representative"
     )
     assert tuple(node_counts) == (duplicate_count, 2, 2)
     assert tuple(edge_counts) == (duplicate_count, 2, 2)

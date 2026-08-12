@@ -866,7 +866,8 @@ maintenance batch cannot silently upgrade its global semantics.
 During that explicit rebuild, duplicate aggregate refresh is set-based: the
 complete duplicate-ID set is materialized once, contribution counts are
 summarized by one grouped scan per contribution table, and only the bounded
-representative rows required by the aggregate payload policy are ranked. The
+representative rows required by the aggregate payload policy are selected by
+their contribution-ID indexes without a global window sort. The
 summary may be consumed in memory-bounded chunks, but those chunks must not
 repeat the contribution-table aggregation. Incremental maintenance retains its
 bounded ID-chunk refresh because it operates on a small dirty-source frontier.
