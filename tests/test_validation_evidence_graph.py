@@ -85,6 +85,22 @@ def test_public_source_shadow_route_does_not_pull_full_final_fan_in() -> None:
     assert post_claim["required_evidence"] == ["post-build-public-tree-audit"]
 
 
+def test_independent_evidence_nodes_do_not_wait_for_duplicate_preflight() -> None:
+    payload = json.loads(
+        validation_evidence_graph.MANIFEST_PATH.read_text(encoding="utf-8")
+    )
+    nodes = {item["id"]: item for item in payload["nodes"]}
+    independent = set(nodes) - {
+        "validation-graph-contract",
+        "post-build-public-source-audit",
+    }
+
+    assert all(nodes[node_id]["depends_on"] == [] for node_id in independent)
+    assert set(
+        nodes["post-build-public-source-audit"]["depends_on"]
+    ) == set(nodes) - {"post-build-public-source-audit"}
+
+
 def test_inventory_guard_reports_an_omitted_serial_obligation(tmp_path: Path) -> None:
     payload = json.loads(validation_evidence_graph.MANIFEST_PATH.read_text(encoding="utf-8"))
     node = next(item for item in payload["nodes"] if item["id"] == "decision-indexes")
