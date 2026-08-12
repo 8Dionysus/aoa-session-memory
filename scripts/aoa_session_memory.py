@@ -9,6 +9,7 @@ import ctypes
 import ctypes.util
 import difflib
 import fcntl
+import gc
 import gzip
 import hashlib
 import inspect
@@ -131994,7 +131995,7 @@ def graph_lineage_agent_evidence_refs(
     ]
 
 
-def graph_contributions_for_record(
+def _graph_contributions_for_record(
     record: dict[str, Any],
     *,
     source_keys: set[str] | None = None,
@@ -132982,6 +132983,30 @@ def graph_contributions_for_record(
             }
         )
     return contributions, diagnostics
+
+
+def graph_contributions_for_record(
+    record: dict[str, Any],
+    *,
+    source_keys: set[str] | None = None,
+    entity_registry_index: (
+        dict[tuple[str, str], dict[str, Any]] | None
+    ) = None,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Build one acyclic record graph without repeated full-heap GC scans."""
+
+    restore_gc = gc.isenabled()
+    if restore_gc:
+        gc.disable()
+    try:
+        return _graph_contributions_for_record(
+            record,
+            source_keys=source_keys,
+            entity_registry_index=entity_registry_index,
+        )
+    finally:
+        if restore_gc:
+            gc.enable()
 
 
 GRAPH_PROJECTION_SEMANTIC_DIGEST_VERSION = 2
@@ -140031,6 +140056,13 @@ def build_session_graph(
                         )
                     )
                     yield contribution
+                # Every contribution for this record has now been consumed by
+                # the store.  Drop the record-local object graph before one
+                # deliberate collection instead of letting cyclic GC rescan
+                # it repeatedly during JSON hydration and redaction.
+                record_contributions.clear()
+                contribution = None
+                gc.collect()
                 if progress_interval and (processed_record_count % progress_interval == 0 or processed_record_count == len(records)):
                     progress_telemetry.emit(
                         {

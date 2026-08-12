@@ -96871,6 +96871,34 @@ def test_graph_record_redaction_cache_preserves_standard_output(
     assert cache
 
 
+def test_graph_record_builder_restores_gc_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[bool] = []
+
+    def inner(*_args: Any, **_kwargs: Any) -> tuple[list[Any], list[str]]:
+        observed.append(module.gc.isenabled())
+        return [], []
+
+    monkeypatch.setattr(
+        module,
+        "_graph_contributions_for_record",
+        inner,
+    )
+    module.gc.enable()
+    assert module.graph_contributions_for_record({}) == ([], [])
+    assert observed == [False]
+    assert module.gc.isenabled() is True
+
+    module.gc.disable()
+    try:
+        assert module.graph_contributions_for_record({}) == ([], [])
+        assert observed == [False, False]
+        assert module.gc.isenabled() is False
+    finally:
+        module.gc.enable()
+
+
 def test_graph_store_resolves_registry_index_only_once_per_store(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
