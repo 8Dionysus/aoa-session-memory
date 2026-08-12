@@ -136277,6 +136277,111 @@ class GraphSqliteStore:
             return False, edge_type
         return True, edge_type
 
+    def _merge_rebuild_aggregate_node(
+        self,
+        node: dict[str, Any],
+    ) -> None:
+        """Merge one node while preserving the richest rebuild payload."""
+
+        node_id = str(node.get("id") or "")
+        if not node_id:
+            return
+        payload = dict(node)
+        payload["count"] = int_value(payload.get("count"), 1)
+        node_type = str(payload.get("type") or "unknown")
+        payload_json = graph_json(
+            graph_compact_aggregate_payload(payload, kind="node")
+        )
+        count = int_value(payload.get("count"), 1)
+        self.conn.execute(
+            """
+            INSERT INTO nodes(id, node_type, payload_json, count)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+              count = nodes.count + excluded.count,
+              node_type = CASE
+                WHEN LENGTH(excluded.payload_json)
+                     > LENGTH(nodes.payload_json)
+                THEN excluded.node_type
+                ELSE nodes.node_type
+              END,
+              payload_json = CASE
+                WHEN LENGTH(excluded.payload_json)
+                     > LENGTH(nodes.payload_json)
+                THEN excluded.payload_json
+                ELSE nodes.payload_json
+              END
+            """,
+            (node_id, node_type, payload_json, count),
+        )
+
+    def _merge_rebuild_aggregate_edge(
+        self,
+        edge: dict[str, Any],
+    ) -> None:
+        """Merge one edge while preserving the richest rebuild payload."""
+
+        normalized = graph_relation_contract_payload(edge)
+        if not normalized.get("navigation_admissible"):
+            return
+        source = str(normalized.get("source") or "")
+        target = str(normalized.get("target") or "")
+        edge_type = str(normalized.get("type") or "")
+        if not source or not target or not edge_type:
+            return
+        payload = dict(normalized)
+        payload["id"] = str(
+            payload.get("id")
+            or graph_edge_id(source, target, edge_type)
+        )
+        payload["count"] = int_value(payload.get("count"), 1)
+        payload_json = graph_json(
+            graph_compact_aggregate_payload(payload, kind="edge")
+        )
+        count = int_value(payload.get("count"), 1)
+        self.conn.execute(
+            """
+            INSERT INTO edges(
+              id, edge_type, source_node, target_node,
+              payload_json, count
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+              count = edges.count + excluded.count,
+              edge_type = CASE
+                WHEN LENGTH(excluded.payload_json)
+                     > LENGTH(edges.payload_json)
+                THEN excluded.edge_type
+                ELSE edges.edge_type
+              END,
+              source_node = CASE
+                WHEN LENGTH(excluded.payload_json)
+                     > LENGTH(edges.payload_json)
+                THEN excluded.source_node
+                ELSE edges.source_node
+              END,
+              target_node = CASE
+                WHEN LENGTH(excluded.payload_json)
+                     > LENGTH(edges.payload_json)
+                THEN excluded.target_node
+                ELSE edges.target_node
+              END,
+              payload_json = CASE
+                WHEN LENGTH(excluded.payload_json)
+                     > LENGTH(edges.payload_json)
+                THEN excluded.payload_json
+                ELSE edges.payload_json
+              END
+            """,
+            (
+                payload["id"],
+                edge_type,
+                source,
+                target,
+                payload_json,
+                count,
+            ),
+        )
+
     def _append_aggregate_contribution(
         self,
         contribution: dict[str, Any],
@@ -137826,6 +137931,190 @@ class GraphSqliteStore:
         removed = self.remove_sources([source_key])
         return (removed.get("results") or [{"source_key": source_key, "status": "removed", "node_count": 0, "edge_count": 0}])[0]
 
+    def _finalize_rebuild_duplicate_nodes(
+        self,
+        node_ids: set[str],
+    ) -> dict[str, Any]:
+        """Finalize rebuild node counters without Python payload hydration."""
+
+        started = graph_phase_timer_start()
+        ordered_ids = sorted({value for value in node_ids if value})
+        stats = {
+            "requested_count": len(ordered_ids),
+            "chunk_count": 1 if ordered_ids else 0,
+            "row_count": 0,
+            "missing_count": 0,
+            "aggregate_row_count": 0,
+            "representative_payload_count": 0,
+            "existing_payload_reused_count": 0,
+            "minimal_payload_count": 0,
+            "invalid_existing_payload_count": 0,
+            "fresh_representative_row_limit": (
+                GRAPH_MAINTENANCE_FRESH_REPRESENTATIVE_ROW_LIMIT
+            ),
+            "refresh_strategy": (
+                "bulk_rebuild_inline_representative_set_based_finalize"
+            ),
+        }
+        if not ordered_ids:
+            stats["elapsed_ms"] = graph_phase_elapsed_ms(started)
+            return stats
+        id_table = "graph_rebuild_duplicate_node_ids"
+        summary_table = "graph_rebuild_duplicate_node_summary"
+        try:
+            self.conn.execute(f"DROP TABLE IF EXISTS temp.{summary_table}")
+            self.conn.execute(f"DROP TABLE IF EXISTS temp.{id_table}")
+            self.conn.execute(
+                f"CREATE TEMP TABLE {id_table} "
+                "(id TEXT PRIMARY KEY) WITHOUT ROWID"
+            )
+            self.conn.executemany(
+                f"INSERT INTO {id_table}(id) VALUES (?)",
+                ((node_id,) for node_id in ordered_ids),
+            )
+            self.conn.execute(
+                f"""
+                CREATE TEMP TABLE {summary_table} AS
+                SELECT c.node_id,
+                       COUNT(*) AS contrib_row_count
+                FROM node_contribs AS c
+                JOIN {id_table} AS requested
+                  ON requested.id = c.node_id
+                GROUP BY c.node_id
+                """
+            )
+            summary = self.conn.execute(
+                f"""
+                SELECT COUNT(*) AS aggregate_row_count,
+                       COALESCE(SUM(contrib_row_count), 0) AS row_count
+                FROM {summary_table}
+                """
+            ).fetchone()
+            stats["aggregate_row_count"] = int_value(
+                summary["aggregate_row_count"]
+            )
+            stats["row_count"] = int_value(summary["row_count"])
+            evidence_limit = graph_aggregate_evidence_limit("node")
+            self.conn.execute(
+                f"""
+                UPDATE nodes
+                SET payload_json = json_set(
+                    payload_json,
+                    '$.count', count,
+                    '$.evidence_ref_count', MIN(
+                        ?,
+                        (
+                            SELECT summary.contrib_row_count
+                            FROM {summary_table} AS summary
+                            WHERE summary.node_id = nodes.id
+                        )
+                    )
+                )
+                WHERE id IN (SELECT node_id FROM {summary_table})
+                """,
+                (evidence_limit,),
+            )
+        finally:
+            self.conn.execute(f"DROP TABLE IF EXISTS temp.{summary_table}")
+            self.conn.execute(f"DROP TABLE IF EXISTS temp.{id_table}")
+        stats["missing_count"] = max(
+            0,
+            stats["requested_count"] - stats["aggregate_row_count"],
+        )
+        stats["elapsed_ms"] = graph_phase_elapsed_ms(started)
+        return stats
+
+    def _finalize_rebuild_duplicate_edges(
+        self,
+        edge_ids: set[str],
+    ) -> dict[str, Any]:
+        """Finalize rebuild edge counters without Python payload hydration."""
+
+        started = graph_phase_timer_start()
+        ordered_ids = sorted({value for value in edge_ids if value})
+        stats = {
+            "requested_count": len(ordered_ids),
+            "chunk_count": 1 if ordered_ids else 0,
+            "row_count": 0,
+            "missing_count": 0,
+            "aggregate_row_count": 0,
+            "representative_payload_count": 0,
+            "existing_payload_reused_count": 0,
+            "minimal_payload_count": 0,
+            "invalid_existing_payload_count": 0,
+            "fresh_representative_row_limit": 1,
+            "refresh_strategy": (
+                "bulk_rebuild_inline_representative_set_based_finalize"
+            ),
+        }
+        if not ordered_ids:
+            stats["elapsed_ms"] = graph_phase_elapsed_ms(started)
+            return stats
+        id_table = "graph_rebuild_duplicate_edge_ids"
+        summary_table = "graph_rebuild_duplicate_edge_summary"
+        try:
+            self.conn.execute(f"DROP TABLE IF EXISTS temp.{summary_table}")
+            self.conn.execute(f"DROP TABLE IF EXISTS temp.{id_table}")
+            self.conn.execute(
+                f"CREATE TEMP TABLE {id_table} "
+                "(id TEXT PRIMARY KEY) WITHOUT ROWID"
+            )
+            self.conn.executemany(
+                f"INSERT INTO {id_table}(id) VALUES (?)",
+                ((edge_id,) for edge_id in ordered_ids),
+            )
+            self.conn.execute(
+                f"""
+                CREATE TEMP TABLE {summary_table} AS
+                SELECT c.edge_id,
+                       COUNT(*) AS contrib_row_count
+                FROM edge_contribs AS c
+                JOIN {id_table} AS requested
+                  ON requested.id = c.edge_id
+                GROUP BY c.edge_id
+                """
+            )
+            summary = self.conn.execute(
+                f"""
+                SELECT COUNT(*) AS aggregate_row_count,
+                       COALESCE(SUM(contrib_row_count), 0) AS row_count
+                FROM {summary_table}
+                """
+            ).fetchone()
+            stats["aggregate_row_count"] = int_value(
+                summary["aggregate_row_count"]
+            )
+            stats["row_count"] = int_value(summary["row_count"])
+            evidence_limit = graph_aggregate_evidence_limit("edge")
+            self.conn.execute(
+                f"""
+                UPDATE edges
+                SET payload_json = json_set(
+                    payload_json,
+                    '$.count', count,
+                    '$.evidence_ref_count', MIN(
+                        ?,
+                        (
+                            SELECT summary.contrib_row_count
+                            FROM {summary_table} AS summary
+                            WHERE summary.edge_id = edges.id
+                        )
+                    )
+                )
+                WHERE id IN (SELECT edge_id FROM {summary_table})
+                """,
+                (evidence_limit,),
+            )
+        finally:
+            self.conn.execute(f"DROP TABLE IF EXISTS temp.{summary_table}")
+            self.conn.execute(f"DROP TABLE IF EXISTS temp.{id_table}")
+        stats["missing_count"] = max(
+            0,
+            stats["requested_count"] - stats["aggregate_row_count"],
+        )
+        stats["elapsed_ms"] = graph_phase_elapsed_ms(started)
+        return stats
+
     def rebuild(self, contributions: Iterable[dict[str, Any]]) -> dict[str, Any]:
         self.assert_entity_registry_dependency_current()
         for table in ("graph_sources", "node_contribs", "edge_contribs", "nodes", "edges"):
@@ -137841,14 +138130,67 @@ class GraphSqliteStore:
             duplicate_edge_ids.update(seen_edge_ids & edge_ids)
             seen_node_ids.update(node_ids)
             seen_edge_ids.update(edge_ids)
-            results.append(self.replace_source(contribution, bulk=True))
+            source = (
+                contribution.get("source")
+                if isinstance(contribution.get("source"), dict)
+                else {}
+            )
+            source_key = str(source.get("source_key") or "")
+            old_node_ids, old_edge_ids = self.source_contribution_ids(
+                source_key
+            )
+            self.conn.execute(
+                "DELETE FROM node_contribs WHERE source_key = ?",
+                (source_key,),
+            )
+            self.conn.execute(
+                "DELETE FROM edge_contribs WHERE source_key = ?",
+                (source_key,),
+            )
+            if source.get("status") == "blocked":
+                self._insert_source_row(contribution, status="blocked")
+                results.append(
+                    {
+                        "source_key": source_key,
+                        "status": "blocked",
+                        "diagnostics": source.get("diagnostics", []),
+                    }
+                )
+                continue
+            inserted_node_ids, inserted_edge_ids = (
+                self._insert_contrib_rows(contribution)
+            )
+            self._insert_source_row(contribution, status="current")
+            for node in (
+                contribution.get("nodes", [])
+                if isinstance(contribution.get("nodes"), list)
+                else []
+            ):
+                if isinstance(node, dict):
+                    self._merge_rebuild_aggregate_node(node)
+            for edge in (
+                contribution.get("edges", [])
+                if isinstance(contribution.get("edges"), list)
+                else []
+            ):
+                if isinstance(edge, dict):
+                    self._merge_rebuild_aggregate_edge(edge)
+            results.append(
+                {
+                    "source_key": source_key,
+                    "status": "updated",
+                    "node_count": len(inserted_node_ids),
+                    "edge_count": len(inserted_edge_ids),
+                    "diagnostics": [],
+                }
+            )
         duplicate_node_refresh = (
-            self._refresh_rebuild_duplicate_nodes(
+            self._finalize_rebuild_duplicate_nodes(
                 duplicate_node_ids
             )
         )
         duplicate_edge_refresh = (
-            self._refresh_rebuild_duplicate_edges(
+            self._finalize_rebuild_duplicate_edges(
                 duplicate_edge_ids
             )
         )

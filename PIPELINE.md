@@ -865,12 +865,12 @@ the dependency contract requires an explicit full rebuild; a bounded
 maintenance batch cannot silently upgrade its global semantics.
 During that explicit rebuild, duplicate aggregate refresh is set-based: the
 complete duplicate-ID set is materialized once, contribution counts are
-summarized by one grouped scan per contribution table, and only the bounded
-representative rows required by the aggregate payload policy are selected by
-their contribution-ID indexes without a global window sort. The
-summary may be consumed in memory-bounded chunks, but those chunks must not
-repeat the contribution-table aggregation. Incremental maintenance retains its
-bounded ID-chunk refresh because it operates on a small dirty-source frontier.
+summarized by one grouped scan per contribution table, while the richest
+representative payload is retained inline by the bulk UPSERT. Final count and
+evidence counters are applied with set-based JSON updates; full rebuild must
+not hydrate every duplicate payload in Python or repeat contribution-table
+aggregation. Incremental maintenance retains its bounded ID-chunk refresh
+because it operates on a small dirty-source frontier.
 Known same-epoch dependency drift instead routes through the complete
 registry-derived materialization proof and atomic rebind. Unknown epochs,
 schema or canonicalization changes, malformed legacy bindings, and rejected

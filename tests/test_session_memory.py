@@ -41744,11 +41744,10 @@ def test_graph_store_rebuild_refreshes_duplicate_aggregate_evidence(tmp_path: Pa
     assert rebuilt["duplicate_node_refresh"]["requested_count"] == 1
     assert rebuilt["duplicate_edge_refresh"]["requested_count"] == 1
     assert rebuilt["duplicate_node_refresh"]["refresh_strategy"] == (
-        "bulk_rebuild_single_scan_summary_with_selective_indexed_"
-        "representative"
+        "bulk_rebuild_inline_representative_set_based_finalize"
     )
     assert rebuilt["duplicate_edge_refresh"]["refresh_strategy"] == (
-        "bulk_rebuild_single_scan_summary_with_indexed_representative"
+        "bulk_rebuild_inline_representative_set_based_finalize"
     )
     assert int(node_row["count"]) == 2
     assert int(edge_row["count"]) == 2
@@ -41849,14 +41848,13 @@ def test_graph_store_rebuild_bulk_refresh_crosses_chunk_boundary(
     edge_refresh = rebuilt["duplicate_edge_refresh"]
     assert node_refresh["requested_count"] == duplicate_count
     assert edge_refresh["requested_count"] == duplicate_count
-    assert node_refresh["chunk_count"] == 2
-    assert edge_refresh["chunk_count"] == 2
+    assert node_refresh["chunk_count"] == 1
+    assert edge_refresh["chunk_count"] == 1
     assert node_refresh["refresh_strategy"] == (
-        "bulk_rebuild_single_scan_summary_with_selective_indexed_"
-        "representative"
+        "bulk_rebuild_inline_representative_set_based_finalize"
     )
     assert edge_refresh["refresh_strategy"] == (
-        "bulk_rebuild_single_scan_summary_with_indexed_representative"
+        "bulk_rebuild_inline_representative_set_based_finalize"
     )
     assert tuple(node_counts) == (duplicate_count, 2, 2)
     assert tuple(edge_counts) == (duplicate_count, 2, 2)
