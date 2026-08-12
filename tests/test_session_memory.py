@@ -98168,6 +98168,295 @@ def test_graph_legacy_generation_transition_requires_exact_source(
     ]
 
 
+def test_graph_projection_generation_transition_requires_declared_pair_and_exact_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    expected = module.session_memory_expected_generation_identities(
+        aoa_root
+    )["graph"]
+    source_bytes = SCRIPT.read_bytes().replace(
+        b"Durable source-contribution graph store for incremental maintenance.",
+        b"Prior source-contribution graph store for incremental maintenance.",
+        1,
+    )
+    previous_source = tmp_path / "previous_aoa_session_memory.py"
+    previous_source.write_bytes(source_bytes)
+    previous_contract = (
+        module.projection_producer_contract_from_source_bytes(
+            source_bytes,
+            "session_graph",
+        )
+    )
+    stored = {
+        key: value
+        for key, value in expected.items()
+        if key
+        not in (
+            {"generation_id", "generated_at"}
+            | module.PROJECTION_PRODUCER_GENERATION_FIELD_NAMES
+        )
+    }
+    stored.update(
+        {
+            "producer": "aoa_session_memory.py",
+            "producer_identity_mode": (
+                module.PROJECTION_PRODUCER_IDENTITY_MODE
+            ),
+            "producer_sha256": previous_contract["sha256"],
+            "producer_contract_version": (
+                module.PROJECTION_PRODUCER_CONTRACT_VERSION
+            ),
+            "producer_contract_status": "current",
+            "producer_contract_chunks": [
+                {
+                    key: item.get(key)
+                    for key in (
+                        "ordinal",
+                        "start_anchor",
+                        "end_anchor",
+                        "byte_count",
+                        "sha256",
+                    )
+                }
+                for item in previous_contract["chunks"]
+            ],
+        }
+    )
+    stored = module.generation_identity_with_id(stored)
+    monkeypatch.setattr(
+        module,
+        "DECLARED_GRAPH_PROJECTION_GENERATION_TRANSITIONS",
+        {
+            expected["generation_id"]: {
+                stored["generation_id"]: hashlib.sha256(
+                    source_bytes
+                ).hexdigest()
+            }
+        },
+    )
+
+    ready = module.graph_declared_generation_transition(
+        aoa_root=aoa_root,
+        stored_identity=stored,
+        previous_producer_source=previous_source,
+    )
+    missing = module.graph_declared_generation_transition(
+        aoa_root=aoa_root,
+        stored_identity=stored,
+        previous_producer_source=None,
+    )
+    previous_source.write_bytes(source_bytes + b"\n# drift\n")
+    wrong = module.graph_declared_generation_transition(
+        aoa_root=aoa_root,
+        stored_identity=stored,
+        previous_producer_source=previous_source,
+    )
+
+    assert ready["status"] == "ready"
+    assert ready["compatible"] is True
+    assert ready["declared_transition"]["decision_id"] == "AOA-SM-D-0067"
+    assert missing["diagnostics"] == [
+        "graph_generation_transition_previous_source_required"
+    ]
+    assert wrong["compatible"] is False
+    assert wrong["diagnostics"] == [
+        "graph_generation_transition_previous_source_sha_mismatch"
+    ]
+
+
+def test_graph_declared_transition_target_is_current_generation(
+    tmp_path: Path,
+) -> None:
+    expected_generation_id = (
+        module.session_memory_expected_generation_identities(
+            tmp_path / ".aoa"
+        )["graph"]["generation_id"]
+    )
+
+    assert set(
+        module.DECLARED_GRAPH_PROJECTION_GENERATION_TRANSITIONS
+    ) == {expected_generation_id}
+    assert all(
+        len(source_sha256) == 64
+        for source_sha256 in module.DECLARED_GRAPH_PROJECTION_GENERATION_TRANSITIONS[
+            expected_generation_id
+        ].values()
+    )
+
+
+def test_graph_registry_rebind_compatibility_admits_mixed_exact_generations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    expected = module.session_memory_expected_generation_identities(
+        aoa_root
+    )["graph"]
+    source_bytes = SCRIPT.read_bytes().replace(
+        b"Durable source-contribution graph store for incremental maintenance.",
+        b"Prior source-contribution graph store for incremental maintenance.",
+        1,
+    )
+    previous_source = tmp_path / "previous_aoa_session_memory.py"
+    previous_source.write_bytes(source_bytes)
+    previous_contract = (
+        module.projection_producer_contract_from_source_bytes(
+            source_bytes,
+            "session_graph",
+        )
+    )
+    predecessor = {
+        key: value
+        for key, value in expected.items()
+        if key
+        not in (
+            {"generation_id", "generated_at"}
+            | module.PROJECTION_PRODUCER_GENERATION_FIELD_NAMES
+        )
+    }
+    predecessor.update(
+        {
+            "producer": "aoa_session_memory.py",
+            "producer_identity_mode": (
+                module.PROJECTION_PRODUCER_IDENTITY_MODE
+            ),
+            "producer_sha256": previous_contract["sha256"],
+            "producer_contract_version": (
+                module.PROJECTION_PRODUCER_CONTRACT_VERSION
+            ),
+            "producer_contract_status": "current",
+            "producer_contract_chunks": previous_contract["chunks"],
+        }
+    )
+    predecessor = module.generation_identity_with_id(predecessor)
+    monkeypatch.setattr(
+        module,
+        "DECLARED_GRAPH_PROJECTION_GENERATION_TRANSITIONS",
+        {
+            expected["generation_id"]: {
+                predecessor["generation_id"]: hashlib.sha256(
+                    source_bytes
+                ).hexdigest()
+            }
+        },
+    )
+    dependency = {
+        "schema_version": 1,
+        "artifact_type": "entity_registry_dependency",
+        "status": "current",
+        "dependency_id": "current-dependency",
+        "entries": [],
+        "index": {},
+        "truth_status": "fixture",
+    }
+    store = module.GraphSqliteStore(
+        aoa_root,
+        reset=True,
+        entity_registry_dependency=dependency,
+    )
+    source_template = {
+        "source_type": "session",
+        "session_id": "fixture",
+        "session_label": "fixture",
+        "segment_id": "",
+        "source_path": "fixture",
+        "source_paths_json": "[]",
+        "source_sha": "fixture",
+        "source_mtime": 1.0,
+        "graph_schema_version": module.GRAPH_SCHEMA_VERSION,
+        "graph_store_schema_version": module.GRAPH_STORE_SCHEMA_VERSION,
+        "graph_event_route_signal_edge_policy": (
+            module.GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY
+        ),
+        "route_signal_classifier_version": (
+            module.ROUTE_SIGNAL_CLASSIFIER_VERSION
+        ),
+        "entity_registry_route_tokens_json": "[]",
+        "entity_registry_selective_digest": "",
+        "indexed_at": module.utc_now(),
+        "status": "current",
+        "diagnostic": "",
+        "node_count": 0,
+        "edge_count": 0,
+    }
+    columns = [
+        "source_key",
+        *source_template.keys(),
+        "generation_id",
+        "generation_identity_json",
+        "entity_registry_dependency_id",
+        "entity_registry_dependency_json",
+    ]
+    for source_key, identity, dependency_id in (
+        ("session:old", predecessor, "previous-dependency"),
+        ("session:current", expected, "current-dependency"),
+    ):
+        values = {
+            "source_key": source_key,
+            **source_template,
+            "generation_id": identity["generation_id"],
+            "generation_identity_json": module.graph_json(identity),
+            "entity_registry_dependency_id": dependency_id,
+            "entity_registry_dependency_json": module.graph_json(
+                {"dependency_id": dependency_id}
+            ),
+        }
+        store.conn.execute(
+            f"INSERT INTO graph_sources ({', '.join(columns)}) "
+            f"VALUES ({', '.join('?' for _ in columns)})",
+            tuple(values[column] for column in columns),
+        )
+    store.conn.commit()
+
+    plan = module.graph_entity_registry_materialization_compatibility(
+        aoa_root=aoa_root,
+        conn=store.conn,
+        dependency=dependency,
+        previous_producer_source=previous_source,
+    )
+    store.conn.execute(
+        "UPDATE graph_sources SET generation_id = ? "
+        "WHERE source_key = ?",
+        ("mismatched-column-generation", "session:old"),
+    )
+    store.conn.commit()
+    mismatched = (
+        module.graph_entity_registry_materialization_compatibility(
+            aoa_root=aoa_root,
+            conn=store.conn,
+            dependency=dependency,
+            previous_producer_source=previous_source,
+            include_content_digest=False,
+        )
+    )
+    store.close()
+
+    assert plan["compatible"] is True
+    assert plan["status"] == "ready"
+    assert plan["generation_changed"] is True
+    assert plan["dependency_changed"] is True
+    assert len(plan["source_generation_transitions"]) == 2
+    assert {
+        item["transition"]["status"]
+        for item in plan["source_generation_transitions"]
+    } == {"current", "ready"}
+    assert "graph_registry_rebind_mixed_stored_generations" not in plan[
+        "diagnostics"
+    ]
+    assert "graph_registry_rebind_mixed_stored_dependencies" not in plan[
+        "diagnostics"
+    ]
+    assert mismatched["compatible"] is False
+    assert any(
+        reason.startswith(
+            "graph_registry_rebind_source_generation_id_payload_mismatch:"
+        )
+        for reason in mismatched["diagnostics"]
+    )
+
+
 def test_graph_content_digest_excludes_only_generation_bindings(
     tmp_path: Path,
 ) -> None:

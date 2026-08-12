@@ -881,6 +881,16 @@ Known same-epoch dependency drift instead routes through the complete
 registry-derived materialization proof and atomic rebind. Unknown epochs,
 schema or canonicalization changes, malformed legacy bindings, and rejected
 proofs retain the full-rebuild boundary.
+An implementation-only graph producer transition may use the same rebind only
+for an exact declared predecessor-to-current generation pair and the declared
+whole-file SHA of the previous producer. The proof reconstructs that previous
+projection identity and evaluates every distinct source-generation group, so a
+store containing both current and exact-predecessor rows is not rejected merely
+because bounded maintenance already made progress. Every group must be current
+or explicitly admitted, every source must retain a dependency binding, static
+versions and complete registry materialization must pass, and query-bearing
+content remains digest-bound across one atomic restamp. This is a bounded
+reuse-then-restamp migration, not a persistent compatibility reader mode.
 
 Optional graph sidecar export is a separate manifest-committed projection.
 Nodes and edges are rendered in private staging, the graph transaction and

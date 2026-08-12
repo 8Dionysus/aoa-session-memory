@@ -128,6 +128,23 @@ DECLARED_PROJECTION_PREDECESSOR_GENERATION_IDS: dict[
         }
     ),
 }
+DECLARED_GRAPH_PROJECTION_GENERATION_TRANSITIONS: dict[
+    str,
+    dict[str, str],
+] = {
+    # AOA-SM-D-0067: the 0f10ba1 graph producer changes only how an
+    # append-only batch refreshes already-defined aggregates.  Admission is
+    # still conditional on reconstructing the exact predecessor identity from
+    # its source and on the complete graph materialization proof performed by
+    # graph-registry-rebind.
+    "ea73e542d289dd3f62a5801f9d3192f5ff2aec9492dedafaf1ffb46f642c4871": (
+        {
+            "bae847f241b3c19e3ca11d177df29089f8760aec72e1d0e50790eb6955d710c9": (
+                "e065b0e0399f986829c524f79cbf371b0fe6925c9f9aeb39c944c6309adcadb3"
+            ),
+        }
+    ),
+}
 PROJECTION_PRODUCER_SOURCE_RANGES: dict[
     str,
     tuple[tuple[str, str], ...],
@@ -133697,8 +133714,154 @@ def graph_declared_generation_transition(
             "changes_generation": False,
             "diagnostics": [],
         }
+    stored_identity_mode = str(
+        stored_identity.get("producer_identity_mode") or ""
+    )
+    if stored_identity_mode == PROJECTION_PRODUCER_IDENTITY_MODE:
+        declared_predecessors = (
+            DECLARED_GRAPH_PROJECTION_GENERATION_TRANSITIONS.get(
+                expected_generation_id,
+                {},
+            )
+        )
+        if stored_generation_id not in declared_predecessors:
+            return {
+                **base,
+                "status": "blocked",
+                "compatible": False,
+                "changes_generation": False,
+                "diagnostics": [
+                    "graph_generation_transition_projection_pair_not_declared"
+                ],
+            }
+        if previous_producer_source is None:
+            return {
+                **base,
+                "status": "blocked",
+                "compatible": False,
+                "changes_generation": False,
+                "requires_previous_producer_source": True,
+                "diagnostics": [
+                    "graph_generation_transition_previous_source_required"
+                ],
+            }
+        try:
+            previous_source_bytes = previous_producer_source.read_bytes()
+        except OSError as exc:
+            return {
+                **base,
+                "status": "blocked",
+                "compatible": False,
+                "changes_generation": False,
+                "requires_previous_producer_source": True,
+                "diagnostics": [
+                    "graph_generation_transition_previous_source_unreadable:"
+                    f"{exc}"
+                ],
+            }
+        previous_source_sha256 = hashlib.sha256(
+            previous_source_bytes
+        ).hexdigest()
+        declared_previous_source_sha256 = str(
+            declared_predecessors.get(stored_generation_id) or ""
+        )
+        previous_contract = (
+            projection_producer_contract_from_source_bytes(
+                previous_source_bytes,
+                "session_graph",
+            )
+        )
+        reconstructed_previous = {
+            key: value
+            for key, value in expected_graph.items()
+            if key
+            not in (
+                {"generation_id", "generated_at"}
+                | PROJECTION_PRODUCER_GENERATION_FIELD_NAMES
+            )
+        }
+        if previous_contract.get("status") == "current":
+            reconstructed_previous.update(
+                {
+                    "producer": "aoa_session_memory.py",
+                    "producer_identity_mode": (
+                        PROJECTION_PRODUCER_IDENTITY_MODE
+                    ),
+                    "producer_sha256": str(
+                        previous_contract.get("sha256") or ""
+                    ),
+                    "producer_contract_version": (
+                        PROJECTION_PRODUCER_CONTRACT_VERSION
+                    ),
+                    "producer_contract_status": "current",
+                    "producer_contract_chunks": [
+                        {
+                            key: item.get(key)
+                            for key in (
+                                "ordinal",
+                                "start_anchor",
+                                "end_anchor",
+                                "byte_count",
+                                "sha256",
+                            )
+                        }
+                        for item in previous_contract.get("chunks", [])
+                        if isinstance(item, dict)
+                    ],
+                }
+            )
+        reconstructed_previous = generation_identity_with_id(
+            reconstructed_previous
+        )
+        diagnostics = []
+        if (
+            not declared_previous_source_sha256
+            or previous_source_sha256
+            != declared_previous_source_sha256
+        ):
+            diagnostics.append(
+                "graph_generation_transition_previous_source_sha_mismatch"
+            )
+        if previous_contract.get("status") != "current":
+            diagnostics.extend(
+                str(item)
+                for item in previous_contract.get("diagnostics", [])
+                if item
+            )
+            diagnostics.append(
+                "graph_generation_transition_previous_contract_not_current"
+            )
+        if reconstructed_previous != stored_identity:
+            diagnostics.append(
+                "graph_generation_transition_projection_identity_mismatch"
+            )
+        compatible = not diagnostics
+        return {
+            **base,
+            "status": "ready" if compatible else "blocked",
+            "compatible": compatible,
+            "changes_generation": compatible,
+            "requires_previous_producer_source": True,
+            "previous_producer_sha256": previous_source_sha256,
+            "declared_previous_producer_sha256": (
+                declared_previous_source_sha256
+            ),
+            "previous_contract": previous_contract,
+            "reconstructed_previous_identity": reconstructed_previous,
+            "declared_transition": {
+                "from_generation_id": stored_generation_id,
+                "to_generation_id": expected_generation_id,
+                "decision_id": "AOA-SM-D-0067",
+                "scope": "rebind_after_complete_materialization_proof",
+            },
+            "diagnostics": list(dict.fromkeys(diagnostics)),
+            "truth_status": (
+                "exact_declared_projection_predecessor_source_proof_"
+                "not_graph_content_proof"
+            ),
+        }
     if (
-        str(stored_identity.get("producer_identity_mode") or "")
+        stored_identity_mode
         != SESSION_MEMORY_PRODUCER_IDENTITY_MODE
     ):
         return {
@@ -134579,41 +134742,107 @@ def graph_entity_registry_materialization_compatibility(
         }
         for row in source_generation_rows
     ]
-    dependency_counts = {
-        str(row["entity_registry_dependency_id"] or ""): int_value(
-            row["item_count"]
+    source_generation_transitions: list[dict[str, Any]] = []
+    for item in source_generation_counts:
+        try:
+            source_identity = json.loads(
+                item["generation_identity_json"] or "{}"
+            )
+        except json.JSONDecodeError:
+            source_identity = {}
+        if not isinstance(source_identity, dict):
+            source_identity = {}
+        if str(source_identity.get("generation_id") or "") != str(
+            item["generation_id"]
+        ):
+            diagnostics.append(
+                "graph_registry_rebind_source_generation_id_payload_mismatch:"
+                f"{item['generation_id']}"
+            )
+        transition = graph_declared_generation_transition(
+            aoa_root=aoa_root,
+            stored_identity=source_identity,
+            previous_producer_source=previous_producer_source,
         )
-        for row in conn.execute(
-            """
-            SELECT entity_registry_dependency_id, COUNT(*) AS item_count
-            FROM graph_sources
-            GROUP BY entity_registry_dependency_id
-            ORDER BY entity_registry_dependency_id
-            """
-        ).fetchall()
-    }
+        source_generation_transitions.append(
+            {
+                "generation_id": item["generation_id"],
+                "item_count": item["item_count"],
+                "transition": transition,
+            }
+        )
+        if not transition.get("compatible"):
+            diagnostics.append(
+                "graph_registry_rebind_source_generation_incompatible:"
+                f"{item['generation_id']}"
+            )
+            diagnostics.extend(
+                str(reason)
+                for reason in transition.get("diagnostics", [])
+                if reason
+            )
+    source_dependency_rows = conn.execute(
+        """
+        SELECT
+          entity_registry_dependency_id,
+          entity_registry_dependency_json,
+          COUNT(*) AS item_count
+        FROM graph_sources
+        GROUP BY
+          entity_registry_dependency_id,
+          entity_registry_dependency_json
+        ORDER BY
+          entity_registry_dependency_id,
+          entity_registry_dependency_json
+        """
+    ).fetchall()
+    source_dependency_bindings: list[dict[str, Any]] = []
+    dependency_counts_counter: Counter[str] = Counter()
+    for row in source_dependency_rows:
+        dependency_id = str(
+            row["entity_registry_dependency_id"] or ""
+        )
+        dependency_json = str(
+            row["entity_registry_dependency_json"] or ""
+        )
+        item_count = int_value(row["item_count"])
+        dependency_counts_counter[dependency_id] += item_count
+        try:
+            dependency_identity = json.loads(
+                dependency_json or "{}"
+            )
+        except json.JSONDecodeError:
+            dependency_identity = {}
+        valid = bool(
+            dependency_id
+            and isinstance(dependency_identity, dict)
+            and str(
+                dependency_identity.get("dependency_id") or ""
+            )
+            == dependency_id
+        )
+        source_dependency_bindings.append(
+            {
+                "dependency_id": dependency_id,
+                "item_count": item_count,
+                "valid": valid,
+            }
+        )
+        if not valid:
+            diagnostics.append(
+                "graph_registry_rebind_source_dependency_binding_invalid:"
+                f"{dependency_id or 'missing'}"
+            )
+    dependency_counts = dict(dependency_counts_counter)
     if source_count <= 0:
         diagnostics.append("graph_registry_rebind_source_rows_empty")
     if static_version_mismatch_count:
         diagnostics.append(
             "graph_registry_rebind_static_version_mismatch"
         )
-    expected_stored_identity_json = graph_json(
-        stored_generation_identity
-    )
-    if source_generation_counts != [
-        {
-            "generation_id": stored_generation_id,
-            "generation_identity_json": expected_stored_identity_json,
-            "item_count": source_count,
-        }
-    ]:
+    if any(not dependency_id for dependency_id in dependency_counts):
         diagnostics.append(
-            "graph_registry_rebind_mixed_stored_generations"
-        )
-    if dependency_counts != {stored_dependency_id: source_count}:
-        diagnostics.append(
-            "graph_registry_rebind_mixed_stored_dependencies"
+            "graph_registry_rebind_source_dependency_missing"
         )
 
     counts: Counter[str] = Counter()
@@ -134883,6 +135112,16 @@ def graph_entity_registry_materialization_compatibility(
                 break
             samples.append(item)
     compatible = not diagnostics
+    all_source_generations_current = bool(
+        source_generation_transitions
+        and all(
+            item.get("transition", {}).get("status") == "current"
+            for item in source_generation_transitions
+        )
+    )
+    all_source_dependencies_current = (
+        dependency_counts == {expected_dependency_id: source_count}
+    )
     refreshable_diagnostics = {
         "graph_registry_rebind_aggregate_node_mismatch",
         "graph_registry_rebind_contribution_node_mismatch",
@@ -134917,6 +135156,8 @@ def graph_entity_registry_materialization_compatibility(
             if compatible
             and stored_dependency_id == expected_dependency_id
             and generation_transition.get("status") == "current"
+            and all_source_generations_current
+            and all_source_dependencies_current
             else "ready_refresh"
             if registry_materialization_refreshable
             else "ready"
@@ -134934,19 +135175,27 @@ def graph_entity_registry_materialization_compatibility(
         "current_generation_id": expected_generation_id,
         "generation_transition": generation_transition,
         "generation_changed": bool(
-            stored_generation_id
-            and expected_generation_id
-            and stored_generation_id != expected_generation_id
+            generation_transition.get("changes_generation")
+            or any(
+                item.get("transition", {}).get(
+                    "changes_generation"
+                )
+                for item in source_generation_transitions
+            )
         ),
         "dependency_changed": bool(
             stored_dependency_id
             and expected_dependency_id
             and stored_dependency_id != expected_dependency_id
-        ),
+        ) or not all_source_dependencies_current,
         "dependency": dependency_packet,
         "source_count": source_count,
         "stored_dependency_counts": dependency_counts,
+        "source_dependency_bindings": source_dependency_bindings,
         "stored_generation_counts": source_generation_counts,
+        "source_generation_transitions": (
+            source_generation_transitions
+        ),
         "static_version_mismatch_count": (
             static_version_mismatch_count
         ),
@@ -135275,6 +135524,48 @@ def graph_entity_registry_dependency_rebind(
                 dependency_json,
             ),
         )
+        rebound_source_generation_ids = sorted(
+            {
+                str(item.get("generation_id") or "")
+                for item in plan.get(
+                    "source_generation_transitions",
+                    [],
+                )
+                if isinstance(item, dict)
+                and item.get("transition", {}).get(
+                    "changes_generation"
+                )
+                and item.get("generation_id")
+            }
+        )
+        previous_source_sha256 = str(
+            (
+                plan.get("generation_transition", {})
+                if isinstance(
+                    plan.get("generation_transition"),
+                    dict,
+                )
+                else {}
+            ).get("previous_producer_sha256")
+            or ""
+        )
+        if not previous_source_sha256:
+            for item in plan.get(
+                "source_generation_transitions",
+                [],
+            ):
+                transition = (
+                    item.get("transition", {})
+                    if isinstance(item, dict)
+                    else {}
+                )
+                if transition.get("changes_generation"):
+                    previous_source_sha256 = str(
+                        transition.get("previous_producer_sha256")
+                        or ""
+                    )
+                    if previous_source_sha256:
+                        break
         conn.execute(
             "INSERT OR REPLACE INTO metadata(key, value) "
             "VALUES ('graph_generation_id', ?)",
@@ -135315,19 +135606,13 @@ def graph_entity_registry_dependency_rebind(
             ),
             (
                 "graph_generation_rebound_from",
-                plan.get("stored_generation_id") or "",
+                ",".join(rebound_source_generation_ids)
+                or plan.get("stored_generation_id")
+                or "",
             ),
             (
                 "graph_generation_rebound_previous_source_sha256",
-                (
-                    plan.get("generation_transition", {})
-                    if isinstance(
-                        plan.get("generation_transition"),
-                        dict,
-                    )
-                    else {}
-                ).get("previous_producer_sha256")
-                or "",
+                previous_source_sha256,
             ),
         ):
             conn.execute(
