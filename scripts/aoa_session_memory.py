@@ -137903,6 +137903,10 @@ class GraphSqliteStore:
         append_only_edge_count = 0
         append_only_inserted_node_count = 0
         append_only_inserted_edge_count = 0
+        append_only_node_ids: set[str] = set()
+        append_only_edge_ids: set[str] = set()
+        single_append_only_contribution: dict[str, Any] | None = None
+        append_only_aggregate_strategy = "none"
         metadata_only_source_count = 0
         metadata_only_node_count = 0
         metadata_only_edge_count = 0
@@ -138019,14 +138023,35 @@ class GraphSqliteStore:
             graph_add_phase_timing(phase_timings, "source_row_upsert_ms", phase_started)
             append_only = not old_node_ids and not old_edge_ids
             if append_only:
-                phase_started = graph_phase_timer_start()
-                append_stats = self._append_aggregate_contribution(contribution, budget_deadline=budget_deadline)
-                graph_add_phase_timing(phase_timings, "append_aggregate_ms", phase_started)
                 append_only_source_count += 1
-                append_only_node_count += int_value(append_stats.get("node_count"))
-                append_only_edge_count += int_value(append_stats.get("edge_count"))
-                append_only_inserted_node_count += int_value(append_stats.get("inserted_node_count"))
-                append_only_inserted_edge_count += int_value(append_stats.get("inserted_edge_count"))
+                append_only_node_count += sum(
+                    1
+                    for node in (
+                        contribution.get("nodes", [])
+                        if isinstance(contribution.get("nodes"), list)
+                        else []
+                    )
+                    if isinstance(node, dict) and node.get("id")
+                )
+                append_only_edge_count += sum(
+                    1
+                    for edge in (
+                        contribution.get("edges", [])
+                        if isinstance(contribution.get("edges"), list)
+                        else []
+                    )
+                    if (
+                        isinstance(edge, dict)
+                        and edge.get("source")
+                        and edge.get("target")
+                    )
+                )
+                append_only_node_ids.update(node_ids)
+                append_only_edge_ids.update(edge_ids)
+                if append_only_source_count == 1:
+                    single_append_only_contribution = contribution
+                else:
+                    single_append_only_contribution = None
                 results.append(
                     {
                         "source_key": source_key,
@@ -138056,6 +138081,62 @@ class GraphSqliteStore:
                 }
             )
             graph_add_phase_timing(phase_timings, "source_processing_ms", source_started)
+        if append_only_source_count == 1 and single_append_only_contribution is not None:
+            phase_started = graph_phase_timer_start()
+            append_stats = self._append_aggregate_contribution(
+                single_append_only_contribution,
+                budget_deadline=budget_deadline,
+            )
+            graph_add_phase_timing(
+                phase_timings,
+                "append_aggregate_ms",
+                phase_started,
+            )
+            append_only_inserted_node_count = int_value(
+                append_stats.get("inserted_node_count")
+            )
+            append_only_inserted_edge_count = int_value(
+                append_stats.get("inserted_edge_count")
+            )
+            append_only_aggregate_strategy = "single_source_incremental"
+        elif append_only_source_count > 1:
+            phase_started = graph_phase_timer_start()
+            existing_append_node_ids: set[str] = set()
+            existing_append_edge_ids: set[str] = set()
+            for chunk in self._id_chunks(append_only_node_ids):
+                graph_check_budget(budget_deadline)
+                placeholders = ",".join("?" for _ in chunk)
+                existing_append_node_ids.update(
+                    str(row[0])
+                    for row in self.conn.execute(
+                        f"SELECT id FROM nodes WHERE id IN ({placeholders})",
+                        chunk,
+                    ).fetchall()
+                )
+            for chunk in self._id_chunks(append_only_edge_ids):
+                graph_check_budget(budget_deadline)
+                placeholders = ",".join("?" for _ in chunk)
+                existing_append_edge_ids.update(
+                    str(row[0])
+                    for row in self.conn.execute(
+                        f"SELECT id FROM edges WHERE id IN ({placeholders})",
+                        chunk,
+                    ).fetchall()
+                )
+            append_only_inserted_node_count = len(
+                append_only_node_ids - existing_append_node_ids
+            )
+            append_only_inserted_edge_count = len(
+                append_only_edge_ids - existing_append_edge_ids
+            )
+            touched_node_ids.update(append_only_node_ids)
+            touched_edge_ids.update(append_only_edge_ids)
+            append_only_aggregate_strategy = "batch_set_wise_refresh"
+            graph_add_phase_timing(
+                phase_timings,
+                "append_aggregate_prepare_ms",
+                phase_started,
+            )
         graph_check_budget(budget_deadline)
         if touched_node_ids or touched_edge_ids:
             phase_started = graph_phase_timer_start()
@@ -138098,6 +138179,7 @@ class GraphSqliteStore:
             "append_only_edge_count": append_only_edge_count,
             "append_only_inserted_node_count": append_only_inserted_node_count,
             "append_only_inserted_edge_count": append_only_inserted_edge_count,
+            "append_only_aggregate_strategy": append_only_aggregate_strategy,
             "metadata_only_source_count": metadata_only_source_count,
             "metadata_only_node_count": metadata_only_node_count,
             "metadata_only_edge_count": metadata_only_edge_count,
@@ -143720,6 +143802,9 @@ def graph_maintenance(
                             maintenance_detail["append_only_edge_count"] = replaced.get("append_only_edge_count", 0)
                             maintenance_detail["append_only_inserted_node_count"] = replaced.get("append_only_inserted_node_count", 0)
                             maintenance_detail["append_only_inserted_edge_count"] = replaced.get("append_only_inserted_edge_count", 0)
+                            maintenance_detail["append_only_aggregate_strategy"] = replaced.get(
+                                "append_only_aggregate_strategy", "none"
+                            )
                             maintenance_detail["metadata_only_source_count"] = replaced.get("metadata_only_source_count", 0)
                             maintenance_detail["metadata_only_node_count"] = replaced.get("metadata_only_node_count", 0)
                             maintenance_detail["metadata_only_edge_count"] = replaced.get("metadata_only_edge_count", 0)
@@ -144228,6 +144313,7 @@ def graph_maintenance_markdown(payload: dict[str, Any]) -> str:
                 f"- append_only_edge_count: `{detail.get('append_only_edge_count')}`",
                 f"- append_only_inserted_node_count: `{detail.get('append_only_inserted_node_count')}`",
                 f"- append_only_inserted_edge_count: `{detail.get('append_only_inserted_edge_count')}`",
+                f"- append_only_aggregate_strategy: `{detail.get('append_only_aggregate_strategy')}`",
                 f"- metadata_only_source_count: `{detail.get('metadata_only_source_count')}`",
                 f"- metadata_only_node_count: `{detail.get('metadata_only_node_count')}`",
                 f"- metadata_only_edge_count: `{detail.get('metadata_only_edge_count')}`",

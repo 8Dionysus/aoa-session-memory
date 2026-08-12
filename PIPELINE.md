@@ -870,7 +870,13 @@ representative payload is retained inline by the bulk UPSERT. Final count and
 evidence counters are applied with set-based JSON updates; full rebuild must
 not hydrate every duplicate payload in Python or repeat contribution-table
 aggregation. Incremental maintenance retains its bounded ID-chunk refresh
-because it operates on a small dirty-source frontier.
+because it operates on a small dirty-source frontier. For a multi-source
+append-only graph batch, contribution and source rows are inserted first and
+their unique node and edge frontier is refreshed set-wise once inside the same
+transaction. Exactly one new source retains the direct incremental aggregate
+path. This prevents shared session or route aggregates from being decoded and
+mutated once per segment while preserving cooperative deadline rollback,
+pinned registry checks, and atomic type-count updates.
 Known same-epoch dependency drift instead routes through the complete
 registry-derived materialization proof and atomic rebind. Unknown epochs,
 schema or canonicalization changes, malformed legacy bindings, and rejected

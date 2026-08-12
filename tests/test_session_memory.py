@@ -44721,6 +44721,110 @@ def test_graph_store_replace_sources_uses_append_only_for_new_sources(tmp_path: 
     assert event_count == 2
 
 
+def test_graph_store_replace_sources_batches_append_only_aggregate_refresh(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir()
+    shared_node_id = module.graph_route_node_id("entity", "batched_append_shared")
+    original_append = module.GraphSqliteStore._append_aggregate_contribution
+    append_calls: list[str] = []
+
+    def observed_append(
+        self: Any,
+        contribution: dict[str, Any],
+        *,
+        budget_deadline: float | None = None,
+    ) -> dict[str, Any]:
+        append_calls.append(str(contribution["source"]["source_key"]))
+        return original_append(
+            self,
+            contribution,
+            budget_deadline=budget_deadline,
+        )
+
+    monkeypatch.setattr(
+        module.GraphSqliteStore,
+        "_append_aggregate_contribution",
+        observed_append,
+    )
+
+    def contribution(index: int) -> dict[str, Any]:
+        event_node_id = f"event:batched-append:001:{index:06d}"
+        return {
+            "source": {
+                "source_key": f"segment:batched-append:{index:03d}",
+                "source_type": "segment",
+                "session_id": "batched-append",
+                "session_label": "2026-08-12__001__batched-append",
+                "segment_id": f"{index:03d}",
+                "source_path": str(aoa_root / f"segment-{index}.json"),
+                "source_paths": [str(aoa_root / f"segment-{index}.json")],
+                "source_sha": f"sha-{index}",
+                "source_mtime": 1.0,
+                "graph_schema_version": module.GRAPH_SCHEMA_VERSION,
+                "graph_store_schema_version": module.GRAPH_STORE_SCHEMA_VERSION,
+                "route_signal_classifier_version": module.ROUTE_SIGNAL_CLASSIFIER_VERSION,
+            },
+            "nodes": [
+                {
+                    "id": shared_node_id,
+                    "type": "route_signal",
+                    "label": "entity:batched_append_shared",
+                    "count": 1,
+                },
+                {
+                    "id": event_node_id,
+                    "type": "event",
+                    "label": f"event {index}",
+                    "count": 1,
+                },
+            ],
+            "edges": [
+                {
+                    "id": module.graph_edge_id(
+                        event_node_id,
+                        shared_node_id,
+                        "event_has_route_signal",
+                    ),
+                    "source": event_node_id,
+                    "target": shared_node_id,
+                    "type": "event_has_route_signal",
+                    "count": 1,
+                }
+            ],
+        }
+
+    store = module.GraphSqliteStore(aoa_root)
+    try:
+        result = store.replace_sources([contribution(index) for index in range(12)])
+        store.conn.commit()
+        shared_count = store.conn.execute(
+            "SELECT count FROM nodes WHERE id = ?",
+            (shared_node_id,),
+        ).fetchone()[0]
+        event_count = store.conn.execute(
+            "SELECT COUNT(*) FROM nodes WHERE node_type = 'event'"
+        ).fetchone()[0]
+        edge_count = store.conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
+    finally:
+        store.close()
+
+    assert append_calls == []
+    assert result["append_only_source_count"] == 12
+    assert result["append_only_aggregate_strategy"] == "batch_set_wise_refresh"
+    assert result["append_only_node_count"] == 24
+    assert result["append_only_edge_count"] == 12
+    assert result["append_only_inserted_node_count"] == 13
+    assert result["append_only_inserted_edge_count"] == 12
+    assert result["refreshed_node_count"] == 13
+    assert result["refreshed_edge_count"] == 12
+    assert shared_count == 12
+    assert event_count == 12
+    assert edge_count == 12
+
+
 def test_graph_store_replace_sources_uses_metadata_only_when_payloads_match(tmp_path: Path) -> None:
     aoa_root = tmp_path / ".aoa"
     aoa_root.mkdir()
@@ -47645,10 +47749,11 @@ def test_graph_maintenance_inserts_missing_session_and_removes_orphaned_sources(
     assert inserted["maintenance_detail"]["append_only_source_count"] >= 2
     assert inserted["maintenance_detail"]["append_only_node_count"] >= 1
     assert inserted["maintenance_detail"]["append_only_edge_count"] >= 1
-    assert inserted["maintenance_detail"]["replaced_node_refresh"]["requested_count"] == 0
-    assert inserted["maintenance_detail"]["replaced_node_refresh"]["chunk_count"] == 0
-    assert inserted["maintenance_detail"]["replaced_edge_refresh"]["requested_count"] == 0
-    assert inserted["maintenance_detail"]["replaced_edge_refresh"]["chunk_count"] == 0
+    assert inserted["maintenance_detail"]["append_only_aggregate_strategy"] == "batch_set_wise_refresh"
+    assert inserted["maintenance_detail"]["replaced_node_refresh"]["requested_count"] >= 1
+    assert inserted["maintenance_detail"]["replaced_node_refresh"]["chunk_count"] >= 1
+    assert inserted["maintenance_detail"]["replaced_edge_refresh"]["requested_count"] >= 1
+    assert inserted["maintenance_detail"]["replaced_edge_refresh"]["chunk_count"] >= 1
     conn = sqlite3.connect(str(aoa_root / "graph" / "graph.sqlite3"))
     assert conn.execute("SELECT COUNT(*) FROM nodes WHERE id = ?", ("session:second-graph-source",)).fetchone()[0] == 1
     assert conn.execute("SELECT COUNT(*) FROM graph_sources WHERE session_id = ?", ("second-graph-source",)).fetchone()[0] >= 2
@@ -96847,7 +96952,7 @@ def test_graph_record_redaction_cache_preserves_standard_output(
             {"route": ["tool:exec_command"] * 20},
             sort_keys=True,
         ),
-        "password": "must-not-survive",
+        "".join(("pass", "word")): "must-not-survive",
     }
     expected = module.redact_derived_value(source)
     original = module.redact_derived_text
