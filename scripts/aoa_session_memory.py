@@ -33074,6 +33074,116 @@ def enqueue_index_maintenance_job(
     return job_path
 
 
+def graph_upstream_reindex_session_ids(
+    payload: dict[str, Any],
+    *,
+    limit: int = 4,
+) -> list[str]:
+    """Return bounded session predecessors named by blocked graph results."""
+    session_ids: list[str] = []
+    seen: set[str] = set()
+    for result in (
+        payload.get("results")
+        if isinstance(payload.get("results"), list)
+        else []
+    ):
+        if not isinstance(result, dict) or result.get("status") != "blocked":
+            continue
+        diagnostics = (
+            result.get("diagnostics")
+            if isinstance(result.get("diagnostics"), list)
+            else []
+        )
+        for diagnostic in diagnostics:
+            text = str(diagnostic or "")
+            if (
+                not text.startswith(
+                    "graph_source_generation_incompatible:"
+                )
+                or "session_index_generation_identity_changed" not in text
+            ):
+                continue
+            match = re.match(
+                r"^graph_source_generation_incompatible:([^:]+):",
+                text,
+            )
+            session_id = str(match.group(1) if match else "").strip()
+            if not session_id or session_id in seen:
+                continue
+            seen.add(session_id)
+            session_ids.append(session_id)
+            if len(session_ids) >= max(0, int_value(limit, 4)):
+                return session_ids
+    return session_ids
+
+
+def enqueue_session_generation_reindex_job(
+    aoa_root: Path,
+    *,
+    session_id: str,
+    reason: str,
+    followup_graph_target: str = "all",
+    budget_seconds: float = 300.0,
+    graph_batch_limit: int = GRAPH_MAINTENANCE_AUTO_BATCH_LIMIT,
+    graph_refresh_chunk_size: int = GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE,
+) -> Path | None:
+    """Queue one resumable predecessor refresh before graph retry."""
+    if not hook_sync_queue_enabled():
+        return None
+    target = str(session_id or "").strip()
+    if not target:
+        return None
+    dirs = hook_worker_dirs(aoa_root)
+    for queue_name in ("pending", "running", "deferred"):
+        queue_dir = dirs[queue_name]
+        for existing_path in sorted(queue_dir.glob("*.json")):
+            existing = read_json(existing_path, {})
+            if not isinstance(existing, dict):
+                continue
+            if (
+                existing.get("job_type")
+                == "session_generation_reindex"
+                and str(existing.get("session_id") or "") == target
+            ):
+                return existing_path
+    pending_root = dirs["pending"]
+    pending_root.mkdir(parents=True, exist_ok=True)
+    job_path = pending_root / (
+        f"{hook_job_id('SessionGenerationReindex', target)}.json"
+    )
+    write_json(
+        job_path,
+        {
+            "schema_version": SCHEMA_VERSION,
+            "job_type": "session_generation_reindex",
+            "queued_at": utc_now(),
+            "event_name": "SessionGenerationReindex",
+            "session_id": target,
+            "target": target,
+            "reason": reason,
+            "budget_seconds": max(1.0, float(budget_seconds)),
+            "followup_graph_target": str(
+                followup_graph_target or "all"
+            ),
+            "graph_batch_limit": max(
+                1,
+                int_value(
+                    graph_batch_limit,
+                    GRAPH_MAINTENANCE_AUTO_BATCH_LIMIT,
+                ),
+            ),
+            "graph_refresh_chunk_size": max(
+                1,
+                int_value(
+                    graph_refresh_chunk_size,
+                    GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE,
+                ),
+            ),
+        },
+    )
+    return job_path
+
+
 def enqueue_graph_maintenance_job(
     aoa_root: Path,
     *,
@@ -33160,6 +33270,30 @@ def promote_deferred_hook_jobs(
         if not isinstance(job, dict):
             continue
         job_type = str(job.get("job_type") or "hook_sync_transcript")
+        if job_type == "session_generation_reindex":
+            pending_path = pending_dir / deferred_path.name
+            if pending_path.exists():
+                pending_path = pending_dir / (
+                    f"{compact_stamp()}__promoted__"
+                    f"{deferred_path.name}"
+                )
+            job["promoted_at"] = utc_now()
+            job["promotion_reason"] = (
+                "resume_checkpointed_session_generation_reindex"
+            )
+            job["queue_state"] = "pending_retry"
+            write_json(pending_path, job)
+            deferred_path.unlink(missing_ok=True)
+            promoted.append(
+                {
+                    "from": str(deferred_path),
+                    "to": str(pending_path),
+                    "session_id": str(job.get("session_id") or ""),
+                    "status": "promoted_deferred_job",
+                    "reason": job["promotion_reason"],
+                }
+            )
+            continue
         if job_type == "graph_maintenance":
             circuit = graph_automatic_drip_circuit_state(aoa_root)
             if circuit.get("open"):
@@ -33318,6 +33452,132 @@ def run_hook_worker(*, workspace_root: Path | None, aoa_root: Path, limit: int =
                             "session_id": manifest.get("session_id"),
                             "session_dir": str(session_dir),
                         }
+                    elif job_type == "session_generation_reindex":
+                        reindex_target = str(
+                            job.get("target")
+                            or job.get("session_id")
+                            or ""
+                        )
+                        budget_seconds = max(
+                            1.0,
+                            float(job.get("budget_seconds") or 300.0),
+                        )
+                        reindexed = reindex_sessions(
+                            aoa_root=aoa_root,
+                            target=reindex_target,
+                            max_raw_bytes=None,
+                            write_report=True,
+                            budget_seconds=budget_seconds,
+                            split_publish_lock=True,
+                        )
+                        stale_reasons: list[str] = [
+                            "session_index_currentness_unresolved"
+                        ]
+                        try:
+                            reindex_record = resolve_session_record(
+                                aoa_root,
+                                reindex_target,
+                            )
+                            reindex_index_path = (
+                                session_dir_from_record(reindex_record)
+                                / SESSION_INDEX_JSON
+                            )
+                            probed_reasons = (
+                                generated_session_index_stale_reasons_from_file(
+                                    reindex_index_path
+                                )
+                            )
+                            if probed_reasons is not None:
+                                stale_reasons = list(probed_reasons)
+                        except ValueError as exc:
+                            stale_reasons = [str(exc)]
+                        generation_current = not stale_reasons
+                        followup_graph_job: Path | None = None
+                        if generation_current:
+                            followup_graph_job = (
+                                enqueue_graph_maintenance_job(
+                                    aoa_root,
+                                    reason=(
+                                        "session_generation_reindexed:"
+                                        f"{reindex_target}"
+                                    ),
+                                    target=str(
+                                        job.get("followup_graph_target")
+                                        or "all"
+                                    ),
+                                    batch_limit=max(
+                                        1,
+                                        int_value(
+                                            job.get("graph_batch_limit"),
+                                            GRAPH_MAINTENANCE_AUTO_BATCH_LIMIT,
+                                        ),
+                                    ),
+                                    refresh_chunk_size=max(
+                                        1,
+                                        int_value(
+                                            job.get(
+                                                "graph_refresh_chunk_size"
+                                            ),
+                                            GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE,
+                                        ),
+                                    ),
+                                )
+                            )
+                        checkpointed = bool(
+                            reindexed.get("budget_exhausted")
+                            or any(
+                                str(item.get("status") or "")
+                                == "checkpointed"
+                                for item in (
+                                    reindexed.get("results")
+                                    if isinstance(
+                                        reindexed.get("results"), list
+                                    )
+                                    else []
+                                )
+                                if isinstance(item, dict)
+                            )
+                        )
+                        result = {
+                            "job": str(running_path),
+                            "status": (
+                                "reindexed_session_generation"
+                                if generation_current
+                                else (
+                                    "deferred_session_generation_reindex"
+                                    if checkpointed
+                                    else "failed"
+                                )
+                            ),
+                            "session_id": reindex_target,
+                            "budget_seconds": budget_seconds,
+                            "budget_exhausted": reindexed.get(
+                                "budget_exhausted"
+                            ),
+                            "reindex_status": reindexed.get("status"),
+                            "completed_session_ids": reindexed.get(
+                                "completed_session_ids", []
+                            ),
+                            "session_index_generation_current": (
+                                generation_current
+                            ),
+                            "session_index_stale_reasons": stale_reasons,
+                            "report_json": reindexed.get("report_json"),
+                            "diagnostics": reindexed.get(
+                                "diagnostics", []
+                            ),
+                            "followup_graph_job": str(
+                                followup_graph_job or ""
+                            ),
+                            "retry_required": bool(
+                                not generation_current and checkpointed
+                            ),
+                            "job_disposition": (
+                                "deferred"
+                                if not generation_current and checkpointed
+                                else "done"
+                            ),
+                        }
                     elif job_type == "index_maintenance":
                         max_raw_mb = job.get("max_raw_mb")
                         token_max_raw_mb = job.get("token_max_raw_mb")
@@ -33361,18 +33621,97 @@ def run_hook_worker(*, workspace_root: Path | None, aoa_root: Path, limit: int =
                             aoa_root
                         )
                         if circuit.get("open"):
-                            result = {
-                                "job": str(running_path),
-                                "status": (
-                                    "deferred_graph_drip_circuit_open"
-                                ),
-                                "target": str(job.get("target") or "all"),
-                                "reason": circuit.get("reason"),
-                                "retry_required": True,
-                                "job_disposition": "deferred",
-                                "graph_drip_circuit": circuit,
-                                "next_route": circuit.get("next_route"),
-                            }
+                            circuit_session_ids = [
+                                str(item)
+                                for item in (
+                                    circuit.get(
+                                        "recoverable_upstream_session_ids"
+                                    )
+                                    if isinstance(
+                                        circuit.get(
+                                            "recoverable_upstream_session_ids"
+                                        ),
+                                        list,
+                                    )
+                                    else []
+                                )
+                                if str(item)
+                            ]
+                            circuit_reindex_jobs = [
+                                queued_path
+                                for blocked_session_id in circuit_session_ids
+                                for queued_path in [
+                                    enqueue_session_generation_reindex_job(
+                                        aoa_root,
+                                        session_id=blocked_session_id,
+                                        reason=(
+                                            "graph_no_progress_predecessor:"
+                                            f"{blocked_session_id}"
+                                        ),
+                                        followup_graph_target=str(
+                                            job.get("target") or "all"
+                                        ),
+                                        budget_seconds=300.0,
+                                        graph_batch_limit=int_value(
+                                            job.get("batch_limit"),
+                                            GRAPH_MAINTENANCE_AUTO_BATCH_LIMIT,
+                                        ),
+                                        graph_refresh_chunk_size=int_value(
+                                            job.get("refresh_chunk_size"),
+                                            GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE,
+                                        ),
+                                    )
+                                ]
+                                if queued_path is not None
+                            ]
+                            circuit_handoff_queued = bool(
+                                circuit_session_ids
+                                and len(circuit_reindex_jobs)
+                                == len(circuit_session_ids)
+                            )
+                            result = (
+                                {
+                                    "job": str(running_path),
+                                    "status": (
+                                        "blocked_upstream_reindex_queued"
+                                    ),
+                                    "target": str(
+                                        job.get("target") or "all"
+                                    ),
+                                    "reason": circuit.get("reason"),
+                                    "retry_required": True,
+                                    "job_disposition": "done",
+                                    "graph_drip_circuit": circuit,
+                                    "next_route": circuit.get(
+                                        "next_route"
+                                    ),
+                                    "upstream_reindex_session_ids": (
+                                        circuit_session_ids
+                                    ),
+                                    "upstream_reindex_jobs": [
+                                        str(path)
+                                        for path in circuit_reindex_jobs
+                                    ],
+                                    "predecessor_handoff_queued": True,
+                                }
+                                if circuit_handoff_queued
+                                else {
+                                    "job": str(running_path),
+                                    "status": (
+                                        "deferred_graph_drip_circuit_open"
+                                    ),
+                                    "target": str(
+                                        job.get("target") or "all"
+                                    ),
+                                    "reason": circuit.get("reason"),
+                                    "retry_required": True,
+                                    "job_disposition": "deferred",
+                                    "graph_drip_circuit": circuit,
+                                    "next_route": circuit.get(
+                                        "next_route"
+                                    ),
+                                }
+                            )
                         else:
                             budget_seconds_value = job.get("budget_seconds")
                             graph_batch_limit = int_value(
@@ -33414,9 +33753,55 @@ def run_hook_worker(*, workspace_root: Path | None, aoa_root: Path, limit: int =
                                 write_report=True,
                                 reason=str(job.get("reason") or "queued_graph_maintenance"),
                             )
+                            upstream_reindex_session_ids = (
+                                graph_upstream_reindex_session_ids(
+                                    maintained
+                                )
+                            )
+                            upstream_reindex_jobs = [
+                                queued_path
+                                for blocked_session_id in (
+                                    upstream_reindex_session_ids
+                                )
+                                for queued_path in [
+                                    enqueue_session_generation_reindex_job(
+                                        aoa_root,
+                                        session_id=blocked_session_id,
+                                        reason=(
+                                            "graph_generation_predecessor:"
+                                            f"{blocked_session_id}"
+                                        ),
+                                        followup_graph_target=graph_target,
+                                        budget_seconds=300.0,
+                                        graph_batch_limit=graph_batch_limit,
+                                        graph_refresh_chunk_size=(
+                                            int_value(
+                                                job.get(
+                                                    "refresh_chunk_size"
+                                                ),
+                                                GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE,
+                                            )
+                                        ),
+                                    )
+                                ]
+                                if queued_path is not None
+                            ]
+                            predecessor_handoff_queued = bool(
+                                upstream_reindex_session_ids
+                                and len(upstream_reindex_jobs)
+                                == len(upstream_reindex_session_ids)
+                            )
                             result = {
                                 "job": str(running_path),
-                                "status": "maintained_graph" if maintained.get("ok") else "failed",
+                                "status": (
+                                    "maintained_graph"
+                                    if maintained.get("ok")
+                                    else (
+                                        "blocked_upstream_reindex_queued"
+                                        if predecessor_handoff_queued
+                                        else "failed"
+                                    )
+                                ),
                                 "target": maintained.get("target"),
                                 "reason": maintained.get("reason"),
                                 "source_state": maintained.get("source_state"),
@@ -33430,6 +33815,16 @@ def run_hook_worker(*, workspace_root: Path | None, aoa_root: Path, limit: int =
                                 "maintenance_detail": maintained.get("maintenance_detail"),
                                 "report_json": maintained.get("report_json"),
                                 "diagnostics": maintained.get("diagnostics", []),
+                                "upstream_reindex_session_ids": (
+                                    upstream_reindex_session_ids
+                                ),
+                                "upstream_reindex_jobs": [
+                                    str(path)
+                                    for path in upstream_reindex_jobs
+                                ],
+                                "predecessor_handoff_queued": (
+                                    predecessor_handoff_queued
+                                ),
                             }
                     else:
                         transcript_value = job.get("transcript_path")
@@ -175664,12 +176059,24 @@ def graph_automatic_drip_circuit_state(
         and not selected_source_change.get("advanced")
     )
     if explicit_no_progress and report_still_applies:
+        recoverable_upstream_session_ids = (
+            graph_upstream_reindex_session_ids(
+                latest_queue_report
+            )
+        )
         return {
             "open": True,
             "reason": "latest_graph_queue_drip_no_semantic_progress",
             "next_route": (
-                "wait_for_selected_upstream_source_or_graph_store_"
-                "state_change"
+                "session_generation_reindex_handoff"
+                if recoverable_upstream_session_ids
+                else (
+                    "wait_for_selected_upstream_source_or_graph_store_"
+                    "state_change"
+                )
+            ),
+            "recoverable_upstream_session_ids": (
+                recoverable_upstream_session_ids
             ),
             "evidence": {
                 "path": latest_queue_report.get(

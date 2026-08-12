@@ -57976,6 +57976,180 @@ def test_hook_worker_automatic_maintenance_jobs_observe_query_demand(
     assert calls["graph"]["priority_session_ids"] is None
 
 
+def test_hook_worker_graph_block_queues_bounded_upstream_reindex(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    dirs = module.hook_worker_dirs(aoa_root)
+    for path in dirs.values():
+        path.mkdir(parents=True, exist_ok=True)
+    write_json(
+        dirs["pending"] / "001-graph.json",
+        {
+            "job_type": "graph_maintenance",
+            "target": "all",
+            "reason": "automatic_graph_predecessor_test",
+        },
+    )
+    blocked_session_id = "blocked-session-generation"
+    blocked_diagnostic = (
+        "graph_source_generation_incompatible:"
+        f"{blocked_session_id}:"
+        "session_index_generation_identity_changed:"
+        "recovery=aoa-session-memory reindex-sessions "
+        f"{blocked_session_id}"
+    )
+
+    monkeypatch.setattr(
+        module,
+        "graph_automatic_drip_circuit_state",
+        lambda _aoa_root: {"open": False},
+    )
+    monkeypatch.setattr(
+        module,
+        "graph_maintenance",
+        lambda **kwargs: {
+            "ok": False,
+            "target": kwargs.get("target"),
+            "reason": kwargs.get("reason"),
+            "source_state": {},
+            "selected_count": 0,
+            "remaining_count": 1,
+            "budget_exhausted": False,
+            "refresh_chunk_size": kwargs.get("refresh_chunk_size"),
+            "query_demand_count": 0,
+            "query_demand_priority_session_ids": [],
+            "maintenance_detail": {},
+            "results": [
+                {
+                    "source_key": f"session:{blocked_session_id}",
+                    "status": "blocked",
+                    "diagnostics": [blocked_diagnostic],
+                }
+            ],
+            "diagnostics": [],
+        },
+    )
+
+    payload = module.run_hook_worker(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        limit=1,
+    )
+
+    assert payload["ok"] is True
+    assert payload["results"][0]["status"] == (
+        "blocked_upstream_reindex_queued"
+    )
+    assert payload["results"][0]["upstream_reindex_session_ids"] == [
+        blocked_session_id
+    ]
+    pending_jobs = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in dirs["pending"].glob("*.json")
+    ]
+    assert len(pending_jobs) == 1
+    assert pending_jobs[0]["job_type"] == (
+        "session_generation_reindex"
+    )
+    assert pending_jobs[0]["session_id"] == blocked_session_id
+    assert pending_jobs[0]["followup_graph_target"] == "all"
+
+
+def test_hook_worker_reindex_predecessor_resumes_then_queues_graph_followup(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    session_id = "checkpointed-predecessor"
+    session_dir = aoa_root / "sessions" / session_id
+    session_dir.mkdir(parents=True)
+    (session_dir / module.SESSION_INDEX_JSON).write_text(
+        "{}\n", encoding="utf-8"
+    )
+    queued = module.enqueue_session_generation_reindex_job(
+        aoa_root,
+        session_id=session_id,
+        reason="test_graph_predecessor",
+    )
+    assert queued is not None
+    attempts = {"count": 0}
+
+    def fake_reindex_sessions(**_kwargs: Any) -> dict[str, Any]:
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            return {
+                "status": "checkpointed",
+                "budget_exhausted": True,
+                "completed_session_ids": [],
+                "results": [{"status": "checkpointed"}],
+                "diagnostics": [],
+            }
+        return {
+            "status": "completed",
+            "budget_exhausted": False,
+            "completed_session_ids": [session_id],
+            "results": [{"status": "reindexed"}],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr(module, "reindex_sessions", fake_reindex_sessions)
+    monkeypatch.setattr(
+        module,
+        "resolve_session_record",
+        lambda *_args, **_kwargs: {
+            "session_id": session_id,
+            "path": str(session_dir),
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "generated_session_index_stale_reasons_from_file",
+        lambda _path: (
+            ["session_index_generation_identity_changed"]
+            if attempts["count"] == 1
+            else []
+        ),
+    )
+
+    first = module.run_hook_worker(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        limit=1,
+    )
+    dirs = module.hook_worker_dirs(aoa_root)
+    assert first["ok"] is True
+    assert first["results"][0]["status"] == (
+        "deferred_session_generation_reindex"
+    )
+    assert len(list(dirs["deferred"].glob("*.json"))) == 1
+
+    second = module.run_hook_worker(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        limit=1,
+    )
+
+    assert second["ok"] is True
+    assert second["promoted_deferred"][0]["reason"] == (
+        "resume_checkpointed_session_generation_reindex"
+    )
+    assert second["results"][0]["status"] == (
+        "reindexed_session_generation"
+    )
+    assert second["results"][0][
+        "session_index_generation_current"
+    ] is True
+    pending_jobs = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in dirs["pending"].glob("*.json")
+    ]
+    assert len(pending_jobs) == 1
+    assert pending_jobs[0]["job_type"] == "graph_maintenance"
+    assert pending_jobs[0]["target"] == "all"
+
+
 def test_hook_worker_defers_graph_job_until_drip_circuit_closes(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
@@ -58067,6 +58241,65 @@ def test_hook_worker_defers_graph_job_until_drip_circuit_closes(
     assert maintenance_calls[0]["use_queue"] is True
     assert maintenance_calls[0]["seed_queue_from_ledger"] is True
     assert maintenance_calls[0]["candidate_pool_limit"] == 30
+    assert not list(dirs["deferred"].glob("*.json"))
+
+
+def test_hook_worker_no_progress_circuit_queues_named_predecessor(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    dirs = module.hook_worker_dirs(aoa_root)
+    for path in dirs.values():
+        path.mkdir(parents=True, exist_ok=True)
+    write_json(
+        dirs["pending"] / "001-graph.json",
+        {
+            "job_type": "graph_maintenance",
+            "target": "all",
+            "reason": "automatic_graph_circuit_predecessor_test",
+        },
+    )
+    blocked_session_id = "circuit-blocked-session"
+    maintenance_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        module,
+        "graph_automatic_drip_circuit_state",
+        lambda _aoa_root: {
+            "open": True,
+            "reason": "latest_graph_queue_drip_no_semantic_progress",
+            "next_route": "session_generation_reindex_handoff",
+            "recoverable_upstream_session_ids": [blocked_session_id],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "graph_maintenance",
+        lambda **kwargs: maintenance_calls.append(kwargs),
+    )
+
+    payload = module.run_hook_worker(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        limit=1,
+    )
+
+    assert payload["ok"] is True
+    assert payload["results"][0]["status"] == (
+        "blocked_upstream_reindex_queued"
+    )
+    assert payload["results"][0]["upstream_reindex_session_ids"] == [
+        blocked_session_id
+    ]
+    assert maintenance_calls == []
+    pending_jobs = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in dirs["pending"].glob("*.json")
+    ]
+    assert len(pending_jobs) == 1
+    assert pending_jobs[0]["job_type"] == (
+        "session_generation_reindex"
+    )
     assert not list(dirs["deferred"].glob("*.json"))
 
 

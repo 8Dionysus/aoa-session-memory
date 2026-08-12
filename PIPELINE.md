@@ -834,6 +834,19 @@ prevents a larger planning window from repeatedly parsing sources that the
 current transaction cannot commit. Dry exact-cost planning retains its
 declared candidate window and does not claim this mutation posture.
 
+When that consumer explicitly blocks a source because its session-index
+generation changed, the hook worker persists the named predecessor as a
+deduplicated one-session reindex job instead of retrying the graph source in a
+loop. The predecessor uses the split publish lock and retains a checkpointed
+job in the deferred queue. Only a direct current-generation probe may enqueue
+the successor graph job; attempted, selected, checkpointed, or failed reindex
+work never admits graph continuation. The handoff count is bounded per graph
+job, so later graph passes discover any remaining predecessors without
+flooding the worker queue. If the same blocked result already opened the
+no-progress circuit, the circuit preserves that report as recovery evidence
+and queues its named predecessor instead of reopening an identical graph
+attempt.
+
 Conversely, a child may commit bounded mutations and then return deferred or
 budget-exhausted. Explicit allowlisted mutation counters in the action result
 admit only that bounded progress; generic processed, current, attempted,

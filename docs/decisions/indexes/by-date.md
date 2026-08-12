@@ -4,6 +4,7 @@
 
 | Date | Decision | Status | Path |
 | --- | --- | --- | --- |
+| 2026-08-12 | [AOA-SM-D-0069 Graph Predecessor Reindex Handoff](../AOA-SM-D-0069-graph-predecessor-reindex-handoff.md) | Accepted | `docs/decisions/AOA-SM-D-0069-graph-predecessor-reindex-handoff.md` |
 | 2026-08-12 | [AOA-SM-D-0068 Session-Coherent Graph Queue Windows](../AOA-SM-D-0068-session-coherent-graph-queue-windows.md) | Accepted | `docs/decisions/AOA-SM-D-0068-session-coherent-graph-queue-windows.md` |
 | 2026-08-12 | [AOA-SM-D-0067 Guarded Graph Generation Rebind](../AOA-SM-D-0067-guarded-graph-generation-rebind.md) | Accepted | `docs/decisions/AOA-SM-D-0067-guarded-graph-generation-rebind.md` |
 | 2026-08-12 | [AOA-SM-D-0066 Set-Wise Append-Only Graph Batches](../AOA-SM-D-0066-set-wise-append-only-graph-batches.md) | Accepted | `docs/decisions/AOA-SM-D-0066-set-wise-append-only-graph-batches.md` |

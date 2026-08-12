@@ -184,6 +184,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0010 Natural-Language Intent Before Literal Length](../AOA-SM-D-0010-natural-language-intent-before-literal-length.md) | 2026-07-16 | Accepted | `docs/decisions/AOA-SM-D-0010-natural-language-intent-before-literal-length.md` |
 
+## bounded handoff
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0069 Graph Predecessor Reindex Handoff](../AOA-SM-D-0069-graph-predecessor-reindex-handoff.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0069-graph-predecessor-reindex-handoff.md` |
+
 ## bounded history
 
 | Decision | Date | Status | Path |
@@ -273,6 +279,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0057 Append-Only Capture Ledger Stable Raw Publication](../AOA-SM-D-0057-append-only-capture-ledger-stable-raw-publication.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0057-append-only-capture-ledger-stable-raw-publication.md` |
+
+## checkpoint resume
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0069 Graph Predecessor Reindex Handoff](../AOA-SM-D-0069-graph-predecessor-reindex-handoff.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0069-graph-predecessor-reindex-handoff.md` |
 
 ## circuit breaker
 
@@ -629,6 +641,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0036 Explicit Context Additions Continue Open Task Episodes](../AOA-SM-D-0036-explicit-context-additions-continue-open-task-episodes.md) | 2026-07-28 | Accepted | `docs/decisions/AOA-SM-D-0036-explicit-context-additions-continue-open-task-episodes.md` |
 
+## fail closed
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0069 Graph Predecessor Reindex Handoff](../AOA-SM-D-0069-graph-predecessor-reindex-handoff.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0069-graph-predecessor-reindex-handoff.md` |
+
 ## fail-closed admission
 
 | Decision | Date | Status | Path |
@@ -980,6 +998,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0048 Stage-Scoped Producer ABI and Guarded Predecessor Admission](../AOA-SM-D-0048-stage-scoped-producer-abi-and-guarded-predecessor-admission.md) | 2026-08-10 | Accepted | `docs/decisions/AOA-SM-D-0048-stage-scoped-producer-abi-and-guarded-predecessor-admission.md` |
+
+## predecessor compatibility
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0069 Graph Predecessor Reindex Handoff](../AOA-SM-D-0069-graph-predecessor-reindex-handoff.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0069-graph-predecessor-reindex-handoff.md` |
 
 ## prefix attestation
 

@@ -338,6 +338,7 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0006 Bounded Query-Demand Projection Catch-Up](../AOA-SM-D-0006-bounded-query-demand-projection-catch-up.md) | 2026-07-16 | Accepted | `docs/decisions/AOA-SM-D-0006-bounded-query-demand-projection-catch-up.md` |
 | [AOA-SM-D-0012 Bounded Background Graph Queue Reserve](../AOA-SM-D-0012-bounded-background-graph-queue-reserve.md) | 2026-07-17 | Accepted | `docs/decisions/AOA-SM-D-0012-bounded-background-graph-queue-reserve.md` |
+| [AOA-SM-D-0069 Graph Predecessor Reindex Handoff](../AOA-SM-D-0069-graph-predecessor-reindex-handoff.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0069-graph-predecessor-reindex-handoff.md` |
 
 ## graph metadata
 
@@ -399,6 +400,7 @@
 | [AOA-SM-D-0066 Set-Wise Append-Only Graph Batches](../AOA-SM-D-0066-set-wise-append-only-graph-batches.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0066-set-wise-append-only-graph-batches.md` |
 | [AOA-SM-D-0067 Guarded Graph Generation Rebind](../AOA-SM-D-0067-guarded-graph-generation-rebind.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0067-guarded-graph-generation-rebind.md` |
 | [AOA-SM-D-0068 Session-Coherent Graph Queue Windows](../AOA-SM-D-0068-session-coherent-graph-queue-windows.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0068-session-coherent-graph-queue-windows.md` |
+| [AOA-SM-D-0069 Graph Predecessor Reindex Handoff](../AOA-SM-D-0069-graph-predecessor-reindex-handoff.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0069-graph-predecessor-reindex-handoff.md` |
 
 ## graph source ledger
 
@@ -837,6 +839,7 @@
 | [AOA-SM-D-0046 Content-Addressed Session-Index Components With Compatibility View](../AOA-SM-D-0046-content-addressed-session-index-components-with-compatibility-view.md) | 2026-08-09 | Accepted | `docs/decisions/AOA-SM-D-0046-content-addressed-session-index-components-with-compatibility-view.md` |
 | [AOA-SM-D-0048 Stage-Scoped Producer ABI and Guarded Predecessor Admission](../AOA-SM-D-0048-stage-scoped-producer-abi-and-guarded-predecessor-admission.md) | 2026-08-10 | Accepted | `docs/decisions/AOA-SM-D-0048-stage-scoped-producer-abi-and-guarded-predecessor-admission.md` |
 | [AOA-SM-D-0053 Single-Pass Task-Episode Reduction and Shard Redaction](../AOA-SM-D-0053-single-pass-task-episode-reduction-and-shard-redaction.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0053-single-pass-task-episode-reduction-and-shard-redaction.md` |
+| [AOA-SM-D-0069 Graph Predecessor Reindex Handoff](../AOA-SM-D-0069-graph-predecessor-reindex-handoff.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0069-graph-predecessor-reindex-handoff.md` |
 
 ## session lineage
 
