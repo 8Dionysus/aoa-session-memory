@@ -44980,7 +44980,10 @@ def test_graph_maintenance_replaces_dirty_segment_contribution(tmp_path: Path) -
     conn.close()
 
 
-def test_graph_store_replace_sources_uses_append_only_for_new_sources(tmp_path: Path) -> None:
+def test_graph_store_replace_sources_uses_append_only_for_new_sources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     aoa_root = tmp_path / ".aoa"
     aoa_root.mkdir()
     shared_node_id = module.graph_route_node_id("entity", "append_only_shared")
@@ -45031,6 +45034,51 @@ def test_graph_store_replace_sources_uses_append_only_for_new_sources(tmp_path: 
         }
 
     store = module.GraphSqliteStore(aoa_root)
+    original_insert = store._insert_contrib_rows
+    original_append = store._append_aggregate_contribution
+    insert_caches: list[dict[tuple[str, str], str] | None] = []
+    append_caches: list[dict[tuple[str, str], str] | None] = []
+
+    def reject_redundant_expected_rows(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError(
+            "append-only sources must not build unused expected row maps"
+        )
+
+    def observed_insert(
+        item: dict[str, Any],
+        *,
+        redaction_text_cache: dict[tuple[str, str], str] | None = None,
+    ) -> tuple[set[str], set[str]]:
+        insert_caches.append(redaction_text_cache)
+        return original_insert(
+            item,
+            redaction_text_cache=redaction_text_cache,
+        )
+
+    def observed_append(
+        item: dict[str, Any],
+        *,
+        budget_deadline: float | None = None,
+        redaction_text_cache: dict[tuple[str, str], str] | None = None,
+    ) -> dict[str, Any]:
+        append_caches.append(redaction_text_cache)
+        return original_append(
+            item,
+            budget_deadline=budget_deadline,
+            redaction_text_cache=redaction_text_cache,
+        )
+
+    monkeypatch.setattr(
+        store,
+        "_expected_contrib_row_maps",
+        reject_redundant_expected_rows,
+    )
+    monkeypatch.setattr(store, "_insert_contrib_rows", observed_insert)
+    monkeypatch.setattr(
+        store,
+        "_append_aggregate_contribution",
+        observed_append,
+    )
     try:
         first = store.replace_sources([contribution("segment:append-only-session:001", "001")])
         store.refresh_type_counts(commit=False)
@@ -45052,6 +45100,11 @@ def test_graph_store_replace_sources_uses_append_only_for_new_sources(tmp_path: 
     assert second["node_refresh"]["row_count"] == 0
     assert second["edge_refresh"]["row_count"] == 0
     assert second["results"][0]["aggregate_update"] == "append_only"
+    assert len(insert_caches) == len(append_caches) == 2
+    assert insert_caches[0] is append_caches[0]
+    assert insert_caches[1] is append_caches[1]
+    assert insert_caches[0] is not insert_caches[1]
+    assert all(cache for cache in insert_caches)
     assert shared_row is not None
     assert shared_row[0] == 2
     assert event_count == 2
@@ -98786,6 +98839,7 @@ def test_graph_record_redaction_cache_preserves_standard_output(
         sensitive_label: sensitive_value,
     }
     expected = module.redact_derived_value(source)
+    module._derived_text_sensitive_value_key_cached.cache_clear()
     original = module.redact_derived_text
     calls = 0
 
@@ -98805,6 +98859,9 @@ def test_graph_record_redaction_cache_preserves_standard_output(
     assert sensitive_value not in json.dumps(actual)
     assert calls < 10
     assert cache
+    cache_info = module._derived_text_sensitive_value_key_cached.cache_info()
+    assert cache_info.hits >= 50
+    assert cache_info.misses < 10
 
 
 def test_graph_record_builder_restores_gc_state(

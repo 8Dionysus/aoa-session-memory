@@ -36,6 +36,7 @@ from collections import Counter, defaultdict, deque
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
@@ -13380,11 +13381,12 @@ DERIVED_SENSITIVE_KEY_SAFE_SUFFIXES = (
 )
 
 
-def derived_text_sensitive_value_key(key: Any) -> bool:
+@lru_cache(maxsize=1024)
+def _derived_text_sensitive_value_key_cached(key: str) -> bool:
     normalized = re.sub(
         r"[^a-z0-9]+",
         "_",
-        str(key or "").casefold(),
+        key.casefold(),
     ).strip("_")
     if not normalized or normalized.endswith(
         DERIVED_SENSITIVE_KEY_SAFE_SUFFIXES
@@ -13394,6 +13396,12 @@ def derived_text_sensitive_value_key(key: Any) -> bool:
         normalized in DERIVED_SENSITIVE_EXACT_KEYS
         or DERIVED_SENSITIVE_VALUE_KEY_RE.search(normalized)
     )
+
+
+def derived_text_sensitive_value_key(key: Any) -> bool:
+    """Classify a field name while reusing the bounded pure result."""
+
+    return _derived_text_sensitive_value_key_cached(str(key or ""))
 
 
 class DerivedSessionSensitiveLiteralPolicy:
@@ -139195,6 +139203,10 @@ class GraphSqliteStore:
     def _expected_contrib_row_maps(
         self,
         contribution: dict[str, Any],
+        *,
+        redaction_text_cache: (
+            dict[tuple[str, str], str] | None
+        ) = None,
     ) -> tuple[dict[str, tuple[str, str, int]], dict[str, tuple[str, str, str, str, int]]]:
         node_rows: dict[str, tuple[str, str, int]] = {}
         edge_rows: dict[str, tuple[str, str, str, str, int]] = {}
@@ -139204,7 +139216,11 @@ class GraphSqliteStore:
             original = dict(node)
             node_id = str(original.get("id") or "")
             node_type = str(original.get("type") or "unknown")
-            payload = graph_compact_contribution_payload(original, kind="node")
+            payload = graph_compact_contribution_payload(
+                original,
+                kind="node",
+                redaction_text_cache=redaction_text_cache,
+            )
             payload["count"] = int_value(payload.get("count"), 1)
             node_rows[node_id] = (node_type, graph_json(payload), int_value(payload.get("count"), 1))
         for edge in contribution.get("edges", []) if isinstance(contribution.get("edges"), list) else []:
@@ -139217,7 +139233,11 @@ class GraphSqliteStore:
             target_node = str(original.get("target") or "")
             edge_type = str(original.get("type") or "")
             edge_id = str(original.get("id") or graph_edge_id(source_node, target_node, edge_type))
-            payload = graph_compact_contribution_payload(original, kind="edge")
+            payload = graph_compact_contribution_payload(
+                original,
+                kind="edge",
+                redaction_text_cache=redaction_text_cache,
+            )
             payload["count"] = int_value(payload.get("count"), 1)
             edge_rows[edge_id] = (
                 edge_type or "unknown",
@@ -139228,12 +139248,22 @@ class GraphSqliteStore:
             )
         return node_rows, edge_rows
 
-    def source_contribution_payloads_match(self, contribution: dict[str, Any]) -> dict[str, Any]:
+    def source_contribution_payloads_match(
+        self,
+        contribution: dict[str, Any],
+        *,
+        redaction_text_cache: (
+            dict[tuple[str, str], str] | None
+        ) = None,
+    ) -> dict[str, Any]:
         source = contribution.get("source") if isinstance(contribution.get("source"), dict) else {}
         source_key = str(source.get("source_key") or "")
         if not source_key:
             return {"matches": False, "reason": "missing_source_key"}
-        expected_nodes, expected_edges = self._expected_contrib_row_maps(contribution)
+        expected_nodes, expected_edges = self._expected_contrib_row_maps(
+            contribution,
+            redaction_text_cache=redaction_text_cache,
+        )
         current_nodes, current_edges = self._source_contrib_row_maps(source_key)
         node_match = current_nodes == expected_nodes
         edge_match = current_edges == expected_edges
@@ -139372,14 +139402,25 @@ class GraphSqliteStore:
             "elapsed_ms": graph_phase_elapsed_ms(started),
         }
 
-    def _add_aggregate_node(self, node: dict[str, Any]) -> tuple[bool, str]:
+    def _add_aggregate_node(
+        self,
+        node: dict[str, Any],
+        *,
+        redaction_text_cache: (
+            dict[tuple[str, str], str] | None
+        ) = None,
+    ) -> tuple[bool, str]:
         node_id = str(node.get("id") or "")
         if not node_id:
             return False, ""
         payload = dict(node)
         payload["count"] = int_value(payload.get("count"), 1)
         node_type = str(payload.get("type") or "unknown")
-        aggregate_payload = graph_compact_aggregate_payload(payload, kind="node")
+        aggregate_payload = graph_compact_aggregate_payload(
+            payload,
+            kind="node",
+            redaction_text_cache=redaction_text_cache,
+        )
         cursor = self.conn.execute(
             "INSERT OR IGNORE INTO nodes(id, node_type, payload_json, count) VALUES (?, ?, ?, ?)",
             (node_id, node_type, graph_json(aggregate_payload), int_value(payload.get("count"), 1)),
@@ -139389,7 +139430,14 @@ class GraphSqliteStore:
             return False, node_type
         return True, node_type
 
-    def _add_aggregate_edge(self, edge: dict[str, Any]) -> tuple[bool, str]:
+    def _add_aggregate_edge(
+        self,
+        edge: dict[str, Any],
+        *,
+        redaction_text_cache: (
+            dict[tuple[str, str], str] | None
+        ) = None,
+    ) -> tuple[bool, str]:
         edge = graph_relation_contract_payload(edge)
         if not edge.get("navigation_admissible"):
             return False, ""
@@ -139401,7 +139449,11 @@ class GraphSqliteStore:
         payload = dict(edge)
         payload["id"] = str(payload.get("id") or graph_edge_id(source, target, edge_type))
         payload["count"] = int_value(payload.get("count"), 1)
-        aggregate_payload = graph_compact_aggregate_payload(payload, kind="edge")
+        aggregate_payload = graph_compact_aggregate_payload(
+            payload,
+            kind="edge",
+            redaction_text_cache=redaction_text_cache,
+        )
         cursor = self.conn.execute(
             "INSERT OR IGNORE INTO edges(id, edge_type, source_node, target_node, payload_json, count) VALUES (?, ?, ?, ?, ?, ?)",
             (payload["id"], edge_type, source, target, graph_json(aggregate_payload), int_value(payload.get("count"), 1)),
@@ -139537,6 +139589,9 @@ class GraphSqliteStore:
         contribution: dict[str, Any],
         *,
         budget_deadline: float | None = None,
+        redaction_text_cache: (
+            dict[tuple[str, str], str] | None
+        ) = None,
     ) -> dict[str, Any]:
         projection_ready = self.type_counts_projection_ready()
         inserted_node_counts: Counter[str] = Counter()
@@ -139548,7 +139603,10 @@ class GraphSqliteStore:
                 continue
             if node_count and node_count % 1000 == 0:
                 graph_check_budget(budget_deadline)
-            inserted, node_type = self._add_aggregate_node(node)
+            inserted, node_type = self._add_aggregate_node(
+                node,
+                redaction_text_cache=redaction_text_cache,
+            )
             if node.get("id"):
                 node_count += 1
             if projection_ready and inserted and node_type:
@@ -139558,7 +139616,10 @@ class GraphSqliteStore:
                 continue
             if edge_count and edge_count % 1000 == 0:
                 graph_check_budget(budget_deadline)
-            inserted, edge_type = self._add_aggregate_edge(edge)
+            inserted, edge_type = self._add_aggregate_edge(
+                edge,
+                redaction_text_cache=redaction_text_cache,
+            )
             if edge.get("source") and edge.get("target"):
                 edge_count += 1
             if projection_ready and inserted and edge_type:
@@ -140774,6 +140835,7 @@ class GraphSqliteStore:
         append_only_node_ids: set[str] = set()
         append_only_edge_ids: set[str] = set()
         single_append_only_contribution: dict[str, Any] | None = None
+        single_append_only_redaction_text_cache: dict[tuple[str, str], str] | None = None
         append_only_aggregate_strategy = "none"
         metadata_only_source_count = 0
         metadata_only_node_count = 0
@@ -140803,6 +140865,11 @@ class GraphSqliteStore:
         for contribution in contributions:
             source_started = graph_phase_timer_start()
             graph_check_budget(budget_deadline)
+            # One source contribution repeats session, route, ref, and label
+            # strings across many node/edge payloads.  Keep the privacy cache
+            # source-local so reuse is bounded and cannot cross evidence
+            # ownership boundaries.
+            redaction_text_cache: dict[tuple[str, str], str] = {}
             source = contribution.get("source") if isinstance(contribution.get("source"), dict) else {}
             source_key = str(source.get("source_key") or "")
             if not source_key:
@@ -140816,7 +140883,10 @@ class GraphSqliteStore:
             graph_add_phase_timing(phase_timings, "source_id_lookup_ms", phase_started)
             if source.get("status") != "blocked" and (old_node_ids or old_edge_ids):
                 phase_started = graph_phase_timer_start()
-                payload_match = self.source_contribution_payloads_match(contribution)
+                payload_match = self.source_contribution_payloads_match(
+                    contribution,
+                    redaction_text_cache=redaction_text_cache,
+                )
                 graph_add_phase_timing(phase_timings, "payload_match_ms", phase_started)
                 if payload_match.get("matches"):
                     phase_started = graph_phase_timer_start()
@@ -140883,13 +140953,25 @@ class GraphSqliteStore:
                 graph_add_phase_timing(phase_timings, "source_processing_ms", source_started)
                 continue
             phase_started = graph_phase_timer_start()
-            new_node_rows, new_edge_rows = self._expected_contrib_row_maps(contribution)
-            node_ids, edge_ids = self._insert_contrib_rows(contribution)
+            append_only = not old_node_ids and not old_edge_ids
+            if append_only:
+                new_node_rows = {}
+                new_edge_rows = {}
+            else:
+                new_node_rows, new_edge_rows = (
+                    self._expected_contrib_row_maps(
+                        contribution,
+                        redaction_text_cache=redaction_text_cache,
+                    )
+                )
+            node_ids, edge_ids = self._insert_contrib_rows(
+                contribution,
+                redaction_text_cache=redaction_text_cache,
+            )
             graph_add_phase_timing(phase_timings, "insert_contrib_rows_ms", phase_started)
             phase_started = graph_phase_timer_start()
             self._insert_source_row(contribution, status="current")
             graph_add_phase_timing(phase_timings, "source_row_upsert_ms", phase_started)
-            append_only = not old_node_ids and not old_edge_ids
             if append_only:
                 append_only_source_count += 1
                 append_only_node_count += sum(
@@ -140918,8 +141000,10 @@ class GraphSqliteStore:
                 append_only_edge_ids.update(edge_ids)
                 if append_only_source_count == 1:
                     single_append_only_contribution = contribution
+                    single_append_only_redaction_text_cache = redaction_text_cache
                 else:
                     single_append_only_contribution = None
+                    single_append_only_redaction_text_cache = None
                 results.append(
                     {
                         "source_key": source_key,
@@ -140954,6 +141038,7 @@ class GraphSqliteStore:
             append_stats = self._append_aggregate_contribution(
                 single_append_only_contribution,
                 budget_deadline=budget_deadline,
+                redaction_text_cache=single_append_only_redaction_text_cache,
             )
             graph_add_phase_timing(
                 phase_timings,
