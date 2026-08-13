@@ -1011,6 +1011,16 @@ exact raw authority is still checked and rechecked before removal, while the
 complete read-only debris classification remains an explicit dry-run audit
 (AOA-SM-D-0085).
 
+For current-session retrieval, the atomic projection publish identity owns the
+stable archive byte, line, and digest watermark. An older source snapshot may
+describe the work seed and the capture materialization may already contain a
+newer append-only tail; neither replaces the publish watermark. The persistent
+live-tail overlay bridges from that exact published prefix only after its
+source identity, ledger chain, captured size, last block, and stored prefix
+attestation all verify. Later growth of the same owner inode does not invalidate
+the immutable captured prefix: the uncaptured suffix is exposed as unscanned
+and keeps the result non-exhaustive until the next capture (AOA-SM-D-0086).
+
 Graph incremental mutation checks its pinned registry dependency before
 mutation and before commit. A dependency race rolls back the transaction.
 Full rebuild publishes a temporary store only after the same recheck, so a

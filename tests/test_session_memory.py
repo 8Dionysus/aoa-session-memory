@@ -74997,6 +74997,101 @@ def test_live_tail_snapshot_uses_persistent_ledger_without_prefix_rescan(
     assert exact["scan"]["posting_full_scan_performed"] is False
 
 
+def test_live_tail_snapshot_uses_publish_watermark_when_capture_metadata_lags(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    session_dir = aoa_root / "sessions" / "2026-08-10__002__resumed"
+    raw_dir = session_dir / "raw"
+    raw_dir.mkdir(parents=True)
+    session_id = "resumed-publish-overlay-session"
+    old_prefix = b'{"row":"old"}\n'
+    published_tail = b'{"row":"published"}\n'
+    live_tail = b'{"row":"live publish watermark anchor"}\n'
+    published = old_prefix + published_tail
+    transcript = tmp_path / "resumed-publish-overlay-session.jsonl"
+    transcript.write_bytes(published + live_tail)
+    archive_path = raw_dir / "session.raw.jsonl"
+    archive_path.write_bytes(published)
+    manifest = {
+        "schema_version": 1,
+        "session_id": session_id,
+        "session_label": session_dir.name,
+        "session_title": "Resumed publish overlay",
+        "updated_at": "2026-08-10T00:03:00Z",
+        "archive_status": "indexed",
+        "source": {"transcript_path": str(transcript)},
+        "raw": {
+            "path": str(archive_path),
+            "source_path": str(transcript),
+            "bytes": len(published),
+            "line_count": 2,
+            "sha256": hashlib.sha256(published).hexdigest(),
+            "indexing_status": "indexed",
+            "source_snapshot": {
+                "path": str(transcript),
+                "size": len(published),
+                "mtime_ns": transcript.stat().st_mtime_ns,
+            },
+        },
+        "index_schema": {
+            "projection_publish": {
+                "source": {
+                    "raw_bytes": len(published),
+                    "raw_line_count": 2,
+                    "raw_sha256": hashlib.sha256(published).hexdigest(),
+                }
+            }
+        },
+        "segments": [],
+    }
+    module.write_json(session_dir / "session.manifest.json", manifest)
+    module.update_registry(aoa_root, manifest, session_dir)
+    captured = module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id=session_id,
+        transcript_path=transcript,
+        manifest=manifest,
+        hook_event_name="PostToolUse",
+        now="2026-08-10T00:03:00Z",
+    )
+    overlay = captured["persistent_live_tail"]
+    with transcript.open("ab") as handle:
+        handle.write(b'{"row":"newer owner-only tail"}\n')
+
+    # Model a resumed projection whose original source snapshot lags its
+    # atomic publish watermark while raw.path now names the growing capture.
+    manifest["raw"]["source_snapshot"]["size"] = len(old_prefix)
+    manifest["raw"]["bytes"] = len(published + live_tail)
+    manifest["raw"]["sha256"] = hashlib.sha256(
+        published + live_tail
+    ).hexdigest()
+    manifest["raw"]["path"] = overlay["materialization_path"]
+    module.write_json(session_dir / "session.manifest.json", manifest)
+
+    snapshot = module.session_live_tail_source_snapshot(
+        aoa_root=aoa_root,
+        session=session_id,
+    )
+
+    assert snapshot["ok"] is True
+    assert snapshot["status"] == "truncated"
+    assert snapshot["archive_watermark_source"] == (
+        "projection_publish_identity"
+    )
+    assert snapshot["archived_bytes"] == len(published)
+    assert snapshot["scan_start_offset"] == len(published)
+    assert snapshot["owner_tail_bytes"] > 0
+    assert snapshot["unscanned_bytes"] == snapshot["owner_tail_bytes"]
+    assert (
+        "live_tail_owner_source_advanced_beyond_capture"
+        in snapshot["diagnostics"]
+    )
+    assert snapshot["prefix_validation"]["expected_sha256"] == (
+        hashlib.sha256(published).hexdigest()
+    )
+
+
 def test_generation_identity_uses_loaded_projection_producer_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

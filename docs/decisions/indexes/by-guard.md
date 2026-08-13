@@ -113,6 +113,12 @@
 | [AOA-SM-D-0050 Manifest-First Session Components and Lazy Review Rendering](../AOA-SM-D-0050-manifest-first-session-components-and-lazy-review-rendering.md) | 2026-08-10 | Accepted | `docs/decisions/AOA-SM-D-0050-manifest-first-session-components-and-lazy-review-rendering.md` |
 | [AOA-SM-D-0051 Transactional Component Outbox and Vector Freshness](../AOA-SM-D-0051-transactional-component-outbox-and-vector-freshness.md) | 2026-08-10 | Accepted | `docs/decisions/AOA-SM-D-0051-transactional-component-outbox-and-vector-freshness.md` |
 
+## atomic publish identity
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0086 Live Tail Publish Watermark Authority](../AOA-SM-D-0086-live-tail-publish-watermark-authority.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0086-live-tail-publish-watermark-authority.md` |
+
 ## atomic rebind
 
 | Decision | Date | Status | Path |
@@ -124,6 +130,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0037 Evidence-Backed Representation Vectors for Dense Episode Retrieval](../AOA-SM-D-0037-evidence-backed-representation-vectors-for-dense-episode-retrieval.md) | 2026-07-29 | Accepted | `docs/decisions/AOA-SM-D-0037-evidence-backed-representation-vectors-for-dense-episode-retrieval.md` |
+
+## attested prefix
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0086 Live Tail Publish Watermark Authority](../AOA-SM-D-0086-live-tail-publish-watermark-authority.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0086-live-tail-publish-watermark-authority.md` |
 
 ## authored/generated authority
 
@@ -155,6 +167,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0011 Evidence-Grain Date Bounds](../AOA-SM-D-0011-evidence-grain-date-bounds.md) | 2026-07-17 | Accepted | `docs/decisions/AOA-SM-D-0011-evidence-grain-date-bounds.md` |
+
+## bounded append read
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0086 Live Tail Publish Watermark Authority](../AOA-SM-D-0086-live-tail-publish-watermark-authority.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0086-live-tail-publish-watermark-authority.md` |
 
 ## bounded batch
 

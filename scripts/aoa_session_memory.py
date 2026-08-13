@@ -108015,7 +108015,7 @@ def persistent_live_tail_source_snapshot(
     if not (
         source_stat.st_dev == int_value(overlay.get("source_device"), -1)
         and source_stat.st_ino == int_value(overlay.get("source_inode"), -1)
-        and source_stat.st_size == captured_bytes
+        and source_stat.st_size >= captured_bytes
         and materialized_stat.st_size == captured_bytes
         and int_value(epoch.get("captured_bytes"), -1) == captured_bytes
         and str(epoch.get("chain_sha256") or "")
@@ -108059,7 +108059,11 @@ def persistent_live_tail_source_snapshot(
             return None
     delta_bytes = captured_bytes - archived_bytes
     scan_end = min(captured_bytes, archived_bytes + max_delta_bytes)
-    byte_truncated = scan_end < captured_bytes
+    owner_tail_bytes = max(0, source_stat.st_size - captured_bytes)
+    byte_truncated = bool(
+        scan_end < captured_bytes
+        or owner_tail_bytes > 0
+    )
     snapshot_id = hashlib.sha256(
         (
             f"{overlay.get('epoch_id')}:{overlay.get('ledger_chain_sha256')}:"
@@ -108075,6 +108079,8 @@ def persistent_live_tail_source_snapshot(
         ),
         "live_source_path": str(materialization_path),
         "source_size": captured_bytes,
+        "owner_source_size": source_stat.st_size,
+        "owner_tail_bytes": owner_tail_bytes,
         "source_mtime_ns": materialized_stat.st_mtime_ns,
         "source_device": materialized_stat.st_dev,
         "source_inode": materialized_stat.st_ino,
@@ -108086,7 +108092,10 @@ def persistent_live_tail_source_snapshot(
         "scan_end_offset": scan_end,
         "delta_bytes": delta_bytes,
         "scan_bytes": scan_end - archived_bytes,
-        "unscanned_bytes": max(0, captured_bytes - scan_end),
+        "unscanned_bytes": (
+            max(0, captured_bytes - scan_end)
+            + owner_tail_bytes
+        ),
         "line_start": archived_lines + 1,
         "byte_truncated": byte_truncated,
         "persistent_overlay": True,
@@ -108120,10 +108129,21 @@ def persistent_live_tail_source_snapshot(
             "archive_projection": "stale-readable",
             "segment_ref_available": False,
         },
-        "diagnostics": (
-            ["live_tail_byte_budget_truncated"]
-            if byte_truncated
-            else []
+        "diagnostics": unique_preserving_order(
+            [
+                *(
+                    ["live_tail_byte_budget_truncated"]
+                    if scan_end < captured_bytes
+                    else []
+                ),
+                *(
+                    [
+                        "live_tail_owner_source_advanced_beyond_capture"
+                    ]
+                    if owner_tail_bytes > 0
+                    else []
+                ),
+            ]
         ),
         "elapsed_ms": int((time.monotonic() - started) * 1000),
     }
@@ -108169,6 +108189,21 @@ def session_live_tail_source_snapshot(
     raw = manifest.get("raw") if isinstance(manifest.get("raw"), dict) else {}
     source = manifest.get("source") if isinstance(manifest.get("source"), dict) else {}
     source_snapshot = raw.get("source_snapshot") if isinstance(raw.get("source_snapshot"), dict) else {}
+    index_schema = (
+        manifest.get("index_schema")
+        if isinstance(manifest.get("index_schema"), dict)
+        else {}
+    )
+    projection_publish = (
+        index_schema.get("projection_publish")
+        if isinstance(index_schema.get("projection_publish"), dict)
+        else {}
+    )
+    publish_source = (
+        projection_publish.get("source")
+        if isinstance(projection_publish.get("source"), dict)
+        else {}
+    )
     archive_path_text = str(raw.get("path") or "")
     source_path_text = str(
         source_snapshot.get("path")
@@ -108176,9 +108211,31 @@ def session_live_tail_source_snapshot(
         or source.get("transcript_path")
         or ""
     )
-    archived_bytes = int_value(source_snapshot.get("size"), int_value(raw.get("bytes"), -1))
-    archived_lines = int_value(raw.get("line_count"), int_value(manifest.get("latest_event_count"), 0))
-    expected_prefix_sha256 = str(raw.get("sha256") or "")
+    # The stable projection watermark is owned by the atomic publish
+    # identity. raw.source_snapshot describes the capture that originally
+    # seeded work and may legitimately lag a later resumed publication;
+    # raw.path may meanwhile point at the still-growing append-only capture
+    # materialization. Using either as the primary watermark can make a valid
+    # persistent overlay impossible to admit.
+    archived_bytes = int_value(
+        publish_source.get("raw_bytes"),
+        int_value(
+            raw.get("bytes"),
+            int_value(source_snapshot.get("size"), -1),
+        ),
+    )
+    archived_lines = int_value(
+        publish_source.get("raw_line_count"),
+        int_value(
+            raw.get("line_count"),
+            int_value(manifest.get("latest_event_count"), 0),
+        ),
+    )
+    expected_prefix_sha256 = str(
+        publish_source.get("raw_sha256")
+        or raw.get("sha256")
+        or ""
+    )
     archive_path = Path(archive_path_text).expanduser() if archive_path_text else Path()
     source_path = Path(source_path_text).expanduser() if source_path_text else Path()
     base = {
@@ -108196,6 +108253,11 @@ def session_live_tail_source_snapshot(
         "live_source_path": source_path_text,
         "archived_bytes": archived_bytes,
         "archived_line_count": archived_lines,
+        "archive_watermark_source": (
+            "projection_publish_identity"
+            if publish_source.get("raw_bytes")
+            else "raw_manifest_fallback"
+        ),
         "max_delta_bytes": effective_max_bytes,
         "max_lines": effective_max_lines,
         "scan_budget_ms": LIVE_TAIL_SEARCH_SCAN_BUDGET_MS,
