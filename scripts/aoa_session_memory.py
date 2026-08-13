@@ -60732,6 +60732,36 @@ def auto_maintenance_resource_status_progressed(
     return bool(fallback.get("made_progress")) and bool(fallback.get("remaining_work"))
 
 
+def auto_maintenance_resource_verified_fallback_completion(
+    status: str,
+    payload: dict[str, Any] | None = None,
+) -> bool:
+    """Accept a bounded fallback as final only with verified zero remaining work."""
+    if not isinstance(payload, dict):
+        return False
+    normalized = str(status or "")
+    if normalized == "resource_blocked_graph_drip_completed":
+        fallback_key = "fallback_graph_drip"
+        expected_artifact_type = "session_memory_graph_maintenance"
+    elif normalized in {
+        "resource_blocked_index_drip_completed",
+        "bounded_index_drip_completed",
+    }:
+        fallback_key = "fallback_index_drip"
+        expected_artifact_type = "index_maintenance"
+    else:
+        return False
+    fallback = payload.get(fallback_key) if isinstance(payload.get(fallback_key), dict) else {}
+    child = fallback.get("child") if isinstance(fallback.get("child"), dict) else {}
+    return bool(
+        fallback.get("ok") is True
+        and fallback.get("child_result_verified") is True
+        and fallback.get("remaining_work") is False
+        and child.get("artifact_type") == expected_artifact_type
+        and child.get("ok") is True
+    )
+
+
 def auto_maintenance_resource_status_contended(
     status: str,
     payload: dict[str, Any] | None = None,
@@ -61332,7 +61362,17 @@ def auto_maintenance_retry_dispatch(
 
             reported_launch_status = str(launch_payload.get("status") or "unknown")
             reported_launch_ok = launch_payload.get("ok") is True
-            launch_result_verified = launch_payload.get("child_result_verified") is True
+            fallback_completion_verified = (
+                auto_maintenance_resource_verified_fallback_completion(
+                    reported_launch_status,
+                    launch_payload,
+                )
+            )
+            launch_result_verified = bool(
+                launch_payload.get("result_verified") is True
+                or launch_payload.get("child_result_verified") is True
+                or fallback_completion_verified
+            )
             launch_status = reported_launch_status
             launch_ok = reported_launch_ok
             if launch_ok and not launch_result_verified:
@@ -62481,11 +62521,20 @@ def auto_maintenance_resource_launch(
             status = "resource_blocked_graph_drip_failed"
             diagnostics.append(f"graph_drip_fallback_{fallback_status}")
     elapsed_ms = int((time.monotonic() - started) * 1000)
+    fallback_completion_verified = (
+        auto_maintenance_resource_verified_fallback_completion(
+            status,
+            {
+                "fallback_index_drip": fallback_index_drip,
+                "fallback_graph_drip": fallback_graph_drip,
+            },
+        )
+    )
     payload_ok = status in {
         "completed",
         "completed_without_execution_summary",
         "completed_with_deferred_handoff",
-    }
+    } or fallback_completion_verified
     deferred_status = status in {
         "skipped_lock_held",
         "deferred_conflicting_lease",
@@ -62588,6 +62637,10 @@ def auto_maintenance_resource_launch(
             "timeout_cleanup": execution_timeout_cleanup or None,
         },
         "child_result_verified": child_result_verified,
+        "fallback_completion_verified": fallback_completion_verified,
+        "result_verified": bool(
+            child_result_verified or fallback_completion_verified
+        ),
         "child_status": child_status,
         "child_ok": child_payload.get("ok") if child_payload else None,
         "child_progressed_with_remaining": (

@@ -632,6 +632,12 @@ same profile's retry intent while the dispatcher owns it in flight. The
 dispatcher alone reconciles that claim and, when bounded work remains, creates
 its successor. Circuit-open cleanup applies only to a non-running queued item.
 
+A resource-blocked bounded fallback becomes semantic success only when its own
+typed child result is verified and its post-run state proves zero remaining
+work. That verified fallback result clears the profile retry intent even though
+the primary resource route was denied. Partial fallback progress keeps the
+intent pending, and an untyped or unverifiable child cannot claim completion.
+
 Bounded session discovery does not rescan global derivative state. For the
 backlog and deep owner profiles, the auto-maintenance coordinator instead
 passes its already-observed preflight entity-registry state into bounded index

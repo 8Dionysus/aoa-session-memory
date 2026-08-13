@@ -59092,7 +59092,13 @@ def test_auto_maintenance_resource_launch_can_run_graph_drip_fallback(tmp_path: 
                         "ok": True,
                         "returncode": 0,
                         "stderr_tail": "Memory peak: 5.3G (swap: 0B)",
-                        "stdout_tail": "{\"ok\": true}",
+                        "stdout_tail": json.dumps(
+                            {
+                                "artifact_type": "session_memory_graph_maintenance",
+                                "ok": True,
+                                "status": "applied",
+                            }
+                        ),
                     },
                 }
             )
@@ -59113,8 +59119,10 @@ def test_auto_maintenance_resource_launch_can_run_graph_drip_fallback(tmp_path: 
         graph_drip_candidate_pool_limit=150,
     )
 
-    assert payload["ok"] is False
+    assert payload["ok"] is True
     assert payload["status"] == "resource_blocked_graph_drip_completed"
+    assert payload["fallback_completion_verified"] is True
+    assert payload["result_verified"] is True
     assert payload["mutates"] is True
     assert payload["recommended_exit_code"] == 0
     assert payload["fallback_graph_drip"]["ok"] is True
@@ -60539,6 +60547,66 @@ def test_auto_maintenance_retry_dispatch_preserves_timer_reassertion_during_in_f
     assert retry_item["attempts_started"] == 0
     assert retry_item["last_status"] == "resource_blocked_graph_drip_failed"
     assert retry_item["next_attempt_epoch"] > due_epoch
+
+
+def test_auto_maintenance_retry_dispatch_retires_verified_completed_graph_drip(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    scheduled = module.auto_maintenance_retry_reconcile(
+        aoa_root=aoa_root,
+        profile="backlog",
+        target="all",
+        reason="timer_backlog",
+        apply=True,
+        launch_ok=False,
+        launch_status="resource_blocked",
+        options={"graph_drip_on_block": True},
+        now_epoch=100.0,
+    )
+    due_epoch = float(scheduled["next_attempt_epoch"]) + 1
+
+    def completed_launch(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "schema_version": 1,
+            "artifact_type": "auto_maintenance_resource_launch",
+            "ok": True,
+            "status": "resource_blocked_graph_drip_completed",
+            "child_result_verified": False,
+            "fallback_graph_drip": {
+                "ok": True,
+                "status": "completed",
+                "child_result_verified": True,
+                "made_progress": True,
+                "remaining_work": False,
+                "child": {
+                    "artifact_type": "session_memory_graph_maintenance",
+                    "ok": True,
+                    "status": "applied",
+                },
+            },
+        }
+
+    monkeypatch.setattr(module, "auto_maintenance_resource_launch", completed_launch)
+    dispatched = module.auto_maintenance_retry_dispatch(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        apply=True,
+        limit=1,
+        now_epoch=due_epoch,
+    )
+
+    assert scheduled["queue_key"] == "backlog:all"
+    assert dispatched["results"][0]["launch_ok"] is True
+    assert dispatched["results"][0]["launch_result_verified"] is True
+    assert dispatched["results"][0]["disposition"] == "completed"
+    assert module.auto_maintenance_retry_queue_status(
+        aoa_root,
+        now_epoch=due_epoch,
+    )["queued_count"] == 0
 
 
 def test_auto_maintenance_retry_dispatch_records_finish_time_and_backs_off_from_completion(
