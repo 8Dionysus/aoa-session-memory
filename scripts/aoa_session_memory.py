@@ -136639,11 +136639,8 @@ def graph_entity_registry_materialization_compatibility(
             )
             if not entry:
                 continue
-            registry_node_id = str(
-                graph_entity_registry_node_semantic_projection(
-                    entry
-                ).get("id")
-                or ""
+            registry_node_id = (
+                f"entity_registry:{entry.get('entity_id')}"
             )
             route_node_id = graph_route_node_id(layer, key)
             if not registry_node_id or not route_node_id:
