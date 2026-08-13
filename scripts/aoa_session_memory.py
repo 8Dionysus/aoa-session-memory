@@ -198073,6 +198073,22 @@ def command_sweep_codex_sessions(args: argparse.Namespace) -> int:
     return 0 if payload.get("ok") else 1
 
 
+def command_capture_watch(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(
+        explicit_workspace,
+        Path(args.aoa_root) if args.aoa_root else None,
+    )
+    payload = reconcile_capture_watch(
+        aoa_root=root,
+        limit=max(1, int(args.limit)),
+        apply=bool(args.apply),
+        target=str(args.session or "all"),
+    )
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
 def command_render_segment(args: argparse.Namespace) -> int:
     explicit_workspace = (
         Path(args.workspace_root) if args.workspace_root else None
@@ -208091,6 +208107,20 @@ def build_parser() -> argparse.ArgumentParser:
     sweep_sessions.add_argument("--write-report", action="store_true", help="Write JSON and Markdown sweep reports under .aoa/diagnostics.")
     sweep_sessions.add_argument("--full", action="store_true", help="Print complete sweep results to stdout.")
     sweep_sessions.set_defaults(func=command_sweep_codex_sessions)
+
+    capture_watch = sub.add_parser(
+        "capture-watch",
+        help=(
+            "Reconcile only hook-observed transcript capture watermarks "
+            "without archive discovery or stable projection work."
+        ),
+    )
+    capture_watch.add_argument("session", nargs="?", default="all", help="Watched session id or all.")
+    capture_watch.add_argument("--workspace-root")
+    capture_watch.add_argument("--aoa-root")
+    capture_watch.add_argument("--limit", type=int, default=64, help="Maximum watched sources to stat in one bounded pass.")
+    capture_watch.add_argument("--apply", action="store_true", help="Append changed source bytes to the preserved raw capture.")
+    capture_watch.set_defaults(func=command_capture_watch)
 
     render_segment = sub.add_parser(
         "render-segment",

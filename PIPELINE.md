@@ -99,6 +99,9 @@ capture watermark. Hook-observed paths enter a bounded capture-watch frontier.
 An ordinary hot timer reads this frontier and component-outbox readiness only;
 it performs no archive discovery and no raw read for an unchanged watched
 source. Catchup, deep, and audit remain the global reconciliation routes.
+`capture-watch` exposes that same bounded frontier reconciliation as a
+capture-only operator or timer route. It never discovers the archive or starts
+stable projection work, so fresh evidence can advance ahead of historical debt.
 
 Raw preservation is append-oriented. Repair may regenerate derived material,
 but ordinary cleanup never deletes raw session evidence.

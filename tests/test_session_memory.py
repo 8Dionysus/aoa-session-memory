@@ -74076,6 +74076,34 @@ def test_capture_watch_recovers_missed_hook_without_archive_scan(
     )
 
 
+def test_capture_watch_cli_routes_only_the_bounded_frontier(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    args = module.build_parser().parse_args(
+        [
+            "capture-watch",
+            "all",
+            "--workspace-root",
+            str(workspace),
+            "--aoa-root",
+            str(aoa_root),
+            "--limit",
+            "7",
+            "--apply",
+        ]
+    )
+
+    assert args.func(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "applied"
+    assert payload["selected_count"] == 0
+    assert payload["archive_manifest_scan_performed"] is False
+    assert payload["raw_payload_read_for_unchanged_sources"] is False
+
+
 def test_hot_timer_recovers_missed_hook_without_archive_rediscovery(
     tmp_path: Path,
 ) -> None:
