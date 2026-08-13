@@ -60978,12 +60978,23 @@ def auto_maintenance_retry_reconcile(
                     )
                     else {}
                 )
-                existing = items.pop(queue_key, None)
+                existing = items.get(queue_key)
                 if not isinstance(existing, dict):
                     return (
                         {"status": "circuit_open_not_queued"},
                         False,
                     )
+                if bool(existing.get("in_flight")):
+                    return (
+                        {
+                            "status": (
+                                "circuit_open_in_flight_preserved"
+                            ),
+                            "in_flight": True,
+                        },
+                        False,
+                    )
+                items.pop(queue_key, None)
                 auto_maintenance_retry_add_history(
                     queue_payload,
                     {

@@ -58584,6 +58584,63 @@ def test_auto_maintenance_graph_drip_circuit_prevents_launch_and_retry(
     )
 
 
+def test_auto_maintenance_graph_drip_circuit_preserves_in_flight_retry(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir(parents=True)
+    scheduled = module.auto_maintenance_retry_reconcile(
+        aoa_root=aoa_root,
+        profile="backlog",
+        target="all",
+        reason="timer_backlog",
+        apply=True,
+        launch_ok=False,
+        launch_status="resource_blocked",
+        options={},
+        now_epoch=2_000.0,
+    )
+    attempts_started = 4
+
+    def mark_in_flight(
+        queue_payload: dict[str, Any],
+    ) -> tuple[None, bool]:
+        item = queue_payload["items"]["backlog:all"]
+        item["in_flight"] = True
+        item["attempts_started"] = attempts_started
+        return None, True
+
+    module.mutate_auto_maintenance_retry_queue(
+        aoa_root,
+        mark_in_flight,
+        now_epoch=2_001.0,
+    )
+
+    reconciled = module.auto_maintenance_retry_reconcile(
+        aoa_root=aoa_root,
+        profile="backlog",
+        target="all",
+        reason="timer_backlog",
+        apply=True,
+        launch_ok=False,
+        launch_status="resource_blocked_graph_drip_circuit_open",
+        options={},
+        now_epoch=2_002.0,
+    )
+
+    after = module.auto_maintenance_retry_queue_status(
+        aoa_root,
+        now_epoch=2_002.0,
+    )
+    retry_item = after["items"]["backlog:all"]
+    assert scheduled["status"] == "scheduled"
+    assert reconciled["status"] == "circuit_open_in_flight_preserved"
+    assert reconciled["in_flight"] is True
+    assert after["queued_count"] == 1
+    assert retry_item["in_flight"] is True
+    assert retry_item["attempts_started"] == attempts_started
+
+
 def test_graph_drip_circuit_reopens_after_selected_upstream_source_changes(
     tmp_path: Path,
 ) -> None:

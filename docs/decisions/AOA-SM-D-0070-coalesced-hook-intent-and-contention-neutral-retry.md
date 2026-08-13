@@ -54,6 +54,10 @@ its failed-attempt cycle, increments an observable contention counter, and is
 retried through the existing aged-profile fairness order. Real resource and
 execution failures retain bounded exponential backoff and exhaustion.
 
+Periodic reconciliation may clear a circuit-open retry only when that item is
+not in flight. Once the dispatcher claims an item, it alone owns completion and
+successor reconciliation; a concurrent timer observation preserves the claim.
+
 ## Rationale
 
 The system needs to scale with unique unfinished sessions and projection
@@ -71,6 +75,8 @@ admission, and the existing fairness contract.
   receipts, while only the latest snapshot executes.
 - Positive: active catch-up cannot permanently exhaust backlog or graph work
   merely by holding the shared lease at unlucky retry times.
+- Positive: a concurrent periodic circuit check cannot erase the dispatcher's
+  in-flight claim or the successor implied by its bounded progress.
 - Tradeoff: the active job records an aggregate signal count rather than
   executing each lifecycle signal as an independent sync.
 - Tradeoff: contention can keep an intent queued indefinitely when the host

@@ -627,6 +627,11 @@ silently create background work. A host scheduler may invoke the portable
 dispatcher, but the queue and retry semantics remain owned by this organ;
 scheduled retry is not semantic maintenance success.
 
+A periodic launch that observes an open graph-drip circuit must not clear the
+same profile's retry intent while the dispatcher owns it in flight. The
+dispatcher alone reconciles that claim and, when bounded work remains, creates
+its successor. Circuit-open cleanup applies only to a non-running queued item.
+
 The catch-up resource route consumes an explicitly ready live-tail command
 independently of the packet's global recommendation. An unrelated cleanup or
 historical projection recommendation must not displace a ready recent-session
