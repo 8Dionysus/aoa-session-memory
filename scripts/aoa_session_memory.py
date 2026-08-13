@@ -145244,6 +145244,39 @@ def graph_maintenance_no_source_scan_payload(
     return payload
 
 
+def graph_force_exact_source_refresh_states(
+    states: Iterable[dict[str, Any]],
+    requested_source_keys: set[str],
+) -> list[dict[str, Any]]:
+    """Admit a proved materialization repair without widening its source scope."""
+    if not requested_source_keys:
+        return list(states)
+    return [
+        {
+            **item,
+            "status": "dirty",
+            "reasons": list(
+                dict.fromkeys(
+                    [
+                        *(
+                            item.get("reasons")
+                            if isinstance(item.get("reasons"), list)
+                            else []
+                        ),
+                        "operator_exact_materialization_refresh",
+                    ]
+                )
+            ),
+            "forced_materialization_refresh": True,
+        }
+        if isinstance(item, dict)
+        and item.get("source_key") in requested_source_keys
+        and item.get("status") not in {"blocked", "orphaned"}
+        else item
+        for item in states
+    ]
+
+
 def graph_maintenance(
     *,
     aoa_root: Path,
@@ -145252,6 +145285,7 @@ def graph_maintenance(
     until: str | None = None,
     limit: int | None = None,
     source_keys: Iterable[str] | None = None,
+    force_source_refresh: bool = False,
     apply: bool = False,
     batch_limit: int = GRAPH_MAINTENANCE_DEFAULT_BATCH_LIMIT,
     refresh_chunk_size: int = GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE,
@@ -145293,6 +145327,17 @@ def graph_maintenance(
         mode = "hot"
     hash_mode = normalize_graph_source_hash_mode(hash_mode)
     requested_source_keys = normalize_graph_source_key_filters(source_keys)
+    force_source_refresh = bool(
+        requested_source_keys
+        and (
+            force_source_refresh
+            or (
+                apply
+                and selected_records is None
+                and not use_queue
+            )
+        )
+    )
     if query_demand is not None:
         query_demand_payload = dict(query_demand)
     elif observe_query_demand:
@@ -145559,6 +145604,11 @@ def graph_maintenance(
     missing_requested_source_keys: list[str] = []
     if requested_source_keys:
         states, missing_requested_source_keys = filter_graph_source_states_by_key(states, requested_source_keys)
+    if force_source_refresh:
+        states = graph_force_exact_source_refresh_states(
+            states,
+            requested_source_keys,
+        )
     actionable = [
         item for item in states
         if isinstance(item, dict) and item.get("status") in {"dirty", "missing", "orphaned"}
@@ -145736,6 +145786,7 @@ def graph_maintenance(
         ),
         "matched_source_key_sample": bounded_graph_source_keys(states),
         "missing_source_keys": missing_requested_source_keys,
+        "force_source_refresh": force_source_refresh,
         "phase_timings_ms": phase_timings,
         "entity_registry_dependency": (
             entity_registry_dependency_packet

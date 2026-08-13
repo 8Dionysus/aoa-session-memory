@@ -44746,6 +44746,25 @@ def test_graph_maintenance_replaces_dirty_segment_contribution(tmp_path: Path) -
     assert conn.execute("SELECT COUNT(*) FROM nodes WHERE id = ?", (new_node_id,)).fetchone()[0] == 1
     conn.close()
 
+    exact_source_key = next(
+        str(item["source_key"])
+        for item in maintained["selected"]
+        if item.get("source_type") == "segment"
+    )
+    exact_refreshed = module.graph_maintenance(
+        aoa_root=aoa_root,
+        source_keys=[exact_source_key],
+        apply=True,
+        batch_limit=1,
+        write_report=True,
+    )
+    assert exact_refreshed["ok"] is True
+    assert exact_refreshed["selected_count"] == 1
+    assert exact_refreshed["selected"][0]["source_key"] == exact_source_key
+    assert exact_refreshed["selected"][0]["forced_materialization_refresh"] is True
+    assert exact_refreshed["maintenance_detail"]["force_source_refresh"] is True
+    assert exact_refreshed["post_actionable_count"] == 0
+
     gates = module.graph_freshness_gates(aoa_root=aoa_root, ref_sample_limit=20)
     assert gates["graph_store"]["status"] == "current"
     assert gates["graph_sidecar"]["status"] == "stale"
@@ -46992,6 +47011,30 @@ def test_graph_status_preserves_latest_queue_aggregate_refresh_ms(tmp_path: Path
     )
 
     assert summary["latest_queue_maintenance"]["aggregate_refresh_ms"] == 103_360
+
+
+def test_graph_force_exact_source_refresh_marks_only_named_clean_sources() -> None:
+    states = [
+        {"source_key": "session:alpha", "status": "clean", "reasons": []},
+        {"source_key": "session:blocked", "status": "blocked", "reasons": ["unsafe"]},
+        {"source_key": "session:orphaned", "status": "orphaned", "reasons": []},
+        {"source_key": "session:untouched", "status": "clean", "reasons": []},
+    ]
+
+    refreshed = module.graph_force_exact_source_refresh_states(
+        states,
+        {"session:alpha", "session:blocked", "session:orphaned"},
+    )
+
+    by_key = {item["source_key"]: item for item in refreshed}
+    assert by_key["session:alpha"]["status"] == "dirty"
+    assert by_key["session:alpha"]["forced_materialization_refresh"] is True
+    assert "operator_exact_materialization_refresh" in by_key["session:alpha"]["reasons"]
+    assert by_key["session:blocked"] == states[1]
+    assert by_key["session:orphaned"] == states[2]
+    assert by_key["session:untouched"] == states[3]
+    assert states[0]["status"] == "clean"
+    assert module.graph_force_exact_source_refresh_states(states, set()) == states
 
 
 def test_graph_maintenance_selects_cheap_sources_before_oversized_backlog(tmp_path: Path, monkeypatch: Any) -> None:

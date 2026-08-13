@@ -428,6 +428,13 @@ Completion of a session-generation predecessor queues graph maintenance only
 for that session. Global historical graph work remains an explicit backlog
 route and is never inferred from one live session transition (AOA-SM-D-0081).
 
+When the complete compact registry/materialization proof identifies exact
+source contributions whose route pairs disagree with the current registry,
+repair those exact sources with `graph-maintenance --source-key ... --apply`.
+Exact apply requests rebuild their named clean sources, never widen without
+source keys, do not override blocked or orphaned source state, and must be
+followed by the same proof before registry rebind (AOA-SM-D-0082).
+
 Entity-registry construction distinguishes incremental navigation history from
 an authoritative rebuild. Incremental refresh may retain bounded prior-snapshot
 aliases and retired identities under an explicit history policy. A full rebuild
