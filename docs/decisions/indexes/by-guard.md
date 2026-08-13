@@ -215,6 +215,7 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0078 Hot Status Does Not Parse Raw Projection Work](../AOA-SM-D-0078-hot-status-does-not-parse-raw-projection-work.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0078-hot-status-does-not-parse-raw-projection-work.md` |
+| [AOA-SM-D-0085 Bounded Orphan Stage Verification](../AOA-SM-D-0085-bounded-orphan-stage-verification.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0085-bounded-orphan-stage-verification.md` |
 
 ## bounded hydration
 
@@ -698,6 +699,12 @@
 | [AOA-SM-D-0079 Materialization-Equivalent Rebind Does Not Rehash the Graph](../AOA-SM-D-0079-materialization-equivalent-rebind-does-not-rehash-graph.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0079-materialization-equivalent-rebind-does-not-rehash-graph.md` |
 | [AOA-SM-D-0084 Predecessor Proof Preserves Stored Dependency Generations](../AOA-SM-D-0084-predecessor-proof-preserves-stored-dependency-generations.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0084-predecessor-proof-preserves-stored-dependency-generations.md` |
 
+## exact raw authority
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0085 Bounded Orphan Stage Verification](../AOA-SM-D-0085-bounded-orphan-stage-verification.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0085-bounded-orphan-stage-verification.md` |
+
 ## exact recall
 
 | Decision | Date | Status | Path |
@@ -784,6 +791,7 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0078 Hot Status Does Not Parse Raw Projection Work](../AOA-SM-D-0078-hot-status-does-not-parse-raw-projection-work.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0078-hot-status-does-not-parse-raw-projection-work.md` |
+| [AOA-SM-D-0085 Bounded Orphan Stage Verification](../AOA-SM-D-0085-bounded-orphan-stage-verification.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0085-bounded-orphan-stage-verification.md` |
 
 ## fail-closed fallback
 

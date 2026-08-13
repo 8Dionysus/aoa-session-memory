@@ -64507,12 +64507,14 @@ def session_projection_stage_entries(
     *,
     include_unowned_content_digest: bool = True,
     include_raw_authority_verification: bool = True,
+    raw_authority_verification_limit: int | None = None,
 ) -> list[dict[str, Any]]:
     sessions_root = aoa_root / "sessions"
     if not sessions_root.exists():
         return []
     now = time.time()
     entries: list[dict[str, Any]] = []
+    raw_authority_verification_count = 0
     for path in sorted(
         sessions_root.glob(".*.projection-stage-*")
     ):
@@ -64567,12 +64569,26 @@ def session_projection_stage_entries(
                 digest_error = (
                     f"{type(exc).__name__}:{exc}"
                 )
+        verification_eligible = bool(
+            not journal_present
+            and not pid_alive
+        )
+        verification_budget_available = bool(
+            raw_authority_verification_limit is None
+            or raw_authority_verification_count
+            < max(0, int(raw_authority_verification_limit))
+        )
+        verify_raw_authority = bool(
+            include_raw_authority_verification
+            and verification_eligible
+            and verification_budget_available
+        )
         raw_authority = (
             session_projection_stage_raw_authority(
                 path,
                 owner_session_dir,
             )
-            if include_raw_authority_verification
+            if verify_raw_authority
             else {
                 "schema_version": SCHEMA_VERSION,
                 "artifact_type": (
@@ -64586,6 +64602,8 @@ def session_projection_stage_entries(
                 ],
             }
         )
+        if verify_raw_authority:
+            raw_authority_verification_count += 1
         raw_authority_verified = bool(
             raw_authority.get("verified")
         )
@@ -64599,6 +64617,8 @@ def session_projection_stage_entries(
             status = (
                 "orphaned"
                 if raw_authority_verified
+                else "orphaned_verification_deferred"
+                if not raw_authority.get("inspected")
                 else "orphaned_raw_authority_unresolved"
             )
             safe_to_remove = raw_authority_verified
@@ -64647,6 +64667,7 @@ def session_projection_stage_status(
     *,
     include_unowned_content_digest: bool = True,
     include_raw_authority_verification: bool = True,
+    raw_authority_verification_limit: int | None = None,
 ) -> dict[str, Any]:
     entries = session_projection_stage_entries(
         aoa_root,
@@ -64655,6 +64676,9 @@ def session_projection_stage_status(
         ),
         include_raw_authority_verification=(
             include_raw_authority_verification
+        ),
+        raw_authority_verification_limit=(
+            raw_authority_verification_limit
         ),
     )
     orphaned = [
@@ -64673,6 +64697,12 @@ def session_projection_stage_status(
         for entry in entries
         if entry.get("status") == "unowned_legacy"
     ]
+    verification_deferred = [
+        entry
+        for entry in entries
+        if entry.get("status")
+        == "orphaned_verification_deferred"
+    ]
     raw_authority_unresolved = [
         entry
         for entry in entries
@@ -64690,6 +64720,7 @@ def session_projection_stage_status(
         not in {
             "active_or_pid_alive",
             "interrupted_publish_journal_present",
+            "orphaned_verification_deferred",
         }
     ]
     journaled = [
@@ -64747,6 +64778,8 @@ def session_projection_stage_status(
             else
             "cleanup_needed"
             if orphaned or unowned
+            else "cleanup_verification_pending"
+            if verification_deferred
             else "recovery_needed"
             if journaled
             else "active_or_unknown"
@@ -64757,6 +64790,7 @@ def session_projection_stage_status(
             orphaned
             or unowned
             or raw_authority_unresolved
+            or verification_deferred
         ),
         "entry_count": len(entries),
         "orphaned_count": len(orphaned),
@@ -64766,6 +64800,9 @@ def session_projection_stage_status(
         "confirmation_required_count": len(unowned),
         "raw_authority_unresolved_count": len(
             raw_authority_unresolved
+        ),
+        "raw_authority_verification_deferred_count": len(
+            verification_deferred
         ),
         "raw_authority_verified_count": sum(
             1
@@ -64791,6 +64828,9 @@ def session_projection_stage_status(
         ),
         "raw_authority_verification_included": (
             include_raw_authority_verification
+        ),
+        "raw_authority_verification_limit": (
+            raw_authority_verification_limit
         ),
         "diagnostics": diagnostics,
     }
@@ -65088,6 +65128,7 @@ def maintenance_cleanup(
     write_report: bool = False,
     surface: str = "all",
     inspect_session_projection_work: bool = True,
+    session_stage_verification_limit: int | None = None,
     confirmed_unowned_session_stage_digests: set[str]
     | None = None,
 ) -> dict[str, Any]:
@@ -65158,7 +65199,12 @@ def maintenance_cleanup(
         else dict(empty_surface_status)
     )
     session_stage_status = (
-        session_projection_stage_status(aoa_root)
+        session_projection_stage_status(
+            aoa_root,
+            raw_authority_verification_limit=(
+                session_stage_verification_limit
+            ),
+        )
         if include_session_projection
         else dict(empty_surface_status)
     )
@@ -65527,7 +65573,14 @@ def maintenance_cleanup(
             search_tmp_status = search_rebuild_tmp_status(aoa_root)
         if include_session_projection:
             session_stage_status = (
-                session_projection_stage_status(aoa_root)
+                session_projection_stage_status(
+                    aoa_root,
+                    raw_authority_verification_limit=(
+                        0
+                        if apply
+                        else session_stage_verification_limit
+                    ),
+                )
             )
             session_work_status = session_projection_work_status(
                 aoa_root
@@ -65615,6 +65668,9 @@ def maintenance_cleanup(
         ),
         "apply": apply,
         "surface": selected_surface,
+        "session_stage_verification_limit": (
+            session_stage_verification_limit
+        ),
         "status": status,
         "aoa_root": str(aoa_root),
         "lock_path": str(lock_path),
@@ -174345,9 +174401,17 @@ def session_memory_maintenance_next_actions(
         # for explicit cleanup/apply instead of hiding a deep source scan in
         # an ordinary health read.
         inspect_session_projection_work=False,
+        # Staged raw authority may cover tens of gigabytes of abandoned
+        # generated copies. Hot planning inventories those candidates from
+        # metadata only; the recommended cleanup route verifies one exact
+        # candidate per bounded cycle.
+        session_stage_verification_limit=0,
     )
     cleanup_diagnostics = cleanup_status.get("diagnostics") if isinstance(cleanup_status.get("diagnostics"), list) else []
-    cleanup_needed = str(cleanup_status.get("status") or "") == "cleanup_needed"
+    cleanup_needed = str(cleanup_status.get("status") or "") in {
+        "cleanup_needed",
+        "cleanup_verification_pending",
+    }
     cleanup_session_stages = (
         cleanup_status.get("session_projection_stages")
         if isinstance(
@@ -174385,7 +174449,7 @@ def session_memory_maintenance_next_actions(
                     "--apply",
                     "--write-report",
                 ],
-                "note": "Clear stale coordinator state and only PID-proven orphaned generated graph/search/session-projection stages before planning another rebuild. Unowned legacy stages remain fail-closed.",
+                "note": "Verify and remove at most one PID-proven orphaned session-projection stage in this cycle. Raw authority is rechecked before removal; unowned legacy stages remain fail-closed.",
             }
         )
         return "run_maintenance_cleanup", actions
@@ -199441,6 +199505,11 @@ def command_maintenance_cleanup(args: argparse.Namespace) -> int:
         apply=args.apply,
         write_report=args.write_report,
         surface=args.surface,
+        # Apply is an operational drip by default: never hide an all-stage
+        # raw hash pass or complete projection-work identity scan behind one
+        # cleanup mutation. A dry-run retains the explicit complete audit.
+        inspect_session_projection_work=not bool(args.apply),
+        session_stage_verification_limit=(1 if args.apply else None),
         confirmed_unowned_session_stage_digests=set(
             getattr(
                 args,

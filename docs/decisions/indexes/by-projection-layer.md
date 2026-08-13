@@ -509,6 +509,7 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0015 Deadline-Aware Cooperative Retry Dispatch](../AOA-SM-D-0015-deadline-aware-cooperative-retry-dispatch.md) | 2026-07-17 | Accepted | `docs/decisions/AOA-SM-D-0015-deadline-aware-cooperative-retry-dispatch.md` |
 | [AOA-SM-D-0078 Hot Status Does Not Parse Raw Projection Work](../AOA-SM-D-0078-hot-status-does-not-parse-raw-projection-work.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0078-hot-status-does-not-parse-raw-projection-work.md` |
+| [AOA-SM-D-0085 Bounded Orphan Stage Verification](../AOA-SM-D-0085-bounded-orphan-stage-verification.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0085-bounded-orphan-stage-verification.md` |
 
 ## maintenance diagnostics
 
@@ -664,6 +665,7 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0078 Hot Status Does Not Parse Raw Projection Work](../AOA-SM-D-0078-hot-status-does-not-parse-raw-projection-work.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0078-hot-status-does-not-parse-raw-projection-work.md` |
+| [AOA-SM-D-0085 Bounded Orphan Stage Verification](../AOA-SM-D-0085-bounded-orphan-stage-verification.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0085-bounded-orphan-stage-verification.md` |
 
 ## raw-block storage
 
@@ -963,6 +965,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0054 Native-Assisted Portable SHA-256 Continuation](../AOA-SM-D-0054-native-assisted-portable-sha256-continuation.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0054-native-assisted-portable-sha256-continuation.md` |
 | [AOA-SM-D-0078 Hot Status Does Not Parse Raw Projection Work](../AOA-SM-D-0078-hot-status-does-not-parse-raw-projection-work.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0078-hot-status-does-not-parse-raw-projection-work.md` |
+
+## staged session projection
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0085 Bounded Orphan Stage Verification](../AOA-SM-D-0085-bounded-orphan-stage-verification.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0085-bounded-orphan-stage-verification.md` |
 
 ## task episode
 

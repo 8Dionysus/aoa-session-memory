@@ -41752,6 +41752,83 @@ def test_maintenance_cleanup_can_skip_projection_work_identity_for_hot_status(
     assert status["session_projection_work"]["status"] == "not_selected"
 
 
+def test_maintenance_cleanup_can_defer_stage_raw_authority_for_hot_status(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    sessions_root = aoa_root / "sessions"
+    owner = sessions_root / "owner"
+    owner.mkdir(parents=True)
+    stage = sessions_root / ".owner.projection-stage-987654-dead"
+    stage.mkdir()
+    monkeypatch.setattr(module, "process_is_alive", lambda _pid: False)
+
+    def deep_stage_raw_scan(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("hot status hashed staged raw")
+
+    monkeypatch.setattr(
+        module,
+        "session_projection_stage_raw_authority",
+        deep_stage_raw_scan,
+    )
+
+    status = module.maintenance_cleanup(
+        aoa_root=aoa_root,
+        apply=False,
+        inspect_session_projection_work=False,
+        session_stage_verification_limit=0,
+    )
+
+    stages = status["session_projection_stages"]
+    assert stages["status"] == "cleanup_verification_pending"
+    assert stages["raw_authority_verification_deferred_count"] == 1
+    assert stages["raw_authority_unresolved_count"] == 0
+
+
+def test_maintenance_cleanup_stage_raw_authority_limit_is_bounded(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    sessions_root = aoa_root / "sessions"
+    for name in ("first", "second"):
+        (sessions_root / name).mkdir(parents=True)
+        (sessions_root / f".{name}.projection-stage-987654-dead").mkdir()
+    monkeypatch.setattr(module, "process_is_alive", lambda _pid: False)
+    calls: list[str] = []
+
+    def verified_stage_raw(
+        stage_path: Path,
+        _owner_session_dir: Path,
+    ) -> dict[str, Any]:
+        calls.append(stage_path.name)
+        return {
+            "inspected": True,
+            "verified": True,
+            "status": "stage_raw_absent_generated_only",
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr(
+        module,
+        "session_projection_stage_raw_authority",
+        verified_stage_raw,
+    )
+
+    status = module.maintenance_cleanup(
+        aoa_root=aoa_root,
+        apply=False,
+        inspect_session_projection_work=False,
+        session_stage_verification_limit=1,
+    )
+
+    stages = status["session_projection_stages"]
+    assert len(calls) == 1
+    assert stages["orphaned_count"] == 1
+    assert stages["raw_authority_verification_deferred_count"] == 1
+
+
 def test_maintenance_cleanup_detects_orphaned_graph_rebuild_tmp_journal_without_base(tmp_path: Path, monkeypatch: Any) -> None:
     aoa_root = tmp_path / ".aoa"
     graph_root = aoa_root / module.GRAPH_ROOT
@@ -46843,7 +46920,7 @@ def test_maintenance_next_actions_requires_review_for_unowned_session_stage(
     assert "--confirm-unowned-session-stage-digest" not in command
 
 
-def test_maintenance_next_actions_routes_unresolved_stage_raw_to_review(
+def test_hot_maintenance_next_actions_does_not_hash_unresolved_stage_raw(
     tmp_path: Path,
     monkeypatch: Any,
 ) -> None:
@@ -46869,6 +46946,13 @@ def test_maintenance_next_actions_routes_unresolved_stage_raw_to_review(
         module,
         "process_is_alive",
         lambda _pid: False,
+    )
+    monkeypatch.setattr(
+        module,
+        "session_projection_stage_raw_authority",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("hot planner hashed staged raw")
+        ),
     )
 
     recommendation, actions = (
@@ -46897,16 +46981,36 @@ def test_maintenance_next_actions_routes_unresolved_stage_raw_to_review(
         )
     )
 
-    assert recommendation == "review_maintenance_cleanup"
-    assert actions[0]["id"] == (
-        "review_unresolved_session_projection_stage"
+    assert recommendation != "review_maintenance_cleanup"
+    assert all(
+        action.get("id") != "repair_maintenance_cleanup"
+        for action in actions
     )
-    assert actions[0]["reason"] == (
-        "session_projection_stage_stronger_raw_"
-        "authority_unverified"
+
+    monkeypatch.setattr(
+        module,
+        "session_projection_stage_raw_authority",
+        lambda *_args, **_kwargs: {
+            "inspected": True,
+            "verified": False,
+            "status": "stronger_raw_digest_mismatch",
+            "diagnostics": [
+                "session_projection_stage_stronger_raw_authority_unverified"
+            ],
+        },
     )
-    assert "--apply" not in actions[0]["command"]
-    assert "Do not remove the stage" in actions[0]["note"]
+    explicit = module.maintenance_cleanup(
+        aoa_root=aoa_root,
+        apply=False,
+        inspect_session_projection_work=False,
+    )
+    assert explicit["status"] == "cleanup_needed"
+    assert explicit["session_projection_stages"]["status"] == (
+        "blocked_raw_authority_unresolved"
+    )
+    assert explicit["session_projection_stages"][
+        "raw_authority_unresolved_count"
+    ] == 1
 
 
 def test_maintenance_next_actions_prioritizes_runtime_cleanup(tmp_path: Path, monkeypatch: Any) -> None:

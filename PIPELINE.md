@@ -1003,6 +1003,14 @@ Operators may use `--surface graph`, `--surface search`, or
 This prevents a bounded debris repair from paying unrelated raw-authority scan
 cost; the default `--surface all` remains the complete cleanup audit.
 
+Ordinary hot maintenance planning inventories abandoned session-projection
+stages from metadata without hashing staged raw. Unverified generated debris
+does not preempt semantic search or graph maintenance. Each cleanup apply cycle
+checks at most one staged candidate and skips deep projection-work identity;
+exact raw authority is still checked and rechecked before removal, while the
+complete read-only debris classification remains an explicit dry-run audit
+(AOA-SM-D-0085).
+
 Graph incremental mutation checks its pinned registry dependency before
 mutation and before commit. A dependency race rolls back the transaction.
 Full rebuild publishes a temporary store only after the same recheck, so a
