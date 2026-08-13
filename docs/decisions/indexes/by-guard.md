@@ -367,6 +367,7 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0082 Proved Materialization Drift Admits Exact Source Refresh](../AOA-SM-D-0082-proved-materialization-drift-admits-exact-source-refresh.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0082-proved-materialization-drift-admits-exact-source-refresh.md` |
 | [AOA-SM-D-0083 Additive Registry Repair Replaces Full Layer Reconstruction](../AOA-SM-D-0083-additive-registry-repair-replaces-full-layer-reconstruction.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0083-additive-registry-repair-replaces-full-layer-reconstruction.md` |
+| [AOA-SM-D-0084 Predecessor Proof Preserves Stored Dependency Generations](../AOA-SM-D-0084-predecessor-proof-preserves-stored-dependency-generations.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0084-predecessor-proof-preserves-stored-dependency-generations.md` |
 
 ## complete source set
 
@@ -491,6 +492,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0004 Declared Incremental Search Schema Transitions](../AOA-SM-D-0004-declared-incremental-search-schema-transitions.md) | 2026-07-15 | Accepted | `docs/decisions/AOA-SM-D-0004-declared-incremental-search-schema-transitions.md` |
+
+## declared transition
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0084 Predecessor Proof Preserves Stored Dependency Generations](../AOA-SM-D-0084-predecessor-proof-preserves-stored-dependency-generations.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0084-predecessor-proof-preserves-stored-dependency-generations.md` |
 
 ## deep audit
 
@@ -689,6 +696,7 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0067 Guarded Graph Generation Rebind](../AOA-SM-D-0067-guarded-graph-generation-rebind.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0067-guarded-graph-generation-rebind.md` |
 | [AOA-SM-D-0079 Materialization-Equivalent Rebind Does Not Rehash the Graph](../AOA-SM-D-0079-materialization-equivalent-rebind-does-not-rehash-graph.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0079-materialization-equivalent-rebind-does-not-rehash-graph.md` |
+| [AOA-SM-D-0084 Predecessor Proof Preserves Stored Dependency Generations](../AOA-SM-D-0084-predecessor-proof-preserves-stored-dependency-generations.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0084-predecessor-proof-preserves-stored-dependency-generations.md` |
 
 ## exact recall
 

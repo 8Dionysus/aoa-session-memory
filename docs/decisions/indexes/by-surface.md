@@ -317,6 +317,7 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0077 Entry-Set-Equivalent Graph Rebind Is Metadata Only](../AOA-SM-D-0077-entry-set-equivalent-graph-rebind-is-metadata-only.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0077-entry-set-equivalent-graph-rebind-is-metadata-only.md` |
 | [AOA-SM-D-0079 Materialization-Equivalent Rebind Does Not Rehash the Graph](../AOA-SM-D-0079-materialization-equivalent-rebind-does-not-rehash-graph.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0079-materialization-equivalent-rebind-does-not-rehash-graph.md` |
+| [AOA-SM-D-0084 Predecessor Proof Preserves Stored Dependency Generations](../AOA-SM-D-0084-predecessor-proof-preserves-stored-dependency-generations.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0084-predecessor-proof-preserves-stored-dependency-generations.md` |
 
 ## graph
 
@@ -709,6 +710,7 @@
 | [AOA-SM-D-0069 Graph Predecessor Reindex Handoff](../AOA-SM-D-0069-graph-predecessor-reindex-handoff.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0069-graph-predecessor-reindex-handoff.md` |
 | [AOA-SM-D-0070 Coalesced Hook Intent and Contention-Neutral Retry](../AOA-SM-D-0070-coalesced-hook-intent-and-contention-neutral-retry.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0070-coalesced-hook-intent-and-contention-neutral-retry.md` |
 | [AOA-SM-D-0082 Proved Materialization Drift Admits Exact Source Refresh](../AOA-SM-D-0082-proved-materialization-drift-admits-exact-source-refresh.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0082-proved-materialization-drift-admits-exact-source-refresh.md` |
+| [AOA-SM-D-0084 Predecessor Proof Preserves Stored Dependency Generations](../AOA-SM-D-0084-predecessor-proof-preserves-stored-dependency-generations.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0084-predecessor-proof-preserves-stored-dependency-generations.md` |
 
 ## registry rebind
 
@@ -716,6 +718,7 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0082 Proved Materialization Drift Admits Exact Source Refresh](../AOA-SM-D-0082-proved-materialization-drift-admits-exact-source-refresh.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0082-proved-materialization-drift-admits-exact-source-refresh.md` |
 | [AOA-SM-D-0083 Additive Registry Repair Replaces Full Layer Reconstruction](../AOA-SM-D-0083-additive-registry-repair-replaces-full-layer-reconstruction.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0083-additive-registry-repair-replaces-full-layer-reconstruction.md` |
+| [AOA-SM-D-0084 Predecessor Proof Preserves Stored Dependency Generations](../AOA-SM-D-0084-predecessor-proof-preserves-stored-dependency-generations.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0084-predecessor-proof-preserves-stored-dependency-generations.md` |
 
 ## relation taxonomy
 

@@ -135241,6 +135241,17 @@ def graph_declared_generation_transition(
                 | PROJECTION_PRODUCER_GENERATION_FIELD_NAMES
             )
         }
+        stored_dependencies = (
+            stored_identity.get("dependency_generations")
+            if isinstance(
+                stored_identity.get("dependency_generations"),
+                dict,
+            )
+            else {}
+        )
+        reconstructed_previous["dependency_generations"] = dict(
+            stored_dependencies
+        )
         if previous_contract.get("status") == "current":
             reconstructed_previous.update(
                 {

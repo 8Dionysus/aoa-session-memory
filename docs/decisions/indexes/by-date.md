@@ -4,6 +4,7 @@
 
 | Date | Decision | Status | Path |
 | --- | --- | --- | --- |
+| 2026-08-13 | [AOA-SM-D-0084 Predecessor Proof Preserves Stored Dependency Generations](../AOA-SM-D-0084-predecessor-proof-preserves-stored-dependency-generations.md) | Accepted | `docs/decisions/AOA-SM-D-0084-predecessor-proof-preserves-stored-dependency-generations.md` |
 | 2026-08-13 | [AOA-SM-D-0083 Additive Registry Repair Replaces Full Layer Reconstruction](../AOA-SM-D-0083-additive-registry-repair-replaces-full-layer-reconstruction.md) | Accepted | `docs/decisions/AOA-SM-D-0083-additive-registry-repair-replaces-full-layer-reconstruction.md` |
 | 2026-08-13 | [AOA-SM-D-0082 Proved Materialization Drift Admits Exact Source Refresh](../AOA-SM-D-0082-proved-materialization-drift-admits-exact-source-refresh.md) | Accepted | `docs/decisions/AOA-SM-D-0082-proved-materialization-drift-admits-exact-source-refresh.md` |
 | 2026-08-13 | [AOA-SM-D-0081 Session Reindex Follow-Ups Stay Session Scoped](../AOA-SM-D-0081-session-reindex-followups-stay-session-scoped.md) | Accepted | `docs/decisions/AOA-SM-D-0081-session-reindex-followups-stay-session-scoped.md` |

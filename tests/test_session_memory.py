@@ -99698,6 +99698,10 @@ def test_graph_projection_generation_transition_requires_declared_pair_and_exact
             | module.PROJECTION_PRODUCER_GENERATION_FIELD_NAMES
         )
     }
+    stored["dependency_generations"] = {
+        **stored["dependency_generations"],
+        "entity_registry": "prior-entity-registry-generation",
+    }
     stored.update(
         {
             "producer": "aoa_session_memory.py",
@@ -99756,6 +99760,9 @@ def test_graph_projection_generation_transition_requires_declared_pair_and_exact
 
     assert ready["status"] == "ready"
     assert ready["compatible"] is True
+    assert ready["reconstructed_previous_identity"][
+        "dependency_generations"
+    ]["entity_registry"] == "prior-entity-registry-generation"
     assert ready["declared_transition"]["decision_id"] == "AOA-SM-D-0067"
     assert missing["diagnostics"] == [
         "graph_generation_transition_previous_source_required"

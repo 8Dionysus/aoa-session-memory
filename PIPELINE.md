@@ -442,6 +442,13 @@ and refreshes only touched aggregates; any extra pair, semantic mismatch,
 dangling endpoint, malformed payload, selective dependency drift, or changed
 count fails the additive guard (AOA-SM-D-0083).
 
+For a declared projection-generation predecessor, reconstruct producer fields
+from the exact predecessor source but preserve dependency generations from the
+stored predecessor identity. Substituting current dependencies would make a
+real dependency transition impossible to prove. Exact source SHA, declared
+pair, full identity equality, and complete materialization proof remain
+mandatory (AOA-SM-D-0084).
+
 Entity-registry construction distinguishes incremental navigation history from
 an authoritative rebuild. Incremental refresh may retain bounded prior-snapshot
 aliases and retired identities under an explicit history policy. A full rebuild
