@@ -65072,6 +65072,7 @@ def maintenance_cleanup(
     apply: bool = False,
     write_report: bool = False,
     surface: str = "all",
+    inspect_session_projection_work: bool = True,
     confirmed_unowned_session_stage_digests: set[str]
     | None = None,
 ) -> dict[str, Any]:
@@ -65148,7 +65149,10 @@ def maintenance_cleanup(
     )
     session_work_status = (
         session_projection_work_status(aoa_root)
-        if include_session_projection
+        if (
+            include_session_projection
+            and inspect_session_projection_work
+        )
         else dict(empty_surface_status)
     )
     removable_graph_tmp_entries = [
@@ -173595,7 +173599,16 @@ def session_memory_maintenance_next_actions(
     cli = session_memory_cli_command(aoa_root)
     actions: list[dict[str, Any]] = []
     coordinator = coordinator if isinstance(coordinator, dict) else {}
-    cleanup_status = maintenance_cleanup(aoa_root=aoa_root, apply=False, write_report=False)
+    cleanup_status = maintenance_cleanup(
+        aoa_root=aoa_root,
+        apply=False,
+        write_report=False,
+        # Hot status must stay metadata-bounded. Exact projection-work
+        # compatibility can parse complete raw transcripts; retain that proof
+        # for explicit cleanup/apply instead of hiding a deep source scan in
+        # an ordinary health read.
+        inspect_session_projection_work=False,
+    )
     cleanup_diagnostics = cleanup_status.get("diagnostics") if isinstance(cleanup_status.get("diagnostics"), list) else []
     cleanup_needed = str(cleanup_status.get("status") or "") == "cleanup_needed"
     cleanup_session_stages = (

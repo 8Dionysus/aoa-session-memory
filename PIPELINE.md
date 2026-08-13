@@ -408,6 +408,11 @@ dependency columns transactionally without rescanning node/edge payloads or
 running selective registry migration. Entry-set drift retains the complete
 materialization proof and bounded refresh route.
 
+Ordinary hot maintenance status remains metadata-bounded: it does not parse
+raw transcripts to classify temporary projection-work compatibility. Exact
+raw and producer identity is still required by explicit cleanup and repeated
+immediately before any removal (AOA-SM-D-0078).
+
 Entity-registry construction distinguishes incremental navigation history from
 an authoritative rebuild. Incremental refresh may retain bounded prior-snapshot
 aliases and retired identities under an explicit history policy. A full rebuild

@@ -41726,6 +41726,32 @@ def test_maintenance_cleanup_graph_surface_skips_unrelated_scans(
     assert not tmp_store.exists()
 
 
+def test_maintenance_cleanup_can_skip_projection_work_identity_for_hot_status(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir(parents=True)
+
+    def deep_projection_work_scan(_aoa_root: Path) -> dict[str, Any]:
+        raise AssertionError("hot status parsed projection-work raw")
+
+    monkeypatch.setattr(
+        module,
+        "session_projection_work_status",
+        deep_projection_work_scan,
+    )
+
+    status = module.maintenance_cleanup(
+        aoa_root=aoa_root,
+        apply=False,
+        inspect_session_projection_work=False,
+    )
+
+    assert status["status"] == "nothing_to_do"
+    assert status["session_projection_work"]["status"] == "not_selected"
+
+
 def test_maintenance_cleanup_detects_orphaned_graph_rebuild_tmp_journal_without_base(tmp_path: Path, monkeypatch: Any) -> None:
     aoa_root = tmp_path / ".aoa"
     graph_root = aoa_root / module.GRAPH_ROOT
@@ -54042,6 +54068,13 @@ def test_maintenance_status_returns_agent_route_without_mutating(tmp_path: Path,
     monkeypatch.setattr(module, "graph_freshness_gates", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("hot status should not run deep graph gates")))
     monkeypatch.setattr(module, "session_memory_timer_status", lambda: {"ok": True, "status": "available", "timer_count": 1, "timers": [], "diagnostics": []})
     monkeypatch.setattr(module, "latest_diagnostic_summary", lambda *_args, **_kwargs: {"exists": False})
+    monkeypatch.setattr(
+        module,
+        "session_projection_work_status",
+        lambda _aoa_root: (_ for _ in ()).throw(
+            AssertionError("hot status parsed projection-work raw")
+        ),
+    )
     monkeypatch.setattr(
         module,
         "session_memory_search_shard_projection_summary",
