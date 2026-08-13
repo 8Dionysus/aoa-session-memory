@@ -343,6 +343,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0031 Proof-Gated Entity-Registry Graph Rebind](../AOA-SM-D-0031-proof-gated-entity-registry-graph-rebind.md) | 2026-07-26 | Accepted | `docs/decisions/AOA-SM-D-0031-proof-gated-entity-registry-graph-rebind.md` |
 
+## complete materialization equality
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0079 Materialization-Equivalent Rebind Does Not Rehash the Graph](../AOA-SM-D-0079-materialization-equivalent-rebind-does-not-rehash-graph.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0079-materialization-equivalent-rebind-does-not-rehash-graph.md` |
+
 ## complete source set
 
 | Decision | Date | Status | Path |
@@ -663,6 +669,7 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0067 Guarded Graph Generation Rebind](../AOA-SM-D-0067-guarded-graph-generation-rebind.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0067-guarded-graph-generation-rebind.md` |
+| [AOA-SM-D-0079 Materialization-Equivalent Rebind Does Not Rehash the Graph](../AOA-SM-D-0079-materialization-equivalent-rebind-does-not-rehash-graph.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0079-materialization-equivalent-rebind-does-not-rehash-graph.md` |
 
 ## exact recall
 
@@ -1093,6 +1100,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0058 Persisted Live-Tail State Precedes Resource Admission](../AOA-SM-D-0058-persisted-live-tail-state-precedes-resource-admission.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0058-persisted-live-tail-state-precedes-resource-admission.md` |
+
+## post-commit proof
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0079 Materialization-Equivalent Rebind Does Not Rehash the Graph](../AOA-SM-D-0079-materialization-equivalent-rebind-does-not-rehash-graph.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0079-materialization-equivalent-rebind-does-not-rehash-graph.md` |
 
 ## post-maintenance proof
 
@@ -1611,6 +1624,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0077 Entry-Set-Equivalent Graph Rebind Is Metadata Only](../AOA-SM-D-0077-entry-set-equivalent-graph-rebind-is-metadata-only.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0077-entry-set-equivalent-graph-rebind-is-metadata-only.md` |
+
+## transaction scope
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0079 Materialization-Equivalent Rebind Does Not Rehash the Graph](../AOA-SM-D-0079-materialization-equivalent-rebind-does-not-rehash-graph.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0079-materialization-equivalent-rebind-does-not-rehash-graph.md` |
 
 ## transactional invalidation
 

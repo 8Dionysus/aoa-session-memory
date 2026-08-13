@@ -4,6 +4,7 @@
 
 | Date | Decision | Status | Path |
 | --- | --- | --- | --- |
+| 2026-08-13 | [AOA-SM-D-0079 Materialization-Equivalent Rebind Does Not Rehash the Graph](../AOA-SM-D-0079-materialization-equivalent-rebind-does-not-rehash-graph.md) | Accepted | `docs/decisions/AOA-SM-D-0079-materialization-equivalent-rebind-does-not-rehash-graph.md` |
 | 2026-08-13 | [AOA-SM-D-0078 Hot Status Does Not Parse Raw Projection Work](../AOA-SM-D-0078-hot-status-does-not-parse-raw-projection-work.md) | Accepted | `docs/decisions/AOA-SM-D-0078-hot-status-does-not-parse-raw-projection-work.md` |
 | 2026-08-13 | [AOA-SM-D-0077 Entry-Set-Equivalent Graph Rebind Is Metadata Only](../AOA-SM-D-0077-entry-set-equivalent-graph-rebind-is-metadata-only.md) | Accepted | `docs/decisions/AOA-SM-D-0077-entry-set-equivalent-graph-rebind-is-metadata-only.md` |
 | 2026-08-13 | [AOA-SM-D-0076 Observed Route Refresh Is One Covering Pass](../AOA-SM-D-0076-observed-route-refresh-is-one-covering-pass.md) | Accepted | `docs/decisions/AOA-SM-D-0076-observed-route-refresh-is-one-covering-pass.md` |

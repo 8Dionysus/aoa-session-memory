@@ -135554,6 +135554,52 @@ def graph_registry_entry_set_equivalent_generation_transition(
     }
 
 
+def graph_registry_materialization_equivalent_generation_transition(
+    *,
+    aoa_root: Path,
+    stored_identity: dict[str, Any],
+    declared_transition: dict[str, Any],
+) -> dict[str, Any]:
+    """Admit a registry-generation-only move after exact mapping proof."""
+
+    transition = (
+        graph_registry_entry_set_equivalent_generation_transition(
+            aoa_root=aoa_root,
+            stored_identity=stored_identity,
+            declared_transition=declared_transition,
+            # The caller supplies this only after complete node/contribution
+            # registry semantics and route-pair equality has been proved.
+            registry_entry_set_unchanged=True,
+        )
+    )
+    if transition.get("compatible") is not True:
+        return transition
+    if transition is declared_transition:
+        return transition
+    return {
+        **transition,
+        "declared_transition": {
+            **(
+                transition.get("declared_transition")
+                if isinstance(
+                    transition.get("declared_transition"),
+                    dict,
+                )
+                else {}
+            ),
+            "decision_id": "AOA-SM-D-0079",
+            "scope": (
+                "entity_registry_generation_binding_after_complete_"
+                "graph_materialization_equivalence"
+            ),
+        },
+        "truth_status": (
+            "complete_graph_registry_materialization_equivalence_"
+            "permits_generation_binding_not_graph_owner_truth"
+        ),
+    }
+
+
 def graph_registry_materialization_route_target(
     payload: dict[str, Any],
     registry_index: dict[tuple[str, str], dict[str, Any]],
@@ -136720,6 +136766,88 @@ def graph_entity_registry_materialization_compatibility(
             "graph_registry_rebind_contribution_route_mapping_mismatch"
         )
 
+    materialization_generation_transition = False
+    materialization_mismatch = bool(
+        counts["malformed_payload_count"]
+        or aggregate_node_mismatches
+        or contribution_node_mismatches
+        or missing_aggregate_pairs
+        or extra_aggregate_pairs
+        or missing_contribution_pairs
+        or extra_contribution_pairs
+        or static_version_mismatch_count
+    )
+    if not materialization_mismatch:
+        generation_transition = (
+            graph_registry_materialization_equivalent_generation_transition(
+                aoa_root=aoa_root,
+                stored_identity=stored_generation_identity,
+                declared_transition=generation_transition,
+            )
+        )
+        refreshed_source_transitions: list[dict[str, Any]] = []
+        for item in source_generation_transitions:
+            try:
+                source_identity = json.loads(
+                    str(
+                        next(
+                            row["generation_identity_json"]
+                            for row in source_generation_counts
+                            if row["generation_id"]
+                            == item["generation_id"]
+                        )
+                    )
+                )
+            except (StopIteration, TypeError, json.JSONDecodeError):
+                source_identity = {}
+            refreshed_source_transitions.append(
+                {
+                    **item,
+                    "transition": (
+                        graph_registry_materialization_equivalent_generation_transition(
+                            aoa_root=aoa_root,
+                            stored_identity=(
+                                source_identity
+                                if isinstance(source_identity, dict)
+                                else {}
+                            ),
+                            declared_transition=(
+                                item.get("transition", {})
+                                if isinstance(
+                                    item.get("transition"), dict
+                                )
+                                else {}
+                            ),
+                        )
+                    ),
+                }
+            )
+        source_generation_transitions = refreshed_source_transitions
+        all_source_generations_compatible = bool(
+            source_generation_transitions
+            and all(
+                item.get("transition", {}).get("compatible") is True
+                for item in source_generation_transitions
+            )
+        )
+        if (
+            generation_transition.get("compatible") is True
+            and all_source_generations_compatible
+        ):
+            materialization_generation_transition = True
+            diagnostics = [
+                reason
+                for reason in diagnostics
+                if not (
+                    str(reason).startswith(
+                        "graph_generation_transition_"
+                    )
+                    or str(reason).startswith(
+                        "graph_registry_rebind_source_generation_incompatible:"
+                    )
+                )
+            ]
+
     for rows in (
         aggregate_node_mismatches,
         contribution_node_mismatches,
@@ -136837,6 +136965,9 @@ def graph_entity_registry_materialization_compatibility(
         "stored_generation_id": stored_generation_id,
         "current_generation_id": expected_generation_id,
         "generation_transition": generation_transition,
+        "materialization_equivalent_generation_transition": (
+            materialization_generation_transition
+        ),
         "generation_changed": bool(
             generation_transition.get("changes_generation")
             or any(
@@ -136977,13 +137108,21 @@ def graph_entity_registry_dependency_rebind(
                 previous_producer_source
             ),
             sample_limit=sample_limit,
-            include_content_digest=True,
+            include_content_digest=False,
         )
         refresh_required = bool(
             plan.get("registry_materialization_refreshable")
         )
         identity_only_rebind = bool(
             plan.get("identity_only_rebind")
+        )
+        materialization_equivalent_rebind = bool(
+            plan.get("compatible")
+            and not refresh_required
+            and not identity_only_rebind
+            and plan.get(
+                "materialization_equivalent_generation_transition"
+            )
         )
         if not plan.get("compatible") and not refresh_required:
             if apply:
@@ -137091,6 +137230,7 @@ def graph_entity_registry_dependency_rebind(
                 "sha256": "",
             }
             if identity_only_rebind
+            or materialization_equivalent_rebind
             else graph_non_registry_content_digest(conn)
         )
         materialization_refresh: dict[str, Any] = {
@@ -137139,7 +137279,7 @@ def graph_entity_registry_dependency_rebind(
                         previous_producer_source
                     ),
                     sample_limit=sample_limit,
-                    include_content_digest=True,
+                    include_content_digest=False,
                 )
             )
             if not refreshed_plan.get("compatible"):
@@ -137320,11 +137460,13 @@ def graph_entity_registry_dependency_rebind(
         content_digest_after = (
             plan.get("content_digest", {})
             if identity_only_rebind
+            or materialization_equivalent_rebind
             else graph_projection_content_digest(conn)
         )
         if (
             not refresh_required
             and not identity_only_rebind
+            and not materialization_equivalent_rebind
             and
             str(
                 (
@@ -137346,6 +137488,7 @@ def graph_entity_registry_dependency_rebind(
         semantic_digest_after = (
             plan.get("semantic_digest", {})
             if identity_only_rebind
+            or materialization_equivalent_rebind
             else graph_projection_semantic_digest(conn)
         )
         phase = "commit"
@@ -137391,7 +137534,7 @@ def graph_entity_registry_dependency_rebind(
                 dependency=dependency,
                 previous_producer_source=None,
                 sample_limit=sample_limit,
-                include_content_digest=True,
+                include_content_digest=False,
             )
         )
     finally:

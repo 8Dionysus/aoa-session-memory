@@ -413,6 +413,11 @@ raw transcripts to classify temporary projection-work compatibility. Exact
 raw and producer identity is still required by explicit cleanup and repeated
 immediately before any removal (AOA-SM-D-0078).
 
+After bounded graph source refresh removes every registry materialization
+mismatch, final generation/dependency rebind repeats complete registry node and
+route-pair equality instead of rehashing unrelated graph payload tables. Any
+remaining mismatch falls back to bounded refresh (AOA-SM-D-0079).
+
 Entity-registry construction distinguishes incremental navigation history from
 an authoritative rebuild. Incremental refresh may retain bounded prior-snapshot
 aliases and retired identities under an explicit history policy. A full rebuild

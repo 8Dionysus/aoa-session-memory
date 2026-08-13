@@ -100124,6 +100124,116 @@ def test_graph_registry_rebind_uses_entry_set_identity_without_content_scan(
     assert plan["materialization_counts"] == {}
 
 
+def test_graph_registry_rebind_admits_generation_after_complete_materialization(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    expected = module.session_memory_expected_generation_identities(
+        aoa_root
+    )["graph"]
+    stored = json.loads(json.dumps(expected))
+    stored.pop("generation_id", None)
+    stored["dependency_generations"]["entity_registry"] = (
+        "prior-registry-generation"
+    )
+    stored = module.generation_identity_with_id(stored)
+    old_dependency = {
+        "schema_version": 1,
+        "artifact_type": (
+            "session_memory_graph_entity_registry_dependency"
+        ),
+        "status": "current",
+        "dependency_id": "old-dependency",
+        "identity": {
+            "source_fingerprint": "a" * 64,
+            "entity_count": 0,
+            "semantic_epoch_id": "e" * 64,
+        },
+        "entries": [],
+        "index": {},
+    }
+    current_dependency = {
+        **old_dependency,
+        "dependency_id": "current-dependency",
+        "identity": {
+            **old_dependency["identity"],
+            "source_fingerprint": "b" * 64,
+        },
+    }
+    store = module.GraphSqliteStore(
+        aoa_root,
+        reset=True,
+        entity_registry_dependency=old_dependency,
+    )
+    store.conn.execute(
+        "UPDATE metadata SET value = ? "
+        "WHERE key = 'graph_generation_id'",
+        (stored["generation_id"],),
+    )
+    store.conn.execute(
+        "UPDATE metadata SET value = ? "
+        "WHERE key = 'graph_generation_identity_json'",
+        (module.graph_json(stored),),
+    )
+    source = {
+        "source_key": "session:fixture",
+        "source_type": "session",
+        "session_id": "fixture",
+        "session_label": "fixture",
+        "segment_id": "",
+        "source_path": "fixture",
+        "source_paths_json": "[]",
+        "source_sha": "fixture",
+        "source_mtime": 1.0,
+        "graph_schema_version": module.GRAPH_SCHEMA_VERSION,
+        "graph_store_schema_version": module.GRAPH_STORE_SCHEMA_VERSION,
+        "graph_event_route_signal_edge_policy": (
+            module.GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY
+        ),
+        "route_signal_classifier_version": (
+            module.ROUTE_SIGNAL_CLASSIFIER_VERSION
+        ),
+        "entity_registry_route_tokens_json": "[]",
+        "entity_registry_selective_digest": "",
+        "indexed_at": module.utc_now(),
+        "status": "current",
+        "diagnostic": "",
+        "node_count": 0,
+        "edge_count": 0,
+        "generation_id": stored["generation_id"],
+        "generation_identity_json": module.graph_json(stored),
+        "entity_registry_dependency_id": old_dependency["dependency_id"],
+        "entity_registry_dependency_json": module.graph_json(
+            old_dependency
+        ),
+    }
+    columns = list(source)
+    store.conn.execute(
+        f"INSERT INTO graph_sources ({', '.join(columns)}) "
+        f"VALUES ({', '.join('?' for _ in columns)})",
+        tuple(source[column] for column in columns),
+    )
+    store.conn.commit()
+
+    plan = module.graph_entity_registry_materialization_compatibility(
+        aoa_root=aoa_root,
+        conn=store.conn,
+        dependency=current_dependency,
+        include_content_digest=False,
+    )
+    store.close()
+
+    assert plan["compatible"] is True
+    assert plan["status"] == "ready"
+    assert plan[
+        "materialization_equivalent_generation_transition"
+    ] is True
+    assert plan["generation_transition"]["compatible"] is True
+    assert plan["generation_transition"]["declared_transition"][
+        "decision_id"
+    ] == "AOA-SM-D-0079"
+
+
 def test_graph_registry_materialization_refresh_is_bounded_and_exact(
     tmp_path: Path,
 ) -> None:
