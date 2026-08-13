@@ -137,7 +137,7 @@ DECLARED_GRAPH_PROJECTION_GENERATION_TRANSITIONS: dict[
     # still conditional on reconstructing the exact predecessor identity from
     # its source and on the complete graph materialization proof performed by
     # graph-registry-rebind.
-    "ea73e542d289dd3f62a5801f9d3192f5ff2aec9492dedafaf1ffb46f642c4871": (
+    "c93008370f1aa55d24a430c244e154b58ce089c2030d4cefa399632699805a22": (
         {
             "bae847f241b3c19e3ca11d177df29089f8760aec72e1d0e50790eb6955d710c9": (
                 "e065b0e0399f986829c524f79cbf371b0fe6925c9f9aeb39c944c6309adcadb3"
@@ -9012,6 +9012,240 @@ def entity_registry_payload_with_runtime_source_overlay(
     return overlaid
 
 
+def refresh_entity_registry_runtime_source_overlay(
+    *,
+    aoa_root: Path,
+    registry_state: dict[str, Any] | None = None,
+    observed_source: str = "auto",
+    history_policy: str = (
+        ENTITY_REGISTRY_HISTORY_POLICY_INCREMENTAL
+    ),
+) -> dict[str, Any]:
+    """Persist a proved runtime-only registry refresh without rescanning search."""
+
+    path = aoa_root / ENTITY_REGISTRY_PATH
+    state = (
+        registry_state
+        if isinstance(registry_state, dict)
+        else entity_registry_maintenance_status(aoa_root)
+    )
+    payload = read_json(path, {}) if path.is_file() else {}
+    diagnostics = [
+        str(item)
+        for item in (
+            state.get("diagnostics")
+            if isinstance(state.get("diagnostics"), list)
+            else []
+        )
+        if str(item)
+    ]
+    requested_observed_source = route_key_slug(
+        observed_source,
+        fallback="auto",
+    ).replace("_", "-")
+    requested_history_policy = {
+        "incremental": ENTITY_REGISTRY_HISTORY_POLICY_INCREMENTAL,
+        "authoritative-rebuild": (
+            ENTITY_REGISTRY_HISTORY_POLICY_AUTHORITATIVE_REBUILD
+        ),
+    }.get(
+        str(history_policy or "").strip(),
+        str(history_policy or "").strip(),
+    )
+    stored_observed_dependency = (
+        state.get("observed_source_dependency")
+        if isinstance(state.get("observed_source_dependency"), dict)
+        else {}
+    )
+    current_observed_dependency = (
+        state.get("current_observed_source_dependency")
+        if isinstance(
+            state.get("current_observed_source_dependency"),
+            dict,
+        )
+        else {}
+    )
+    observed_dependency_verified = bool(
+        str(stored_observed_dependency.get("semantic_sha256") or "")
+        and str(stored_observed_dependency.get("source") or "")
+        == str(current_observed_dependency.get("source") or "")
+        and str(stored_observed_dependency.get("semantic_sha256") or "")
+        == str(current_observed_dependency.get("semantic_sha256") or "")
+    )
+    eligible = bool(
+        isinstance(payload, dict)
+        and payload.get("artifact_type") == "entity_registry_snapshot"
+        and state.get("runtime_overlay_required") is True
+        and set(diagnostics) == {"source_newer_than_entity_registry"}
+        and state.get("semantic_digest_verified") is True
+        and str(
+            (
+                state.get("generation_identity")
+                if isinstance(state.get("generation_identity"), dict)
+                else {}
+            ).get("generation_id")
+            or ""
+        )
+        == str(
+            (
+                state.get("expected_generation_identity")
+                if isinstance(
+                    state.get("expected_generation_identity"),
+                    dict,
+                )
+                else {}
+            ).get("generation_id")
+            or ""
+        )
+        and observed_dependency_verified
+        and (
+            requested_observed_source == "auto"
+            or requested_observed_source
+            == str(payload.get("observed_source") or "")
+        )
+        and requested_history_policy
+        == str(payload.get("history_policy") or "")
+    )
+    base = {
+        "schema_version": ENTITY_REGISTRY_SCHEMA_VERSION,
+        "artifact_type": "entity_registry_runtime_source_overlay_refresh",
+        "eligible": eligible,
+        "mutates": False,
+        "path": str(path),
+        "observed_dependency_verified": observed_dependency_verified,
+        "diagnostics": diagnostics,
+    }
+    if not eligible:
+        return {
+            **base,
+            "ok": True,
+            "status": "not_eligible",
+            "skip_reason": "full_entity_registry_refresh_required",
+        }
+
+    producer_before = session_memory_loaded_producer_source_state()
+    if not producer_before.get("stable"):
+        return {
+            **base,
+            "ok": False,
+            "status": "blocked",
+            "diagnostics": [
+                "producer_source_changed_before_runtime_overlay_refresh"
+            ],
+        }
+    overlay_status = (
+        state.get("runtime_overlay_state")
+        if isinstance(state.get("runtime_overlay_state"), dict)
+        else {}
+    )
+    refreshed = entity_registry_payload_with_runtime_source_overlay(
+        aoa_root,
+        payload,
+        overlay_status=overlay_status,
+    )
+    generated_at_epoch = time.time()
+    refreshed.update(
+        {
+            "generated_at": datetime.fromtimestamp(
+                generated_at_epoch,
+                timezone.utc,
+            ).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "generated_at_epoch": generated_at_epoch,
+            "mutates": True,
+            "producer_source_state": producer_before,
+            "diagnostics": [],
+        }
+    )
+    for transient_key in (
+        "read_mode",
+        "read_compatibility",
+        "runtime_source_overlay",
+        "source_schema_version",
+    ):
+        refreshed.pop(transient_key, None)
+    entries = (
+        refreshed.get("entries")
+        if isinstance(refreshed.get("entries"), list)
+        else []
+    )
+    refreshed["counts_by_canonicalization"] = dict(
+        Counter(
+            str(
+                (
+                    entry.get("canonicalization")
+                    if isinstance(entry, dict)
+                    and isinstance(entry.get("canonicalization"), dict)
+                    else {}
+                ).get("status")
+                or "unproven"
+            )
+            for entry in entries
+        )
+    )
+    refreshed["semantic_digest"] = entity_registry_semantic_digest(
+        refreshed,
+        aoa_root=aoa_root,
+    )
+    calculated_source_fingerprint = entity_registry_source_fingerprint(
+        entries
+    )
+    if (
+        not calculated_source_fingerprint
+        or calculated_source_fingerprint
+        != str(refreshed.get("source_fingerprint") or "")
+        or refreshed.get("observed_source_dependency")
+        != payload.get("observed_source_dependency")
+    ):
+        return {
+            **base,
+            "ok": False,
+            "status": "blocked",
+            "diagnostics": [
+                "runtime_overlay_refresh_postbuild_proof_failed"
+            ],
+        }
+    producer_at_commit = session_memory_loaded_producer_source_state()
+    if (
+        not producer_at_commit.get("stable")
+        or producer_at_commit.get("loaded_sha256")
+        != producer_before.get("loaded_sha256")
+    ):
+        return {
+            **base,
+            "ok": False,
+            "status": "blocked",
+            "diagnostics": [
+                "producer_source_changed_during_runtime_overlay_refresh"
+            ],
+        }
+    write_json(path, refreshed)
+    write_markdown(
+        aoa_root / ENTITY_REGISTRY_MARKDOWN,
+        entity_registry_markdown(refreshed),
+    )
+    ENTITY_REGISTRY_INDEX_CACHE.clear()
+    post_state = entity_registry_maintenance_status(aoa_root)
+    return {
+        **base,
+        "ok": not post_state.get("needs_maintenance"),
+        "status": (
+            "refreshed"
+            if not post_state.get("needs_maintenance")
+            else "postcondition_failed"
+        ),
+        "mutates": True,
+        "entity_count": len(entries),
+        "source_fingerprint": refreshed.get("source_fingerprint"),
+        "semantic_digest": refreshed.get("semantic_digest"),
+        "post_state": post_state,
+        "diagnostics": (
+            []
+            if not post_state.get("needs_maintenance")
+            else post_state.get("diagnostics", [])
+        ),
+    }
+
+
 def entity_registry_entries_from_route_terms(
     aoa_root: Path,
     *,
@@ -9023,7 +9257,7 @@ def entity_registry_entries_from_route_terms(
     stable_source_ref_path = source_ref_path or db_path
     if not db_path.exists():
         return []
-    entries: list[dict[str, Any]] = []
+    entries_by_id: dict[str, dict[str, Any]] = {}
     conn: sqlite3.Connection | None = None
     try:
         conn = sqlite3.connect(
@@ -9032,55 +9266,87 @@ def entity_registry_entries_from_route_terms(
             timeout=1.0,
         )
         conn.row_factory = sqlite3.Row
-        for layer in sorted(ENTITY_REGISTRY_KIND_BY_ROUTE_LAYER):
-            query = """
-                SELECT route_terms.key AS key, route_terms.route_signal AS route_signal,
-                       COUNT(*) AS signal_count, COUNT(DISTINCT documents.session_id) AS session_count,
-                       MAX(documents.session_date) AS latest_session_date
-                FROM route_terms
-                JOIN document_routes ON document_routes.route_id = route_terms.id
-                JOIN documents ON documents.rowid = document_routes.doc_rowid
-                WHERE route_terms.layer = ?
-                  AND documents.doc_type <> 'entity_registry'
-                GROUP BY route_terms.key, route_terms.route_signal
-                ORDER BY signal_count DESC, session_count DESC, key ASC
-            """
-            query_args: tuple[Any, ...] = (layer,)
-            if limit_per_layer > 0:
-                query += "\nLIMIT ?"
-                query_args = (layer, limit_per_layer)
-            rows = conn.execute(query, query_args).fetchall()
-            for row in rows:
-                key = str(row["key"] or "")
-                if not key:
-                    continue
-                kind = "mcp_tool" if layer == "tool" and entity_registry_tool_key_is_mcp_tool(key) else ENTITY_REGISTRY_KIND_BY_ROUTE_LAYER.get(layer, layer)
-                entries.append(
-                    entity_registry_make_entry(
-                        kind=kind,
-                        key=key,
-                        aliases=[str(row["route_signal"] or "")],
-                        source_refs=[
-                            {
-                                "source_type": "search_route_terms",
-                                "path": str(stable_source_ref_path),
-                                "status": "observed",
-                                "latest_session_date": row["latest_session_date"],
-                            }
-                        ],
-                        source_surface="archived_route_terms",
-                        owner="aoa-session-memory",
-                        status="observed",
-                        signal_count=int_value(row["signal_count"]),
-                        session_count=int_value(row["session_count"]),
-                    )
+        layers = sorted(ENTITY_REGISTRY_KIND_BY_ROUTE_LAYER)
+        placeholders = ",".join("?" for _ in layers)
+        grouped_query = f"""
+            SELECT route_terms.layer AS layer,
+                   route_terms.key AS key,
+                   route_terms.route_signal AS route_signal,
+                   COUNT(*) AS signal_count,
+                   COUNT(DISTINCT documents.session_id) AS session_count,
+                   MAX(documents.session_date) AS latest_session_date
+            FROM documents
+                 INDEXED BY idx_documents_registry_route_cover
+            CROSS JOIN document_routes
+              ON document_routes.doc_rowid = documents.rowid
+            CROSS JOIN route_terms
+              ON route_terms.id = document_routes.route_id
+            WHERE documents.doc_type <> 'entity_registry'
+              AND route_terms.layer IN ({placeholders})
+            GROUP BY route_terms.layer,
+                     route_terms.key,
+                     route_terms.route_signal
+        """
+        query_args: tuple[Any, ...] = tuple(layers)
+        if limit_per_layer > 0:
+            query = f"""
+                WITH grouped AS ({grouped_query}),
+                ranked AS (
+                    SELECT grouped.*,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY layer
+                               ORDER BY signal_count DESC,
+                                        session_count DESC,
+                                        key ASC
+                           ) AS layer_rank
+                    FROM grouped
                 )
+                SELECT * FROM ranked
+                WHERE layer_rank <= ?
+            """
+            query_args = (*query_args, limit_per_layer)
+        else:
+            query = grouped_query
+        rows = conn.execute(query, query_args)
+        for row in rows:
+            layer = str(row["layer"] or "")
+            key = str(row["key"] or "")
+            if not layer or not key:
+                continue
+            kind = "mcp_tool" if layer == "tool" and entity_registry_tool_key_is_mcp_tool(key) else ENTITY_REGISTRY_KIND_BY_ROUTE_LAYER.get(layer, layer)
+            entity_registry_merge_entry(
+                entries_by_id,
+                entity_registry_make_entry(
+                    kind=kind,
+                    key=key,
+                    aliases=[str(row["route_signal"] or "")],
+                    source_refs=[
+                        {
+                            "source_type": "search_route_terms",
+                            "path": str(stable_source_ref_path),
+                            "status": "observed",
+                            "latest_session_date": row["latest_session_date"],
+                        }
+                    ],
+                    source_surface="archived_route_terms",
+                    owner="aoa-session-memory",
+                    status="observed",
+                    signal_count=int_value(row["signal_count"]),
+                    session_count=int_value(row["session_count"]),
+                ),
+            )
     except sqlite3.Error:
-        return entries
+        pass
     finally:
         if conn is not None:
             conn.close()
-    return entries
+    return sorted(
+        entries_by_id.values(),
+        key=lambda item: (
+            str(item.get("kind") or ""),
+            str(item.get("canonical_key") or ""),
+        ),
+    )
 
 
 def entity_registry_observed_rollup_ready(aoa_root: Path) -> dict[str, Any]:
@@ -33442,6 +33708,16 @@ def promote_deferred_hook_jobs(
     promoted: list[dict[str, Any]] = []
     deferred_dir = dirs["deferred"]
     pending_dir = dirs["pending"]
+    pending_predecessor_exists = any(
+        isinstance(job, dict)
+        and str(job.get("job_type") or "")
+        == "session_generation_reindex"
+        for job in (
+            read_json(path, {})
+            for path in sorted(pending_dir.glob("*.json"))
+        )
+    )
+    graph_circuit: dict[str, Any] | None = None
     for deferred_path in sorted(
         deferred_dir.glob("*.json")
     ):
@@ -33474,7 +33750,13 @@ def promote_deferred_hook_jobs(
             )
             continue
         if job_type == "graph_maintenance":
-            circuit = graph_automatic_drip_circuit_state(aoa_root)
+            if pending_predecessor_exists:
+                continue
+            if graph_circuit is None:
+                graph_circuit = (
+                    graph_automatic_drip_circuit_state(aoa_root)
+                )
+            circuit = graph_circuit
             if circuit.get("open"):
                 continue
             reason = "graph_drip_circuit_closed"
@@ -62243,6 +62525,7 @@ def auto_maintenance_resource_launch(
             status = f"{index_drip_status_prefix}_failed"
             diagnostics.append(f"index_drip_fallback_{fallback_status}")
     fallback_graph_drip: dict[str, Any] = {}
+    graph_predecessor_handoff_queued = False
     graph_drip_circuit = (
         graph_automatic_drip_circuit_state(aoa_root)
         if (
@@ -62257,20 +62540,88 @@ def auto_maintenance_resource_launch(
         }
     )
     if graph_drip_circuit.get("open"):
-        status = "resource_blocked_graph_drip_circuit_open"
+        circuit_session_ids = [
+            str(item)
+            for item in (
+                graph_drip_circuit.get(
+                    "recoverable_upstream_session_ids"
+                )
+                if isinstance(
+                    graph_drip_circuit.get(
+                        "recoverable_upstream_session_ids"
+                    ),
+                    list,
+                )
+                else []
+            )
+            if str(item)
+        ]
+        circuit_reindex_jobs = [
+            queued_path
+            for blocked_session_id in circuit_session_ids
+            for queued_path in [
+                enqueue_session_generation_reindex_job(
+                    aoa_root,
+                    session_id=blocked_session_id,
+                    reason=(
+                        "graph_no_progress_predecessor:"
+                        f"{blocked_session_id}"
+                    ),
+                    followup_graph_target=str(target or "all"),
+                    budget_seconds=300.0,
+                    graph_batch_limit=(
+                        effective_graph_drip_batch_limit
+                    ),
+                    graph_refresh_chunk_size=(
+                        effective_graph_drip_refresh_chunk_size
+                    ),
+                )
+            ]
+            if queued_path is not None
+        ]
+        graph_predecessor_handoff_queued = bool(
+            circuit_session_ids
+            and len(circuit_reindex_jobs)
+            == len(circuit_session_ids)
+        )
+        status = (
+            "resource_blocked_graph_drip_upstream_reindex_queued"
+            if graph_predecessor_handoff_queued
+            else "resource_blocked_graph_drip_circuit_open"
+        )
         diagnostics.append(
-            "graph_drip_circuit_open:"
-            f"{graph_drip_circuit.get('reason') or 'unknown'}"
+            "graph_drip_circuit_upstream_reindex_queued"
+            if graph_predecessor_handoff_queued
+            else (
+                "graph_drip_circuit_open:"
+                f"{graph_drip_circuit.get('reason') or 'unknown'}"
+            )
         )
         fallback_graph_drip = {
             "enabled": False,
             "ok": False,
-            "status": "circuit_open",
+            "status": (
+                "upstream_reindex_queued"
+                if graph_predecessor_handoff_queued
+                else "circuit_open"
+            ),
             "made_progress": False,
             "remaining_work": True,
             "circuit": graph_drip_circuit,
+            "next_route": graph_drip_circuit.get("next_route"),
+            "upstream_reindex_session_ids": circuit_session_ids,
+            "upstream_reindex_jobs": [
+                str(path) for path in circuit_reindex_jobs
+            ],
+            "predecessor_handoff_queued": (
+                graph_predecessor_handoff_queued
+            ),
             "diagnostics": [
-                "automatic_graph_drip_not_launched"
+                (
+                    "automatic_graph_drip_predecessor_handoff_queued"
+                    if graph_predecessor_handoff_queued
+                    else "automatic_graph_drip_not_launched"
+                )
             ],
         }
     elif status == "resource_blocked" and effective_graph_drip_on_block and apply and repair_graph is not False:
@@ -62415,6 +62766,43 @@ def auto_maintenance_resource_launch(
             if isinstance(fallback_child_payload.get("diagnostics"), list)
             else []
         )
+        fallback_upstream_session_ids = (
+            graph_upstream_reindex_session_ids(
+                fallback_child_payload
+            )
+        )
+        fallback_upstream_reindex_jobs = [
+            queued_path
+            for blocked_session_id in fallback_upstream_session_ids
+            for queued_path in [
+                enqueue_session_generation_reindex_job(
+                    aoa_root,
+                    session_id=blocked_session_id,
+                    reason=(
+                        "graph_generation_predecessor:"
+                        f"{blocked_session_id}"
+                    ),
+                    followup_graph_target=str(target or "all"),
+                    budget_seconds=300.0,
+                    graph_batch_limit=(
+                        effective_graph_drip_batch_limit
+                    ),
+                    graph_refresh_chunk_size=(
+                        effective_graph_drip_refresh_chunk_size
+                    ),
+                )
+            ]
+            if queued_path is not None
+        ]
+        fallback_predecessor_handoff_queued = bool(
+            fallback_upstream_session_ids
+            and len(fallback_upstream_reindex_jobs)
+            == len(fallback_upstream_session_ids)
+        )
+        graph_predecessor_handoff_queued = bool(
+            graph_predecessor_handoff_queued
+            or fallback_predecessor_handoff_queued
+        )
         if fallback_blocked_reasons:
             fallback_status = "resource_blocked"
             fallback_diagnostics.extend(f"resource_blocked:{item}" for item in fallback_blocked_reasons)
@@ -62503,13 +62891,29 @@ def auto_maintenance_resource_launch(
             },
             "child_result_verified": fallback_child_result_verified,
             "child": compact_maintenance_child_summary(fallback_child_payload),
+            "upstream_reindex_session_ids": (
+                fallback_upstream_session_ids
+            ),
+            "upstream_reindex_jobs": [
+                str(path) for path in fallback_upstream_reindex_jobs
+            ],
+            "predecessor_handoff_queued": (
+                fallback_predecessor_handoff_queued
+            ),
             "command": fallback_command,
             "exact_command": shlex.join(fallback_command),
             "stdout_tail": fallback_stdout[-4000:],
             "stderr_tail": fallback_stderr[-4000:],
             "diagnostics": sorted(set(fallback_diagnostics)),
         }
-        if fallback_ok and (graph_drip_made_progress or not graph_drip_remaining_work):
+        if fallback_predecessor_handoff_queued:
+            status = (
+                "resource_blocked_graph_drip_upstream_reindex_queued"
+            )
+            diagnostics.append(
+                "graph_drip_upstream_reindex_handoff_queued"
+            )
+        elif fallback_ok and (graph_drip_made_progress or not graph_drip_remaining_work):
             status = "resource_blocked_graph_drip_completed"
             diagnostics.append("graph_drip_fallback_completed")
             if graph_drip_made_progress and graph_drip_remaining_work:
@@ -62574,6 +62978,7 @@ def auto_maintenance_resource_launch(
                 or child_progressed_with_remaining
                 or fallback_ok
                 or fallback_progressed
+                or graph_predecessor_handoff_queued
             )
         ),
         "apply": apply,
@@ -76090,6 +76495,7 @@ SEARCH_DB_INDEX_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_documents_session_id ON documents(session_id)",
     "CREATE INDEX IF NOT EXISTS idx_documents_type ON documents(doc_type, event_type)",
     "CREATE INDEX IF NOT EXISTS idx_documents_doc_type_date ON documents(doc_type, session_date DESC, rowid DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_documents_registry_route_cover ON documents(doc_type, session_date, session_id)",
     "CREATE INDEX IF NOT EXISTS idx_documents_usage_role_date ON documents(usage_role, session_date DESC, rowid DESC)",
     "CREATE INDEX IF NOT EXISTS idx_documents_doc_type_usage_role_date ON documents(doc_type, usage_role, session_date DESC, rowid DESC)",
     "CREATE INDEX IF NOT EXISTS idx_documents_session_act_date ON documents(session_act, session_date DESC, rowid DESC)",
@@ -77703,6 +78109,7 @@ def refresh_search_entity_registry_documents(
     history_policy: str = (
         ENTITY_REGISTRY_HISTORY_POLICY_INCREMENTAL
     ),
+    registry_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     phase_timings: list[dict[str, Any]] = []
 
@@ -77717,6 +78124,7 @@ def refresh_search_entity_registry_documents(
         route_terms_source_ref_path=search_db_path(aoa_root),
         observed_source=observed_source,
         history_policy=history_policy,
+        registry_snapshot=registry_snapshot,
     )
     generation_identities = session_memory_expected_generation_identities(
         aoa_root
@@ -77865,6 +78273,29 @@ def refresh_entity_registry_search_documents_only(
         )
         record_phase("entity_registry_search_sync_current_noop", noop_started, skipped=registry_refresh is not None)
         if registry_refresh is None:
+            overlay_started = time.monotonic()
+            runtime_overlay_refresh = (
+                refresh_entity_registry_runtime_source_overlay(
+                    aoa_root=aoa_root,
+                    registry_state=registry_state,
+                    observed_source=observed_source,
+                    history_policy=history_policy,
+                )
+            )
+            record_phase(
+                "entity_registry_runtime_source_overlay_refresh",
+                overlay_started,
+                status=runtime_overlay_refresh.get("status"),
+            )
+            if runtime_overlay_refresh.get("status") == "refreshed":
+                registry_state = (
+                    runtime_overlay_refresh.get("post_state")
+                    if isinstance(
+                        runtime_overlay_refresh.get("post_state"),
+                        dict,
+                    )
+                    else entity_registry_maintenance_status(aoa_root)
+                )
             refresh_started = time.monotonic()
             registry_refresh = refresh_search_entity_registry_documents(
                 conn,
@@ -77872,6 +78303,15 @@ def refresh_entity_registry_search_documents_only(
                 route_terms_db_path=db_path,
                 observed_source=observed_source,
                 history_policy=history_policy,
+                registry_snapshot=(
+                    read_json(aoa_root / ENTITY_REGISTRY_PATH, {})
+                    if runtime_overlay_refresh.get("status")
+                    == "refreshed"
+                    else None
+                ),
+            )
+            registry_refresh["runtime_overlay_refresh"] = (
+                runtime_overlay_refresh
             )
             record_phase(
                 "refresh_search_entity_registry_documents",
@@ -77956,6 +78396,7 @@ def refresh_entity_registry_search_documents_only(
         "history_policy": history_policy,
         "observed_route_source": registry_refresh.get("observed_route_source") if "registry_refresh" in locals() and isinstance(registry_refresh, dict) else None,
         "observed_route_tracking": registry_refresh.get("observed_route_tracking", {}) if "registry_refresh" in locals() and isinstance(registry_refresh, dict) else {},
+        "runtime_overlay_refresh": registry_refresh.get("runtime_overlay_refresh", {}) if "registry_refresh" in locals() and isinstance(registry_refresh, dict) else {},
         "budget_seconds": budget_seconds,
         "budget_exhausted": bool(budget_value is not None and elapsed_ms > int(budget_value * 1000)),
         "budget_policy": "soft_observed_atomic_sync_not_interrupted",
@@ -112708,16 +113149,23 @@ def search_documents_for_entity_registry(
     history_policy: str = (
         ENTITY_REGISTRY_HISTORY_POLICY_INCREMENTAL
     ),
+    registry_snapshot: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    registry = build_entity_registry(
-        aoa_root=aoa_root,
-        write=write_snapshot,
-        include_runtime=True,
-        route_terms_db_path=route_terms_db_path,
-        route_terms_source_ref_path=route_terms_source_ref_path,
-        observed_source=observed_source,
-        history_policy=history_policy,
-        limit=None,
+    registry = (
+        registry_snapshot
+        if isinstance(registry_snapshot, dict)
+        and registry_snapshot.get("artifact_type")
+        == "entity_registry_snapshot"
+        else build_entity_registry(
+            aoa_root=aoa_root,
+            write=write_snapshot,
+            include_runtime=True,
+            route_terms_db_path=route_terms_db_path,
+            route_terms_source_ref_path=route_terms_source_ref_path,
+            observed_source=observed_source,
+            history_policy=history_policy,
+            limit=None,
+        )
     )
     registry_path = aoa_root / ENTITY_REGISTRY_PATH
     documents: list[dict[str, Any]] = []
@@ -135005,6 +135453,96 @@ def graph_declared_generation_transition(
     }
 
 
+def graph_registry_entry_set_equivalent_generation_transition(
+    *,
+    aoa_root: Path,
+    stored_identity: dict[str, Any],
+    declared_transition: dict[str, Any],
+    registry_entry_set_unchanged: bool,
+) -> dict[str, Any]:
+    """Admit only an entity-registry generation binding change."""
+
+    if declared_transition.get("compatible") is True:
+        return declared_transition
+    expected = session_memory_expected_generation_identities(
+        aoa_root
+    )["graph"]
+
+    def comparable(identity: dict[str, Any]) -> dict[str, Any]:
+        value = {
+            key: item
+            for key, item in identity.items()
+            if key not in {"generation_id", "generated_at"}
+        }
+        dependencies = (
+            dict(value.get("dependency_generations"))
+            if isinstance(value.get("dependency_generations"), dict)
+            else {}
+        )
+        dependencies.pop("entity_registry", None)
+        value["dependency_generations"] = dependencies
+        return value
+
+    compatible = bool(
+        registry_entry_set_unchanged
+        and str(stored_identity.get("generation_id") or "")
+        and comparable(stored_identity) == comparable(expected)
+        and str(
+            (
+                stored_identity.get("dependency_generations")
+                if isinstance(
+                    stored_identity.get("dependency_generations"),
+                    dict,
+                )
+                else {}
+            ).get("task_episode_source")
+            or ""
+        )
+        == str(
+            (
+                expected.get("dependency_generations")
+                if isinstance(
+                    expected.get("dependency_generations"),
+                    dict,
+                )
+                else {}
+            ).get("task_episode_source")
+            or ""
+        )
+    )
+    if not compatible:
+        return declared_transition
+    return {
+        "schema_version": 1,
+        "artifact_type": (
+            "session_memory_graph_generation_transition"
+        ),
+        "stored_generation_id": stored_identity.get("generation_id"),
+        "expected_generation_id": expected.get("generation_id"),
+        "status": "ready",
+        "compatible": True,
+        "changes_generation": True,
+        "requires_previous_producer_source": False,
+        "previous_producer_source": "",
+        "declared_transition": {
+            "from_generation_id": stored_identity.get(
+                "generation_id"
+            ),
+            "to_generation_id": expected.get("generation_id"),
+            "decision_id": "AOA-SM-D-0077",
+            "scope": (
+                "entity_registry_generation_binding_only_with_exact_"
+                "entry_set_equivalence"
+            ),
+        },
+        "diagnostics": [],
+        "truth_status": (
+            "exact_graph_identity_except_registry_generation_with_"
+            "entry_set_equivalence_not_graph_content_proof"
+        ),
+    }
+
+
 def graph_registry_materialization_route_target(
     payload: dict[str, Any],
     registry_index: dict[tuple[str, str], dict[str, Any]],
@@ -135643,6 +136181,34 @@ def graph_entity_registry_materialization_compatibility(
     stored_generation_id = str(
         metadata.get("graph_generation_id") or ""
     )
+    stored_dependency = graph_entity_registry_dependency_from_metadata(
+        metadata
+    )
+    stored_dependency_identity = (
+        stored_dependency.get("identity")
+        if isinstance(stored_dependency.get("identity"), dict)
+        else {}
+    )
+    current_dependency_identity = (
+        dependency_packet.get("identity")
+        if isinstance(dependency_packet.get("identity"), dict)
+        else {}
+    )
+    registry_entry_set_unchanged = bool(
+        str(stored_dependency_identity.get("source_fingerprint") or "")
+        and str(stored_dependency_identity.get("source_fingerprint") or "")
+        == str(
+            current_dependency_identity.get("source_fingerprint") or ""
+        )
+        and int_value(stored_dependency_identity.get("entity_count"))
+        == int_value(current_dependency_identity.get("entity_count"))
+        and str(
+            stored_dependency_identity.get("semantic_epoch_id") or ""
+        )
+        == str(
+            current_dependency_identity.get("semantic_epoch_id") or ""
+        )
+    )
     try:
         stored_generation_identity = json.loads(
             str(
@@ -135656,10 +136222,19 @@ def graph_entity_registry_materialization_compatibility(
         stored_generation_identity = {}
     if not isinstance(stored_generation_identity, dict):
         stored_generation_identity = {}
-    generation_transition = graph_declared_generation_transition(
-        aoa_root=aoa_root,
-        stored_identity=stored_generation_identity,
-        previous_producer_source=previous_producer_source,
+    generation_transition = (
+        graph_registry_entry_set_equivalent_generation_transition(
+            aoa_root=aoa_root,
+            stored_identity=stored_generation_identity,
+            declared_transition=graph_declared_generation_transition(
+                aoa_root=aoa_root,
+                stored_identity=stored_generation_identity,
+                previous_producer_source=previous_producer_source,
+            ),
+            registry_entry_set_unchanged=(
+                registry_entry_set_unchanged
+            ),
+        )
     )
     if (
         int_value(metadata.get("graph_store_schema_version"))
@@ -135753,10 +136328,21 @@ def graph_entity_registry_materialization_compatibility(
                 "graph_registry_rebind_source_generation_id_payload_mismatch:"
                 f"{item['generation_id']}"
             )
-        transition = graph_declared_generation_transition(
-            aoa_root=aoa_root,
-            stored_identity=source_identity,
-            previous_producer_source=previous_producer_source,
+        transition = (
+            graph_registry_entry_set_equivalent_generation_transition(
+                aoa_root=aoa_root,
+                stored_identity=source_identity,
+                declared_transition=graph_declared_generation_transition(
+                    aoa_root=aoa_root,
+                    stored_identity=source_identity,
+                    previous_producer_source=(
+                        previous_producer_source
+                    ),
+                ),
+                registry_entry_set_unchanged=(
+                    registry_entry_set_unchanged
+                ),
+            )
         )
         source_generation_transitions.append(
             {
@@ -135838,6 +136424,91 @@ def graph_entity_registry_materialization_compatibility(
         diagnostics.append(
             "graph_registry_rebind_source_dependency_missing"
         )
+
+    all_source_generations_compatible = bool(
+        source_generation_transitions
+        and all(
+            item.get("transition", {}).get("compatible") is True
+            for item in source_generation_transitions
+        )
+    )
+    source_bindings_match_stored_dependency = bool(
+        source_count > 0
+        and stored_dependency_id
+        and dependency_counts == {stored_dependency_id: source_count}
+        and all(
+            item.get("valid") is True
+            for item in source_dependency_bindings
+        )
+    )
+    identity_only_rebind = bool(
+        not diagnostics
+        and registry_entry_set_unchanged
+        and generation_transition.get("compatible") is True
+        and all_source_generations_compatible
+        and static_version_mismatch_count == 0
+        and source_bindings_match_stored_dependency
+    )
+    if identity_only_rebind:
+        all_source_generations_current = all(
+            item.get("transition", {}).get("status") == "current"
+            for item in source_generation_transitions
+        )
+        all_source_dependencies_current = (
+            stored_dependency_id == expected_dependency_id
+        )
+        current_noop = bool(
+            stored_dependency_id == expected_dependency_id
+            and generation_transition.get("status") == "current"
+            and all_source_generations_current
+            and all_source_dependencies_current
+        )
+        not_collected_digest = {
+            "status": "not_collected_registry_entry_set_unchanged",
+            "sha256": "",
+        }
+        return {
+            "schema_version": (
+                GRAPH_ENTITY_REGISTRY_REBIND_CONTRACT_VERSION
+            ),
+            "artifact_type": (
+                "session_memory_graph_registry_rebind_compatibility"
+            ),
+            "status": "current_noop" if current_noop else "ready",
+            "compatible": True,
+            "identity_only_rebind": True,
+            "registry_entry_set_unchanged": True,
+            "registry_materialization_refreshable": False,
+            "mutates": False,
+            "stored_dependency_id": stored_dependency_id,
+            "current_dependency_id": expected_dependency_id,
+            "stored_generation_id": stored_generation_id,
+            "current_generation_id": expected_generation_id,
+            "generation_transition": generation_transition,
+            "generation_changed": not all_source_generations_current,
+            "dependency_changed": not all_source_dependencies_current,
+            "dependency": dependency_packet,
+            "source_count": source_count,
+            "stored_dependency_counts": dependency_counts,
+            "source_dependency_bindings": source_dependency_bindings,
+            "stored_generation_counts": source_generation_counts,
+            "source_generation_transitions": (
+                source_generation_transitions
+            ),
+            "static_version_mismatch_count": 0,
+            "materialization_counts": {},
+            "content_digest": not_collected_digest,
+            "semantic_digest": not_collected_digest,
+            "diagnostics": [],
+            "samples": [],
+            "truth_status": (
+                "exact_registry_entry_set_fingerprint_and_declared_"
+                "generation_transition_proof_not_owner_truth"
+            ),
+            "elapsed_ms": int(
+                (time.monotonic() - started) * 1000
+            ),
+        }
 
     counts: Counter[str] = Counter()
     expected_aggregate_pairs: set[tuple[str, str]] = set()
@@ -136300,6 +136971,9 @@ def graph_entity_registry_dependency_rebind(
         refresh_required = bool(
             plan.get("registry_materialization_refreshable")
         )
+        identity_only_rebind = bool(
+            plan.get("identity_only_rebind")
+        )
         if not plan.get("compatible") and not refresh_required:
             if apply:
                 conn.rollback()
@@ -136399,7 +137073,14 @@ def graph_entity_registry_dependency_rebind(
             )
         phase = "non_registry_digest_before"
         non_registry_digest_before = (
-            graph_non_registry_content_digest(conn)
+            {
+                "status": (
+                    "not_collected_registry_entry_set_unchanged"
+                ),
+                "sha256": "",
+            }
+            if identity_only_rebind
+            else graph_non_registry_content_digest(conn)
         )
         materialization_refresh: dict[str, Any] = {
             "status": "not_required",
@@ -136468,7 +137149,13 @@ def graph_entity_registry_dependency_rebind(
             refreshed_plan = plan
         phase = "selective_registry_dependency_migration"
         selective_dependency_migration = (
-            graph_migrate_selective_registry_dependencies(
+            {
+                "status": "not_required_registry_entry_set_unchanged",
+                "mutates": False,
+                "count": 0,
+            }
+            if identity_only_rebind
+            else graph_migrate_selective_registry_dependencies(
                 conn=conn,
                 registry_index=(
                     dependency.get("index")
@@ -136619,11 +137306,14 @@ def graph_entity_registry_dependency_rebind(
                 "producer_source_changed_during_graph_registry_rebind"
             )
         phase = "content_digest_after"
-        content_digest_after = graph_projection_content_digest(
-            conn
+        content_digest_after = (
+            plan.get("content_digest", {})
+            if identity_only_rebind
+            else graph_projection_content_digest(conn)
         )
         if (
             not refresh_required
+            and not identity_only_rebind
             and
             str(
                 (
@@ -136643,7 +137333,9 @@ def graph_entity_registry_dependency_rebind(
             )
         phase = "semantic_digest_after"
         semantic_digest_after = (
-            graph_projection_semantic_digest(conn)
+            plan.get("semantic_digest", {})
+            if identity_only_rebind
+            else graph_projection_semantic_digest(conn)
         )
         phase = "commit"
         conn.commit()

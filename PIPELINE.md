@@ -400,6 +400,13 @@ fingerprint, semantic digest, and entity count). The complete dependency ID
 still pins one immutable operation. Same-epoch content growth makes graph reads
 abstain only until a proof-gated registry-materialization rebind advances the
 pins; it is not a structural full-rebuild reason.
+When the old and current dependency identities have the same exact registry
+entry-set fingerprint, entity count, and semantic epoch, and every stored graph
+source has a valid old binding plus a declared compatible generation
+transition, rebind is metadata-only by construction. It updates generation and
+dependency columns transactionally without rescanning node/edge payloads or
+running selective registry migration. Entry-set drift retains the complete
+materialization proof and bounded refresh route.
 
 Entity-registry construction distinguishes incremental navigation history from
 an authoritative rebuild. Incremental refresh may retain bounded prior-snapshot
@@ -415,7 +422,22 @@ from stable entity identities and content-bearing source-ref tokens. A newer
 runtime-source `mtime` causes that fingerprint to be recomputed: an exact match
 proves a content-equivalent rewrite for registry purposes, while mismatch or
 missing legacy coverage requires registry catch-up. Timestamp advance alone is
-neither semantic freshness nor semantic staleness.
+neither semantic freshness nor semantic staleness. When the persisted
+registry, producer generation, semantic digest, and observed-route dependency
+are all verified and the only stale reason is a changed runtime-owner
+fingerprint, the atomic registry/search sync refreshes that runtime layer
+directly over the persisted observed entries. It then updates only changed
+registry search documents. This bounded route must fail closed to the complete
+builder for any observed dependency drift, requested history/source-policy
+change, unverified digest, or producer change; it never uses an old observed
+projection to conceal route-term debt.
+The complete archived route-term fallback uses one grouped pass across all
+registry layers. It begins from a compact covering document index and follows
+document-route primary-key order rather than issuing one route-led random
+document walk per layer. Its optional bound is applied by per-layer rank after
+the shared aggregation, and rows merge into canonical entities as the cursor
+advances instead of retaining every route-signal row twice in memory. Bounded
+and complete semantics remain equivalent.
 Previous registries, rollups, and route terms remain generated navigation
 surfaces; their resolvable raw and owner refs remain the evidence authority.
 
@@ -631,6 +653,14 @@ A periodic launch that observes an open graph-drip circuit must not clear the
 same profile's retry intent while the dispatcher owns it in flight. The
 dispatcher alone reconciles that claim and, when bounded work remains, creates
 its successor. Circuit-open cleanup applies only to a non-running queued item.
+When the circuit names session-generation predecessors, the periodic resource
+wrapper uses the same bounded, deduplicated reindex handoff as the hook worker
+instead of merely stopping at the circuit. A directly launched graph fallback
+also performs that handoff from its verified child result. Each predecessor
+queues graph continuation only after its session generation is current. A
+worker wave with a pending predecessor does not probe deferred graph jobs
+first, and a wave without predecessors computes one graph-circuit snapshot for
+all deferred graph jobs rather than rescanning the same dependency per job.
 
 A resource-blocked bounded fallback becomes semantic success only when its own
 typed child result is verified and its post-run state proves zero remaining

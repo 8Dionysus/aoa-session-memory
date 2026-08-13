@@ -26194,6 +26194,125 @@ def test_graph_dependency_auto_refresh_preserves_authoritative_registry_policy(
     )
 
 
+def test_entity_registry_search_sync_fast_refreshes_runtime_only_drift(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    source_state = {
+        "source_path_count": 1,
+        "latest_source_mtime": 1.0,
+        "latest_source_mtime_iso": "1970-01-01T00:00:01Z",
+        "latest_source_path": "/fixture/runtime-owner",
+    }
+    runtime_entries = [
+        module.entity_registry_make_entry(
+            kind="skill",
+            key="existing-runtime-skill",
+            aliases=["existing-runtime-skill"],
+            source_refs=[
+                {
+                    "source_type": "fixture_runtime_owner",
+                    "path": "/fixture/existing/SKILL.md",
+                    "status": "active",
+                    "identity_sha256": "a" * 64,
+                }
+            ],
+            source_surface="fixture_runtime_owner",
+            owner="fixture",
+            status="active",
+        )
+    ]
+    monkeypatch.setattr(
+        module,
+        "entity_registry_source_surface_state",
+        lambda _aoa_root: dict(source_state),
+    )
+    monkeypatch.setattr(
+        module,
+        "entity_registry_runtime_source_entries",
+        lambda _aoa_root: list(runtime_entries),
+    )
+
+    initial = module.refresh_entity_registry_search_documents_only(
+        aoa_root=aoa_root,
+        observed_source="none",
+        history_policy="authoritative-rebuild",
+    )
+    assert initial["ok"] is True
+    before = module.read_json(
+        aoa_root / module.ENTITY_REGISTRY_PATH,
+        {},
+    )
+    before_dependency = before["observed_source_dependency"]
+
+    runtime_entries.append(
+        module.entity_registry_make_entry(
+            kind="skill",
+            key="phoenix-skill",
+            aliases=["phoenix-skill"],
+            source_refs=[
+                {
+                    "source_type": "fixture_runtime_owner",
+                    "path": "/fixture/new/SKILL.md",
+                    "status": "active",
+                    "identity_sha256": "b" * 64,
+                }
+            ],
+            source_surface="fixture_runtime_owner",
+            owner="fixture",
+            status="active",
+        )
+    )
+    source_state["latest_source_mtime"] = (
+        float(before["generated_at_epoch"]) + 10.0
+    )
+    source_state["latest_source_mtime_iso"] = (
+        "2099-01-01T00:00:00Z"
+    )
+
+    def fail_observed_rescan(*_args: Any, **_kwargs: Any) -> list[Any]:
+        raise AssertionError(
+            "runtime-only drift must not rescan archived route terms"
+        )
+
+    monkeypatch.setattr(
+        module,
+        "entity_registry_entries_from_route_terms",
+        fail_observed_rescan,
+    )
+    refreshed = module.refresh_entity_registry_search_documents_only(
+        aoa_root=aoa_root,
+        observed_source="none",
+        history_policy="authoritative-rebuild",
+    )
+    after = module.read_json(
+        aoa_root / module.ENTITY_REGISTRY_PATH,
+        {},
+    )
+
+    assert refreshed["ok"] is True
+    assert refreshed["runtime_overlay_refresh"]["status"] == (
+        "refreshed"
+    )
+    assert after["observed_source_dependency"] == before_dependency
+    assert module.entity_registry_maintenance_status(aoa_root)[
+        "status"
+    ] == "current"
+    assert any(
+        entry.get("canonical_key") == "phoenix_skill"
+        for entry in after["entries"]
+    )
+    search = module.search_sessions(
+        aoa_root=aoa_root,
+        query="phoenix-skill",
+        doc_type="entity_registry",
+        limit=5,
+    )
+    assert search["ok"] is True
+    assert search["results"][0]["doc_type"] == "entity_registry"
+
+
 def test_graph_dependency_snapshot_reuses_exact_semantic_digest(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -58435,6 +58554,64 @@ def test_hook_worker_defers_graph_job_until_drip_circuit_closes(
     assert not list(dirs["deferred"].glob("*.json"))
 
 
+def test_deferred_graph_probe_waits_for_pending_predecessor_and_is_cached(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    dirs = module.hook_worker_dirs(aoa_root)
+    for path in dirs.values():
+        path.mkdir(parents=True, exist_ok=True)
+    write_json(
+        dirs["pending"] / "001-reindex.json",
+        {
+            "job_type": "session_generation_reindex",
+            "session_id": "blocked-session",
+        },
+    )
+    for index in range(3):
+        write_json(
+            dirs["deferred"] / f"{index:03d}-graph.json",
+            {
+                "job_type": "graph_maintenance",
+                "target": "all",
+            },
+        )
+    calls = {"count": 0}
+
+    def fake_circuit(_root: Path) -> dict[str, Any]:
+        calls["count"] += 1
+        return {
+            "open": False,
+            "reason": "graph_state_changed",
+        }
+
+    monkeypatch.setattr(
+        module,
+        "graph_automatic_drip_circuit_state",
+        fake_circuit,
+    )
+
+    blocked = module.promote_deferred_hook_jobs(
+        aoa_root=aoa_root,
+        dirs=dirs,
+    )
+
+    assert blocked == []
+    assert calls["count"] == 0
+    assert len(list(dirs["deferred"].glob("*.json"))) == 3
+
+    (dirs["pending"] / "001-reindex.json").unlink()
+    promoted = module.promote_deferred_hook_jobs(
+        aoa_root=aoa_root,
+        dirs=dirs,
+    )
+
+    assert calls["count"] == 1
+    assert len(promoted) == 3
+    assert not list(dirs["deferred"].glob("*.json"))
+
+
 def test_hook_worker_no_progress_circuit_queues_named_predecessor(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
@@ -58653,6 +58830,93 @@ def test_auto_maintenance_graph_drip_circuit_prevents_launch_and_retry(
         )
         is False
     )
+
+
+def test_auto_maintenance_graph_drip_circuit_queues_upstream_reindex(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    calls: list[list[str]] = []
+    blocked_session_id = "019graph-predecessor"
+
+    def fake_run(
+        command: list[str],
+        **_kwargs: Any,
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps(
+                {
+                    "schema": "abyss_machine_resource_plan_v1",
+                    "ok": False,
+                    "blocked_reasons": [
+                        "indexing_unattended_swap_used_pressure"
+                    ],
+                    "denied_reasons": [],
+                    "execution": {
+                        "ok": None,
+                        "returncode": None,
+                    },
+                }
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        module,
+        "hook_sync_queue_enabled",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        module,
+        "graph_automatic_drip_circuit_state",
+        lambda _root: {
+            "open": True,
+            "reason": "latest_graph_queue_drip_no_semantic_progress",
+            "next_route": "session_generation_reindex_handoff",
+            "recoverable_upstream_session_ids": [
+                blocked_session_id
+            ],
+        },
+    )
+
+    payload = module.auto_maintenance_resource_launch(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        profile="backlog",
+        apply=True,
+        reason="timer_backlog",
+    )
+
+    assert len(calls) == 1
+    assert payload["status"] == (
+        "resource_blocked_graph_drip_upstream_reindex_queued"
+    )
+    assert payload["mutates"] is True
+    assert payload["fallback_graph_drip"]["status"] == (
+        "upstream_reindex_queued"
+    )
+    assert payload["fallback_graph_drip"][
+        "predecessor_handoff_queued"
+    ] is True
+    assert payload["fallback_graph_drip"][
+        "upstream_reindex_session_ids"
+    ] == [blocked_session_id]
+    queued_jobs = sorted(
+        module.hook_worker_dirs(aoa_root)["pending"].glob("*.json")
+    )
+    assert len(queued_jobs) == 1
+    queued = json.loads(queued_jobs[0].read_text(encoding="utf-8"))
+    assert queued["job_type"] == "session_generation_reindex"
+    assert queued["session_id"] == blocked_session_id
+    assert queued["followup_graph_target"] == "all"
+    assert payload["automatic_retry"]["retryable"] is True
 
 
 def test_auto_maintenance_graph_drip_circuit_preserves_in_flight_retry(
@@ -59143,6 +59407,121 @@ def test_auto_maintenance_resource_launch_can_run_graph_drip_fallback(tmp_path: 
     assert "graph_drip_fallback_completed" in payload["diagnostics"]
     assert Path(payload["report_json"]).exists()
     assert Path(payload["report_markdown"]).exists()
+
+
+def test_graph_drip_fallback_queues_named_upstream_reindex(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    blocked_session_id = "fallback-blocked-session"
+    calls: list[list[str]] = []
+
+    def fake_run(
+        command: list[str],
+        **_kwargs: Any,
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if len(calls) == 1:
+            stdout = json.dumps(
+                {
+                    "schema": "abyss_machine_resource_plan_v1",
+                    "ok": False,
+                    "blocked_reasons": [
+                        "indexing_unattended_swap_used_pressure"
+                    ],
+                    "denied_reasons": [],
+                    "execution": {
+                        "ok": None,
+                        "returncode": None,
+                    },
+                }
+            )
+        else:
+            child = {
+                "artifact_type": (
+                    "session_memory_graph_maintenance"
+                ),
+                "ok": False,
+                "status": "blocked",
+                "results": [
+                    {
+                        "status": "blocked",
+                        "diagnostics": [
+                            "graph_source_generation_incompatible:"
+                            f"{blocked_session_id}:"
+                            "session_index_generation_identity_changed:"
+                            "recovery=reindex-sessions"
+                        ],
+                    }
+                ],
+                "diagnostics": ["upstream_generation_blocked"],
+            }
+            stdout = json.dumps(
+                {
+                    "schema": "abyss_machine_resource_launch_v1",
+                    "ok": False,
+                    "blocked_reasons": [],
+                    "denied_reasons": [],
+                    "execution": {
+                        "ok": False,
+                        "returncode": 1,
+                        "stdout_tail": json.dumps(child),
+                    },
+                }
+            )
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=stdout,
+            stderr="",
+        )
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        module,
+        "hook_sync_queue_enabled",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        module,
+        "graph_automatic_drip_circuit_state",
+        lambda _root: {
+            "open": False,
+            "reason": "no_blocking_graph_drip_evidence",
+        },
+    )
+
+    payload = module.auto_maintenance_resource_launch(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        profile="backlog",
+        apply=True,
+        reason="timer_backlog",
+        graph_drip_on_block=True,
+    )
+
+    assert len(calls) == 2
+    assert payload["status"] == (
+        "resource_blocked_graph_drip_upstream_reindex_queued"
+    )
+    assert payload["mutates"] is True
+    assert payload["fallback_graph_drip"][
+        "predecessor_handoff_queued"
+    ] is True
+    assert payload["fallback_graph_drip"][
+        "upstream_reindex_session_ids"
+    ] == [blocked_session_id]
+    queued_jobs = sorted(
+        module.hook_worker_dirs(aoa_root)["pending"].glob("*.json")
+    )
+    assert len(queued_jobs) == 1
+    queued = json.loads(queued_jobs[0].read_text(encoding="utf-8"))
+    assert queued["job_type"] == "session_generation_reindex"
+    assert queued["session_id"] == blocked_session_id
+    assert payload["automatic_retry"]["retryable"] is True
 
 
 def test_graph_drip_fallback_reports_ledger_progress_with_remaining_work(
@@ -99602,6 +99981,114 @@ def test_graph_content_digest_excludes_only_generation_bindings(
 
     assert before["sha256"] == after_binding["sha256"]
     assert before["sha256"] != after_content["sha256"]
+
+
+def test_graph_registry_rebind_uses_entry_set_identity_without_content_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    generation = module.session_memory_expected_generation_identities(
+        aoa_root
+    )["graph"]
+    identity_base = {
+        "version": 1,
+        "schema_version": module.ENTITY_REGISTRY_SCHEMA_VERSION,
+        "canonicalization_version": (
+            module.ENTITY_REGISTRY_CANONICALIZATION_VERSION
+        ),
+        "generation_id": "registry-generation",
+        "source_fingerprint": "f" * 64,
+        "entity_count": 1,
+        "semantic_epoch_id": "e" * 64,
+    }
+    old_dependency = {
+        "schema_version": 1,
+        "artifact_type": (
+            "session_memory_graph_entity_registry_dependency"
+        ),
+        "status": "current",
+        "dependency_id": "old-dependency",
+        "identity": {
+            **identity_base,
+            "semantic_digest_sha256": "a" * 64,
+        },
+        "entries": [],
+        "index": {},
+    }
+    current_dependency = {
+        **old_dependency,
+        "dependency_id": "current-dependency",
+        "identity": {
+            **identity_base,
+            "semantic_digest_sha256": "b" * 64,
+        },
+    }
+    store = module.GraphSqliteStore(
+        aoa_root,
+        reset=True,
+        entity_registry_dependency=old_dependency,
+    )
+    store.conn.execute(
+        """
+        INSERT INTO graph_sources(
+          source_key, source_type, session_id, session_label,
+          segment_id, source_path, source_paths_json, source_sha,
+          source_mtime, graph_schema_version,
+          graph_store_schema_version,
+          graph_event_route_signal_edge_policy,
+          route_signal_classifier_version,
+          entity_registry_route_tokens_json,
+          entity_registry_selective_digest, indexed_at, status,
+          diagnostic, node_count, edge_count, generation_id,
+          generation_identity_json, entity_registry_dependency_id,
+          entity_registry_dependency_json
+        ) VALUES (
+          'session:fixture', 'session', 'fixture', 'fixture', '',
+          'fixture', '[]', 'fixture', 1.0, ?, ?, ?, ?, '[]', '',
+          ?, 'current', '', 0, 0, ?, ?, ?, ?
+        )
+        """,
+        (
+            module.GRAPH_SCHEMA_VERSION,
+            module.GRAPH_STORE_SCHEMA_VERSION,
+            module.GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
+            module.ROUTE_SIGNAL_CLASSIFIER_VERSION,
+            module.utc_now(),
+            generation["generation_id"],
+            module.graph_json(generation),
+            old_dependency["dependency_id"],
+            module.graph_json(old_dependency),
+        ),
+    )
+    store.conn.commit()
+
+    def fail_scan(_conn: sqlite3.Connection) -> dict[str, Any]:
+        raise AssertionError("identity-only rebind must not scan graph content")
+
+    monkeypatch.setattr(
+        module,
+        "graph_projection_content_digest",
+        fail_scan,
+    )
+    monkeypatch.setattr(
+        module,
+        "graph_projection_semantic_digest",
+        fail_scan,
+    )
+    plan = module.graph_entity_registry_materialization_compatibility(
+        aoa_root=aoa_root,
+        conn=store.conn,
+        dependency=current_dependency,
+    )
+    store.close()
+
+    assert plan["compatible"] is True
+    assert plan["status"] == "ready"
+    assert plan["identity_only_rebind"] is True
+    assert plan["registry_entry_set_unchanged"] is True
+    assert plan["dependency_changed"] is True
+    assert plan["materialization_counts"] == {}
 
 
 def test_graph_registry_materialization_refresh_is_bounded_and_exact(
