@@ -100345,7 +100345,7 @@ def test_graph_registry_materialization_refresh_is_bounded_and_exact(
         }
     ]
     route_node = {
-        "id": "tool:alpha",
+        "id": module.graph_route_node_id("tool", "alpha"),
         "type": "tool",
         "label": "alpha",
         "route_layer": "tool",
@@ -100432,6 +100432,57 @@ def test_graph_registry_materialization_refresh_is_bounded_and_exact(
         store._add_aggregate_edge(edge)
     store.refresh_type_counts(commit=False)
     store.conn.commit()
+
+    missing_source_key = "session:fixture-session-0"
+    missing_edge_id = module.graph_edge_id(
+        old_registry_node["id"],
+        route_node["id"],
+        "registry_entity_has_route_signal",
+    )
+    store.conn.execute(
+        "DELETE FROM edge_contribs WHERE source_key = ? AND edge_id = ?",
+        (missing_source_key, missing_edge_id),
+    )
+    store.conn.execute(
+        "UPDATE graph_sources SET edge_count = edge_count - 1 "
+        "WHERE source_key = ?",
+        (missing_source_key,),
+    )
+    additive_plan = {
+        "registry_materialization_refreshable": True,
+        "diagnostics": [
+            "graph_registry_rebind_contribution_route_mapping_mismatch"
+        ],
+        "materialization_counts": {
+            "missing_contribution_registry_edge_count": 1,
+            "extra_contribution_registry_edge_count": 0,
+            "missing_aggregate_registry_edge_count": 0,
+            "extra_aggregate_registry_edge_count": 0,
+            "aggregate_registry_node_mismatch_count": 0,
+            "contribution_registry_node_mismatch_count": 0,
+            "dangling_aggregate_registry_edge_count": 0,
+            "dangling_contribution_registry_edge_count": 0,
+            "malformed_payload_count": 0,
+            "selective_dependency_mismatch_count": 0,
+        },
+    }
+    additive = module.graph_registry_materialization_refresh(
+        aoa_root=aoa_root,
+        conn=store.conn,
+        dependency=old_dependency,
+        plan=additive_plan,
+    )
+    assert additive["ok"] is True, additive
+    assert additive["status"] == "additive_exact_refreshed"
+    assert additive["counts"]["missing_pair_count"] == 1
+    assert additive["counts"][
+        "added_registry_edge_contribution_count"
+    ] == 1
+    assert store.conn.execute(
+        "SELECT COUNT(*) FROM edge_contribs "
+        "WHERE source_key = ? AND edge_id = ?",
+        (missing_source_key, missing_edge_id),
+    ).fetchone()[0] == 1
     before = module.graph_non_registry_content_digest(store.conn)
 
     refreshed = module.graph_registry_materialization_refresh(
@@ -100499,7 +100550,7 @@ def test_graph_registry_materialization_refresh_is_bounded_and_exact(
         (
             "registry_entity_has_route_signal",
             current_registry_node_id,
-            "tool:alpha",
+            route_node["id"],
         ),
     }
 

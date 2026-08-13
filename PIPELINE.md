@@ -435,6 +435,13 @@ Exact apply requests rebuild their named clean sources, never widen without
 source keys, do not override blocked or orphaned source state, and must be
 followed by the same proof before registry rebind (AOA-SM-D-0082).
 
+Do not classify registry links intentionally omitted by event/segment
+high-fanout policy as source-version drift. When compact rebind proves only
+missing registry-to-route contribution pairs, its mutation adds that exact set
+and refreshes only touched aggregates; any extra pair, semantic mismatch,
+dangling endpoint, malformed payload, selective dependency drift, or changed
+count fails the additive guard (AOA-SM-D-0083).
+
 Entity-registry construction distinguishes incremental navigation history from
 an authoritative rebuild. Incremental refresh may retain bounded prior-snapshot
 aliases and retired identities under an explicit history policy. A full rebuild

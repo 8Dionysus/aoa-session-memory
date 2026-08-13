@@ -135667,13 +135667,398 @@ def graph_registry_entry_from_route_signal(
     )
 
 
+def graph_registry_additive_refresh_eligible(
+    plan: dict[str, Any] | None,
+) -> bool:
+    if not isinstance(plan, dict):
+        return False
+    counts = (
+        plan.get("materialization_counts")
+        if isinstance(plan.get("materialization_counts"), dict)
+        else {}
+    )
+    diagnostics = {
+        str(item)
+        for item in (
+            plan.get("diagnostics")
+            if isinstance(plan.get("diagnostics"), list)
+            else []
+        )
+        if item
+    }
+    allowed_diagnostics = {
+        "graph_registry_rebind_aggregate_route_mapping_mismatch",
+        "graph_registry_rebind_contribution_route_mapping_mismatch",
+    }
+    disallowed_count_keys = (
+        "malformed_payload_count",
+        "selective_dependency_mismatch_count",
+        "aggregate_registry_node_mismatch_count",
+        "contribution_registry_node_mismatch_count",
+        "extra_aggregate_registry_edge_count",
+        "extra_contribution_registry_edge_count",
+        "dangling_aggregate_registry_edge_count",
+        "dangling_contribution_registry_edge_count",
+    )
+    return bool(
+        plan.get("registry_materialization_refreshable")
+        and diagnostics
+        and diagnostics.issubset(allowed_diagnostics)
+        and int_value(
+            counts.get("missing_contribution_registry_edge_count")
+        )
+        > 0
+        and not any(
+            int_value(counts.get(key)) for key in disallowed_count_keys
+        )
+    )
+
+
+def graph_registry_add_missing_route_pairs(
+    *,
+    aoa_root: Path,
+    conn: sqlite3.Connection,
+    dependency: dict[str, Any],
+    plan: dict[str, Any],
+) -> dict[str, Any]:
+    """Add only proved-missing registry route mappings and touched aggregates."""
+
+    started = time.monotonic()
+    registry_entries = (
+        dependency.get("entries")
+        if isinstance(dependency.get("entries"), list)
+        else []
+    )
+    registry_index = (
+        dependency.get("index")
+        if isinstance(dependency.get("index"), dict)
+        else {}
+    )
+    entries_by_id = {
+        str(entry.get("entity_id") or ""): entry
+        for entry in registry_entries
+        if isinstance(entry, dict) and entry.get("entity_id")
+    }
+    actual_pairs = {
+        (
+            str(row["source_key"] or ""),
+            str(row["source_node"] or ""),
+            str(row["target_node"] or ""),
+        )
+        for row in conn.execute(
+            "SELECT source_key, source_node, target_node "
+            "FROM edge_contribs WHERE edge_type = "
+            "'registry_entity_has_route_signal'"
+        )
+    }
+    missing: list[
+        tuple[str, str, str, dict[str, Any], str, str]
+    ] = []
+    for row in conn.execute(
+        "SELECT source_key, entity_registry_route_tokens_json "
+        "FROM graph_sources ORDER BY source_key"
+    ):
+        source_key = str(row["source_key"] or "")
+        try:
+            route_tokens = json.loads(
+                str(row["entity_registry_route_tokens_json"] or "[]")
+            )
+        except (TypeError, json.JSONDecodeError) as exc:
+            return {
+                "status": "blocked",
+                "ok": False,
+                "mutates": False,
+                "diagnostics": [
+                    "graph_registry_additive_refresh_malformed_route_tokens:"
+                    f"{source_key}:{exc}"
+                ],
+                "elapsed_ms": int((time.monotonic() - started) * 1000),
+            }
+        selective = graph_source_registry_dependency_for_route_tokens(
+            route_tokens if isinstance(route_tokens, list) else [],
+            registry_index,
+        )
+        for token in selective.get("route_tokens", []):
+            if not isinstance(token, dict):
+                continue
+            layer = route_key_slug(token.get("layer"), fallback="")
+            key = route_key_slug(
+                token.get("key"), fallback="", max_chars=120
+            )
+            entry = graph_entity_registry_entry_for_route(
+                registry_index,
+                layer,
+                key,
+            )
+            if not entry:
+                continue
+            registry_node_id = (
+                f"entity_registry:{entry.get('entity_id')}"
+            )
+            route_node_id = graph_route_node_id(layer, key)
+            pair = (source_key, registry_node_id, route_node_id)
+            if pair not in actual_pairs:
+                missing.append(
+                    (
+                        source_key,
+                        registry_node_id,
+                        route_node_id,
+                        entry,
+                        layer,
+                        key,
+                    )
+                )
+    expected_missing_count = int_value(
+        plan.get("materialization_counts", {}).get(
+            "missing_contribution_registry_edge_count"
+        )
+    )
+    if len(missing) != expected_missing_count:
+        return {
+            "status": "blocked",
+            "ok": False,
+            "mutates": False,
+            "diagnostics": [
+                "graph_registry_additive_refresh_proof_count_changed:"
+                f"expected={expected_missing_count}:actual={len(missing)}"
+            ],
+            "elapsed_ms": int((time.monotonic() - started) * 1000),
+        }
+
+    affected_node_ids: set[str] = set()
+    affected_edge_ids: set[str] = set()
+    source_node_deltas: Counter[str] = Counter()
+    source_edge_deltas: Counter[str] = Counter()
+    for (
+        source_key,
+        registry_node_id,
+        route_node_id,
+        entry,
+        layer,
+        key,
+    ) in missing:
+        route_row = conn.execute(
+            "SELECT payload_json FROM node_contribs "
+            "WHERE source_key = ? AND node_id = ?",
+            (source_key, route_node_id),
+        ).fetchone()
+        if route_row is None:
+            return {
+                "status": "blocked",
+                "ok": False,
+                "mutates": False,
+                "diagnostics": [
+                    "graph_registry_additive_refresh_route_node_missing:"
+                    f"{source_key}:{route_node_id}"
+                ],
+                "elapsed_ms": int((time.monotonic() - started) * 1000),
+            }
+        try:
+            route_payload = json.loads(str(route_row["payload_json"] or "{}"))
+        except (TypeError, json.JSONDecodeError):
+            route_payload = {}
+        evidence_refs = (
+            route_payload.get("evidence_refs")
+            if isinstance(route_payload, dict)
+            and isinstance(route_payload.get("evidence_refs"), list)
+            else []
+        )
+        registry_row = conn.execute(
+            "SELECT 1 FROM node_contribs "
+            "WHERE source_key = ? AND node_id = ?",
+            (source_key, registry_node_id),
+        ).fetchone()
+        if registry_row is None:
+            registry_node = graph_entity_registry_node(
+                entry,
+                aoa_root=aoa_root,
+                evidence_refs=evidence_refs,
+            )
+            registry_payload = graph_compact_contribution_payload(
+                registry_node,
+                kind="node",
+            )
+            conn.execute(
+                "INSERT INTO node_contribs("
+                "source_key, node_id, node_type, payload_json, count"
+                ") VALUES (?, ?, 'entity_registry', ?, 1)",
+                (
+                    source_key,
+                    registry_node_id,
+                    graph_json(registry_payload),
+                ),
+            )
+            source_node_deltas[source_key] += 1
+            affected_node_ids.add(registry_node_id)
+        edge = graph_relation_contract_payload(
+            {
+                "source": registry_node_id,
+                "target": route_node_id,
+                "type": "registry_entity_has_route_signal",
+                "session_id": (
+                    route_payload.get("session_id")
+                    if isinstance(route_payload, dict)
+                    else None
+                ),
+                "route_signal": (
+                    route_payload.get("route_signal")
+                    if isinstance(route_payload, dict)
+                    else None
+                )
+                or route_signal_token(layer, key),
+                "evidence_refs": evidence_refs,
+            }
+        )
+        if not edge.get("navigation_admissible"):
+            return {
+                "status": "blocked",
+                "ok": False,
+                "mutates": False,
+                "diagnostics": [
+                    "graph_registry_additive_refresh_edge_rejected:"
+                    f"{source_key}:{registry_node_id}:{route_node_id}"
+                ],
+                "elapsed_ms": int((time.monotonic() - started) * 1000),
+            }
+        edge_id = graph_edge_id(
+            registry_node_id,
+            route_node_id,
+            "registry_entity_has_route_signal",
+        )
+        edge_payload = graph_compact_contribution_payload(
+            edge,
+            kind="edge",
+        )
+        conn.execute(
+            "INSERT INTO edge_contribs("
+            "source_key, edge_id, edge_type, source_node, "
+            "target_node, payload_json, count"
+            ") VALUES (?, ?, 'registry_entity_has_route_signal', "
+            "?, ?, ?, 1)",
+            (
+                source_key,
+                edge_id,
+                registry_node_id,
+                route_node_id,
+                graph_json(edge_payload),
+            ),
+        )
+        source_edge_deltas[source_key] += 1
+        affected_edge_ids.add(edge_id)
+
+    for source_key in sorted(
+        set(source_node_deltas) | set(source_edge_deltas)
+    ):
+        conn.execute(
+            "UPDATE graph_sources SET node_count = node_count + ?, "
+            "edge_count = edge_count + ? WHERE source_key = ?",
+            (
+                int(source_node_deltas[source_key]),
+                int(source_edge_deltas[source_key]),
+                source_key,
+            ),
+        )
+
+    refresher = GraphSqliteStore.__new__(GraphSqliteStore)
+    refresher.aoa_root = aoa_root
+    refresher.paths = graph_paths(aoa_root)
+    refresher.db_path = graph_paths(aoa_root)["store"]
+    refresher.conn = conn
+    refresher.refresh_chunk_size = GRAPH_MAINTENANCE_REFRESH_CHUNK_SIZE
+    node_refresh, edge_refresh, refresh_timing = (
+        refresher._refresh_touched_aggregates_with_type_counts(
+            affected_node_ids,
+            affected_edge_ids,
+        )
+    )
+    for node_id in sorted(affected_node_ids):
+        entry = entries_by_id.get(
+            node_id.removeprefix("entity_registry:")
+        )
+        if entry is None:
+            return {
+                "status": "blocked",
+                "ok": False,
+                "mutates": True,
+                "diagnostics": [
+                    "graph_registry_additive_refresh_identity_unresolved:"
+                    f"{node_id}"
+                ],
+                "elapsed_ms": int((time.monotonic() - started) * 1000),
+            }
+        aggregate_row = conn.execute(
+            "SELECT SUM(count) AS aggregate_count, COUNT(*) AS row_count "
+            "FROM node_contribs WHERE node_id = ? "
+            "AND node_type = 'entity_registry'",
+            (node_id,),
+        ).fetchone()
+        aggregate = graph_entity_registry_node(
+            entry,
+            aoa_root=aoa_root,
+            evidence_refs=[],
+        )
+        aggregate["count"] = int_value(
+            aggregate_row["aggregate_count"], 1
+        )
+        aggregate["evidence_ref_count"] = min(
+            int_value(aggregate_row["row_count"]),
+            graph_aggregate_evidence_limit("node"),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO nodes("
+            "id, node_type, payload_json, count"
+            ") VALUES (?, 'entity_registry', ?, ?)",
+            (
+                node_id,
+                graph_json(
+                    graph_compact_aggregate_payload(
+                        aggregate,
+                        kind="node",
+                    )
+                ),
+                int_value(aggregate["count"], 1),
+            ),
+        )
+    return {
+        "status": "additive_exact_refreshed",
+        "ok": True,
+        "mutates": True,
+        "diagnostics": [],
+        "counts": {
+            "missing_pair_count": len(missing),
+            "added_registry_node_contribution_count": sum(
+                source_node_deltas.values()
+            ),
+            "added_registry_edge_contribution_count": sum(
+                source_edge_deltas.values()
+            ),
+            "affected_source_count": len(source_edge_deltas),
+            "affected_node_id_count": len(affected_node_ids),
+            "affected_edge_id_count": len(affected_edge_ids),
+        },
+        "node_refresh": node_refresh,
+        "edge_refresh": edge_refresh,
+        "aggregate_refresh_timing": refresh_timing,
+        "elapsed_ms": int((time.monotonic() - started) * 1000),
+    }
+
+
 def graph_registry_materialization_refresh(
     *,
     aoa_root: Path,
     conn: sqlite3.Connection,
     dependency: dict[str, Any],
+    plan: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Rebuild only registry-derived contributions and aggregates."""
+
+    if graph_registry_additive_refresh_eligible(plan):
+        return graph_registry_add_missing_route_pairs(
+            aoa_root=aoa_root,
+            conn=conn,
+            dependency=dependency,
+            plan=plan,
+        )
 
     started = time.monotonic()
     registry_entries = (
@@ -137384,6 +137769,7 @@ def graph_entity_registry_dependency_rebind(
                     aoa_root=aoa_root,
                     conn=conn,
                     dependency=dependency,
+                    plan=plan,
                 )
             )
             if not materialization_refresh.get("ok"):
