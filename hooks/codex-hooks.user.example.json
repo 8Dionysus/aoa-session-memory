@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /path/to/workspace/.aoa/scripts/aoa_session_memory.py hook --event-name SessionStart --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa",
+            "command": "python3 /path/to/workspace/.aoa/scripts/aoa_session_hook.py enqueue --event-name SessionStart --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa",
             "statusMessage": "AoA session memory start",
             "timeout": 20
           }
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /path/to/workspace/.aoa/scripts/aoa_session_memory.py hook --event-name UserPromptSubmit --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa",
+            "command": "python3 /path/to/workspace/.aoa/scripts/aoa_session_hook.py enqueue --event-name UserPromptSubmit --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa",
             "statusMessage": "AoA session memory prompt",
             "timeout": 20
           }
@@ -30,7 +30,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /path/to/workspace/.aoa/scripts/aoa_session_memory.py hook --event-name PreCompact --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa",
+            "command": "python3 /path/to/workspace/.aoa/scripts/aoa_session_hook.py enqueue --event-name PreCompact --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa",
             "statusMessage": "AoA session memory pre-compact",
             "timeout": 30
           }
@@ -42,7 +42,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /path/to/workspace/.aoa/scripts/aoa_session_memory.py hook --event-name PostCompact --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa",
+            "command": "python3 /path/to/workspace/.aoa/scripts/aoa_session_hook.py enqueue --event-name PostCompact --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa",
             "statusMessage": "AoA session memory post-compact",
             "timeout": 30
           }
@@ -54,7 +54,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /path/to/workspace/.aoa/scripts/aoa_session_memory.py hook --event-name Stop --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa",
+            "command": "python3 /path/to/workspace/.aoa/scripts/aoa_session_hook.py enqueue --event-name Stop --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa",
             "statusMessage": "AoA session memory stop",
             "timeout": 20
           }

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import copy
 import importlib.util
 import contextlib
@@ -26,6 +27,9 @@ import pytest
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "aoa_session_memory.py"
+HOOK_SCRIPT = (
+    Path(__file__).resolve().parents[1] / "scripts" / "aoa_session_hook.py"
+)
 BENCHMARK_SCRIPT = (
     Path(__file__).resolve().parents[1]
     / "scripts"
@@ -36,6 +40,14 @@ assert spec and spec.loader
 module = importlib.util.module_from_spec(spec)
 sys.modules["aoa_session_memory"] = module
 spec.loader.exec_module(module)
+hook_spec = importlib.util.spec_from_file_location(
+    "aoa_session_hook",
+    HOOK_SCRIPT,
+)
+assert hook_spec and hook_spec.loader
+hook_module = importlib.util.module_from_spec(hook_spec)
+sys.modules["aoa_session_hook"] = hook_module
+hook_spec.loader.exec_module(hook_module)
 
 
 def test_session_projection_benchmark_smoke_proves_parity_and_reuse(
@@ -91304,6 +91316,62 @@ def test_raw_unavailable_writes_diagnostic(tmp_path: Path) -> None:
     assert list((session_dir / "incidents").glob("*__DIAGNOSTIC.json"))
 
 
+def test_raw_unavailable_lifecycle_hook_defers_registry_derivatives_by_default(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    missing = tmp_path / "missing.jsonl"
+
+    def unexpected_name_index(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("lifecycle hook rebuilt the name index inline")
+
+    def unexpected_directory_index(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError(
+            "lifecycle hook rebuilt the directory index inline"
+        )
+
+    monkeypatch.setattr(module, "write_session_name_index", unexpected_name_index)
+    monkeypatch.setattr(
+        module,
+        "write_sessions_directory_index",
+        unexpected_directory_index,
+    )
+    receipt = module.handle_hook_event(
+        "SessionStart",
+        {
+            "session_id": "missing-fast-hook",
+            "transcript_path": str(missing),
+            "cwd": str(workspace),
+            "hook_event_name": "SessionStart",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    assert receipt["ok"] is True
+    assert "raw_unavailable_incident_written" in receipt["actions"]
+    assert "registry_derivatives_deferred" in receipt["actions"]
+    assert "registry_update_deferred" not in receipt["actions"]
+    assert "registry_update_retry_queued" in receipt["actions"]
+    assert Path(str(receipt["registry_update_job"])).is_file()
+    registry = json.loads(
+        (aoa_root / "session-registry.json").read_text(encoding="utf-8")
+    )
+    assert [
+        item["session_id"] for item in registry["sessions"]
+    ] == ["missing-fast-hook"]
+    assert receipt["incident"]["registry_updated"] is True
+    assert receipt["incident"]["registry_derivatives_updated"] is False
+    assert not (aoa_root / module.SESSION_NAME_INDEX_JSON).exists()
+    assert not (aoa_root / "SESSION_NAMES.md").exists()
+    session_dir = Path(str(receipt["session_dir"]))
+    assert (session_dir / "session.manifest.json").is_file()
+    assert list((session_dir / "incidents").glob("*__INCIDENT.md"))
+    assert list((session_dir / "incidents").glob("*__DIAGNOSTIC.json"))
+
+
 def test_raw_unavailable_observation_preserves_existing_last_good_projection(
     tmp_path: Path,
 ) -> None:
@@ -92415,8 +92483,326 @@ def test_hooks_config_builder_uses_supplied_roots(tmp_path: Path) -> None:
     for event_name in config["hooks"]:
         command = config["hooks"][event_name][0]["hooks"][0]["command"]
         assert str(workspace) in command
-        assert str(aoa_root / "scripts" / "aoa_session_memory.py") in command
+        assert str(aoa_root / "scripts" / "aoa_session_hook.py") in command
+        assert " enqueue " in command
         assert f"--event-name {event_name}" in command
+
+
+def test_thin_hook_ingress_preserves_exact_bytes_and_coalesces_duplicate_signals(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    raw_event = json.dumps(
+        {
+            "session_id": "thin-hook-session",
+            "transcript_path": str(tmp_path / "missing.jsonl"),
+            "cwd": str(workspace),
+            "hook_event_name": "SessionStart",
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    environment = {
+        **os.environ,
+        "AOA_SESSION_MEMORY_HOOK_BACKGROUND_SYNC": "0",
+    }
+    command = [
+        sys.executable,
+        str(HOOK_SCRIPT),
+        "enqueue",
+        "--event-name",
+        "SessionStart",
+        "--workspace-root",
+        str(workspace),
+        "--aoa-root",
+        str(aoa_root),
+    ]
+
+    first = subprocess.run(
+        command,
+        input=raw_event,
+        capture_output=True,
+        check=False,
+        env=environment,
+    )
+    second = subprocess.run(
+        command,
+        input=raw_event,
+        capture_output=True,
+        check=False,
+        env=environment,
+    )
+
+    assert first.returncode == 0
+    assert second.returncode == 0
+    output = json.loads(first.stdout)
+    assert set(output) == {"continue", "hookSpecificOutput"}
+    assert output["continue"] is True
+    pending = list(
+        (aoa_root / module.HOOK_INGRESS_ROOT / "pending").glob("*.json")
+    )
+    assert len(pending) == 1
+    assert pending[0].stat().st_mode & 0o777 == 0o600
+    assert pending[0].parent.stat().st_mode & 0o777 == 0o700
+    envelope = json.loads(pending[0].read_text(encoding="utf-8"))
+    assert envelope["schema_version"] == module.HOOK_INGRESS_SCHEMA_VERSION
+    assert envelope["signal_count"] == 2
+    assert base64.b64decode(envelope["event_b64"]) == raw_event
+    assert envelope["event_sha256"] == (
+        f"sha256:{hashlib.sha256(raw_event).hexdigest()}"
+    )
+
+    pipeline = module.run_hook_pipeline(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        ingress_limit=5,
+        job_limit=5,
+    )
+
+    assert pipeline["ok"] is True
+    assert pipeline["ingress"]["processed"] == 1
+    assert pipeline["ingress"]["results"][0]["signal_count"] == 2
+    assert pipeline["jobs"]["processed"] == 1
+    assert not list(
+        (aoa_root / module.HOOK_INGRESS_ROOT / "pending").glob("*.json")
+    )
+    done = list(
+        (aoa_root / module.HOOK_INGRESS_ROOT / "done").glob("*.json")
+    )
+    assert len(done) == 1
+    assert done[0].stat().st_mode & 0o777 == 0o600
+    assert base64.b64decode(
+        json.loads(done[0].read_text(encoding="utf-8"))["event_b64"]
+    ) == raw_event
+    session_dir = Path(
+        str(pipeline["ingress"]["results"][0]["session_dir"])
+    )
+    hook_events = [
+        json.loads(line)
+        for line in (
+            session_dir / "hooks" / "events.jsonl"
+        )
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert len(hook_events) == 1
+    assert hook_events[0]["event"]["_aoa_hook_ingress"][
+        "signal_count"
+    ] == 2
+
+
+def test_thin_hook_ingress_rejects_corrupt_existing_identity(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    raw_event = b'{"session_id":"corrupt-existing"}'
+    pending_path, envelope = hook_module.enqueue_event(
+        event_name="SessionStart",
+        raw_event=raw_event,
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    decoded, decoded_raw = module.decode_hook_ingress_event(
+        envelope,
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    assert decoded == {"session_id": "corrupt-existing"}
+    assert decoded_raw == raw_event
+    with pytest.raises(ValueError, match="identity mismatch"):
+        module.decode_hook_ingress_event(
+            {**envelope, "ingress_id": "hook-ingress:wrong"},
+            workspace_root=workspace,
+            aoa_root=aoa_root,
+        )
+
+    corrupt = {**envelope, "event_b64": "corrupt-but-valid-json"}
+    pending_path.write_text(
+        json.dumps(corrupt, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    before = pending_path.read_bytes()
+    with pytest.raises(ValueError, match="failed exact identity"):
+        hook_module.enqueue_event(
+            event_name="SessionStart",
+            raw_event=raw_event,
+            workspace_root=workspace,
+            aoa_root=aoa_root,
+        )
+    assert pending_path.read_bytes() == before
+
+    worker = module.run_hook_ingress_worker(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        limit=1,
+    )
+    assert worker["ok"] is False
+    assert worker["processed"] == 1
+    assert not list(
+        (aoa_root / module.HOOK_INGRESS_ROOT / "pending").glob("*.json")
+    )
+    failed_root = aoa_root / module.HOOK_INGRESS_ROOT / "failed"
+    quarantined = list(failed_root.glob("*.raw"))
+    diagnostics = list(failed_root.glob("*.json"))
+    assert len(quarantined) == 1
+    assert len(diagnostics) == 1
+    assert quarantined[0].read_bytes() == before
+    failure = json.loads(diagnostics[0].read_text(encoding="utf-8"))
+    assert failure["quarantined_envelope"] == str(quarantined[0])
+
+
+def test_thin_hook_ingress_coalesces_duplicate_arriving_during_owner_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    raw_event = json.dumps(
+        {
+            "session_id": "thin-hook-running-duplicate",
+            "transcript_path": str(tmp_path / "missing.jsonl"),
+            "cwd": str(workspace),
+            "hook_event_name": "SessionStart",
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    command = [
+        sys.executable,
+        str(HOOK_SCRIPT),
+        "enqueue",
+        "--event-name",
+        "SessionStart",
+        "--workspace-root",
+        str(workspace),
+        "--aoa-root",
+        str(aoa_root),
+    ]
+    environment = {
+        **os.environ,
+        "AOA_SESSION_MEMORY_HOOK_BACKGROUND_SYNC": "0",
+    }
+    first = subprocess.run(
+        command,
+        input=raw_event,
+        capture_output=True,
+        check=False,
+        env=environment,
+    )
+    assert first.returncode == 0
+
+    original_handle = module.handle_hook_event
+    duplicate_results: list[subprocess.CompletedProcess[bytes]] = []
+
+    def handle_with_late_duplicate(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        duplicate_results.append(
+            subprocess.run(
+                command,
+                input=raw_event,
+                capture_output=True,
+                check=False,
+                env=environment,
+            )
+        )
+        return original_handle(*args, **kwargs)
+
+    monkeypatch.setattr(module, "handle_hook_event", handle_with_late_duplicate)
+    pipeline = module.run_hook_pipeline(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        ingress_limit=5,
+        job_limit=5,
+    )
+
+    assert [item.returncode for item in duplicate_results] == [0]
+    assert pipeline["ok"] is True
+    assert pipeline["ingress"]["processed"] == 1
+    result = pipeline["ingress"]["results"][0]
+    assert result["signal_count"] == 2
+    assert result["coalesced_after_replay"] == 1
+    assert "hook_ingress_late_duplicates_coalesced" in result["actions"]
+    assert not list(
+        (aoa_root / module.HOOK_INGRESS_ROOT / "pending").glob("*.json")
+    )
+    done = json.loads(
+        next(
+            (aoa_root / module.HOOK_INGRESS_ROOT / "done").glob("*.json")
+        ).read_text(encoding="utf-8")
+    )
+    assert done["signal_count"] == 2
+    session_dir = Path(str(result["session_dir"]))
+    hook_events = (
+        session_dir / "hooks" / "events.jsonl"
+    ).read_text(encoding="utf-8").splitlines()
+    receipts = [
+        json.loads(line)
+        for line in (
+            session_dir / "hooks" / "receipts.jsonl"
+        ).read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(hook_events) == 1
+    assert receipts[-1]["hook_ingress"]["signal_count"] == 2
+    assert receipts[-1]["hook_ingress"]["coalesced_after_replay"] == 1
+
+
+def test_scheduled_retry_dispatch_recovers_pending_thin_prompt_ingress(
+    tmp_path: Path,
+    capsys: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    event = {
+        "session_id": "scheduled-thin-prompt",
+        "cwd": str(workspace),
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "preserve this prompt until the owner worker runs",
+    }
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(HOOK_SCRIPT),
+            "enqueue",
+            "--event-name",
+            "UserPromptSubmit",
+            "--workspace-root",
+            str(workspace),
+            "--aoa-root",
+            str(aoa_root),
+        ],
+        input=json.dumps(event, ensure_ascii=False).encode("utf-8"),
+        capture_output=True,
+        check=False,
+        env={
+            **os.environ,
+            "AOA_SESSION_MEMORY_HOOK_BACKGROUND_SYNC": "0",
+        },
+    )
+    assert completed.returncode == 0
+    assert list(
+        (aoa_root / module.HOOK_INGRESS_ROOT / "pending").glob("*.json")
+    )
+
+    returncode = module.command_auto_maintenance_retry(
+        SimpleNamespace(
+            workspace_root=str(workspace),
+            aoa_root=str(aoa_root),
+            apply=True,
+            limit=0,
+            write_report=False,
+            full=False,
+        )
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert returncode == 0
+    assert payload["hook_pipeline"]["ok"] is True
+    assert payload["hook_pipeline"]["ingress"]["processed"] == 1
+    assert not list(
+        (aoa_root / module.HOOK_INGRESS_ROOT / "pending").glob("*.json")
+    )
 
 
 def test_codex_hook_lookup_tracks_trust_and_expected_commands(tmp_path: Path) -> None:
@@ -92851,6 +93237,8 @@ def test_validate_pipeline_runs_end_to_end(tmp_path: Path) -> None:
     assert payload["ok"] is True
     checks = {check["name"]: check["ok"] for check in payload["checks"]}
     assert checks["generated_hook_config_events"] is True
+    assert checks["generated_hook_commands_use_thin_ingress"] is True
+    assert checks["thin_hook_ingress_source_exists"] is True
     assert checks["precompact_receipt_ok"] is True
     assert checks["postcompact_receipt_ok"] is True
     assert checks["stop_receipt_ok"] is True
@@ -93266,7 +93654,8 @@ def test_copy_portable_bundle_keeps_hook_example_and_local_stats_portable(tmp_pa
     rendered_hooks = json.dumps(hook_example, ensure_ascii=False)
     assert str(module.default_source_aoa_root()) not in rendered_hooks
     assert str(target.resolve()) not in rendered_hooks
-    assert "/path/to/workspace/.aoa/scripts/aoa_session_memory.py" in rendered_hooks
+    assert "/path/to/workspace/.aoa/scripts/aoa_session_hook.py" in rendered_hooks
+    assert " enqueue " in rendered_hooks
     assert "stats" in payload["copied"]
     assert "docs" in payload["copied"]
     assert (target / "stats" / "port.manifest.json").is_file()

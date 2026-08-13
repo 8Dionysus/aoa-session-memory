@@ -28,6 +28,27 @@ Foreground hooks are bounded and fail-open. A hook failure produces a receipt
 or incident that later recovery can inspect; it does not make the active agent
 session depend on archive health.
 
+The generated Codex command first enters a small standard-library adapter. It
+atomically persists the exact private hook bytes, byte count, digest, selected
+roots, event kind, and signal count before returning schema-limited output.
+Byte-identical global and project signals share one ingress identity; the count
+and observation interval remain visible. Different bytes never coalesce. Queue
+admission means durable pending capture, not an indexed or current archive.
+
+Lifecycle ingress wakes one single-flight background process. That process
+loads the full projection engine outside the foreground hook latency, verifies
+the envelope, replays it through the ordinary owner handler, writes the normal
+receipt, and drains bounded hook jobs under the shared maintenance lease. A
+lease collision leaves ingress pending for the persistent retry dispatcher.
+The synchronous owner path remains an environment-controlled rollback and an
+enqueue failure attempts it before failing open.
+
+When raw is unavailable, the lifecycle handler writes the incident, diagnostic,
+session manifest, and minimal session-registry record synchronously during
+replay but queues the derived name and directory indexes. Those indexes are
+rebuildable navigation views; deferring them does not defer session visibility
+or weaken the incident evidence.
+
 Hook sync execution intent is coalesced by session and transcript across the
 pending and deferred queues. A later lifecycle signal updates the one active
 intent with the newest source snapshot while retaining the earliest queue time,

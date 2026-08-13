@@ -510,6 +510,8 @@ INSTALL_PROFILE_SCHEMA_VERSION = "aoa_session_memory_install_profile_v1"
 MAINTENANCE_COORDINATOR_STATE_JSON = "maintenance-coordinator.json"
 MAINTENANCE_BULK_MODES = {"catchup", "backlog", "deep", "manual-bulk"}
 HOOK_JOBS_ROOT = DIAGNOSTICS_ROOT / "hook-jobs"
+HOOK_INGRESS_ROOT = DIAGNOSTICS_ROOT / "hook-ingress"
+HOOK_INGRESS_SCHEMA_VERSION = "aoa_session_memory_hook_ingress_v1"
 HOOK_WORKER_SEEN_JSON = Path("hooks/worker-seen.json")
 PROJECTION_OUTBOX_ROOT = Path("projection-outbox")
 PROJECTION_OUTBOX_RECORDS_DIR = PROJECTION_OUTBOX_ROOT / "records"
@@ -2368,12 +2370,12 @@ def workspace_root_for(workspace_root: Path | None, aoa_root: Path) -> Path:
 
 
 def build_hook_command(event_name: str, workspace_root: Path, aoa_root: Path, *, python_bin: str = "python3") -> str:
-    script = aoa_root / "scripts" / "aoa_session_memory.py"
+    script = aoa_root / "scripts" / "aoa_session_hook.py"
     return " ".join(
         [
             shlex.quote(python_bin),
             shlex.quote(str(script)),
-            "hook",
+            "enqueue",
             "--event-name",
             shlex.quote(event_name),
             "--workspace-root",
@@ -3997,6 +3999,36 @@ def write_json(path: Path, payload: Any) -> None:
                 + "\n"
             )
         tmp_path.replace(path)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
+
+
+def write_private_json(path: Path, payload: Any) -> None:
+    """Atomically write owner-private runtime evidence without a mode race."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = -1
+    tmp_path: Path | None = None
+    try:
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=".aoa-private-json-",
+            suffix=".tmp",
+            dir=path.parent,
+        )
+        tmp_path = Path(tmp_name)
+        os.fchmod(fd, 0o600)
+        handle = os.fdopen(fd, "w", encoding="utf-8")
+        fd = -1
+        with handle:
+            handle.write(
+                json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+            )
+            handle.flush()
+            os.fsync(handle.fileno())
+        tmp_path.replace(path)
+        fsync_parent_directory(path)
     finally:
         if fd >= 0:
             os.close(fd)
@@ -33715,6 +33747,485 @@ def enqueue_graph_maintenance_job(
     return job_path
 
 
+def hook_ingress_dirs(aoa_root: Path) -> dict[str, Path]:
+    root = aoa_root / HOOK_INGRESS_ROOT
+    return {
+        "root": root,
+        "pending": root / "pending",
+        "running": root / "running",
+        "done": root / "done",
+        "failed": root / "failed",
+        "superseded": root / "superseded",
+    }
+
+
+def hook_ingress_identity(event_name: str, raw_event: bytes) -> str:
+    digest = hashlib.sha256()
+    digest.update(event_name.encode("utf-8"))
+    digest.update(b"\0")
+    digest.update(raw_event)
+    return digest.hexdigest()
+
+
+def hook_pipeline_pending_counts(aoa_root: Path) -> dict[str, int]:
+    ingress = hook_ingress_dirs(aoa_root)
+    jobs = hook_worker_dirs(aoa_root)
+    return {
+        "ingress_pending": sum(1 for _ in ingress["pending"].glob("*.json")),
+        "ingress_running": sum(1 for _ in ingress["running"].glob("*.json")),
+        "job_pending": sum(1 for _ in jobs["pending"].glob("*.json")),
+        "job_running": sum(1 for _ in jobs["running"].glob("*.json")),
+    }
+
+
+def recover_orphaned_hook_ingress(
+    dirs: dict[str, Path],
+    *,
+    workspace_root: Path | None,
+    aoa_root: Path,
+) -> list[dict[str, Any]]:
+    recovered: list[dict[str, Any]] = []
+    lock_path = dirs["root"] / "enqueue.lock"
+    with lock_path.open("a+", encoding="utf-8") as lock_handle:
+        os.chmod(lock_path, 0o600)
+        fcntl.flock(lock_handle, fcntl.LOCK_EX)
+        for running_path in sorted(dirs["running"].glob("*.json")):
+            pending_path = dirs["pending"] / running_path.name
+            if not pending_path.exists():
+                running_path.replace(pending_path)
+                fsync_parent_directory(running_path)
+                fsync_parent_directory(pending_path)
+                recovered.append(
+                    {
+                        "from": str(running_path),
+                        "to": str(pending_path),
+                        "status": "requeued_orphaned_ingress",
+                    }
+                )
+                continue
+            running = read_json(running_path, {})
+            pending = read_json(pending_path, {})
+            try:
+                running_event, running_raw = decode_hook_ingress_event(
+                    running,
+                    workspace_root=workspace_root,
+                    aoa_root=aoa_root,
+                )
+                pending_event, pending_raw = decode_hook_ingress_event(
+                    pending,
+                    workspace_root=workspace_root,
+                    aoa_root=aoa_root,
+                )
+                same_identity = (
+                    running_raw == pending_raw
+                    and running_event == pending_event
+                    and running.get("event_name") == pending.get("event_name")
+                )
+            except ValueError:
+                same_identity = False
+            if not same_identity:
+                quarantined_path = dirs["failed"] / (
+                    f"{compact_stamp()}__{time.time_ns()}__orphaned__"
+                    f"{running_path.name}"
+                )
+                running_path.replace(quarantined_path)
+                fsync_parent_directory(running_path)
+                fsync_parent_directory(quarantined_path)
+                recovered.append(
+                    {
+                        "from": str(running_path),
+                        "to": str(quarantined_path),
+                        "status": "quarantined_orphaned_ingress",
+                    }
+                )
+                continue
+            pending["signal_count"] = max(
+                1,
+                int_value(pending.get("signal_count"), 1),
+            ) + max(1, int_value(running.get("signal_count"), 1))
+            first_values = sorted(
+                value
+                for value in (
+                    str(running.get("first_seen_at") or ""),
+                    str(pending.get("first_seen_at") or ""),
+                )
+                if value
+            )
+            last_values = sorted(
+                value
+                for value in (
+                    str(running.get("last_seen_at") or ""),
+                    str(pending.get("last_seen_at") or ""),
+                )
+                if value
+            )
+            if first_values:
+                pending["first_seen_at"] = first_values[0]
+            if last_values:
+                pending["last_seen_at"] = last_values[-1]
+            write_private_json(pending_path, pending)
+            superseded_path = dirs["superseded"] / (
+                f"{compact_stamp()}__{time.time_ns()}__{running_path.name}"
+            )
+            running_path.replace(superseded_path)
+            fsync_parent_directory(running_path)
+            fsync_parent_directory(superseded_path)
+            recovered.append(
+                {
+                    "from": str(running_path),
+                    "to": str(pending_path),
+                    "superseded": str(superseded_path),
+                    "status": "merged_orphaned_ingress",
+                }
+            )
+    return recovered
+
+
+def decode_hook_ingress_event(
+    envelope: dict[str, Any],
+    *,
+    workspace_root: Path | None,
+    aoa_root: Path,
+) -> tuple[dict[str, Any], bytes]:
+    if envelope.get("schema_version") != HOOK_INGRESS_SCHEMA_VERSION:
+        raise ValueError("unsupported hook ingress schema")
+    if envelope.get("artifact_type") != "codex_hook_ingress":
+        raise ValueError("unsupported hook ingress artifact type")
+    if envelope.get("source") != "codex_hook_stdin":
+        raise ValueError("unsupported hook ingress source")
+    if envelope.get("privacy") != "owner_private_runtime_evidence":
+        raise ValueError("unsupported hook ingress privacy posture")
+    signal_count = envelope.get("signal_count")
+    if (
+        isinstance(signal_count, bool)
+        or not isinstance(signal_count, int)
+        or signal_count < 1
+    ):
+        raise ValueError("invalid hook ingress signal count")
+    encoded = envelope.get("event_b64")
+    if not isinstance(encoded, str):
+        raise ValueError("missing hook ingress event_b64")
+    try:
+        raw_event = base64.b64decode(encoded.encode("ascii"), validate=True)
+    except (ValueError, UnicodeEncodeError) as exc:
+        raise ValueError("invalid hook ingress event_b64") from exc
+    expected_digest = str(envelope.get("event_sha256") or "")
+    actual_digest = f"sha256:{hashlib.sha256(raw_event).hexdigest()}"
+    if expected_digest != actual_digest:
+        raise ValueError("hook ingress event digest mismatch")
+    if int_value(envelope.get("event_bytes"), -1) != len(raw_event):
+        raise ValueError("hook ingress event byte count mismatch")
+    event_name = str(envelope.get("event_name") or "")
+    if not event_name:
+        raise ValueError("missing hook ingress event name")
+    identity = hook_ingress_identity(event_name, raw_event)
+    if envelope.get("ingress_id") != f"hook-ingress:{identity}":
+        raise ValueError("hook ingress identity mismatch")
+    declared_aoa_value = str(envelope.get("aoa_root") or "")
+    if not declared_aoa_value:
+        raise ValueError("missing hook ingress aoa root")
+    declared_aoa = Path(declared_aoa_value).expanduser()
+    if declared_aoa.resolve(strict=False) != aoa_root.resolve(strict=False):
+        raise ValueError("hook ingress aoa root mismatch")
+    if workspace_root is not None:
+        declared_workspace_value = str(envelope.get("workspace_root") or "")
+        if not declared_workspace_value:
+            raise ValueError("missing hook ingress workspace root")
+        declared_workspace = Path(declared_workspace_value).expanduser()
+        if (
+            declared_workspace.resolve(strict=False)
+            != workspace_root.resolve(strict=False)
+        ):
+            raise ValueError("hook ingress workspace root mismatch")
+    try:
+        decoded = json.loads(raw_event.decode("utf-8")) if raw_event.strip() else {}
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("hook ingress event is not valid JSON") from exc
+    event = decoded if isinstance(decoded, dict) else {"payload": decoded}
+    return event, raw_event
+
+
+def coalesce_pending_hook_ingress_after_replay(
+    *,
+    dirs: dict[str, Path],
+    running_path: Path,
+    envelope: dict[str, Any],
+    raw_event: bytes,
+    workspace_root: Path | None,
+    aoa_root: Path,
+) -> tuple[dict[str, Any], int]:
+    """Merge a byte-identical signal that arrived while replay was running."""
+    pending_path = dirs["pending"] / running_path.name
+    if not pending_path.is_file():
+        return envelope, 0
+    pending = read_json(pending_path, {})
+    if not isinstance(pending, dict):
+        return envelope, 0
+    try:
+        pending_event, pending_raw = decode_hook_ingress_event(
+            pending,
+            workspace_root=workspace_root,
+            aoa_root=aoa_root,
+        )
+    except ValueError:
+        return envelope, 0
+    if (
+        pending_raw != raw_event
+        or str(pending.get("event_name") or "")
+        != str(envelope.get("event_name") or "")
+        or not isinstance(pending_event, dict)
+    ):
+        return envelope, 0
+    additional = max(1, int_value(pending.get("signal_count"), 1))
+    merged = {
+        **envelope,
+        "signal_count": (
+            max(1, int_value(envelope.get("signal_count"), 1))
+            + additional
+        ),
+    }
+    first_values = sorted(
+        value
+        for value in (
+            str(envelope.get("first_seen_at") or ""),
+            str(pending.get("first_seen_at") or ""),
+        )
+        if value
+    )
+    last_values = sorted(
+        value
+        for value in (
+            str(envelope.get("last_seen_at") or ""),
+            str(pending.get("last_seen_at") or ""),
+        )
+        if value
+    )
+    if first_values:
+        merged["first_seen_at"] = first_values[0]
+    if last_values:
+        merged["last_seen_at"] = last_values[-1]
+    write_private_json(running_path, merged)
+    pending_path.unlink(missing_ok=True)
+    fsync_parent_directory(pending_path)
+    return merged, additional
+
+
+def run_hook_ingress_worker(
+    *,
+    workspace_root: Path | None,
+    aoa_root: Path,
+    limit: int = 20,
+) -> dict[str, Any]:
+    dirs = hook_ingress_dirs(aoa_root)
+    for path in dirs.values():
+        path.mkdir(parents=True, exist_ok=True)
+        os.chmod(path, 0o700)
+    worker_lock_path = dirs["root"] / "worker.lock"
+    results: list[dict[str, Any]] = []
+    with worker_lock_path.open("a+", encoding="utf-8") as worker_handle:
+        os.chmod(worker_lock_path, 0o600)
+        try:
+            fcntl.flock(
+                worker_handle,
+                fcntl.LOCK_EX | fcntl.LOCK_NB,
+            )
+        except BlockingIOError:
+            return {
+                "schema_version": SCHEMA_VERSION,
+                "ok": True,
+                "status": "worker_already_running",
+                "processed": 0,
+                "results": [],
+            }
+        recovered = recover_orphaned_hook_ingress(
+            dirs,
+            workspace_root=workspace_root,
+            aoa_root=aoa_root,
+        )
+        remaining = max(0, int(limit))
+        while remaining > 0:
+            enqueue_lock = dirs["root"] / "enqueue.lock"
+            with enqueue_lock.open("a+", encoding="utf-8") as lock_handle:
+                os.chmod(enqueue_lock, 0o600)
+                fcntl.flock(lock_handle, fcntl.LOCK_EX)
+                pending = sorted(dirs["pending"].glob("*.json"))
+                if not pending:
+                    break
+                pending_path = pending[0]
+                running_path = dirs["running"] / pending_path.name
+                pending_path.replace(running_path)
+                fsync_parent_directory(pending_path)
+                fsync_parent_directory(running_path)
+            started = time.monotonic()
+            envelope_validated = False
+            try:
+                envelope = read_json(running_path, {})
+                if not isinstance(envelope, dict):
+                    raise ValueError("hook ingress envelope is not a mapping")
+                event, raw_event = decode_hook_ingress_event(
+                    envelope,
+                    workspace_root=workspace_root,
+                    aoa_root=aoa_root,
+                )
+                event_name = str(envelope.get("event_name") or "")
+                if event_name not in REQUIRED_HOOK_EVENTS:
+                    raise ValueError("unsupported hook ingress event name")
+                expected_name = (
+                    "hook-ingress__"
+                    f"{hook_ingress_identity(event_name, raw_event)}.json"
+                )
+                if running_path.name != expected_name:
+                    raise ValueError("hook ingress queue filename mismatch")
+                envelope_validated = True
+                event = {
+                    **event,
+                    "_aoa_hook_ingress": {
+                        "ingress_id": envelope.get("ingress_id"),
+                        "signal_count": max(
+                            1,
+                            int_value(envelope.get("signal_count"), 1),
+                        ),
+                        "first_seen_at": envelope.get("first_seen_at"),
+                        "last_seen_at": envelope.get("last_seen_at"),
+                        "event_sha256": envelope.get("event_sha256"),
+                    },
+                }
+                receipt = handle_hook_event(
+                    event_name,
+                    event,
+                    workspace_root=workspace_root,
+                    aoa_root=aoa_root,
+                )
+                actions = receipt.setdefault("actions", [])
+                if isinstance(actions, list):
+                    actions.append("hook_ingress_replayed")
+                enqueue_lock = dirs["root"] / "enqueue.lock"
+                with enqueue_lock.open(
+                    "a+",
+                    encoding="utf-8",
+                ) as lock_handle:
+                    os.chmod(enqueue_lock, 0o600)
+                    fcntl.flock(lock_handle, fcntl.LOCK_EX)
+                    envelope, coalesced_after_replay = (
+                        coalesce_pending_hook_ingress_after_replay(
+                            dirs=dirs,
+                            running_path=running_path,
+                            envelope=envelope,
+                            raw_event=raw_event,
+                            workspace_root=workspace_root,
+                            aoa_root=aoa_root,
+                        )
+                    )
+                    if coalesced_after_replay and isinstance(actions, list):
+                        actions.append(
+                            "hook_ingress_late_duplicates_coalesced"
+                        )
+                    receipt["hook_ingress"] = {
+                        "ingress_id": envelope.get("ingress_id"),
+                        "signal_count": max(
+                            1,
+                            int_value(envelope.get("signal_count"), 1),
+                        ),
+                        "coalesced_after_replay": (
+                            coalesced_after_replay
+                        ),
+                        "first_seen_at": envelope.get("first_seen_at"),
+                        "last_seen_at": envelope.get("last_seen_at"),
+                        "event_sha256": envelope.get("event_sha256"),
+                    }
+                    duration_ms = int(
+                        (time.monotonic() - started) * 1000
+                    )
+                    record_hook_receipt(
+                        receipt,
+                        duration_ms=duration_ms,
+                    )
+                    result = {
+                        "status": "hook_ingress_processed",
+                        "ingress_id": envelope.get("ingress_id"),
+                        "event_name": event_name,
+                        "signal_count": max(
+                            1,
+                            int_value(envelope.get("signal_count"), 1),
+                        ),
+                        "coalesced_after_replay": (
+                            coalesced_after_replay
+                        ),
+                        "event_bytes": len(raw_event),
+                        "event_sha256": envelope.get("event_sha256"),
+                        "session_id": receipt.get("session_id"),
+                        "session_dir": receipt.get("session_dir"),
+                        "hook_ok": receipt.get("ok"),
+                        "actions": receipt.get("actions", []),
+                        "background_job": receipt.get("background_job"),
+                        "duration_ms": duration_ms,
+                    }
+                    done_path = dirs["done"] / running_path.name
+                    write_private_json(
+                        done_path,
+                        {
+                            **envelope,
+                            "processed_at": utc_now(),
+                            "result": result,
+                        },
+                    )
+                    running_path.unlink(missing_ok=True)
+                    fsync_parent_directory(running_path)
+                results.append(result)
+            except Exception as exc:
+                failure_prefix = (
+                    f"{compact_stamp()}__{time.time_ns()}__"
+                    f"{running_path.name}"
+                )
+                failed_path = dirs["failed"] / failure_prefix
+                envelope = read_json(running_path, {})
+                failure_payload = {
+                    "failed_at": utc_now(),
+                    "error": f"{exc.__class__.__name__}: {exc}",
+                }
+                if (
+                    envelope_validated
+                    and isinstance(envelope, dict)
+                    and envelope
+                ):
+                    write_private_json(
+                        failed_path,
+                        {**envelope, **failure_payload},
+                    )
+                    running_path.unlink(missing_ok=True)
+                    fsync_parent_directory(running_path)
+                else:
+                    quarantined_path = failed_path.with_suffix(".raw")
+                    running_path.replace(quarantined_path)
+                    fsync_parent_directory(running_path)
+                    fsync_parent_directory(quarantined_path)
+                    write_private_json(
+                        failed_path,
+                        {
+                            **failure_payload,
+                            "quarantined_envelope": str(
+                                quarantined_path
+                            ),
+                        },
+                    )
+                results.append(
+                    {
+                        "status": "failed",
+                        "job": str(running_path),
+                        "error": f"{exc.__class__.__name__}: {exc}",
+                    }
+                )
+            remaining -= 1
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "ok": all(result.get("status") != "failed" for result in results),
+        "status": "processed",
+        "processed": len(results),
+        "recovered_running": recovered,
+        "results": results,
+    }
+
+
 def hook_worker_dirs(aoa_root: Path) -> dict[str, Path]:
     root = aoa_root / HOOK_JOBS_ROOT
     return {
@@ -34616,6 +35127,40 @@ def run_hook_worker(*, workspace_root: Path | None, aoa_root: Path, limit: int =
     }
 
 
+def run_hook_pipeline(
+    *,
+    workspace_root: Path | None,
+    aoa_root: Path,
+    ingress_limit: int = 20,
+    job_limit: int = 5,
+) -> dict[str, Any]:
+    before = hook_pipeline_pending_counts(aoa_root)
+    ingress = run_hook_ingress_worker(
+        workspace_root=workspace_root,
+        aoa_root=aoa_root,
+        limit=ingress_limit,
+    )
+    jobs = run_hook_worker(
+        workspace_root=workspace_root,
+        aoa_root=aoa_root,
+        limit=job_limit,
+    )
+    after = hook_pipeline_pending_counts(aoa_root)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_hook_pipeline",
+        "ok": ingress.get("ok") is True and jobs.get("ok") is True,
+        "status": "processed",
+        "pending_before": before,
+        "pending_after": after,
+        "ingress": ingress,
+        "jobs": jobs,
+        "truth_status": (
+            "queued_hook_evidence_processed_with_owner_handlers"
+        ),
+    }
+
+
 def launch_hook_worker(*, workspace_root: Path | None, aoa_root: Path) -> bool:
     if not hook_background_sync_enabled():
         return False
@@ -34650,6 +35195,7 @@ def update_registry(
     session_dir: Path,
     *,
     lock_timeout_sec: float | None = None,
+    update_derived_indexes: bool = True,
 ) -> bool:
     lock_path = aoa_root / ".session-registry.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -34666,11 +35212,22 @@ def update_registry(
                     if time.monotonic() >= deadline:
                         return False
                     time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
-        update_registry_locked(aoa_root, manifest, session_dir)
+        update_registry_locked(
+            aoa_root,
+            manifest,
+            session_dir,
+            update_derived_indexes=update_derived_indexes,
+        )
     return True
 
 
-def update_registry_locked(aoa_root: Path, manifest: dict[str, Any], session_dir: Path) -> None:
+def update_registry_locked(
+    aoa_root: Path,
+    manifest: dict[str, Any],
+    session_dir: Path,
+    *,
+    update_derived_indexes: bool = True,
+) -> None:
     registry_path = aoa_root / REGISTRY_NAME
     registry = read_json(registry_path, {"schema_version": SCHEMA_VERSION, "sessions": []})
     sessions = registry.get("sessions", [])
@@ -34698,8 +35255,9 @@ def update_registry_locked(aoa_root: Path, manifest: dict[str, Any], session_dir
             "sessions": updated,
         },
     )
-    write_session_name_index(aoa_root, updated)
-    write_sessions_directory_index(aoa_root, updated)
+    if update_derived_indexes:
+        write_session_name_index(aoa_root, updated)
+        write_sessions_directory_index(aoa_root, updated)
 
 
 def registry_records_from_manifests(aoa_root: Path) -> list[dict[str, Any]]:
@@ -71212,6 +71770,7 @@ def write_raw_unavailable_incident(
     transcript_path: Path | None,
     hook_event_name: str,
     registry_lock_timeout_sec: float | None = None,
+    defer_registry_derivatives: bool = False,
 ) -> dict[str, Any]:
     now = utc_now()
     session_id = session_id_from(event, transcript_path)
@@ -71334,6 +71893,7 @@ def write_raw_unavailable_incident(
             existing,
             session_dir,
             lock_timeout_sec=registry_lock_timeout_sec,
+            update_derived_indexes=not defer_registry_derivatives,
         )
         return {
             "session_id": session_id,
@@ -71348,6 +71908,9 @@ def write_raw_unavailable_incident(
             "diagnostic": str(diagnostic_path),
             "hook_observation": hook_observation,
             "registry_updated": registry_updated,
+            "registry_derivatives_updated": bool(
+                registry_updated and not defer_registry_derivatives
+            ),
         }
     manifest_path = session_dir / "session.manifest.json"
     manifest = {
@@ -71372,7 +71935,13 @@ def write_raw_unavailable_incident(
     }
     refresh_session_metadata_generation_identity(manifest)
     write_json(manifest_path, manifest)
-    registry_updated = update_registry(aoa_root, manifest, session_dir, lock_timeout_sec=registry_lock_timeout_sec)
+    registry_updated = update_registry(
+        aoa_root,
+        manifest,
+        session_dir,
+        lock_timeout_sec=registry_lock_timeout_sec,
+        update_derived_indexes=not defer_registry_derivatives,
+    )
     return {
         "session_id": session_id,
         "display_name": display["label"],
@@ -71383,6 +71952,9 @@ def write_raw_unavailable_incident(
         "incident": str(incident_path),
         "diagnostic": str(diagnostic_path),
         "registry_updated": registry_updated,
+        "registry_derivatives_updated": bool(
+            registry_updated and not defer_registry_derivatives
+        ),
     }
 
 
@@ -71646,10 +72218,25 @@ def handle_hook_event(
                 transcript_path=transcript_path,
                 hook_event_name=event_name,
                 registry_lock_timeout_sec=DEFAULT_HOOK_REGISTRY_LOCK_TIMEOUT_SEC if event_name in HOOK_EVENT_ORDER else None,
+                defer_registry_derivatives=event_name in {
+                    "SessionStart",
+                    "PreCompact",
+                    "PostCompact",
+                    "Stop",
+                },
             )
             actions.append("raw_unavailable_incident_written")
-            if not incident.get("registry_updated"):
-                actions.append("registry_update_deferred")
+            registry_update_deferred = not incident.get("registry_updated")
+            registry_derivatives_deferred = bool(
+                registry_update_deferred
+                or incident.get("registry_derivatives_updated") is False
+            )
+            if registry_derivatives_deferred:
+                actions.append(
+                    "registry_update_deferred"
+                    if registry_update_deferred
+                    else "registry_derivatives_deferred"
+                )
             receipt = {
                 "schema_version": SCHEMA_VERSION,
                 "ok": True,
@@ -71663,7 +72250,7 @@ def handle_hook_event(
                 "incident": incident,
                 "errors": errors,
             }
-            if not incident.get("registry_updated"):
+            if registry_derivatives_deferred:
                 return attach_registry_update_job(
                     receipt,
                     root,
@@ -71671,7 +72258,14 @@ def handle_hook_event(
                     event=event,
                     session_id=session_id,
                     session_dir=Path(str(incident["session_dir"])),
-                    reason="raw_unavailable_registry_update_deferred",
+                    reason=(
+                        "raw_unavailable_registry_update_deferred"
+                        if registry_update_deferred
+                        else (
+                            "raw_unavailable_registry_"
+                            "derivatives_deferred"
+                        )
+                    ),
                 )
             return receipt
         synced = sync_session_from_transcript(
@@ -71782,6 +72376,8 @@ def record_hook_receipt(receipt: dict[str, Any], *, duration_ms: int | None = No
     }
     if duration_ms is not None:
         payload["duration_ms"] = duration_ms
+    if isinstance(receipt.get("hook_ingress"), dict):
+        payload["hook_ingress"] = receipt["hook_ingress"]
     if isinstance(receipt.get("typing_bridge"), dict):
         payload["typing_bridge"] = receipt["typing_bridge"]
     try:
@@ -191737,6 +192333,7 @@ HOOK_RECEIPT_SIGNAL_ACTIONS = {
         "indexing_deferred",
         "raw_mirror_deferred",
         "raw_sync_deferred",
+        "registry_derivatives_deferred",
         "registry_update_deferred",
         "registry_update_retry_queued",
     },
@@ -198149,6 +198746,64 @@ def command_hook(args: argparse.Namespace) -> int:
     return 0
 
 
+def hook_pipeline_touched_surfaces() -> list[str]:
+    return sorted(
+        {
+            "hook-ingress",
+            "hooks",
+            "sessions",
+            *maintenance_surfaces(
+                repair_indexes=True,
+                repair_token_accounting=True,
+                repair_graph=True,
+            ),
+        }
+    )
+
+
+def run_hook_pipeline_with_maintenance_lock(
+    *,
+    workspace_root: Path | None,
+    aoa_root: Path,
+    ingress_limit: int = 20,
+    job_limit: int = 5,
+    reason: str = "background_hook_ingress_worker",
+) -> dict[str, Any]:
+    return run_with_maintenance_lock(
+        aoa_root,
+        lambda: run_hook_pipeline(
+            workspace_root=workspace_root,
+            aoa_root=aoa_root,
+            ingress_limit=ingress_limit,
+            job_limit=job_limit,
+        ),
+        owner_job="hook-ingress-worker",
+        mode="hook-worker",
+        target="hook-ingress-and-jobs",
+        reason=reason,
+        touched_surfaces=hook_pipeline_touched_surfaces(),
+        lock_timeout_sec=0.0,
+    )
+
+
+def command_hook_ingress_worker(args: argparse.Namespace) -> int:
+    explicit_workspace = (
+        Path(args.workspace_root) if args.workspace_root else None
+    )
+    root = aoa_root_for(
+        explicit_workspace,
+        Path(args.aoa_root) if args.aoa_root else None,
+    )
+    payload = run_hook_pipeline_with_maintenance_lock(
+        workspace_root=explicit_workspace,
+        aoa_root=root,
+        ingress_limit=args.ingress_limit,
+        job_limit=args.job_limit,
+    )
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
 def command_hook_worker(args: argparse.Namespace) -> int:
     explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
     root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
@@ -198625,12 +199280,31 @@ def command_auto_maintenance_retry(args: argparse.Namespace) -> int:
     explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
     root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
     workspace = explicit_workspace or root.parent
+    hook_pending_before = hook_pipeline_pending_counts(root)
+    hook_pipeline: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "ok": True,
+        "status": "not_requested",
+        "pending_before": hook_pending_before,
+    }
+    if args.apply and any(hook_pending_before.values()):
+        hook_pipeline = run_hook_pipeline_with_maintenance_lock(
+            workspace_root=workspace,
+            aoa_root=root,
+            ingress_limit=20,
+            job_limit=5,
+            reason="scheduled_retry_hook_recovery",
+        )
     payload = auto_maintenance_retry_dispatch(
         workspace_root=workspace,
         aoa_root=root,
         apply=args.apply,
         limit=args.limit,
         write_report=args.write_report,
+    )
+    payload["hook_pipeline"] = hook_pipeline
+    payload["ok"] = (
+        payload.get("ok") is True and hook_pipeline.get("ok") is True
     )
     stdout_payload = payload if args.full else {
         key: value
@@ -206510,6 +207184,34 @@ def validate_pipeline(*, workspace_root: Path | None = None, aoa_root: Path | No
         generated_config = build_user_hooks_config(reference_workspace, reference_root)
         generated_commands = expected_hook_commands(reference_workspace, reference_root)
         add_check("generated_hook_config_events", set(generated_config.get("hooks", {})) == set(REQUIRED_HOOK_EVENTS))
+        thin_hook_script = reference_root / "scripts" / "aoa_session_hook.py"
+        add_check(
+            "generated_hook_commands_use_thin_ingress",
+            all(
+                str(thin_hook_script) in command
+                and " enqueue " in command
+                for command in generated_commands.values()
+            ),
+            generated_commands,
+        )
+        if (reference_root / "AGENTS.md").is_file():
+            add_check(
+                "thin_hook_ingress_source_exists",
+                thin_hook_script.is_file(),
+                str(thin_hook_script),
+            )
+        else:
+            add_check(
+                "thin_hook_ingress_source_exists",
+                True,
+                {
+                    "status": "not_applicable",
+                    "reason": (
+                        "selected runtime root is not an installed portable "
+                        "kernel"
+                    ),
+                },
+            )
         add_check(
             "generated_hook_commands_target_selected_roots",
             all(str(reference_workspace) in command and str(reference_root) in command for command in generated_commands.values()),
@@ -208242,6 +208944,27 @@ def build_parser() -> argparse.ArgumentParser:
     hook.add_argument("--workspace-root")
     hook.add_argument("--aoa-root")
     hook.set_defaults(func=command_hook)
+
+    hook_ingress_worker = sub.add_parser(
+        "hook-ingress-worker",
+        help=(
+            "Replay thin hook-ingress envelopes and process their bounded "
+            "follow-up jobs outside the Codex hook timeout window."
+        ),
+    )
+    hook_ingress_worker.add_argument("--workspace-root")
+    hook_ingress_worker.add_argument("--aoa-root")
+    hook_ingress_worker.add_argument(
+        "--ingress-limit",
+        type=int,
+        default=20,
+    )
+    hook_ingress_worker.add_argument(
+        "--job-limit",
+        type=int,
+        default=5,
+    )
+    hook_ingress_worker.set_defaults(func=command_hook_ingress_worker)
 
     hook_worker = sub.add_parser("hook-worker", help="Process queued hook sync jobs outside the Codex hook timeout window.")
     hook_worker.add_argument("--workspace-root")
