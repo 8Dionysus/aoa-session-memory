@@ -28,6 +28,15 @@ Foreground hooks are bounded and fail-open. A hook failure produces a receipt
 or incident that later recovery can inspect; it does not make the active agent
 session depend on archive health.
 
+Hook sync execution intent is coalesced by session and transcript across the
+pending and deferred queues. A later lifecycle signal updates the one active
+intent with the newest source snapshot while retaining the earliest queue time,
+event names, reasons, and a total signal count. Legacy duplicates are moved to
+the generated `superseded` receipt lane before one canonical job remains; they
+are not executed repeatedly or discarded as if they never existed. A running
+job may have one pending successor so source growth observed during execution
+is not lost.
+
 ## 2. Raw preservation
 
 Readable source JSONL is mirrored into the local archive before semantic
@@ -609,11 +618,14 @@ generated persistent retry queue under `diagnostics/`. The
 `auto-maintenance-retry` dispatcher consumes at most a bounded number of due
 items, deduplicates by profile and target, applies exponential backoff, recovers
 an interrupted in-flight claim after dispatcher restart, and stops after the
-profile retry limit. A later successful periodic or retry launch clears the
-pending intent. Manual operator launches do not silently create background
-work. A host scheduler may invoke the portable dispatcher, but the queue and
-retry semantics remain owned by this organ; scheduled retry is not semantic
-maintenance success.
+profile retry limit for actual resource or execution failure. Contention with
+another healthy maintenance owner does not consume that failure budget: the
+dispatcher resets the attempt cycle, records a contention cycle, and keeps the
+same intent pending for the next fair window. A later successful periodic or
+retry launch clears the pending intent. Manual operator launches do not
+silently create background work. A host scheduler may invoke the portable
+dispatcher, but the queue and retry semantics remain owned by this organ;
+scheduled retry is not semantic maintenance success.
 
 The catch-up resource route consumes an explicitly ready live-tail command
 independently of the packet's global recommendation. An unrelated cleanup or

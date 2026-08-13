@@ -44,9 +44,9 @@ still launches its exact bounded child. Otherwise the wrapper skips the global
 catch-up resource launch and directly admits the probe-class index drip.
 
 The direct drip retains the existing demand epoch and owner floor, maintenance
-lease, dirty-first bounded discovery, one-slice repair limit, search-shard
-limit, token/graph exclusion, exact child-result parsing, semantic progress
-classification, and retry scheduling. Reports distinguish
+lease, dirty-first bounded discovery, calibrated bounded repair batch,
+search-shard limit, token/graph exclusion, exact child-result parsing, semantic
+progress classification, and retry scheduling. Reports distinguish
 `bounded_index_drip_*` from resource-blocked fallback statuses and state why
 the route was preferred.
 
@@ -94,3 +94,16 @@ Tests require an explicit all-target catch-up to issue exactly one probe-class
 index-maintenance launch, never the medium global child, and retain separate
 tests for true resource-blocked fallback, progress-with-remaining retry,
 learned-demand floors, lock conflicts, and live-tail targeting.
+
+## Review 2026-08-13
+
+Live convergence showed that an installed one-session batch used about
+1.0-2.7 GiB peak memory but allowed a growing archive to add stale sessions as
+fast as the ten-minute route retired them. The accepted route now uses the
+portable default batch of 12 sessions inside the same 600-second cooperative
+budget and 32 MiB per-session light-lane ceiling. The host floor and larger
+learned peak still win admission, and budget exhaustion remains a normal
+checkpoint. The catch-up demand epoch advances from `v7` to `v8`, so the wider
+batch does not inherit an obsolete peak from the one-session execution shape.
+This tunes the bounded batch; it does not widen the projection scope or convert
+catch-up into a monolithic rebuild.

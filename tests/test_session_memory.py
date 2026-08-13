@@ -55153,7 +55153,7 @@ def test_auto_maintenance_resource_demand_epoch_tracks_each_bounded_profile_enve
     expected_epochs = {
         "hot": "v5",
         "backlog": "v4",
-        "catchup": "v7",
+        "catchup": "v8",
         "deep": "v4",
     }
     for profile, epoch in expected_epochs.items():
@@ -55511,7 +55511,7 @@ def test_auto_maintenance_resource_launch_uses_live_tail_fast_path_for_catchup(t
     assert calls["command"][:3] == ["abyss-machine", "resource", "launch"]
     assert "--force" in calls["command"]
     assert calls["command"][calls["command"].index("--demand-key") + 1] == (
-        "aoa-session-memory:auto-maintenance:catchup:index-maintenance-v7"
+        "aoa-session-memory:auto-maintenance:catchup:index-maintenance-v8"
     )
     assert calls["command"][calls["command"].index("--demand-owner") + 1] == "aoa-session-memory"
     assert child[:4] == ["python3", str(Path(module.__file__).resolve()), "index-maintenance", session_label]
@@ -56712,7 +56712,7 @@ def test_catchup_auto_maintenance_resource_prefers_explicit_bounded_index_drip(
     assert len(calls) == 1
     assert calls[0][3:5] == ["--class", "probe"]
     assert calls[0][calls[0].index("--demand-key") + 1] == (
-        "aoa-session-memory:auto-maintenance:catchup:index-drip-v7"
+        "aoa-session-memory:auto-maintenance:catchup:index-drip-v8"
     )
     assert calls[0][calls[0].index("--demand-owner") + 1] == "aoa-session-memory"
     assert "index-maintenance" in calls[0]
@@ -59939,6 +59939,79 @@ def test_auto_maintenance_retry_dispatch_reschedules_retryable_block_with_backof
     assert retry_item["last_status"] == "resource_blocked"
     assert retry_item["next_attempt_epoch"] > due_epoch
     assert retry_item["next_delay_seconds"] > retry_item["base_delay_seconds"]
+
+
+def test_auto_maintenance_retry_lock_contention_never_exhausts_owner_work(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    scheduled = module.auto_maintenance_retry_reconcile(
+        aoa_root=aoa_root,
+        profile="backlog",
+        target="all",
+        reason="timer_backlog",
+        apply=True,
+        launch_ok=False,
+        launch_status="skipped_lock_held",
+        options={},
+        now_epoch=2_000.0,
+    )
+    due_epoch = float(scheduled["next_attempt_epoch"]) + 1
+
+    def put_on_last_attempt(
+        queue_payload: dict[str, Any],
+    ) -> tuple[None, bool]:
+        item = queue_payload["items"]["backlog:all"]
+        item["attempts_started"] = item["max_attempts"] - 1
+        item["next_attempt_epoch"] = due_epoch - 1
+        item["next_attempt_at"] = module.auto_maintenance_retry_iso(
+            due_epoch - 1
+        )
+        return None, True
+
+    module.mutate_auto_maintenance_retry_queue(
+        aoa_root,
+        put_on_last_attempt,
+        now_epoch=due_epoch - 1,
+    )
+    monkeypatch.setattr(
+        module,
+        "auto_maintenance_resource_launch",
+        lambda **_kwargs: {
+            "schema_version": 1,
+            "artifact_type": "auto_maintenance_resource_launch",
+            "ok": False,
+            "status": "skipped_lock_held",
+            "diagnostics": ["lock_held"],
+        },
+    )
+
+    dispatched = module.auto_maintenance_retry_dispatch(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        apply=True,
+        limit=1,
+        now_epoch=due_epoch,
+    )
+
+    after = module.auto_maintenance_retry_queue_status(
+        aoa_root,
+        now_epoch=due_epoch,
+    )
+    result = dispatched["results"][0]
+    retry_item = after["items"]["backlog:all"]
+    assert result["attempt"] == retry_item["max_attempts"]
+    assert result["launch_contended"] is True
+    assert result["disposition"] == "contention_rescheduled"
+    assert retry_item["attempts_started"] == 0
+    assert retry_item["contention_cycles"] == 1
+    assert retry_item["next_delay_seconds"] == retry_item[
+        "base_delay_seconds"
+    ]
+    assert retry_item["next_attempt_epoch"] > due_epoch
 
 
 def test_auto_maintenance_retry_dispatch_starts_new_cycle_after_bounded_progress(
@@ -90457,6 +90530,164 @@ def test_hook_worker_processes_deferred_sync_job(tmp_path: Path, monkeypatch) ->
     assert list((aoa_root / module.HOOK_JOBS_ROOT / "done").glob("*.json"))
 
 
+def test_hook_sync_queue_coalesces_pending_events_per_session(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    transcript = tmp_path / "rollout-coalesced-pending.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-08-12T00:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": "coalesced-pending"},
+            }
+        ],
+    )
+
+    first = module.enqueue_hook_sync_job(
+        aoa_root,
+        event_name="SessionStart",
+        event={"session_id": "coalesced-pending", "sequence": 1},
+        session_id="coalesced-pending",
+        transcript_path=transcript,
+        reason="first_signal",
+    )
+    second = module.enqueue_hook_sync_job(
+        aoa_root,
+        event_name="Stop",
+        event={"session_id": "coalesced-pending", "sequence": 2},
+        session_id="coalesced-pending",
+        transcript_path=transcript,
+        reason="latest_signal",
+    )
+
+    assert first == second
+    pending = list(
+        (aoa_root / module.HOOK_JOBS_ROOT / "pending").glob("*.json")
+    )
+    assert pending == [first]
+    payload = json.loads(first.read_text(encoding="utf-8"))
+    assert payload["event_name"] == "Stop"
+    assert payload["event"]["sequence"] == 2
+    assert payload["coalesced_event_count"] == 2
+    assert payload["coalesced_event_names"] == ["SessionStart", "Stop"]
+    assert payload["coalesced_reasons"] == ["first_signal", "latest_signal"]
+
+
+def test_hook_sync_queue_updates_one_deferred_job_in_place(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    transcript = tmp_path / "rollout-coalesced-deferred.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-08-12T00:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": "coalesced-deferred"},
+            }
+        ],
+    )
+    pending = module.enqueue_hook_sync_job(
+        aoa_root,
+        event_name="PreCompact",
+        event={"session_id": "coalesced-deferred", "sequence": 1},
+        session_id="coalesced-deferred",
+        transcript_path=transcript,
+        reason="initial_defer",
+    )
+    assert pending is not None
+    deferred = aoa_root / module.HOOK_JOBS_ROOT / "deferred" / pending.name
+    pending.replace(deferred)
+
+    updated = module.enqueue_hook_sync_job(
+        aoa_root,
+        event_name="PostCompact",
+        event={"session_id": "coalesced-deferred", "sequence": 2},
+        session_id="coalesced-deferred",
+        transcript_path=transcript,
+        reason="newer_snapshot",
+    )
+
+    assert updated == deferred
+    assert not list(
+        (aoa_root / module.HOOK_JOBS_ROOT / "pending").glob("*.json")
+    )
+    payload = json.loads(deferred.read_text(encoding="utf-8"))
+    assert payload["event_name"] == "PostCompact"
+    assert payload["coalesced_event_count"] == 2
+
+
+def test_hook_worker_coalesces_legacy_duplicates_into_superseded_receipts(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-legacy-hook-duplicates.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-08-12T00:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": "legacy-hook-duplicates"},
+            }
+        ],
+    )
+    deferred = aoa_root / module.HOOK_JOBS_ROOT / "deferred"
+    deferred.mkdir(parents=True)
+    for ordinal, event_name in enumerate(
+        ("SessionStart", "PreCompact", "Stop"),
+        start=1,
+    ):
+        (deferred / f"legacy-{ordinal}.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": module.SCHEMA_VERSION,
+                    "job_type": "hook_sync_transcript",
+                    "queued_at": f"2026-08-12T00:00:0{ordinal}Z",
+                    "event_name": event_name,
+                    "session_id": "legacy-hook-duplicates",
+                    "transcript_path": str(transcript),
+                    "reason": f"legacy_{ordinal}",
+                    "event": {
+                        "session_id": "legacy-hook-duplicates",
+                        "sequence": ordinal,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+    monkeypatch.setenv("AOA_SESSION_MEMORY_HOOK_WORKER_MAX_RAW_BYTES", "1")
+
+    result = module.run_hook_worker(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        limit=5,
+    )
+
+    assert result["processed"] == 0
+    assert len(result["coalesced_hook_jobs"]) == 1
+    coalesced = result["coalesced_hook_jobs"][0]
+    assert coalesced["source_job_count"] == 3
+    assert coalesced["coalesced_event_count"] == 3
+    assert len(coalesced["superseded_jobs"]) == 3
+    active = list(deferred.glob("*.json"))
+    assert len(active) == 1
+    active_payload = json.loads(active[0].read_text(encoding="utf-8"))
+    assert active_payload["event_name"] == "Stop"
+    assert active_payload["coalesced_event_count"] == 3
+    assert len(
+        list(
+            (aoa_root / module.HOOK_JOBS_ROOT / "superseded").glob("*.json")
+        )
+    ) == 3
+
+
 def test_hook_worker_reports_post_sync_staleness_when_transcript_grows_during_sync(
     tmp_path: Path,
     monkeypatch,
@@ -91259,7 +91490,8 @@ def test_lifecycle_hooks_queue_compaction_archive_and_worker_indexes(tmp_path: P
 
     worker = module.run_hook_worker(workspace_root=workspace, aoa_root=aoa_root, limit=5)
     assert worker["ok"] is True
-    assert worker["processed"] == 2
+    assert worker["processed"] == 1
+    assert worker["results"][0]["status"] == "synced"
     session_dir = aoa_root / "sessions" / "2026-05-14__001__archive-compaction-intervals"
     manifest = json.loads((session_dir / "session.manifest.json").read_text(encoding="utf-8"))
     assert manifest["archive_status"] == "indexed"
@@ -91277,7 +91509,6 @@ def test_lifecycle_hooks_queue_compaction_archive_and_worker_indexes(tmp_path: P
         manifest,
     ) == [
         "HookWorker:PostCompact",
-        "HookWorker:PreCompact",
         "PostCompact",
         "PreCompact",
     ]

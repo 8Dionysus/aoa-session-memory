@@ -1569,7 +1569,7 @@ AUTO_MAINTENANCE_PROFILES = {
         "deferred_graph_job_budget_seconds": 600,
         "resource_class": "medium",
         "resource_kind": "indexing",
-        "resource_demand_epoch": "v7",
+        "resource_demand_epoch": "v8",
         "automatic_heavy_projection_lane": False,
         "budget_seconds": 600,
         "resource_startup_grace_seconds": 180,
@@ -32922,6 +32922,68 @@ def hook_job_id(event_name: str, session_id: str) -> str:
     return f"{compact_stamp()}__{os.getpid()}__{time.time_ns()}__{safe_event}__{safe_session}"
 
 
+def hook_sync_job_filename(session_id: str, transcript_path: Path) -> str:
+    """Return one stable active-queue name for a transcript session."""
+    safe_session = readable_slug(
+        session_id,
+        fallback="session",
+        max_chars=48,
+    )
+    path_digest = hashlib.sha256(
+        str(transcript_path).encode("utf-8")
+    ).hexdigest()[:16]
+    return f"hook-sync__{safe_session}__{path_digest}.json"
+
+
+def merge_hook_sync_job_payloads(
+    payloads: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Preserve the newest hook snapshot while accounting for every signal."""
+    # Callers provide oldest-to-newest order. This remains deterministic for
+    # legacy migration and, unlike second-resolution timestamps, cannot let an
+    # event-name sort replace the newest hook snapshot.
+    ordered = list(payloads)
+    merged = dict(ordered[-1])
+    queued_values = [
+        str(item.get("queued_at") or "")
+        for item in ordered
+        if str(item.get("queued_at") or "")
+    ]
+    event_names = sorted(
+        {
+            str(name)
+            for item in ordered
+            for name in (
+                item.get("coalesced_event_names")
+                if isinstance(item.get("coalesced_event_names"), list)
+                else [item.get("event_name")]
+            )
+            if str(name or "")
+        }
+    )
+    reasons = sorted(
+        {
+            str(reason)
+            for item in ordered
+            for reason in (
+                item.get("coalesced_reasons")
+                if isinstance(item.get("coalesced_reasons"), list)
+                else [item.get("reason")]
+            )
+            if str(reason or "")
+        }
+    )
+    merged["queued_at"] = min(queued_values) if queued_values else utc_now()
+    merged["updated_at"] = utc_now()
+    merged["coalesced_event_count"] = sum(
+        max(1, int_value(item.get("coalesced_event_count"), 1))
+        for item in ordered
+    )
+    merged["coalesced_event_names"] = event_names
+    merged["coalesced_reasons"] = reasons
+    return merged
+
+
 def enqueue_hook_sync_job(
     aoa_root: Path,
     *,
@@ -32937,9 +32999,14 @@ def enqueue_hook_sync_job(
         return None
     if transcript_path is None or not transcript_path.exists() or not os.access(transcript_path, os.R_OK):
         return None
-    pending_root = aoa_root / HOOK_JOBS_ROOT / "pending"
+    dirs = hook_worker_dirs(aoa_root)
+    pending_root = dirs["pending"]
+    deferred_root = dirs["deferred"]
     pending_root.mkdir(parents=True, exist_ok=True)
-    job_path = pending_root / f"{hook_job_id(event_name, session_id)}.json"
+    deferred_root.mkdir(parents=True, exist_ok=True)
+    job_name = hook_sync_job_filename(session_id, transcript_path)
+    pending_path = pending_root / job_name
+    deferred_path = deferred_root / job_name
     payload = {
         "schema_version": SCHEMA_VERSION,
         "job_type": "hook_sync_transcript",
@@ -32951,7 +33018,31 @@ def enqueue_hook_sync_job(
         "reason": reason,
         "event": event,
     }
-    write_json(job_path, payload)
+    queue_lock_path = dirs["root"] / "enqueue.lock"
+    queue_lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with queue_lock_path.open("w", encoding="utf-8") as lock_handle:
+        fcntl.flock(lock_handle, fcntl.LOCK_EX)
+        existing_path = (
+            pending_path
+            if pending_path.exists()
+            else deferred_path if deferred_path.exists() else None
+        )
+        job_path = existing_path or pending_path
+        existing = (
+            read_json(existing_path, {})
+            if existing_path is not None
+            else {}
+        )
+        write_json(
+            job_path,
+            merge_hook_sync_job_payloads(
+                [
+                    item
+                    for item in (existing, payload)
+                    if isinstance(item, dict) and item
+                ]
+            ),
+        )
     return job_path
 
 
@@ -33252,7 +33343,95 @@ def hook_worker_dirs(aoa_root: Path) -> dict[str, Path]:
         "deferred": root / "deferred",
         "done": root / "done",
         "failed": root / "failed",
+        "superseded": root / "superseded",
     }
+
+
+def coalesce_hook_sync_jobs(
+    *,
+    dirs: dict[str, Path],
+) -> list[dict[str, Any]]:
+    """Collapse legacy active duplicates without discarding their receipts."""
+    grouped: dict[tuple[str, str], list[tuple[str, Path, dict[str, Any]]]] = {}
+    for queue_name in ("pending", "deferred"):
+        for path in sorted(dirs[queue_name].glob("*.json")):
+            payload = read_json(path, {})
+            if (
+                not isinstance(payload, dict)
+                or str(payload.get("job_type") or "hook_sync_transcript")
+                != "hook_sync_transcript"
+            ):
+                continue
+            session_id = str(payload.get("session_id") or "").strip()
+            transcript_value = str(payload.get("transcript_path") or "").strip()
+            if not session_id or not transcript_value:
+                continue
+            grouped.setdefault((session_id, transcript_value), []).append(
+                (queue_name, path, payload)
+            )
+
+    results: list[dict[str, Any]] = []
+    superseded_dir = dirs["superseded"]
+    superseded_dir.mkdir(parents=True, exist_ok=True)
+    for (session_id, transcript_value), entries in sorted(grouped.items()):
+        transcript_path = Path(transcript_value).expanduser()
+        destination_queue = (
+            "pending"
+            if any(queue_name == "pending" for queue_name, _, _ in entries)
+            else "deferred"
+        )
+        destination = (
+            dirs[destination_queue]
+            / hook_sync_job_filename(session_id, transcript_path)
+        )
+        if len(entries) == 1 and entries[0][1] == destination:
+            continue
+        ordered_entries = sorted(
+            entries,
+            key=lambda item: (
+                str(
+                    item[2].get("updated_at")
+                    or item[2].get("queued_at")
+                    or ""
+                ),
+                str(item[1]),
+            ),
+        )
+        merged = merge_hook_sync_job_payloads(
+            [payload for _, _, payload in ordered_entries]
+        )
+        merged["queue_state"] = destination_queue
+        merged["coalesced_at"] = utc_now()
+        moved: list[str] = []
+        for ordinal, (_, source, _) in enumerate(entries, start=1):
+            if source == destination:
+                continue
+            superseded = superseded_dir / (
+                f"{compact_stamp()}__{ordinal:04d}__{source.name}"
+            )
+            while superseded.exists():
+                superseded = superseded_dir / (
+                    f"{compact_stamp()}__{ordinal:04d}__"
+                    f"{time.time_ns()}__{source.name}"
+                )
+            source.replace(superseded)
+            moved.append(str(superseded))
+        write_json(destination, merged)
+        results.append(
+            {
+                "status": "coalesced_hook_sync_jobs",
+                "session_id": session_id,
+                "transcript_path": transcript_value,
+                "active_job": str(destination),
+                "active_queue": destination_queue,
+                "source_job_count": len(entries),
+                "coalesced_event_count": merged[
+                    "coalesced_event_count"
+                ],
+                "superseded_jobs": moved,
+            }
+        )
+    return results
 
 
 def promote_deferred_hook_jobs(
@@ -33407,6 +33586,7 @@ def run_hook_worker(*, workspace_root: Path | None, aoa_root: Path, limit: int =
     lock_path = dirs["root"] / "worker.lock"
     results: list[dict[str, Any]] = []
     recovered_running: list[dict[str, Any]] = []
+    coalesced_hook_jobs: list[dict[str, Any]] = []
     promoted_deferred: list[dict[str, Any]] = []
     with lock_path.open("w", encoding="utf-8") as lock_handle:
         try:
@@ -33420,6 +33600,7 @@ def run_hook_worker(*, workspace_root: Path | None, aoa_root: Path, limit: int =
                 "results": [],
             }
         recovered_running = recover_orphaned_running_hook_jobs(dirs)
+        coalesced_hook_jobs = coalesce_hook_sync_jobs(dirs=dirs)
         promoted_deferred = promote_deferred_hook_jobs(
             aoa_root=aoa_root,
             dirs=dirs,
@@ -34032,6 +34213,7 @@ def run_hook_worker(*, workspace_root: Path | None, aoa_root: Path, limit: int =
         "status": "processed",
         "processed": len(results),
         "recovered_running": recovered_running,
+        "coalesced_hook_jobs": coalesced_hook_jobs,
         "promoted_deferred": promoted_deferred,
         "results": results,
     }
@@ -60490,6 +60672,29 @@ def auto_maintenance_resource_status_progressed(
     return bool(fallback.get("made_progress")) and bool(fallback.get("remaining_work"))
 
 
+def auto_maintenance_resource_status_contended(
+    status: str,
+    payload: dict[str, Any] | None = None,
+) -> bool:
+    """Recognize a healthy writer lane that is temporarily owned elsewhere."""
+    normalized = str(status or "")
+    if normalized in {"skipped_lock_held", "deferred_conflicting_lease"}:
+        return True
+    if not isinstance(payload, dict):
+        return False
+    for key in ("fallback_graph_drip", "fallback_index_drip"):
+        fallback = payload.get(key) if isinstance(payload.get(key), dict) else {}
+        if str(fallback.get("status") or "") in {
+            "skipped_lock_held",
+            "deferred_conflicting_lease",
+        }:
+            return True
+    return maintenance_child_defer_status(payload) in {
+        "skipped_lock_held",
+        "deferred_conflicting_lease",
+    }
+
+
 def auto_maintenance_retry_key(profile: str, target: str) -> str:
     return f"{str(profile or 'unknown')}:{str(target or 'all')}"
 
@@ -61084,6 +61289,10 @@ def auto_maintenance_retry_dispatch(
             )
             retryable = auto_maintenance_resource_status_retryable(launch_status)
             progressed = auto_maintenance_resource_status_progressed(launch_status, launch_payload)
+            contended = auto_maintenance_resource_status_contended(
+                launch_status,
+                launch_payload,
+            )
             attempt_finished_epoch = (
                 effective_now
                 if now_epoch is not None
@@ -61104,6 +61313,7 @@ def auto_maintenance_retry_dispatch(
                     "reported_launch_status": reported_launch_status,
                     "reported_launch_ok": reported_launch_ok,
                     "launch_progressed": progressed,
+                    "launch_contended": contended,
                     "handoff_required": handoff_required,
                     "handoff_profile": handoff_profile or None,
                     "dispatch_selection": dispatch_selection,
@@ -61170,6 +61380,25 @@ def auto_maintenance_retry_dispatch(
                     current["updated_at"] = auto_maintenance_retry_iso(attempt_finished_epoch)
                     items[queue_key] = current
                     result_row["disposition"] = "progressed_rescheduled"
+                    result_row["next_attempt_at"] = current["next_attempt_at"]
+                    result_row["next_delay_seconds"] = base_delay
+                    return result_row, True
+                if contended:
+                    current["last_status"] = launch_status
+                    current["last_report_json"] = launch_payload.get("report_json")
+                    base_delay = max(1, int_value(current.get("base_delay_seconds"), 300))
+                    next_epoch = attempt_finished_epoch + base_delay
+                    current["attempts_started"] = 0
+                    current["contention_cycles"] = max(
+                        0,
+                        int_value(current.get("contention_cycles")),
+                    ) + 1
+                    current["next_delay_seconds"] = base_delay
+                    current["next_attempt_epoch"] = next_epoch
+                    current["next_attempt_at"] = auto_maintenance_retry_iso(next_epoch)
+                    current["updated_at"] = auto_maintenance_retry_iso(attempt_finished_epoch)
+                    items[queue_key] = current
+                    result_row["disposition"] = "contention_rescheduled"
                     result_row["next_attempt_at"] = current["next_attempt_at"]
                     result_row["next_delay_seconds"] = base_delay
                     return result_row, True
