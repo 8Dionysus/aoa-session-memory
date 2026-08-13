@@ -33515,6 +33515,14 @@ def enqueue_session_generation_reindex_job(
     job_path = pending_root / (
         f"{hook_job_id('SessionGenerationReindex', target)}.json"
     )
+    bounded_graph_target = str(
+        followup_graph_target or target
+    ).strip()
+    if not bounded_graph_target or bounded_graph_target == "all":
+        # One predecessor reindex invalidates one session graph family. A
+        # global graph follow-up would let every live session manufacture a
+        # monolithic worker job and starve unrelated bounded maintenance.
+        bounded_graph_target = target
     write_json(
         job_path,
         {
@@ -33527,7 +33535,7 @@ def enqueue_session_generation_reindex_job(
             "reason": reason,
             "budget_seconds": max(1.0, float(budget_seconds)),
             "followup_graph_target": str(
-                followup_graph_target or "all"
+                bounded_graph_target
             ),
             "graph_batch_limit": max(
                 1,

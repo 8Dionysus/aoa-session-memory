@@ -363,6 +363,7 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0012 Bounded Background Graph Queue Reserve](../AOA-SM-D-0012-bounded-background-graph-queue-reserve.md) | 2026-07-17 | Accepted | `docs/decisions/AOA-SM-D-0012-bounded-background-graph-queue-reserve.md` |
+| [AOA-SM-D-0081 Session Reindex Follow-Ups Stay Session Scoped](../AOA-SM-D-0081-session-reindex-followups-stay-session-scoped.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0081-session-reindex-followups-stay-session-scoped.md` |
 
 ## graph readiness
 
@@ -389,6 +390,7 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0074 Graph Blockers Transfer to the Upstream Owner](../AOA-SM-D-0074-graph-blockers-transfer-to-upstream-owner.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0074-graph-blockers-transfer-to-upstream-owner.md` |
+| [AOA-SM-D-0081 Session Reindex Follow-Ups Stay Session Scoped](../AOA-SM-D-0081-session-reindex-followups-stay-session-scoped.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0081-session-reindex-followups-stay-session-scoped.md` |
 
 ## hooks
 
@@ -663,6 +665,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0002 Semantic Projection Generation Identity](../AOA-SM-D-0002-semantic-projection-generation-identity.md) | 2026-07-14 | Accepted | `docs/decisions/AOA-SM-D-0002-semantic-projection-generation-identity.md` |
+
+## queue scope
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0081 Session Reindex Follow-Ups Stay Session Scoped](../AOA-SM-D-0081-session-reindex-followups-stay-session-scoped.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0081-session-reindex-followups-stay-session-scoped.md` |
 
 ## raw capture
 

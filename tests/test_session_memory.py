@@ -58277,7 +58277,7 @@ def test_hook_worker_graph_block_queues_bounded_upstream_reindex(
         "session_generation_reindex"
     )
     assert pending_jobs[0]["session_id"] == blocked_session_id
-    assert pending_jobs[0]["followup_graph_target"] == "all"
+    assert pending_jobs[0]["followup_graph_target"] == blocked_session_id
 
 
 def test_hook_worker_reindex_predecessor_resumes_then_queues_graph_followup(
@@ -58376,7 +58376,7 @@ def test_hook_worker_reindex_predecessor_resumes_then_queues_graph_followup(
     ]
     assert len(pending_jobs) == 1
     assert pending_jobs[0]["job_type"] == "graph_maintenance"
-    assert pending_jobs[0]["target"] == "all"
+    assert pending_jobs[0]["target"] == session_id
 
 
 def test_hook_worker_reindex_predecessor_lock_conflict_stays_deferred(
@@ -58948,7 +58948,7 @@ def test_auto_maintenance_graph_drip_circuit_queues_upstream_reindex(
     queued = json.loads(queued_jobs[0].read_text(encoding="utf-8"))
     assert queued["job_type"] == "session_generation_reindex"
     assert queued["session_id"] == blocked_session_id
-    assert queued["followup_graph_target"] == "all"
+    assert queued["followup_graph_target"] == blocked_session_id
     assert payload["automatic_retry"]["retryable"] is True
 
 

@@ -322,6 +322,7 @@
 | [AOA-SM-D-0077 Entry-Set-Equivalent Graph Rebind Is Metadata Only](../AOA-SM-D-0077-entry-set-equivalent-graph-rebind-is-metadata-only.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0077-entry-set-equivalent-graph-rebind-is-metadata-only.md` |
 | [AOA-SM-D-0079 Materialization-Equivalent Rebind Does Not Rehash the Graph](../AOA-SM-D-0079-materialization-equivalent-rebind-does-not-rehash-graph.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0079-materialization-equivalent-rebind-does-not-rehash-graph.md` |
 | [AOA-SM-D-0080 Compact Route-Token Proof Replaces Payload Scan](../AOA-SM-D-0080-compact-route-token-proof-replaces-payload-scan.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0080-compact-route-token-proof-replaces-payload-scan.md` |
+| [AOA-SM-D-0081 Session Reindex Follow-Ups Stay Session Scoped](../AOA-SM-D-0081-session-reindex-followups-stay-session-scoped.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0081-session-reindex-followups-stay-session-scoped.md` |
 
 ## graph anchor resolution
 
@@ -893,6 +894,7 @@
 | [AOA-SM-D-0053 Single-Pass Task-Episode Reduction and Shard Redaction](../AOA-SM-D-0053-single-pass-task-episode-reduction-and-shard-redaction.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0053-single-pass-task-episode-reduction-and-shard-redaction.md` |
 | [AOA-SM-D-0069 Graph Predecessor Reindex Handoff](../AOA-SM-D-0069-graph-predecessor-reindex-handoff.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0069-graph-predecessor-reindex-handoff.md` |
 | [AOA-SM-D-0074 Graph Blockers Transfer to the Upstream Owner](../AOA-SM-D-0074-graph-blockers-transfer-to-upstream-owner.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0074-graph-blockers-transfer-to-upstream-owner.md` |
+| [AOA-SM-D-0081 Session Reindex Follow-Ups Stay Session Scoped](../AOA-SM-D-0081-session-reindex-followups-stay-session-scoped.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0081-session-reindex-followups-stay-session-scoped.md` |
 
 ## session lineage
 

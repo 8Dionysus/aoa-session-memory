@@ -186,6 +186,12 @@
 | [AOA-SM-D-0010 Natural-Language Intent Before Literal Length](../AOA-SM-D-0010-natural-language-intent-before-literal-length.md) | 2026-07-16 | Accepted | `docs/decisions/AOA-SM-D-0010-natural-language-intent-before-literal-length.md` |
 | [AOA-SM-D-0073 Verified Fallback Completion Retires Retry](../AOA-SM-D-0073-verified-fallback-completion-retires-retry.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0073-verified-fallback-completion-retires-retry.md` |
 
+## bounded follow-up
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0081 Session Reindex Follow-Ups Stay Session Scoped](../AOA-SM-D-0081-session-reindex-followups-stay-session-scoped.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0081-session-reindex-followups-stay-session-scoped.md` |
+
 ## bounded handoff
 
 | Decision | Date | Status | Path |
@@ -915,6 +921,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0051 Transactional Component Outbox and Vector Freshness](../AOA-SM-D-0051-transactional-component-outbox-and-vector-freshness.md) | 2026-08-10 | Accepted | `docs/decisions/AOA-SM-D-0051-transactional-component-outbox-and-vector-freshness.md` |
 
+## independent live sessions
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0081 Session Reindex Follow-Ups Stay Session Scoped](../AOA-SM-D-0081-session-reindex-followups-stay-session-scoped.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0081-session-reindex-followups-stay-session-scoped.md` |
+
 ## indexed exact seed
 
 | Decision | Date | Status | Path |
@@ -988,6 +1000,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0024 Semantic Generation Pins for Evaluation Admission](../AOA-SM-D-0024-semantic-generation-pins-for-evaluation-admission.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0024-semantic-generation-pins-for-evaluation-admission.md` |
+
+## maintenance lock
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0081 Session Reindex Follow-Ups Stay Session Scoped](../AOA-SM-D-0081-session-reindex-followups-stay-session-scoped.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0081-session-reindex-followups-stay-session-scoped.md` |
 
 ## manifest commit
 

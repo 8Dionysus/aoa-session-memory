@@ -424,6 +424,10 @@ It compares all aggregate/contribution registry edges, registry-node semantics,
 and endpoint existence without parsing unrelated contribution payloads
 (AOA-SM-D-0080).
 
+Completion of a session-generation predecessor queues graph maintenance only
+for that session. Global historical graph work remains an explicit backlog
+route and is never inferred from one live session transition (AOA-SM-D-0081).
+
 Entity-registry construction distinguishes incremental navigation history from
 an authoritative rebuild. Incremental refresh may retain bounded prior-snapshot
 aliases and retired identities under an explicit history policy. A full rebuild
