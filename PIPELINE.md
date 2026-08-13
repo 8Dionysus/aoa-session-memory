@@ -638,6 +638,15 @@ passes its already-observed preflight entity-registry state into bounded index
 planning. A stale preflight state schedules the atomic registry/search sync.
 A bounded search update cannot claim that sync as covered when its global
 derivatives were explicitly deferred; the dedicated action remains required.
+The later owner-level post-maintenance freshness probe may retire that bounded
+deferral only when it proves the index surface current with no diagnostics.
+
+Route readiness keeps absent selected-scope evidence visible without turning
+it into synthetic maintenance work. Missing source axes, missing generated
+axes, failed global gates, and diagnostics remain retryable. A current route
+index with zero signals for a required semantic layer reports an evidence gap
+but does not schedule another maintenance cycle merely to wait for unrelated
+future source evidence.
 
 The catch-up resource route consumes an explicitly ready live-tail command
 independently of the packet's global recommendation. An unrelated cleanup or

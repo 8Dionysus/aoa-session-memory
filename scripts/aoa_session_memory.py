@@ -56264,7 +56264,15 @@ def maintain_indexes(
                     write_report=write_report,
                     selected_records=current_selected_records(),
                 )
-                readiness_action["status"] = "applied" if result.get("ok") else "remaining"
+                readiness_action["status"] = (
+                    "applied"
+                    if result.get("ok")
+                    else (
+                        "remaining"
+                        if result.get("retry_recommended") is True
+                        else "observed_evidence_gap"
+                    )
+                )
                 readiness_action["result"] = {
                     key: result.get(key)
                     for key in (
@@ -56277,6 +56285,9 @@ def maintain_indexes(
                         "selected_count",
                         "covered_requirement_count",
                         "required_requirement_count",
+                        "actionable_remaining_count",
+                        "evidence_absence_count",
+                        "retry_recommended",
                         "report_json",
                         "report_markdown",
                         "diagnostics",
@@ -65512,6 +65523,8 @@ def auto_maintenance_has_remaining_route_readiness_backlog(maintenance: dict[str
         if str(action.get("status") or "") != "remaining":
             continue
         result = action.get("result") if isinstance(action.get("result"), dict) else {}
+        if "retry_recommended" in result:
+            return result.get("retry_recommended") is True
         if int_value(result.get("remaining_count")) > 0 or int_value(action.get("dirty_count")) > 0:
             return True
     return False
@@ -65608,6 +65621,23 @@ def auto_maintenance_has_deferred_global_derivatives(
         and global_derivatives.get("query_availability")
         == "monolith_search_current_shard_routes_fail_closed_to_monolith"
     )
+
+
+def auto_maintenance_deferred_global_derivatives_retryable(
+    maintenance: dict[str, Any],
+    *,
+    post_freshness: dict[str, Any] | None = None,
+) -> bool:
+    if not auto_maintenance_has_deferred_global_derivatives(maintenance):
+        return False
+    if not isinstance(post_freshness, dict):
+        return True
+    post_probe_proves_current = bool(
+        post_freshness.get("ok") is True
+        and post_freshness.get("needs_index_maintenance") is False
+        and not post_freshness.get("diagnostics")
+    )
+    return not post_probe_proves_current
 
 
 def auto_maintenance_has_budget_remaining_backlog(maintenance: dict[str, Any]) -> bool:
@@ -65817,8 +65847,9 @@ def auto_maintenance_expected_remaining_backlog(
         maintenance,
         post_freshness=post_freshness,
     )
-    deferred_global_derivatives = auto_maintenance_has_deferred_global_derivatives(
-        maintenance
+    deferred_global_derivatives = auto_maintenance_deferred_global_derivatives_retryable(
+        maintenance,
+        post_freshness=post_freshness,
     )
     budget_remaining = auto_maintenance_has_budget_remaining_backlog(maintenance) and (
         bool(diagnostics) or not bool(maintenance.get("ok"))
@@ -200413,8 +200444,28 @@ def route_layer_readiness(
             "evidence": provider_status,
         },
     ]
-    remaining = [req for req in requirements if req["status"] != "covered"]
-    remaining.extend(gate for gate in global_gates if gate["status"] != "covered")
+    requirement_remaining = [
+        req for req in requirements if req["status"] != "covered"
+    ]
+    gate_remaining = [
+        gate for gate in global_gates if gate["status"] != "covered"
+    ]
+    actionable_requirement_remaining = [
+        req
+        for req in requirement_remaining
+        if req.get("missing_axes") or req.get("missing_generated_axes")
+    ]
+    evidence_absence_remaining = [
+        req
+        for req in requirement_remaining
+        if not req.get("missing_axes") and not req.get("missing_generated_axes")
+    ]
+    remaining = [*requirement_remaining, *gate_remaining]
+    actionable_remaining_count = (
+        len(actionable_requirement_remaining)
+        + len(gate_remaining)
+        + (1 if diagnostics else 0)
+    )
     payload = {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "route_layer_readiness",
@@ -200430,6 +200481,25 @@ def route_layer_readiness(
         "route_signal_classifier_version": ROUTE_SIGNAL_CLASSIFIER_VERSION,
         "required_requirement_count": len(ROUTE_READINESS_REQUIREMENTS),
         "covered_requirement_count": sum(1 for req in requirements if req["status"] == "covered"),
+        "actionable_remaining_count": actionable_remaining_count,
+        "evidence_absence_count": len(evidence_absence_remaining),
+        "retry_recommended": actionable_remaining_count > 0,
+        "remaining_classification": {
+            "actionable_requirement_ids": [
+                str(req.get("id") or "")
+                for req in actionable_requirement_remaining
+            ],
+            "actionable_gate_names": [
+                str(gate.get("name") or "") for gate in gate_remaining
+            ],
+            "evidence_absence_requirement_ids": [
+                str(req.get("id") or "")
+                for req in evidence_absence_remaining
+            ],
+            "truth_status": (
+                "selected_evidence_absence_is_not_projection_repair_work"
+            ),
+        },
         "global_gates": global_gates,
         "requirements": requirements,
         "diagnostics": diagnostics,
@@ -200457,6 +200527,9 @@ def route_layer_readiness_markdown(payload: dict[str, Any]) -> str:
         f"- target: `{payload.get('target')}`",
         f"- selected_count: `{payload.get('selected_count')}`",
         f"- covered_requirements: `{payload.get('covered_requirement_count')}/{payload.get('required_requirement_count')}`",
+        f"- actionable_remaining_count: `{payload.get('actionable_remaining_count')}`",
+        f"- evidence_absence_count: `{payload.get('evidence_absence_count')}`",
+        f"- retry_recommended: `{payload.get('retry_recommended')}`",
         "",
         "## Global Gates",
         "",

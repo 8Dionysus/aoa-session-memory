@@ -67921,6 +67921,95 @@ def test_catchup_auto_maintenance_treats_route_readiness_remaining_as_expected_b
     assert "index_maintenance_needed" in payload["diagnostics"]
 
 
+def test_route_readiness_evidence_absence_does_not_schedule_maintenance_retry() -> None:
+    maintenance = {
+        "action_counts": {"applied": 5, "observed_evidence_gap": 1},
+        "actions": [
+            {
+                "id": "route_readiness",
+                "needed": True,
+                "status": "observed_evidence_gap",
+                "dirty_count": 2,
+                "result": {
+                    "ok": False,
+                    "remaining_count": 3,
+                    "actionable_remaining_count": 0,
+                    "evidence_absence_count": 3,
+                    "retry_recommended": False,
+                },
+            }
+        ],
+    }
+
+    assert (
+        module.auto_maintenance_has_remaining_route_readiness_backlog(
+            maintenance
+        )
+        is False
+    )
+
+
+def test_route_readiness_structural_gap_remains_retryable() -> None:
+    maintenance = {
+        "action_counts": {"remaining": 1},
+        "actions": [
+            {
+                "id": "route_readiness",
+                "needed": True,
+                "status": "remaining",
+                "result": {
+                    "remaining_count": 1,
+                    "actionable_remaining_count": 1,
+                    "evidence_absence_count": 0,
+                    "retry_recommended": True,
+                },
+            }
+        ],
+    }
+
+    assert (
+        module.auto_maintenance_has_remaining_route_readiness_backlog(
+            maintenance
+        )
+        is True
+    )
+
+
+def test_current_post_probe_retires_bounded_global_derivative_deferral() -> None:
+    maintenance = {
+        "action_counts": {"applied": 4},
+        "global_derivatives": {
+            "status": "deferred_bounded_scope",
+            "query_availability": (
+                "monolith_search_current_shard_routes_fail_closed_to_monolith"
+            ),
+        },
+    }
+
+    assert (
+        module.auto_maintenance_deferred_global_derivatives_retryable(
+            maintenance,
+            post_freshness={
+                "ok": True,
+                "needs_index_maintenance": False,
+                "diagnostics": [],
+            },
+        )
+        is False
+    )
+    assert (
+        module.auto_maintenance_deferred_global_derivatives_retryable(
+            maintenance,
+            post_freshness={
+                "ok": False,
+                "needs_index_maintenance": True,
+                "diagnostics": ["index_maintenance_needed"],
+            },
+        )
+        is True
+    )
+
+
 def test_search_schema_transition_21_to_22_stays_incremental_when_structurally_ready() -> None:
     freshness = {
         "search_index": {
