@@ -129,6 +129,12 @@
 | [AOA-SM-D-0043 Split Registry Semantic Epoch from Content Revision](../AOA-SM-D-0043-split-registry-semantic-epoch-from-content-revision.md) | 2026-07-30 | Accepted | `docs/decisions/AOA-SM-D-0043-split-registry-semantic-epoch-from-content-revision.md` |
 | [AOA-SM-D-0059 Transactional Dirty Marker for Observed Route Dependency](../AOA-SM-D-0059-transactional-dirty-marker-for-observed-route-dependency.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0059-transactional-dirty-marker-for-observed-route-dependency.md` |
 
+## entity registry
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0071 Preflight Global State Handoff for Bounded Maintenance](../AOA-SM-D-0071-preflight-global-state-handoff-for-bounded-maintenance.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0071-preflight-global-state-handoff-for-bounded-maintenance.md` |
+
 ## entity routing
 
 | Decision | Date | Status | Path |
@@ -302,6 +308,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0012 Bounded Background Graph Queue Reserve](../AOA-SM-D-0012-bounded-background-graph-queue-reserve.md) | 2026-07-17 | Accepted | `docs/decisions/AOA-SM-D-0012-bounded-background-graph-queue-reserve.md` |
 
+## graph readiness
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0071 Preflight Global State Handoff for Bounded Maintenance](../AOA-SM-D-0071-preflight-global-state-handoff-for-bounded-maintenance.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0071-preflight-global-state-handoff-for-bounded-maintenance.md` |
+
 ## graph retrieval
 
 | Decision | Date | Status | Path |
@@ -363,6 +375,7 @@
 | [AOA-SM-D-0068 Session-Coherent Graph Queue Windows](../AOA-SM-D-0068-session-coherent-graph-queue-windows.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0068-session-coherent-graph-queue-windows.md` |
 | [AOA-SM-D-0069 Graph Predecessor Reindex Handoff](../AOA-SM-D-0069-graph-predecessor-reindex-handoff.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0069-graph-predecessor-reindex-handoff.md` |
 | [AOA-SM-D-0070 Coalesced Hook Intent and Contention-Neutral Retry](../AOA-SM-D-0070-coalesced-hook-intent-and-contention-neutral-retry.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0070-coalesced-hook-intent-and-contention-neutral-retry.md` |
+| [AOA-SM-D-0071 Preflight Global State Handoff for Bounded Maintenance](../AOA-SM-D-0071-preflight-global-state-handoff-for-bounded-maintenance.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0071-preflight-global-state-handoff-for-bounded-maintenance.md` |
 
 ## index discovery
 
@@ -673,6 +686,7 @@
 | [AOA-SM-D-0068 Session-Coherent Graph Queue Windows](../AOA-SM-D-0068-session-coherent-graph-queue-windows.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0068-session-coherent-graph-queue-windows.md` |
 | [AOA-SM-D-0069 Graph Predecessor Reindex Handoff](../AOA-SM-D-0069-graph-predecessor-reindex-handoff.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0069-graph-predecessor-reindex-handoff.md` |
 | [AOA-SM-D-0070 Coalesced Hook Intent and Contention-Neutral Retry](../AOA-SM-D-0070-coalesced-hook-intent-and-contention-neutral-retry.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0070-coalesced-hook-intent-and-contention-neutral-retry.md` |
+| [AOA-SM-D-0071 Preflight Global State Handoff for Bounded Maintenance](../AOA-SM-D-0071-preflight-global-state-handoff-for-bounded-maintenance.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0071-preflight-global-state-handoff-for-bounded-maintenance.md` |
 
 ## search
 

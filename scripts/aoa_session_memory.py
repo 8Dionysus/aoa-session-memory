@@ -53472,6 +53472,41 @@ def route_projection_dependency_coherence(
     }
 
 
+def maintenance_search_action_refreshed_entity_registry(
+    action: dict[str, Any],
+) -> bool:
+    """Admit search coverage only when global derivatives were materialized."""
+    result = (
+        action.get("result")
+        if isinstance(action.get("result"), dict)
+        else {}
+    )
+    global_derivatives = (
+        result.get("global_derivatives")
+        if isinstance(result.get("global_derivatives"), dict)
+        else {}
+    )
+    registry_derivative = (
+        global_derivatives.get("entity_registry")
+        if isinstance(global_derivatives.get("entity_registry"), dict)
+        else {}
+    )
+    deferred_statuses = {
+        "deferred_bounded_scope",
+        "deferred_budget_exhausted",
+        "deferred_not_checked",
+    }
+    return bool(
+        action.get("status") == "applied"
+        and result.get("ok") is True
+        and result.get("entity_registry_document_count") is not None
+        and str(global_derivatives.get("status") or "")
+        not in deferred_statuses
+        and str(registry_derivative.get("status") or "")
+        not in deferred_statuses
+    )
+
+
 def maintain_indexes(
     *,
     aoa_root: Path,
@@ -53509,6 +53544,7 @@ def maintain_indexes(
     selection_scope: dict[str, Any] | None = None,
     query_demand: dict[str, Any] | None = None,
     observe_query_demand: bool = False,
+    preflight_entity_registry_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     now = utc_now()
     started = time.monotonic()
@@ -53911,6 +53947,19 @@ def maintain_indexes(
             "diagnostics": ["index_maintenance_planning_budget_exhausted"],
         }
         entity_registry_repair_needed = False
+    elif bounded_discovery and isinstance(
+        preflight_entity_registry_state,
+        dict,
+    ):
+        entity_registry_state = dict(
+            preflight_entity_registry_state
+        )
+        entity_registry_state["planning_source"] = (
+            "auto_maintenance_preflight"
+        )
+        entity_registry_repair_needed = bool(
+            entity_registry_state.get("needs_maintenance")
+        )
     elif bounded_discovery:
         entity_registry_state = {
             "status": "deferred_bounded_scope",
@@ -55406,9 +55455,9 @@ def maintain_indexes(
                 else {}
             )
             search_action_refreshed_entity_registry = (
-                search_action.get("status") == "applied"
-                and bool(search_action_result.get("ok"))
-                and search_action_result.get("entity_registry_document_count") is not None
+                maintenance_search_action_refreshed_entity_registry(
+                    search_action
+                )
             )
             if search_action_refreshed_entity_registry:
                 entity_registry_action["status"] = "covered_by_search_index"
@@ -67653,6 +67702,15 @@ def auto_maintenance(
             selected_records=selected_records_override,
             selection_scope=selection_scope,
             query_demand=query_demand,
+            preflight_entity_registry_state=(
+                freshness_before.get("entity_registry")
+                if profile in {"backlog", "deep"}
+                and isinstance(
+                    freshness_before.get("entity_registry"),
+                    dict,
+                )
+                else None
+            ),
         )
         maintenance_counts = (
             maintenance.get("action_counts")

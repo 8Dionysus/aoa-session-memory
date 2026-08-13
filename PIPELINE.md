@@ -632,6 +632,13 @@ same profile's retry intent while the dispatcher owns it in flight. The
 dispatcher alone reconciles that claim and, when bounded work remains, creates
 its successor. Circuit-open cleanup applies only to a non-running queued item.
 
+Bounded session discovery does not rescan global derivative state. For the
+backlog and deep owner profiles, the auto-maintenance coordinator instead
+passes its already-observed preflight entity-registry state into bounded index
+planning. A stale preflight state schedules the atomic registry/search sync.
+A bounded search update cannot claim that sync as covered when its global
+derivatives were explicitly deferred; the dedicated action remains required.
+
 The catch-up resource route consumes an explicitly ready live-tail command
 independently of the packet's global recommendation. An unrelated cleanup or
 historical projection recommendation must not displace a ready recent-session

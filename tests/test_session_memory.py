@@ -57215,6 +57215,77 @@ def test_bounded_maintenance_planning_never_reads_global_derivative_state(
     )
     assert planned["global_derivatives"]["status"] == "deferred_bounded_scope"
 
+    monkeypatch.setattr(
+        module,
+        "sqlite_search_index_state",
+        lambda *_args, **_kwargs: {
+            "status": "current",
+            "needs_refresh": False,
+            "dirty_session_ids": [],
+            "dirty_sessions": [],
+            "reasons": [],
+            "diagnostics": [],
+            "search_schema_version": str(module.SEARCH_SCHEMA_VERSION),
+            "expected_search_schema_version": module.SEARCH_SCHEMA_VERSION,
+        },
+    )
+    planned_with_preflight = module.maintain_indexes(
+        aoa_root=aoa_root,
+        target="all",
+        selected_records=[record],
+        selection_scope={
+            "global_scope_complete": False,
+            "profile": "backlog",
+        },
+        apply=False,
+        repair_token_accounting=False,
+        repair_graph=False,
+        preflight_entity_registry_state={
+            "status": "needs_maintenance",
+            "needs_maintenance": True,
+            "diagnostics": ["source_newer_than_entity_registry"],
+        },
+    )
+    registry_action = next(
+        action
+        for action in planned_with_preflight["actions"]
+        if action["id"] == "refresh_entity_registry"
+    )
+    assert registry_action["needed"] is True
+    assert (
+        planned_with_preflight["entity_registry"]["planning_source"]
+        == "auto_maintenance_preflight"
+    )
+
+
+def test_search_action_does_not_cover_deferred_entity_registry_derivative(
+) -> None:
+    base = {
+        "status": "applied",
+        "result": {
+            "ok": True,
+            "entity_registry_document_count": 0,
+        },
+    }
+    assert (
+        module.maintenance_search_action_refreshed_entity_registry(base)
+        is True
+    )
+
+    deferred = json.loads(json.dumps(base))
+    deferred["result"]["global_derivatives"] = {
+        "status": "deferred_bounded_scope",
+        "entity_registry": {
+            "status": "deferred_bounded_scope",
+        },
+    }
+    assert (
+        module.maintenance_search_action_refreshed_entity_registry(
+            deferred
+        )
+        is False
+    )
+
 
 def test_automatic_maintenance_profiles_bound_discovery() -> None:
     assert {
