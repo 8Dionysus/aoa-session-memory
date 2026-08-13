@@ -142,6 +142,13 @@ DECLARED_GRAPH_PROJECTION_GENERATION_TRANSITIONS: dict[
             "bae847f241b3c19e3ca11d177df29089f8760aec72e1d0e50790eb6955d710c9": (
                 "e065b0e0399f986829c524f79cbf371b0fe6925c9f9aeb39c944c6309adcadb3"
             ),
+            # AOA-SM-D-0067/D-0077: the source contract is unchanged; the
+            # graph generation moved because its pinned entity-registry
+            # generation advanced. Complete materialization proof or bounded
+            # source refresh remains mandatory before this transition.
+            "ea73e542d289dd3f62a5801f9d3192f5ff2aec9492dedafaf1ffb46f642c4871": (
+                "5828dbbdc7fb6c54fbcff70ff5ff585ec7889c6ea4286e5548103cede94b6777"
+            ),
         }
     ),
 }
