@@ -683,6 +683,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0005 Provenance-Preserving Fork Lineage Consolidation](../AOA-SM-D-0005-provenance-preserving-fork-lineage-consolidation.md) | 2026-07-15 | Accepted | `docs/decisions/AOA-SM-D-0005-provenance-preserving-fork-lineage-consolidation.md` |
 
+## exact route-pair equality
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0080 Compact Route-Token Proof Replaces Payload Scan](../AOA-SM-D-0080-compact-route-token-proof-replaces-payload-scan.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0080-compact-route-token-proof-replaces-payload-scan.md` |
+
 ## exact semantic digest
 
 | Decision | Date | Status | Path |
@@ -1364,6 +1370,12 @@
 | [AOA-SM-D-0027 Evidence-Specific Sparse Anchors in Hybrid Fusion](../AOA-SM-D-0027-evidence-specific-sparse-anchors-in-hybrid-fusion.md) | 2026-07-20 | Accepted | `docs/decisions/AOA-SM-D-0027-evidence-specific-sparse-anchors-in-hybrid-fusion.md` |
 | [AOA-SM-D-0039 Dense-Reranker Consensus for Unprotected RRF Ties](../AOA-SM-D-0039-dense-reranker-consensus-for-unprotected-rrf-ties.md) | 2026-07-29 | Accepted | `docs/decisions/AOA-SM-D-0039-dense-reranker-consensus-for-unprotected-rrf-ties.md` |
 
+## referential integrity
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0080 Compact Route-Token Proof Replaces Payload Scan](../AOA-SM-D-0080-compact-route-token-proof-replaces-payload-scan.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0080-compact-route-token-proof-replaces-payload-scan.md` |
+
 ## resource admission
 
 | Decision | Date | Status | Path |
@@ -1418,6 +1430,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0006 Bounded Query-Demand Projection Catch-Up](../AOA-SM-D-0006-bounded-query-demand-projection-catch-up.md) | 2026-07-16 | Accepted | `docs/decisions/AOA-SM-D-0006-bounded-query-demand-projection-catch-up.md` |
+
+## selective dependency digest
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0080 Compact Route-Token Proof Replaces Payload Scan](../AOA-SM-D-0080-compact-route-token-proof-replaces-payload-scan.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0080-compact-route-token-proof-replaces-payload-scan.md` |
 
 ## selective hydration
 

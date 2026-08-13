@@ -99831,7 +99831,12 @@ def test_graph_registry_rebind_compatibility_admits_mixed_exact_generations(
             module.ROUTE_SIGNAL_CLASSIFIER_VERSION
         ),
         "entity_registry_route_tokens_json": "[]",
-        "entity_registry_selective_digest": "",
+        "entity_registry_selective_digest": (
+            module.graph_source_registry_dependency_for_route_tokens(
+                [],
+                {},
+            )["digest"]
+        ),
         "indexed_at": module.utc_now(),
         "status": "current",
         "diagnostic": "",
@@ -100194,7 +100199,12 @@ def test_graph_registry_rebind_admits_generation_after_complete_materialization(
             module.ROUTE_SIGNAL_CLASSIFIER_VERSION
         ),
         "entity_registry_route_tokens_json": "[]",
-        "entity_registry_selective_digest": "",
+        "entity_registry_selective_digest": (
+            module.graph_source_registry_dependency_for_route_tokens(
+                [],
+                {},
+            )["digest"]
+        ),
         "indexed_at": module.utc_now(),
         "status": "current",
         "diagnostic": "",
@@ -100228,6 +100238,9 @@ def test_graph_registry_rebind_admits_generation_after_complete_materialization(
     assert plan[
         "materialization_equivalent_generation_transition"
     ] is True
+    assert plan["materialization_proof_mode"] == (
+        "compact_source_route_tokens_and_exact_registry_pairs_v1"
+    )
     assert plan["generation_transition"]["compatible"] is True
     assert plan["generation_transition"]["declared_transition"][
         "decision_id"

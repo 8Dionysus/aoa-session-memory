@@ -136569,10 +136569,96 @@ def graph_entity_registry_materialization_compatibility(
 
     counts: Counter[str] = Counter()
     expected_aggregate_pairs: set[tuple[str, str]] = set()
+    expected_contribution_pairs: set[
+        tuple[str, str, str]
+    ] = set()
+    selective_dependency_mismatches: list[dict[str, Any]] = []
+    for row in conn.execute(
+        """
+        SELECT
+          source_key,
+          entity_registry_route_tokens_json,
+          entity_registry_selective_digest
+        FROM graph_sources
+        ORDER BY source_key
+        """
+    ):
+        source_key = str(row["source_key"] or "")
+        try:
+            route_tokens = json.loads(
+                str(
+                    row["entity_registry_route_tokens_json"]
+                    or "[]"
+                )
+            )
+        except (TypeError, json.JSONDecodeError):
+            route_tokens = None
+        if not isinstance(route_tokens, list):
+            counts["malformed_route_token_source_count"] += 1
+            selective_dependency_mismatches.append(
+                {
+                    "table": "graph_sources",
+                    "source_key": source_key,
+                    "reason": "malformed_route_tokens",
+                }
+            )
+            continue
+        selective = (
+            graph_source_registry_dependency_for_route_tokens(
+                route_tokens,
+                registry_index,
+            )
+        )
+        stored_selective_digest = str(
+            row["entity_registry_selective_digest"] or ""
+        )
+        if stored_selective_digest != str(
+            selective.get("digest") or ""
+        ):
+            counts["selective_dependency_mismatch_count"] += 1
+            selective_dependency_mismatches.append(
+                {
+                    "table": "graph_sources",
+                    "source_key": source_key,
+                    "reason": "selective_dependency_mismatch",
+                }
+            )
+        for token in selective.get("route_tokens", []):
+            if not isinstance(token, dict):
+                continue
+            layer = route_key_slug(token.get("layer"), fallback="")
+            key = route_key_slug(
+                token.get("key"),
+                fallback="",
+                max_chars=120,
+            )
+            entry = graph_entity_registry_entry_for_route(
+                registry_index,
+                layer,
+                key,
+            )
+            if not entry:
+                continue
+            registry_node_id = str(
+                graph_entity_registry_node_semantic_projection(
+                    entry
+                ).get("id")
+                or ""
+            )
+            route_node_id = graph_route_node_id(layer, key)
+            if not registry_node_id or not route_node_id:
+                continue
+            expected_aggregate_pairs.add(
+                (registry_node_id, route_node_id)
+            )
+            expected_contribution_pairs.add(
+                (source_key, registry_node_id, route_node_id)
+            )
     aggregate_registry_pairs: set[tuple[str, str]] = set()
     aggregate_node_mismatches: list[dict[str, Any]] = []
     for row in conn.execute(
-        "SELECT id, node_type, payload_json FROM nodes ORDER BY id"
+        "SELECT id, node_type, payload_json FROM nodes "
+        "WHERE node_type = 'entity_registry' ORDER BY id"
     ):
         counts["aggregate_node_count"] += 1
         try:
@@ -136592,14 +136678,6 @@ def graph_entity_registry_materialization_compatibility(
             counts["malformed_payload_count"] += 1
             continue
         node_id = str(row["id"])
-        registry_node_id = graph_registry_materialization_route_target(
-            payload,
-            registry_index,
-        )
-        if registry_node_id:
-            expected_aggregate_pairs.add(
-                (registry_node_id, node_id)
-            )
         if str(row["node_type"] or "") == "entity_registry":
             counts["aggregate_registry_node_count"] += 1
             mismatched_fields = (
@@ -136639,14 +136717,12 @@ def graph_entity_registry_materialization_compatibility(
         aggregate_registry_pairs - expected_aggregate_pairs
     )
 
-    expected_contribution_pairs: set[
-        tuple[str, str, str]
-    ] = set()
     contribution_node_mismatches: list[dict[str, Any]] = []
     for row in conn.execute(
         """
         SELECT source_key, node_id, node_type, payload_json
         FROM node_contribs
+        WHERE node_type = 'entity_registry'
         ORDER BY source_key, node_id
         """
     ):
@@ -136670,14 +136746,6 @@ def graph_entity_registry_materialization_compatibility(
         if not isinstance(payload, dict):
             counts["malformed_payload_count"] += 1
             continue
-        registry_node_id = graph_registry_materialization_route_target(
-            payload,
-            registry_index,
-        )
-        if registry_node_id:
-            expected_contribution_pairs.add(
-                (source_key, registry_node_id, node_id)
-            )
         if str(row["node_type"] or "") == "entity_registry":
             counts["contribution_registry_node_count"] += 1
             mismatched_fields = (
@@ -136723,6 +136791,49 @@ def graph_entity_registry_materialization_compatibility(
         contribution_registry_pairs
         - expected_contribution_pairs
     )
+    dangling_aggregate_pairs = [
+        {
+            "table": "edges",
+            "source_node": str(row["source_node"] or ""),
+            "target_node": str(row["target_node"] or ""),
+            "reason": "registry_edge_endpoint_missing",
+        }
+        for row in conn.execute(
+            """
+            SELECT e.source_node, e.target_node
+            FROM edges AS e
+            LEFT JOIN nodes AS source ON source.id = e.source_node
+            LEFT JOIN nodes AS target ON target.id = e.target_node
+            WHERE e.edge_type = 'registry_entity_has_route_signal'
+              AND (source.id IS NULL OR target.id IS NULL)
+            ORDER BY e.id
+            """
+        ).fetchall()
+    ]
+    dangling_contribution_pairs = [
+        {
+            "table": "edge_contribs",
+            "source_key": str(row["source_key"] or ""),
+            "source_node": str(row["source_node"] or ""),
+            "target_node": str(row["target_node"] or ""),
+            "reason": "registry_edge_endpoint_missing",
+        }
+        for row in conn.execute(
+            """
+            SELECT e.source_key, e.source_node, e.target_node
+            FROM edge_contribs AS e
+            LEFT JOIN node_contribs AS source
+              ON source.source_key = e.source_key
+             AND source.node_id = e.source_node
+            LEFT JOIN node_contribs AS target
+              ON target.source_key = e.source_key
+             AND target.node_id = e.target_node
+            WHERE e.edge_type = 'registry_entity_has_route_signal'
+              AND (source.node_id IS NULL OR target.node_id IS NULL)
+            ORDER BY e.source_key, e.edge_id
+            """
+        ).fetchall()
+    ]
 
     counts["aggregate_registry_node_mismatch_count"] = len(
         aggregate_node_mismatches
@@ -136742,6 +136853,12 @@ def graph_entity_registry_materialization_compatibility(
     counts["extra_contribution_registry_edge_count"] = len(
         extra_contribution_pairs
     )
+    counts["dangling_aggregate_registry_edge_count"] = len(
+        dangling_aggregate_pairs
+    )
+    counts["dangling_contribution_registry_edge_count"] = len(
+        dangling_contribution_pairs
+    )
     if counts["malformed_payload_count"]:
         diagnostics.append(
             "graph_registry_rebind_malformed_materialization"
@@ -136754,6 +136871,10 @@ def graph_entity_registry_materialization_compatibility(
         diagnostics.append(
             "graph_registry_rebind_contribution_node_mismatch"
         )
+    if selective_dependency_mismatches:
+        diagnostics.append(
+            "graph_registry_rebind_selective_dependency_mismatch"
+        )
     if missing_aggregate_pairs or extra_aggregate_pairs:
         diagnostics.append(
             "graph_registry_rebind_aggregate_route_mapping_mismatch"
@@ -136765,16 +136886,23 @@ def graph_entity_registry_materialization_compatibility(
         diagnostics.append(
             "graph_registry_rebind_contribution_route_mapping_mismatch"
         )
+    if dangling_aggregate_pairs or dangling_contribution_pairs:
+        diagnostics.append(
+            "graph_registry_rebind_registry_edge_endpoint_missing"
+        )
 
     materialization_generation_transition = False
     materialization_mismatch = bool(
         counts["malformed_payload_count"]
         or aggregate_node_mismatches
         or contribution_node_mismatches
+        or selective_dependency_mismatches
         or missing_aggregate_pairs
         or extra_aggregate_pairs
         or missing_contribution_pairs
         or extra_contribution_pairs
+        or dangling_aggregate_pairs
+        or dangling_contribution_pairs
         or static_version_mismatch_count
     )
     if not materialization_mismatch:
@@ -136849,8 +136977,11 @@ def graph_entity_registry_materialization_compatibility(
             ]
 
     for rows in (
+        selective_dependency_mismatches,
         aggregate_node_mismatches,
         contribution_node_mismatches,
+        dangling_aggregate_pairs,
+        dangling_contribution_pairs,
         [
             {
                 "table": "edges",
@@ -136958,6 +137089,9 @@ def graph_entity_registry_materialization_compatibility(
         "compatible": compatible,
         "registry_materialization_refreshable": (
             registry_materialization_refreshable
+        ),
+        "materialization_proof_mode": (
+            "compact_source_route_tokens_and_exact_registry_pairs_v1"
         ),
         "mutates": False,
         "stored_dependency_id": stored_dependency_id,

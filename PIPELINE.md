@@ -418,6 +418,12 @@ mismatch, final generation/dependency rebind repeats complete registry node and
 route-pair equality instead of rehashing unrelated graph payload tables. Any
 remaining mismatch falls back to bounded refresh (AOA-SM-D-0079).
 
+The complete materialization proof derives expected registry pairs from each
+source's normalized route-token set and recomputed selective dependency digest.
+It compares all aggregate/contribution registry edges, registry-node semantics,
+and endpoint existence without parsing unrelated contribution payloads
+(AOA-SM-D-0080).
+
 Entity-registry construction distinguishes incremental navigation history from
 an authoritative rebuild. Incremental refresh may retain bounded prior-snapshot
 aliases and retired identities under an explicit history policy. A full rebuild
