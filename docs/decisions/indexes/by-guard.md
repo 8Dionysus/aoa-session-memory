@@ -319,6 +319,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0064 Freshness Drip Admits Only Light Session Work](../AOA-SM-D-0064-freshness-drip-admits-only-light-session-work.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0064-freshness-drip-admits-only-light-session-work.md` |
 
+## bounded verification
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0087 Resource-Gated Session Projection Cleanup Conveyor](../AOA-SM-D-0087-resource-gated-session-projection-cleanup-conveyor.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0087-resource-gated-session-projection-cleanup-conveyor.md` |
+
 ## cache invalidation
 
 | Decision | Date | Status | Path |
@@ -925,6 +931,12 @@
 | [AOA-SM-D-0038 Primary-Preserving Role-Diverse Dense Evidence Hydration](../AOA-SM-D-0038-primary-preserving-role-diverse-dense-evidence-hydration.md) | 2026-07-29 | Accepted | `docs/decisions/AOA-SM-D-0038-primary-preserving-role-diverse-dense-evidence-hydration.md` |
 | [AOA-SM-D-0041 Incompatible Atlas Generations Use the Deep Clean-Rebuild Route](../AOA-SM-D-0041-incompatible-atlas-generations-use-the-deep-clean-rebuild-route.md) | 2026-07-31 | Accepted | `docs/decisions/AOA-SM-D-0041-incompatible-atlas-generations-use-the-deep-clean-rebuild-route.md` |
 
+## generation incompatibility
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0087 Resource-Gated Session Projection Cleanup Conveyor](../AOA-SM-D-0087-resource-gated-session-projection-cleanup-conveyor.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0087-resource-gated-session-projection-cleanup-conveyor.md` |
+
 ## global recall honesty
 
 | Decision | Date | Status | Path |
@@ -973,6 +985,18 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0051 Transactional Component Outbox and Vector Freshness](../AOA-SM-D-0051-transactional-component-outbox-and-vector-freshness.md) | 2026-08-10 | Accepted | `docs/decisions/AOA-SM-D-0051-transactional-component-outbox-and-vector-freshness.md` |
+
+## inactive lease
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0087 Resource-Gated Session Projection Cleanup Conveyor](../AOA-SM-D-0087-resource-gated-session-projection-cleanup-conveyor.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0087-resource-gated-session-projection-cleanup-conveyor.md` |
+
+## inactive producer
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0087 Resource-Gated Session Projection Cleanup Conveyor](../AOA-SM-D-0087-resource-gated-session-projection-cleanup-conveyor.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0087-resource-gated-session-projection-cleanup-conveyor.md` |
 
 ## independent live sessions
 
@@ -1372,6 +1396,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0006 Bounded Query-Demand Projection Catch-Up](../AOA-SM-D-0006-bounded-query-demand-projection-catch-up.md) | 2026-07-16 | Accepted | `docs/decisions/AOA-SM-D-0006-bounded-query-demand-projection-catch-up.md` |
+
+## quiet-age guard
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0087 Resource-Gated Session Projection Cleanup Conveyor](../AOA-SM-D-0087-resource-gated-session-projection-cleanup-conveyor.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0087-resource-gated-session-projection-cleanup-conveyor.md` |
 
 ## raw authority
 

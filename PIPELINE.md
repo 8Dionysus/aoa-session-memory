@@ -342,6 +342,22 @@ leaves last-good readable. Maintenance never removes a current resumable work
 directory; it may remove only an old incompatible work identity after proving
 the session lease inactive and revalidating current raw authority.
 
+Generated session-projection debris has a separate cleanup conveyor. The
+ordinary apply route verifies only a bounded number of PID-owned orphan stages
+per run; `--session-stage-verification-limit` lets a scheduled owner raise that
+small bound without turning hot status into a raw scan. Exact projection-work
+classification remains excluded from ordinary apply and requires the explicit
+`--inspect-session-projection-work` flag behind a resource-gated maintenance
+owner. The deeper route still proves current raw identity, inactive session
+lease, incompatibility, and the quiet-age guard immediately before removal.
+Schedulers may run the bounded stage drip frequently and the projection-work
+contour less often. Neither contour removes raw evidence, current resumable
+work, or published last-good projections, and cleanup progress does not imply
+semantic freshness. An unattended scheduler may use
+`--success-on-deferred-lock` so healthy owner contention becomes a clean retry
+on the next timer tick rather than a false service failure; the cleanup packet
+still reports `deferred_active_writer` and no mutation.
+
 ## 6. Count-only accounting
 
 Token observations are separated by basis:

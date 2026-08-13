@@ -634,6 +634,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0024 Semantic Generation Pins for Evaluation Admission](../AOA-SM-D-0024-semantic-generation-pins-for-evaluation-admission.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0024-semantic-generation-pins-for-evaluation-admission.md` |
 
+## raw authority
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0087 Resource-Gated Session Projection Cleanup Conveyor](../AOA-SM-D-0087-resource-gated-session-projection-cleanup-conveyor.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0087-resource-gated-session-projection-cleanup-conveyor.md` |
+
 ## raw block projection
 
 | Decision | Date | Status | Path |
@@ -696,6 +702,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0012 Bounded Background Graph Queue Reserve](../AOA-SM-D-0012-bounded-background-graph-queue-reserve.md) | 2026-07-17 | Accepted | `docs/decisions/AOA-SM-D-0012-bounded-background-graph-queue-reserve.md` |
+
+## resumable projection work
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0087 Resource-Gated Session Projection Cleanup Conveyor](../AOA-SM-D-0087-resource-gated-session-projection-cleanup-conveyor.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0087-resource-gated-session-projection-cleanup-conveyor.md` |
 
 ## review rendering
 
@@ -935,6 +947,12 @@
 | [AOA-SM-D-0020 Preserved Capture and Last-Good Projection Publication](../AOA-SM-D-0020-preserved-capture-and-last-good-projection-publication.md) | 2026-07-18 | Accepted | `docs/decisions/AOA-SM-D-0020-preserved-capture-and-last-good-projection-publication.md` |
 | [AOA-SM-D-0061 Freshness Profiles Do Not Own Heavy Tail](../AOA-SM-D-0061-freshness-profiles-do-not-own-heavy-tail.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0061-freshness-profiles-do-not-own-heavy-tail.md` |
 | [AOA-SM-D-0070 Coalesced Hook Intent and Contention-Neutral Retry](../AOA-SM-D-0070-coalesced-hook-intent-and-contention-neutral-retry.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0070-coalesced-hook-intent-and-contention-neutral-retry.md` |
+
+## session projection stage
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0087 Resource-Gated Session Projection Cleanup Conveyor](../AOA-SM-D-0087-resource-gated-session-projection-cleanup-conveyor.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0087-resource-gated-session-projection-cleanup-conveyor.md` |
 
 ## session projection work
 

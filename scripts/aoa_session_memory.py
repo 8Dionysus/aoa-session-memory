@@ -199586,8 +199586,19 @@ def command_maintenance_cleanup(args: argparse.Namespace) -> int:
         # Apply is an operational drip by default: never hide an all-stage
         # raw hash pass or complete projection-work identity scan behind one
         # cleanup mutation. A dry-run retains the explicit complete audit.
-        inspect_session_projection_work=not bool(args.apply),
-        session_stage_verification_limit=(1 if args.apply else None),
+        # Resource-gated cleanup owners may explicitly request the deeper
+        # projection-work proof instead of importing this function ad hoc.
+        inspect_session_projection_work=(
+            bool(args.inspect_session_projection_work)
+            or not bool(args.apply)
+        ),
+        session_stage_verification_limit=(
+            max(0, int(args.session_stage_verification_limit))
+            if args.session_stage_verification_limit is not None
+            else 1
+            if args.apply
+            else None
+        ),
         confirmed_unowned_session_stage_digests=set(
             getattr(
                 args,
@@ -199598,7 +199609,14 @@ def command_maintenance_cleanup(args: argparse.Namespace) -> int:
         ),
     )
     print(json.dumps(payload, indent=2, ensure_ascii=False))
-    return 0 if payload.get("ok") else 1
+    if payload.get("ok"):
+        return 0
+    if (
+        args.success_on_deferred_lock
+        and payload.get("status") == "deferred_active_writer"
+    ):
+        return 0
+    return 1
 
 
 def command_session_stage_promote(args: argparse.Namespace) -> int:
@@ -209424,6 +209442,32 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     maintenance_cleanup_parser.add_argument("--apply", action="store_true", help="Apply cleanup. Default is a dry-run plan.")
+    maintenance_cleanup_parser.add_argument(
+        "--session-stage-verification-limit",
+        type=int,
+        help=(
+            "Maximum PID-orphaned session stages whose stronger raw "
+            "authority may be verified in this run. Apply defaults to 1; "
+            "dry-run defaults to an explicit complete audit."
+        ),
+    )
+    maintenance_cleanup_parser.add_argument(
+        "--inspect-session-projection-work",
+        action="store_true",
+        help=(
+            "Explicitly inspect resumable projection-work identities during "
+            "apply. This may parse large owner raw transcripts and belongs "
+            "behind a resource-gated cleanup owner."
+        ),
+    )
+    maintenance_cleanup_parser.add_argument(
+        "--success-on-deferred-lock",
+        action="store_true",
+        help=(
+            "Return success when an active maintenance owner safely defers "
+            "cleanup. Intended for periodic unattended retries only."
+        ),
+    )
     maintenance_cleanup_parser.add_argument(
         "--confirm-unowned-session-stage-digest",
         action="append",

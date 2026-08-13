@@ -41829,6 +41829,73 @@ def test_maintenance_cleanup_stage_raw_authority_limit_is_bounded(
     assert stages["raw_authority_verification_deferred_count"] == 1
 
 
+def test_maintenance_cleanup_cli_exposes_resource_gated_cleanup_controls(
+    tmp_path: Path,
+    monkeypatch: Any,
+    capsys: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir()
+    captured: dict[str, Any] = {}
+
+    def fake_cleanup(**kwargs: Any) -> dict[str, Any]:
+        captured.update(kwargs)
+        return {"ok": True, "status": "nothing_to_do"}
+
+    monkeypatch.setattr(module, "maintenance_cleanup", fake_cleanup)
+    args = module.build_parser().parse_args(
+        [
+            "maintenance-cleanup",
+            "--aoa-root",
+            str(aoa_root),
+            "--surface",
+            "session-projection",
+            "--apply",
+            "--session-stage-verification-limit",
+            "4",
+            "--inspect-session-projection-work",
+        ]
+    )
+
+    assert args.func(args) == 0
+    assert captured["apply"] is True
+    assert captured["surface"] == "session-projection"
+    assert captured["session_stage_verification_limit"] == 4
+    assert captured["inspect_session_projection_work"] is True
+    assert json.loads(capsys.readouterr().out)["ok"] is True
+
+
+def test_maintenance_cleanup_cli_can_treat_lock_deferral_as_scheduled_success(
+    tmp_path: Path,
+    monkeypatch: Any,
+    capsys: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir()
+    monkeypatch.setattr(
+        module,
+        "maintenance_cleanup",
+        lambda **_kwargs: {
+            "ok": False,
+            "status": "deferred_active_writer",
+        },
+    )
+    args = module.build_parser().parse_args(
+        [
+            "maintenance-cleanup",
+            "--aoa-root",
+            str(aoa_root),
+            "--apply",
+            "--success-on-deferred-lock",
+        ]
+    )
+
+    assert args.func(args) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == (
+        "deferred_active_writer"
+    )
+
+
 def test_maintenance_cleanup_detects_orphaned_graph_rebuild_tmp_journal_without_base(tmp_path: Path, monkeypatch: Any) -> None:
     aoa_root = tmp_path / ".aoa"
     graph_root = aoa_root / module.GRAPH_ROOT
