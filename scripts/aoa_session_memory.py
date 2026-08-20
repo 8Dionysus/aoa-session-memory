@@ -148,7 +148,7 @@ DECLARED_GRAPH_PROJECTION_GENERATION_TRANSITIONS: dict[
     # still conditional on reconstructing the exact predecessor identity from
     # its source and on the complete graph materialization proof performed by
     # graph-registry-rebind.
-    "c93008370f1aa55d24a430c244e154b58ce089c2030d4cefa399632699805a22": (
+    "1aaee30cc3d08ab9e30f219b5e16e679fb203e95ef9a4f0267b244bf7a2fd809": (
         {
             "bae847f241b3c19e3ca11d177df29089f8760aec72e1d0e50790eb6955d710c9": (
                 "e065b0e0399f986829c524f79cbf371b0fe6925c9f9aeb39c944c6309adcadb3"
@@ -65514,6 +65514,7 @@ def session_projection_stage_status(
             "active_or_pid_alive",
             "interrupted_publish_journal_present",
             "orphaned_verification_deferred",
+            "unowned_legacy",
         }
     ]
     journaled = [
@@ -66369,9 +66370,7 @@ def maintenance_cleanup(
                 session_projection_stage_status(
                     aoa_root,
                     raw_authority_verification_limit=(
-                        0
-                        if apply
-                        else session_stage_verification_limit
+                        session_stage_verification_limit
                     ),
                 )
             )

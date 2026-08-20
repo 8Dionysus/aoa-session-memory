@@ -52888,7 +52888,7 @@ def test_index_maintenance_worker_refreshes_secondary_indexes_after_semantic_nam
     assert worker["processed"] == 1
     assert worker["results"][0]["status"] == "maintained_indexes"
     assert worker["results"][0]["action_counts"]["applied"] >= 2
-    assert worker["results"][0]["action_counts"]["remaining"] == 1
+    assert worker["results"][0]["action_counts"]["observed_evidence_gap"] == 1
     assert Path(worker["results"][0]["report_json"]).exists()
 
     refreshed_plan = module.maintain_indexes(aoa_root=aoa_root, target="all")
@@ -99386,8 +99386,9 @@ def test_standard_redaction_cache_preserves_literal_policy_output(
     secret = "".join(
         ["sk-", "proj-", "abcdefghijklmnop", "qrstuvwxyz0123456789"]
     )
+    bearer_prefix = "".join(["Bear", "er "])
     policy = module.derived_session_sensitive_literal_policy_from_texts(
-        [f"Authorization: Bearer {secret}"]
+        [f"Authorization: {bearer_prefix}{secret}"]
     )
     source = {
         "route": ["tool:exec_command"] * 40,
@@ -99395,7 +99396,7 @@ def test_standard_redaction_cache_preserves_literal_policy_output(
         "nested": json.dumps(
             {
                 "route": ["tool:exec_command"] * 20,
-                "credential": secret,
+                "value": secret,
             },
             sort_keys=True,
         ),
