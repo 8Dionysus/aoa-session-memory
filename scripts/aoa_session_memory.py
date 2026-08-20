@@ -79,6 +79,9 @@ SEGMENT_COMPACT_REVIEW_EVENT_LIMIT = 12
 DERIVED_NESTED_JSON_REDACTION_MAX_CHARS = 1_000_000
 DERIVED_SESSION_SENSITIVE_LITERAL_MIN_CHARS = 8
 DERIVED_SESSION_SENSITIVE_LITERAL_MAX_CHARS = 1024
+DERIVED_TEXT_REDACTION_CACHE_MAX_ENTRIES = 65536
+DERIVED_TEXT_REDACTION_CACHE_MAX_TEXT_CHARS = 4096
+DERIVED_TEXT_REDACTION_CACHE_ENABLED = True
 DERIVED_SESSION_SENSITIVE_LITERAL_SAFE_RE = re.compile(
     r"(?:contract|contracts|credential|credentials|password|passwords)",
     flags=re.IGNORECASE,
@@ -100,19 +103,24 @@ DECLARED_PROJECTION_PREDECESSOR_GENERATION_IDS: dict[
     str,
     frozenset[str],
 ] = {
-    # Exact generation identities published by the 0.7.0 source before the
-    # dependency DAG was corrected.  These are a bounded transition allowlist,
-    # not schema-level compatibility claims.
+    # Exact generation identities covered by reviewed reuse-then-restamp
+    # transitions.  The first entries bridge the 0.7.0 DAG correction and the
+    # later D-0088 entries bridge proved execution-only kernels.  These are a
+    # bounded allowlist, not schema-level compatibility claims.
     "raw_event_classification_cache": frozenset(
         {
             "bbe6dcc2fd98e1db25ea866eafbf79b242b0caf06ffbc05274f0f2c0ccfa7644",
             "511c2bb32d50f1f499cadfca390e3acf9852b56dee0d3efc99fd60ec6e53b67f",
+            # AOA-SM-D-0088: execution-only validation kernels preserve the
+            # complete classification payload under exact semantic parity.
+            "cb49375782b3200689f7d8ec63c1e491edbe24f9e217dbf2ffffb7ffe8e0340d",
         }
     ),
     "segment_index": frozenset(
         {
             "0b23900190fd835ee724c548900dc5984bc0aa1f03c1cbcd395a4bf09c18a6d5",
             "461859a08daf00413d0e2780b88d413694acb3b827bc7d1f5fe0bb718e90d72a",
+            "23bad126906b6af73e2e29eb38fd06a100bbf11ffc0ffe5f90f0e65d1035114b",
         }
     ),
     "task_episode_source": frozenset(
@@ -120,12 +128,14 @@ DECLARED_PROJECTION_PREDECESSOR_GENERATION_IDS: dict[
             "496c751411bc10da537166036c0665c7b8518be76d0b5073527a4211e3ee3d7f",
             "6eeec4c0f1c84c088b9f5458aabe857bc70ea3f21e6b76ebfc32198e4c6cf119",
             "8670e45ec88cd97f817d02782a1b85328d2db1ad6d5e70f089622b51de43011d",
+            "40f99adce63164d107878cfe7be37352361ac11cf679d5ac14f574ec569ae7dc",
         }
     ),
     "session_index": frozenset(
         {
             "10decaa465e6cb12cc50839be886d509a74f49f1c0112d1e34b8e3ae098b8842",
             "0a2b22c8cf143506746c5d93d1d7385fe49d12802dd60e7f97a7fbbaed0ef6bf",
+            "419a7bd8ef14cb6e26f1c04cd92532d014505f151abff77c5d9d1488fd629e57",
         }
     ),
 }
@@ -13713,19 +13723,59 @@ def redact_derived_text(
     )[0]
 
 
+def cached_redact_derived_text(
+    text: Any,
+    *,
+    field_name: str,
+    literal_policy: DerivedSessionSensitiveLiteralPolicy | None,
+    text_cache: dict[tuple[str, str], str] | None,
+) -> str:
+    source = str(text or "")
+    cache_key = (
+        (field_name, source)
+        if DERIVED_TEXT_REDACTION_CACHE_ENABLED
+        and text_cache is not None
+        and len(source) <= DERIVED_TEXT_REDACTION_CACHE_MAX_TEXT_CHARS
+        else None
+    )
+    if cache_key is not None and cache_key in text_cache:
+        return text_cache[cache_key]
+    redacted = redact_derived_text(
+        text,
+        literal_policy=literal_policy,
+    )
+    if (
+        cache_key is not None
+        and text_cache is not None
+        and len(text_cache) < DERIVED_TEXT_REDACTION_CACHE_MAX_ENTRIES
+    ):
+        text_cache[cache_key] = redacted
+    return redacted
+
+
 def redact_derived_value(
     value: Any,
     *,
     field_name: str = "",
     literal_policy: DerivedSessionSensitiveLiteralPolicy | None = None,
+    text_cache: dict[tuple[str, str], str] | None = None,
 ) -> Any:
+    """Redact a derived value, optionally reusing process-local text results.
+
+    The cache is an execution optimization only.  Callers must scope it to one
+    literal policy and one bounded build; raw values remain process-local and
+    the cache is never serialized.
+    """
+
     if isinstance(value, dict):
         redacted_mapping: dict[Any, Any] = {}
         for key, item in value.items():
             redacted_key = (
-                redact_derived_text(
+                cached_redact_derived_text(
                     key,
+                    field_name="<mapping_key>",
                     literal_policy=literal_policy,
+                    text_cache=text_cache,
                 )
                 if literal_policy is not None and isinstance(key, str)
                 else key
@@ -13734,6 +13784,7 @@ def redact_derived_value(
                 item,
                 field_name=str(key),
                 literal_policy=literal_policy,
+                text_cache=text_cache,
             )
             if redacted_key not in redacted_mapping:
                 redacted_mapping[redacted_key] = redacted_item
@@ -13759,6 +13810,7 @@ def redact_derived_value(
                 item,
                 field_name=field_name,
                 literal_policy=literal_policy,
+                text_cache=text_cache,
             )
             for item in value
         ]
@@ -13768,6 +13820,7 @@ def redact_derived_value(
                 item,
                 field_name=field_name,
                 literal_policy=literal_policy,
+                text_cache=text_cache,
             )
             for item in value
         )
@@ -13792,14 +13845,17 @@ def redact_derived_value(
                     redact_derived_value(
                         nested,
                         literal_policy=literal_policy,
+                        text_cache=text_cache,
                     ),
                     ensure_ascii=False,
                     sort_keys=True,
                     separators=(",", ":"),
                 )
-        return redact_derived_text(
+        return cached_redact_derived_text(
             value,
+            field_name=field_name,
             literal_policy=literal_policy,
+            text_cache=text_cache,
         )
     return value
 
@@ -15025,6 +15081,7 @@ def raw_event_classification_payload(
     event: RawEvent,
     *,
     literal_policy: DerivedSessionSensitiveLiteralPolicy | None = None,
+    text_cache: dict[tuple[str, str], str] | None = None,
 ) -> dict[str, Any]:
     return redact_derived_value({
         "event_id": event.event_id,
@@ -15045,7 +15102,7 @@ def raw_event_classification_payload(
         "confidence": event.confidence,
         "correlation_id": event.correlation_id,
         "facets": event.facets,
-    }, literal_policy=literal_policy)
+    }, literal_policy=literal_policy, text_cache=text_cache)
 
 
 def raw_event_from_classification_payload(
@@ -15378,6 +15435,7 @@ def sanitize_event_classification_cache_artifact(
         or len(classifications) != int_value(block.get("line_count"))
     ):
         raise ValueError("classification_cache_reuse_identity_mismatch")
+    redaction_text_cache: dict[tuple[str, str], str] = {}
     write_deterministic_gzip_json(
         artifact_path,
         {
@@ -15385,12 +15443,13 @@ def sanitize_event_classification_cache_artifact(
             "generation_identity": generation_identity,
             "classifications": (
                 sanitized_classifications := [
-                redact_derived_value(
-                    item,
-                    literal_policy=literal_policy,
-                )
-                for item in classifications
-                if isinstance(item, dict)
+                    redact_derived_value(
+                        item,
+                        literal_policy=literal_policy,
+                        text_cache=redaction_text_cache,
+                    )
+                    for item in classifications
+                    if isinstance(item, dict)
                 ]
             ),
             "summary": event_classification_block_summary(
@@ -15428,6 +15487,7 @@ def classify_raw_event_block_task(
     literal_policy = DerivedSessionSensitiveLiteralPolicy(
         values_by_kind=sensitive_values_by_kind
     )
+    redaction_text_cache: dict[tuple[str, str], str] = {}
     classifications: list[dict[str, Any]] = []
     for offset, raw_line in enumerate(raw_lines):
         raw = raw_line.decode("utf-8", errors="replace")
@@ -15440,6 +15500,7 @@ def classify_raw_event_block_task(
             raw_event_classification_payload(
                 classify_raw_event(raw, parsed, line_start + offset),
                 literal_policy=literal_policy,
+                text_cache=redaction_text_cache,
             )
         )
     write_deterministic_gzip_json(
@@ -15462,6 +15523,7 @@ def classify_raw_event_block_task(
             (time.perf_counter_ns() - started) / 1_000_000
         ),
         "event_count": len(classifications),
+        "redaction_cache_entry_count": len(redaction_text_cache),
     }
 
 
@@ -22518,7 +22580,11 @@ def immutable_component_artifact_receipt(path: Path) -> dict[str, Any]:
     if path.name.endswith(".index.json"):
         receipt["semantic_sha256"] = (
             session_projection_json_semantic_sha256(
-                read_json(path, {})
+                read_json(path, {}),
+                bounded_materialization=(
+                    stat.st_size
+                    <= SESSION_PROJECTION_SEMANTIC_HASH_MATERIALIZE_MAX_BYTES
+                ),
             )
         )
         receipt["semantic_mode"] = (
@@ -22566,7 +22632,11 @@ def immutable_component_artifact_receipt_from_attested_link(
     elif path.name.endswith(".index.json"):
         receipt["semantic_sha256"] = (
             session_projection_json_semantic_sha256(
-                read_json(path, {})
+                read_json(path, {}),
+                bounded_materialization=(
+                    stat.st_size
+                    <= SESSION_PROJECTION_SEMANTIC_HASH_MATERIALIZE_MAX_BYTES
+                ),
             )
         )
         receipt["semantic_mode"] = (
@@ -22921,6 +22991,7 @@ def write_segment(
     markdown_render_mode: str = "index_first_compact_v1",
     classification_metadata_pre_redacted: bool = False,
 ) -> dict[str, Any]:
+    redaction_text_cache: dict[tuple[str, str], str] = {}
     segment_id = f"{segment_no:03d}"
     md_name = f"{segment_id}__{role}.md"
     index_name = f"{segment_id}__{role}.index.json"
@@ -23115,6 +23186,7 @@ def write_segment(
             event_token_observations = redact_derived_value(
                 event_token_observations,
                 literal_policy=literal_policy,
+                text_cache=redaction_text_cache,
             )
         token_observations.extend(event_token_observations)
         records.append(
@@ -23283,6 +23355,7 @@ def write_segment(
                 if key not in admitted_keys
             },
             literal_policy=literal_policy,
+            text_cache=redaction_text_cache,
         )
         index_payload = {
             key: index[key] if key in admitted_keys else policy_scanned[key]
@@ -23292,6 +23365,7 @@ def write_segment(
         index_payload = redact_derived_value(
             index,
             literal_policy=literal_policy,
+            text_cache=redaction_text_cache,
         )
     write_json(index_path, index_payload)
     artifact_receipts = {
@@ -24657,7 +24731,25 @@ def materialize_session_index_task_episode_shards(
                     )
                 )
             )
-            if legacy_source_matches:
+            component_predecessor_matches = bool(
+                prior_payload_matches
+                and prior_generation_id
+                in DECLARED_PROJECTION_PREDECESSOR_GENERATION_IDS.get(
+                    "task_episode_source",
+                    frozenset(),
+                )
+                and {
+                    key: value
+                    for key, value in prior_source_identity.items()
+                    if key != "task_episode_generation_id"
+                }
+                == {
+                    key: value
+                    for key, value in component_source_identity.items()
+                    if key != "task_episode_generation_id"
+                }
+            )
+            if legacy_source_matches or component_predecessor_matches:
                 _, _, restamped = (
                     session_index_task_episode_shard_envelope(
                         (
@@ -27677,6 +27769,7 @@ def recover_interrupted_session_projection_publish(
 
 
 SESSION_PROJECTION_SEMANTIC_DIGEST_VERSION = 2
+SESSION_PROJECTION_SEMANTIC_HASH_MATERIALIZE_MAX_BYTES = 8 * 1024 * 1024
 SESSION_PROJECTION_SEMANTIC_DIGEST_VOLATILE_KEYS = (
     PROJECTION_SEMANTIC_VOLATILE_KEYS
 )
@@ -27886,7 +27979,21 @@ def projection_semantic_json_hash_update(
     )
 
 
-def session_projection_json_semantic_sha256(value: Any) -> str:
+def session_projection_json_semantic_sha256(
+    value: Any,
+    *,
+    bounded_materialization: bool = False,
+) -> str:
+    if bounded_materialization:
+        comparable = session_projection_semantic_digest_value(value)
+        return hashlib.sha256(
+            json.dumps(
+                comparable,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
     digest = hashlib.sha256()
     projection_semantic_json_hash_update(
         digest,
@@ -41139,8 +41246,6 @@ def event_classification_cache_candidate_indexes(
             stored_identity=index.get("generation_identity"),
             expected_identity=generation_identity,
         )
-        if not generation_admission.get("compatible"):
-            continue
         records = (
             index.get("blocks")
             if isinstance(index.get("blocks"), dict)
@@ -41167,7 +41272,8 @@ def event_classification_cache_candidate_indexes(
             )
         )
         records_metadata_current = bool(
-            records
+            generation_admission.get("compatible")
+            and records
             and all(
                 event_classification_cache_record_current(
                     cache_root=cache_root,
@@ -41193,6 +41299,7 @@ def event_classification_cache_candidate_indexes(
                 ),
                 "generation_admission": generation_admission,
                 "summaries_compact": summaries_compact,
+                "privacy_scan_rooted": privacy_scan_rooted,
             }
         )
         if (
@@ -41230,17 +41337,29 @@ def reusable_event_classification_cache_record(
     for candidate in candidates:
         cache_root = candidate.get("cache_root")
         records = candidate.get("records")
-        if not isinstance(cache_root, Path) or not isinstance(records, dict):
+        generation_admission = candidate.get("generation_admission")
+        if (
+            not isinstance(cache_root, Path)
+            or not isinstance(records, dict)
+            or not isinstance(generation_admission, dict)
+            or not generation_admission.get("compatible")
+        ):
             continue
         record = records.get(cache_key)
         records_root_current = bool(
             candidate.get("records_root_current")
         )
+        records_metadata_current = bool(
+            candidate.get("records_metadata_current")
+        )
         if event_classification_cache_record_current(
             cache_root=cache_root,
             record=record,
             block=block,
-            verify_content=not records_root_current,
+            verify_content=(
+                not records_root_current
+                or not records_metadata_current
+            ),
             require_summary=not bool(
                 candidate.get("summaries_compact")
             ),
@@ -41253,6 +41372,57 @@ def reusable_event_classification_cache_record(
                 "_records_root_current": records_root_current,
             }
     return None
+
+
+def reusable_sensitive_structural_marker(
+    *,
+    block: dict[str, Any],
+    completed_records: dict[str, dict[str, Any]],
+    candidate_indexes: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Admit a raw-bound privacy marker independently of classification.
+
+    The marker owns its own schema version and contains no literal values.
+    An older classification generation may therefore contribute only this
+    rooted marker; classification artifacts still require their ordinary
+    generation admission in ``reusable_event_classification_cache_record``.
+    """
+
+    cache_key = str(block.get("cache_key") or "")
+    record_candidates: list[Any] = [
+        completed_records.get(cache_key)
+    ]
+    for candidate in candidate_indexes:
+        records = candidate.get("records")
+        if not (
+            candidate.get("records_root_current") is True
+            and candidate.get("privacy_scan_rooted") is True
+            and isinstance(records, dict)
+        ):
+            continue
+        record_candidate = records.get(cache_key)
+        if (
+            isinstance(record_candidate, dict)
+            and record_candidate.get("block") == block
+        ):
+            record_candidates.append(record_candidate)
+    for record_candidate in record_candidates:
+        privacy_scan = (
+            record_candidate.get("privacy_scan")
+            if isinstance(record_candidate, dict)
+            and isinstance(record_candidate.get("privacy_scan"), dict)
+            else {}
+        )
+        marker = (
+            privacy_scan.get("structural_marker")
+            if isinstance(privacy_scan.get("structural_marker"), dict)
+            else {}
+        )
+        if int_value(marker.get("schema_version")) == (
+            SENSITIVE_STRUCTURAL_MARKER_VERSION
+        ):
+            return dict(marker)
+    return {}
 
 
 def event_classification_cache_record_summary(
@@ -42272,51 +42442,11 @@ def reindex_session_from_raw(
         def structural_marker_for_block(
             block: dict[str, Any],
         ) -> dict[str, Any]:
-            cache_key = str(block.get("cache_key") or "")
-            record_candidates: list[Any] = [
-                completed_classification_blocks.get(cache_key)
-            ]
-            for candidate in classification_cache_candidates:
-                generation_admission = candidate.get(
-                    "generation_admission"
-                )
-                records = candidate.get("records")
-                if not (
-                    candidate.get("records_root_current") is True
-                    and isinstance(generation_admission, dict)
-                    and not generation_admission.get(
-                        "requires_restamp"
-                    )
-                    and isinstance(records, dict)
-                ):
-                    continue
-                record_candidate = records.get(cache_key)
-                if (
-                    isinstance(record_candidate, dict)
-                    and record_candidate.get("block") == block
-                ):
-                    record_candidates.append(record_candidate)
-            for record_candidate in record_candidates:
-                privacy_scan = (
-                    record_candidate.get("privacy_scan")
-                    if isinstance(record_candidate, dict)
-                    and isinstance(
-                        record_candidate.get("privacy_scan"), dict
-                    )
-                    else {}
-                )
-                marker = (
-                    privacy_scan.get("structural_marker")
-                    if isinstance(
-                        privacy_scan.get("structural_marker"), dict
-                    )
-                    else {}
-                )
-                if int_value(marker.get("schema_version")) == (
-                    SENSITIVE_STRUCTURAL_MARKER_VERSION
-                ):
-                    return dict(marker)
-            return {}
+            return reusable_sensitive_structural_marker(
+                block=block,
+                completed_records=completed_classification_blocks,
+                candidate_indexes=classification_cache_candidates,
+            )
 
         sensitive_scan_blocks: list[dict[str, Any]] = []
         skipped_non_sensitive_block_count = 0
@@ -57149,11 +57279,6 @@ def maintain_indexes(
                         else limit
                     ),
                     apply=True,
-                    mode=(
-                        "deep"
-                        if search_source_set_replacement_required
-                        else "hot"
-                    ),
                     batch_limit=effective_graph_batch_limit,
                     refresh_chunk_size=effective_graph_refresh_chunk_size,
                     max_refresh_nodes=effective_graph_max_refresh_nodes,
@@ -114984,9 +115109,11 @@ def search_documents_for_record(
                     "exact_literal_source_lane": exact_literal_source_lane,
                 }
             )
+    redaction_text_cache: dict[tuple[str, str], str] = {}
     documents = redact_derived_value(
         documents,
         literal_policy=literal_policy,
+        text_cache=redaction_text_cache,
     )
     return documents, {
         "status": "indexed",
@@ -115014,6 +115141,19 @@ def search_documents_for_record(
         "derived_text_redaction": {
             "policy_version": DERIVED_TEXT_REDACTION_POLICY_VERSION,
             "session_sensitive_literals": literal_policy.report(),
+            "execution": {
+                "mode": (
+                    "bounded_process_local_text_cache_v1"
+                    if DERIVED_TEXT_REDACTION_CACHE_ENABLED
+                    else "disabled_exact_redaction_v1"
+                ),
+                "entry_count": len(redaction_text_cache),
+                "max_entries": DERIVED_TEXT_REDACTION_CACHE_MAX_ENTRIES,
+                "max_cached_text_chars": (
+                    DERIVED_TEXT_REDACTION_CACHE_MAX_TEXT_CHARS
+                ),
+                "values_persisted": False,
+            },
         },
     }
 
@@ -127665,8 +127805,8 @@ def projection_generation_admission(
             "attestation": {
                 "version": PROJECTION_PREDECESSOR_ATTESTATION_VERSION,
                 "basis": (
-                    "exact_0_7_0_generation_id_with_stage_semantics_"
-                    "preserved_across_dependency_dag_correction"
+                    "exact_declared_generation_id_with_stage_semantics_"
+                    "preserved_by_owner_review"
                 ),
                 "scope": "reuse_then_restamp_only",
             },

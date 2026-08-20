@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "artifact_type": "session_projection_validation_dag_benchmark",
+  "generated_at": "2026-08-14T04:30:23Z",
+  "fixture": {
+    "synthetic": false,
+    "source_kind": "read_only_captured_snapshot",
+    "fixture_alias": "bounded-readonly-7mb",
+    "raw_bytes": 7323145,
+    "event_count": 3362,
+    "segment_count": 44,
+    "classification_block_count": 7,
+    "task_episode_shard_count": 4
+  },
+  "measurement": {
+    "mode": "same_source_same_shadow_path_crossover",
+    "order": [
+      "optimized",
+      "baseline",
+      "baseline",
+      "optimized"
+    ],
+    "optimized_seconds": [3.625, 4.11],
+    "baseline_seconds": [4.81, 4.706],
+    "optimized_median_seconds": 3.8675,
+    "baseline_median_seconds": 4.758,
+    "median_speedup": 1.23,
+    "semantic_digest_equal": true,
+    "status_all_reindexed": true,
+    "resource_peak_mib": 430.8,
+    "swap_peak_bytes": 0
+  },
+  "optimized_phase_milliseconds": {
+    "event_classification": [850, 930],
+    "segment_generation": [1534, 1785],
+    "sensitive_literal_policy": [102, 109],
+    "session_index_generation": [757, 892],
+    "projection_validation": [60, 76]
+  },
+  "baseline_phase_milliseconds": {
+    "event_classification": [1443, 1448],
+    "segment_generation": [1538, 1618],
+    "sensitive_literal_policy": [577, 481],
+    "session_index_generation": [850, 795],
+    "projection_validation": [68, 67]
+  },
+  "component_hash_comparison": {
+    "component_count": 44,
+    "streaming_median_seconds": 0.60715,
+    "bounded_materialized_median_seconds": 0.11445,
+    "median_speedup": 5.305,
+    "digests_equal": true,
+    "resource_peak_mib": 83.1,
+    "swap_peak_bytes": 0
+  },
+  "rejected_methods": {
+    "global_sensitive_field_lru_speedup": 0.961,
+    "early_recursive_cache_lookup_speedup": 0.989,
+    "classification_cross_block_cache_speedup": 1.032,
+    "classification_cross_block_cache_rejected_reason": "insufficient_gain_for_worker_and_checkpoint_topology_change"
+  },
+  "privacy": {
+    "raw_text_persisted": false,
+    "session_identifier_persisted": false,
+    "host_path_persisted": false,
+    "literal_values_persisted": false,
+    "reversible_literal_digests_persisted": false
+  },
+  "truth_status": "paired_forced_migration_benchmark_not_hot_append_or_global_abyssos_slo",
+  "ok": true
+}

@@ -41577,6 +41577,47 @@ def test_session_projection_semantic_digest_matches_materialized_reference_witho
     assert actual["segment_markdown_count"] == 2
 
 
+def test_component_receipt_uses_bounded_materialized_semantic_hash_with_streaming_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    index_path = tmp_path / "001.index.json"
+    write_json(
+        index_path,
+        {
+            "segment_id": "001",
+            "updated_at": "volatile",
+            "events": [
+                {"event_id": f"event-{ordinal}", "tags": ["repeat"] * 8}
+                for ordinal in range(20)
+            ],
+        },
+    )
+    original = module.session_projection_json_semantic_sha256
+    modes: list[bool] = []
+
+    def observed(value: Any, **kwargs: Any) -> str:
+        modes.append(bool(kwargs.get("bounded_materialization")))
+        return original(value, **kwargs)
+
+    monkeypatch.setattr(
+        module,
+        "session_projection_json_semantic_sha256",
+        observed,
+    )
+    bounded = module.immutable_component_artifact_receipt(index_path)
+    monkeypatch.setattr(
+        module,
+        "SESSION_PROJECTION_SEMANTIC_HASH_MATERIALIZE_MAX_BYTES",
+        0,
+    )
+    streaming = module.immutable_component_artifact_receipt(index_path)
+
+    assert modes == [True, False]
+    assert bounded["semantic_sha256"] == streaming["semantic_sha256"]
+    assert bounded["sha256"] == streaming["sha256"]
+
+
 def test_session_projection_semantic_digest_admits_current_segment_receipts_without_content_reads(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -72927,6 +72968,19 @@ def test_search_index_routes_queries_to_evidence_refs_and_freshness(tmp_path: Pa
     assert indexed["session_document_count"] == 2
     assert indexed["event_document_count"] == 6
     assert indexed["incident_document_count"] >= 1
+    indexed_session = next(
+        item
+        for item in indexed["sessions"]
+        if item.get("session_id") == "search-index-session"
+    )
+    redaction_execution = indexed_session["derived_text_redaction"][
+        "execution"
+    ]
+    assert redaction_execution[
+        "mode"
+    ] == "bounded_process_local_text_cache_v1"
+    assert redaction_execution["entry_count"] > 0
+    assert redaction_execution["values_persisted"] is False
     assert Path(indexed["db_path"]).exists()
     assert module.search_catalog_path(aoa_root).exists()
     assert Path(indexed["report_json"]).exists()
@@ -89033,16 +89087,40 @@ def test_session_projection_process_parallel_matches_serial_semantics(
         segment_workers=1,
     )
     session_dir = module.session_dir_from_record(record)
-    shutil.rmtree(
-        module.event_classification_cache_root(session_dir)
-    )
-    for work_dir in session_dir.parent.glob(
-        f".{session_dir.name}.projection-work-*"
-    ):
+
+    def clear_classification_caches() -> None:
         shutil.rmtree(
-            module.event_classification_cache_root(work_dir),
+            module.event_classification_cache_root(session_dir),
             ignore_errors=True,
         )
+        for work_dir in session_dir.parent.glob(
+            f".{session_dir.name}.projection-work-*"
+        ):
+            shutil.rmtree(
+                module.event_classification_cache_root(work_dir),
+                ignore_errors=True,
+            )
+
+    clear_classification_caches()
+    original_cache_enabled = (
+        module.DERIVED_TEXT_REDACTION_CACHE_ENABLED
+    )
+    monkeypatch.setattr(
+        module,
+        "DERIVED_TEXT_REDACTION_CACHE_ENABLED",
+        False,
+    )
+    uncached = module.reindex_session_from_raw(
+        aoa_root,
+        record,
+        segment_workers=1,
+    )
+    monkeypatch.setattr(
+        module,
+        "DERIVED_TEXT_REDACTION_CACHE_ENABLED",
+        original_cache_enabled,
+    )
+    clear_classification_caches()
     parallel = module.reindex_session_from_raw(
         aoa_root,
         record,
@@ -89050,6 +89128,7 @@ def test_session_projection_process_parallel_matches_serial_semantics(
     )
 
     assert serial["status"] == "reindexed"
+    assert uncached["status"] == "reindexed"
     assert parallel["status"] == "reindexed"
     assert serial["classification_execution"]["mode"] == "serial"
     assert parallel["classification_execution"]["mode"] in {
@@ -89088,6 +89167,10 @@ def test_session_projection_process_parallel_matches_serial_semantics(
     assert parallel["segment_execution"][
         "serialized_raw_event_slice_count"
     ] == 0
+    assert (
+        serial["publish_result"]["validation"]["semantic_digest"]
+        == uncached["publish_result"]["validation"]["semantic_digest"]
+    )
     assert (
         serial["publish_result"]["validation"]["semantic_digest"]
         == parallel["publish_result"]["validation"]["semantic_digest"]
@@ -89506,6 +89589,21 @@ def test_classification_candidate_index_root_is_validated_once_per_build(
         records[block["cache_key"]]["metadata_mode"] = (
             "size_mtime_v1"
         )
+    privacy_marker = {
+        "schema_version": module.SENSITIVE_STRUCTURAL_MARKER_VERSION,
+        "candidate_present": False,
+        "kind_counts": {},
+        "candidate_range_mode": (
+            "exact_candidate_lines_relative_to_raw_block_v1"
+        ),
+        "candidate_ranges": [],
+        "candidate_line_count": 0,
+        "literal_values_persisted": False,
+        "reversible_literal_digests_persisted": False,
+    }
+    records[blocks[0]["cache_key"]]["privacy_scan"] = {
+        "structural_marker": privacy_marker
+    }
     module.write_event_classification_cache_index(
         cache_root=cache_root,
         generation_identity=generation_identity,
@@ -89563,6 +89661,35 @@ def test_classification_candidate_index_root_is_validated_once_per_build(
         )
         assert reusable is not None
     assert root_calls == 1
+
+    changed_generation = {
+        **generation_identity,
+        "generation_id": "f" * 64,
+    }
+    stale_candidates = (
+        module.event_classification_cache_candidate_indexes(
+            session_dir=session_dir,
+            stage_dir=stage_dir,
+            generation_identity=changed_generation,
+        )
+    )
+    assert stale_candidates
+    assert all(
+        candidate["generation_admission"]["compatible"] is False
+        for candidate in stale_candidates
+    )
+    assert module.reusable_event_classification_cache_record(
+        session_dir=session_dir,
+        stage_dir=stage_dir,
+        block=blocks[0],
+        generation_identity=changed_generation,
+        candidate_indexes=stale_candidates,
+    ) is None
+    assert module.reusable_sensitive_structural_marker(
+        block=blocks[0],
+        completed_records={},
+        candidate_indexes=stale_candidates,
+    ) == privacy_marker
 
 
 def test_captured_append_extends_classification_plan_from_attested_tail(
@@ -99251,6 +99378,53 @@ def test_graph_record_redaction_cache_preserves_standard_output(
     cache_info = module._derived_text_sensitive_value_key_cached.cache_info()
     assert cache_info.hits >= 50
     assert cache_info.misses < 10
+
+
+def test_standard_redaction_cache_preserves_literal_policy_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "".join(
+        ["sk-", "proj-", "abcdefghijklmnop", "qrstuvwxyz0123456789"]
+    )
+    policy = module.derived_session_sensitive_literal_policy_from_texts(
+        [f"Authorization: Bearer {secret}"]
+    )
+    source = {
+        "route": ["tool:exec_command"] * 40,
+        "label": "tool:exec_command",
+        "nested": json.dumps(
+            {
+                "route": ["tool:exec_command"] * 20,
+                "credential": secret,
+            },
+            sort_keys=True,
+        ),
+        "detached": [secret] * 12,
+    }
+    expected = module.redact_derived_value(
+        source,
+        literal_policy=policy,
+    )
+    original = module.redact_derived_text
+    calls = 0
+
+    def counted(value: Any, **kwargs: Any) -> str:
+        nonlocal calls
+        calls += 1
+        return original(value, **kwargs)
+
+    monkeypatch.setattr(module, "redact_derived_text", counted)
+    cache: dict[tuple[str, str], str] = {}
+    actual = module.redact_derived_value(
+        source,
+        literal_policy=policy,
+        text_cache=cache,
+    )
+
+    assert actual == expected
+    assert secret not in json.dumps(actual)
+    assert calls < 20
+    assert cache
 
 
 def test_graph_record_builder_restores_gc_state(

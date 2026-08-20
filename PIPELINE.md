@@ -294,10 +294,19 @@ receipt combines named per-component roots. A current
 segment-index receipt supplies its canonical semantic SHA and a current
 Markdown receipt supplies its content SHA without reopening either artifact;
 legacy or drifted receipts take the exact-content fallback and are restamped.
+For an index artifact of at most `8 MiB`, the receipt may materialize the same
+canonical volatile-key-free JSON once and hash it in bulk. Larger artifacts
+retain the streaming scalar hash. Both paths implement one semantic mode and
+must produce the same digest.
 The records root also binds privacy structural markers. Candidate-bearing
 markers may identify exact raw-line byte ranges without storing values or
 digests; repeat policy construction reads only those ranges from raw authority,
 while absent or malformed range metadata selects a full raw-block scan.
+The marker has its own schema and exact raw-block binding, so a rooted marker
+may survive an unrelated classification-generation change. That crossing does
+not admit the classification artifact: positive marker ranges are reread from
+raw under the current detector, and a negative marker skips only an exact
+published raw prefix.
 Upstream, event classification uses append-stable content-addressed raw line
 blocks.
 Each completed block is checkpointed, so a cooperative deadline can preserve
@@ -337,6 +346,10 @@ before publication. No schema-wide or caller-declared compatibility route is
 available. Any such crossing adds a deterministic migration receipt to the
 atomic session manifest with exact predecessor/target IDs, artifact counts,
 raw fingerprint, publish ID, and rollback posture.
+The same bounded bridge may carry a later exact owner-reviewed predecessor
+whose stage output has independent semantic-parity proof, including the D-0088
+execution-only validation kernels. Every source ID remains enumerated; unknown
+or malformed identities still fail closed.
 
 For a growing session, each published raw block is admitted for reuse only
 when its role, line range, byte size, declared SHA-256, and freshly measured
@@ -354,6 +367,12 @@ Every exact assignment match contains one of those labels, so benign oversized
 lines avoid pathological regex backtracking without reducing credential
 coverage. The ephemeral literal policy is still rebuilt from raw authority and
 is never serialized.
+
+Within that one policy-bound build, recursive derived-text redaction may reuse
+a bounded process-local `(field, text)` result for short repeated strings.
+The cache is never serialized, is discarded with the process, and has an exact
+uncached execution path. It changes execution cost, not privacy admission,
+artifact identity, or evidence authority.
 
 Heavy construction owns a nonblocking per-session build lease. It does not own
 the global maintenance lease. A completed build is revalidated against current
