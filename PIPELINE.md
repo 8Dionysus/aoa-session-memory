@@ -646,7 +646,11 @@ Once a source exceeds the sweep indexing envelope, the sweep publishes a
 content-addressed raw capture and preserves the last-good indexes instead of
 starting one uninterruptible whole-session rebuild. The capture remains
 explicitly ahead of the stale projection until a compatible heavy or resumable
-index route lands.
+index route lands. Every selected non-current record enters either its declared
+repair or a visible fallback repair route; a new freshness reason cannot become
+an unowned `skipped_unhandled_freshness` state. A deferred projection upserts one
+session-scoped persistent obligation bound to the capture epoch, byte watermark,
+and digest.
 
 Before a sampled live-tail candidate is declared quiet enough for automatic
 catch-up, the status route rechecks its declared transcript path with one
@@ -749,6 +753,16 @@ silently create background work. A host scheduler may invoke the portable
 dispatcher, but the queue and retry semantics remain owned by this organ;
 scheduled retry is not semantic maintenance success.
 
+A session-projection freshness obligation is stronger than an ordinary bounded
+resource retry. The profile attempt limit bounds one execution cycle but cannot
+delete the obligation. Backlog or deep targets the exact session through the
+resumable projection lane. A green process, timer, fallback, or checkpoint
+retires the item only after the stable manifest proves coverage of its required
+capture watermark. Append-only capture uses a same-epoch published byte
+watermark; a monolithic capture requires exact bytes and digest. Failed cycles,
+oldest obligation age, due count, and next attempt remain visible in
+`maintenance-status`.
+
 A periodic launch that observes an open graph-drip circuit must not clear the
 same profile's retry intent while the dispatcher owns it in flight. The
 dispatcher alone reconciles that claim and, when bounded work remains, creates
@@ -840,6 +854,14 @@ maintenance; it does not start a second memory-heavy build. Applying Codex
 sweeps use the same lease per selected raw source at or above the heavy
 threshold, including mirror-only capture; smaller sources in the sweep remain
 eligible.
+
+A preserved capture ahead of an otherwise compatible published session is also
+an explicit resumable-lane candidate even when route-generation drift is not
+present. Large captures enter the exclusive heavy lane. A smaller capture is
+not promoted into the automatic heavy-lane exclusion set: its watermark-bound
+obligation directly targets the same checkpointed reindex command, leaving hot
+capture-watch reconciliation available instead of letting ordinary metadata
+maintenance declare a no-op.
 
 The recurring catch-up resource wrapper has two freshness routes. A ready
 live-tail target keeps the bounded targeted command. When no live-tail target

@@ -54605,6 +54605,9 @@ def test_maintenance_status_markdown_renders_automatic_retry_summary() -> None:
                 "queued_count": 2,
                 "due_count": 1,
                 "in_flight_count": 0,
+                "freshness_obligation_count": 1,
+                "freshness_obligation_due_count": 1,
+                "oldest_freshness_obligation_age_seconds": 42.0,
                 "next_attempt_at": "2026-07-26T00:01:00Z",
             },
         }
@@ -54613,6 +54616,10 @@ def test_maintenance_status_markdown_renders_automatic_retry_summary() -> None:
     assert (
         "- automatic_retry: `scheduled` queued=`2` due=`1` "
         "in_flight=`0` next=`2026-07-26T00:01:00Z`"
+    ) in rendered
+    assert (
+        "- freshness_obligations: queued=`1` due=`1` "
+        "oldest_age_sec=`42.0`"
     ) in rendered
 
 
@@ -55912,6 +55919,89 @@ def test_live_tail_fast_status_uses_persisted_search_state_before_graph_or_globa
     assert payload["live_tail"]["catchup_target"] == session_label
     assert payload["live_tail"]["catchup_command_kind"] == (
         "targeted_index_maintenance_without_graph"
+    )
+
+
+def test_auto_maintenance_resource_launch_honors_explicit_reindex_child(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    child_command = [
+        "python3",
+        str(Path(module.__file__).resolve()),
+        "reindex-sessions",
+        "session-1",
+        "--workspace-root",
+        str(workspace),
+        "--aoa-root",
+        str(aoa_root),
+        "--budget-seconds",
+        "600",
+    ]
+    calls: list[list[str]] = []
+
+    def fake_run(
+        command: list[str],
+        **_kwargs: Any,
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        child = {
+            "schema_version": 1,
+            "artifact_type": "session_reindex",
+            "ok": True,
+            "status": "applied",
+            "processed_count": 1,
+            "remaining_count": 0,
+            "counts": {"reindexed": 1},
+        }
+        stdout = json.dumps(
+            {
+                "schema": "abyss_machine_resource_launch_v1",
+                "ok": True,
+                "blocked_reasons": [],
+                "denied_reasons": [],
+                "execution": {
+                    "ok": True,
+                    "returncode": 0,
+                    "stdout_tail": json.dumps(child),
+                    "stderr_tail": "",
+                },
+            }
+        )
+        return subprocess.CompletedProcess(
+            command, 0, stdout=stdout, stderr=""
+        )
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    payload = module.auto_maintenance_resource_launch(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        profile="deep",
+        target="session-1",
+        apply=True,
+        reason="automatic_retry:deep:attempt_1",
+        index_drip_on_block=False,
+        graph_drip_on_block=False,
+        repair_indexes=False,
+        repair_graph=False,
+        schedule_automatic_retry=False,
+        child_command_override=child_command,
+    )
+
+    command = calls[0]
+    separator = command.index("--")
+    assert command[separator + 1 :] == child_command
+    assert payload["status"] == "completed"
+    assert payload["result_verified"] is True
+    assert payload["explicit_child_command"] is True
+    assert payload["live_tail_fast_path"]["status"] == (
+        "skipped_explicit_child_command"
+    )
+    assert payload["resource_demand_key"].endswith(
+        ":deep:reindex-sessions-v4"
     )
 
 
@@ -61432,6 +61522,203 @@ def test_auto_maintenance_retry_dispatch_records_finish_time_and_backs_off_from_
     assert dispatched["completed_at"] == module.auto_maintenance_retry_iso(finish_epoch)
     assert dispatched["elapsed_ms"] == 37_000
     assert dispatched["results"][0]["completed_at"] == module.auto_maintenance_retry_iso(finish_epoch)
+
+
+def test_freshness_obligation_survives_bounded_retry_exhaustion(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    session_id = "persistent-freshness"
+    session_dir = aoa_root / module.SESSION_ROOT / session_id
+    session_dir.mkdir(parents=True)
+    module.write_json(
+        session_dir / "session.manifest.json",
+        {
+            "session_id": session_id,
+            "archive_status": "indexed",
+            "raw": {
+                "indexing_status": "indexed",
+                "bytes": 10,
+                "sha256": "old",
+                "capture_ledger": {
+                    "epoch_id": "epoch-1",
+                    "processed_watermark_bytes": 10,
+                },
+            },
+        },
+    )
+    options = {
+        "persistent_obligation": True,
+        "obligation_kind": (
+            module.SESSION_PROJECTION_FRESHNESS_OBLIGATION_KIND
+        ),
+        "session_id": session_id,
+        "session_dir": str(session_dir),
+        "required_capture_epoch_id": "epoch-1",
+        "required_capture_bytes": 20,
+        "required_capture_sha256": "new",
+    }
+
+    def schedule(queue_payload: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        item = module.auto_maintenance_retry_upsert_item(
+            queue_payload,
+            profile="deep",
+            target=session_id,
+            reason="test_freshness_obligation",
+            launch_status="freshness_obligation_enqueued",
+            options=options,
+            now_epoch=100.0,
+            initial_delay_seconds=0,
+        )
+        queue_payload["items"][item["queue_key"]][
+            "attempts_started"
+        ] = item["max_attempts"] - 1
+        return item, True
+
+    module.mutate_auto_maintenance_retry_queue(
+        aoa_root,
+        schedule,
+        now_epoch=100.0,
+    )
+    monkeypatch.setattr(
+        module,
+        "auto_maintenance_resource_launch",
+        lambda **_kwargs: {
+            "ok": False,
+            "status": "resource_blocked",
+        },
+    )
+    dispatched = module.auto_maintenance_retry_dispatch(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        apply=True,
+        limit=1,
+        now_epoch=101.0,
+    )
+    queue = module.auto_maintenance_retry_queue_status(
+        aoa_root,
+        now_epoch=101.0,
+    )
+    item = queue["items"][f"deep:{session_id}"]
+    assert dispatched["results"][0]["disposition"] == (
+        "persistent_obligation_rescheduled_after_bounded_cycle"
+    )
+    assert item["attempts_started"] == 0
+    assert item["exhaustion_cycles"] == 1
+    assert item["status"] == "blocked_persistent_obligation"
+    assert queue["freshness_obligation_count"] == 1
+    assert queue["oldest_freshness_obligation_age_seconds"] == 1.0
+
+
+def test_freshness_obligation_closes_only_after_watermark_proof(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    session_id = "watermark-proof"
+    session_dir = aoa_root / module.SESSION_ROOT / session_id
+    session_dir.mkdir(parents=True)
+    manifest_path = session_dir / "session.manifest.json"
+    manifest = {
+        "session_id": session_id,
+        "archive_status": "indexed",
+        "raw": {
+            "indexing_status": "indexed",
+            "bytes": 10,
+            "sha256": "old",
+            "capture_ledger": {
+                "epoch_id": "epoch-1",
+                "processed_watermark_bytes": 10,
+            },
+        },
+    }
+    module.write_json(manifest_path, manifest)
+    options = {
+        "persistent_obligation": True,
+        "obligation_kind": (
+            module.SESSION_PROJECTION_FRESHNESS_OBLIGATION_KIND
+        ),
+        "session_id": session_id,
+        "session_dir": str(session_dir),
+        "required_capture_epoch_id": "epoch-1",
+        "required_capture_bytes": 20,
+        "required_capture_sha256": "new",
+    }
+
+    def schedule(queue_payload: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        return (
+            module.auto_maintenance_retry_upsert_item(
+                queue_payload,
+                profile="backlog",
+                target=session_id,
+                reason="test_watermark_proof",
+                launch_status="freshness_obligation_enqueued",
+                options=options,
+                now_epoch=200.0,
+                initial_delay_seconds=0,
+            ),
+            True,
+        )
+
+    module.mutate_auto_maintenance_retry_queue(
+        aoa_root,
+        schedule,
+        now_epoch=200.0,
+    )
+
+    launch_kwargs: list[dict[str, Any]] = []
+
+    def publish_required_watermark(**kwargs: Any) -> dict[str, Any]:
+        launch_kwargs.append(kwargs)
+        manifest["raw"].update(
+            {
+                "bytes": 20,
+                "sha256": "new",
+                "capture_ledger": {
+                    "epoch_id": "epoch-1",
+                    "processed_watermark_bytes": 20,
+                },
+            }
+        )
+        module.write_json(manifest_path, manifest)
+        return {
+            "ok": True,
+            "status": "completed",
+            "result_verified": True,
+        }
+
+    monkeypatch.setattr(
+        module,
+        "auto_maintenance_resource_launch",
+        publish_required_watermark,
+    )
+    dispatched = module.auto_maintenance_retry_dispatch(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        apply=True,
+        limit=1,
+        now_epoch=201.0,
+    )
+    result = dispatched["results"][0]
+    assert result["reported_launch_status"] == "completed"
+    assert result["launch_status"] == "freshness_obligation_satisfied"
+    assert result["freshness_obligation_before"]["status"] == "remaining"
+    assert result["freshness_obligation_after"]["status"] == "satisfied"
+    assert result["disposition"] == "completed"
+    child_command = launch_kwargs[0]["child_command_override"]
+    assert "reindex-sessions" in child_command
+    assert session_id in child_command
+    assert launch_kwargs[0]["repair_indexes"] is False
+    assert launch_kwargs[0]["repair_graph"] is False
+    queue = module.auto_maintenance_retry_queue_status(
+        aoa_root,
+        now_epoch=201.0,
+    )
+    assert queue["queued_count"] == 0
+    assert queue["freshness_obligation_count"] == 0
 
 
 def test_deep_auto_maintenance_resource_defaults_to_graph_drip_fallback(tmp_path: Path, monkeypatch: Any) -> None:
@@ -94913,6 +95200,22 @@ def test_sweep_codex_sessions_preserves_oversized_raw_before_deferred_indexing(
     assert capture["status"] == "preserved_unindexed"
     assert capture_path.is_file()
     assert capture_path.read_bytes() == transcript.read_bytes()
+    retry_queue = module.auto_maintenance_retry_queue_status(
+        aoa_root
+    )
+    queue_key = f"deep:{session_id}"
+    assert retry_queue["freshness_obligation_count"] == 1
+    assert retry_queue["freshness_obligation_due_count"] == 1
+    assert queue_key in retry_queue["items"]
+    obligation = retry_queue["items"][queue_key]["options"]
+    assert obligation["persistent_obligation"] is True
+    assert obligation["obligation_kind"] == (
+        module.SESSION_PROJECTION_FRESHNESS_OBLIGATION_KIND
+    )
+    assert obligation["required_capture_bytes"] == transcript.stat().st_size
+    assert obligation["required_capture_epoch_id"] == capture[
+        "ledger_epoch_id"
+    ]
 
 
 def test_sweep_codex_sessions_defers_large_capture_for_heavy_lane_lease(

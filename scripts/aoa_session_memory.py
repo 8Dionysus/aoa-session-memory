@@ -143,12 +143,15 @@ DECLARED_GRAPH_PROJECTION_GENERATION_TRANSITIONS: dict[
     str,
     dict[str, str],
 ] = {
-    # AOA-SM-D-0067: the 0f10ba1 graph producer changes only how an
+    # AOA-SM-D-0067/D-0090: the graph producer contract is unchanged by the
+    # session-freshness scheduling repair; the current source generation still
+    # admits only the explicitly reconstructed predecessor identities below.
+    # The 0f10ba1 graph producer changes only how an
     # append-only batch refreshes already-defined aggregates.  Admission is
     # still conditional on reconstructing the exact predecessor identity from
     # its source and on the complete graph materialization proof performed by
     # graph-registry-rebind.
-    "1aaee30cc3d08ab9e30f219b5e16e679fb203e95ef9a4f0267b244bf7a2fd809": (
+    "b1cc18f49c5545828f141aa0cdfb54d90d5664376a254f3d28d1ad12c2afe186": (
         {
             "bae847f241b3c19e3ca11d177df29089f8760aec72e1d0e50790eb6955d710c9": (
                 "e065b0e0399f986829c524f79cbf371b0fe6925c9f9aeb39c944c6309adcadb3"
@@ -1657,7 +1660,7 @@ SESSION_MEMORY_RESOURCE_MAINTENANCE_UNITS = {
 }
 SESSION_MEMORY_RESOURCE_DEMAND_OWNER = "aoa-session-memory"
 SESSION_MEMORY_RESOURCE_DEMAND_KEY_PREFIX = "aoa-session-memory"
-AUTO_MAINTENANCE_RETRY_QUEUE_SCHEMA_VERSION = 1
+AUTO_MAINTENANCE_RETRY_QUEUE_SCHEMA_VERSION = 2
 AUTO_MAINTENANCE_RETRY_QUEUE_JSON = "auto-maintenance-retry-queue.json"
 AUTO_MAINTENANCE_RETRY_QUEUE_LOCK = "auto-maintenance-retry-queue.lock"
 AUTO_MAINTENANCE_RETRY_WORKER_LOCK = "auto-maintenance-retry-worker.lock"
@@ -18037,7 +18040,279 @@ SWEEP_REPAIR_REASONS = {
     "source_mtime_changed",
     "source_size_changed",
     "source_transcript_path_changed",
+    "source_changed_after_preserved_capture",
+    "preserved_capture_source_unstable",
+    "preserved_capture_ahead_of_projection",
+    "preserved_capture_missing",
 }
+
+SESSION_PROJECTION_FRESHNESS_OBLIGATION_KIND = (
+    "session_projection_freshness"
+)
+
+
+def session_projection_freshness_obligation_options(
+    *,
+    aoa_root: Path,
+    session_id: str,
+    session_dir: Path,
+    transcript_path: Path,
+    freshness_reason: str,
+) -> dict[str, Any]:
+    """Bind one retry intent to the strongest preserved raw watermark."""
+    capture = raw_capture_state_for_session(session_dir)
+    raw_bytes = int_value(capture.get("raw_bytes"), -1)
+    raw_sha256 = str(capture.get("raw_sha256") or "")
+    epoch_id = str(capture.get("ledger_epoch_id") or "")
+    return {
+        "persistent_obligation": True,
+        "obligation_kind": (
+            SESSION_PROJECTION_FRESHNESS_OBLIGATION_KIND
+        ),
+        "session_id": session_id,
+        "session_dir": str(session_dir),
+        "transcript_path": str(transcript_path),
+        "required_capture_epoch_id": epoch_id,
+        "required_capture_bytes": raw_bytes,
+        "required_capture_sha256": raw_sha256,
+        "required_capture_chain_sha256": str(
+            capture.get("ledger_chain_sha256") or ""
+        ),
+        "required_capture_ref": str(
+            capture.get("capture_ref") or ""
+        ),
+        "required_capture_stable": bool(
+            capture.get("source_stable_during_capture")
+        ),
+        "freshness_reason": freshness_reason,
+    }
+
+
+def session_projection_freshness_obligation_status(
+    aoa_root: Path,
+    options: dict[str, Any],
+) -> dict[str, Any]:
+    """Prove that the published projection covers an exact capture watermark."""
+    session_id = str(options.get("session_id") or "")
+    configured_dir = Path(str(options.get("session_dir") or ""))
+    resolved_dir = session_dir_for_id(aoa_root, session_id)
+    session_dir = (
+        resolved_dir
+        if resolved_dir.is_dir()
+        else configured_dir
+    )
+    manifest = read_json(
+        session_dir / "session.manifest.json", {}
+    )
+    raw = (
+        manifest.get("raw")
+        if isinstance(manifest, dict)
+        and isinstance(manifest.get("raw"), dict)
+        else {}
+    )
+    ledger = (
+        raw.get("capture_ledger")
+        if isinstance(raw.get("capture_ledger"), dict)
+        else {}
+    )
+    required_epoch = str(
+        options.get("required_capture_epoch_id") or ""
+    )
+    required_bytes = int_value(
+        options.get("required_capture_bytes"), -1
+    )
+    required_sha256 = str(
+        options.get("required_capture_sha256") or ""
+    )
+    projected_epoch = str(ledger.get("epoch_id") or "")
+    projected_bytes = int_value(
+        ledger.get("processed_watermark_bytes"),
+        int_value(raw.get("bytes"), -1),
+    )
+    projected_sha256 = str(raw.get("sha256") or "")
+    published = bool(
+        isinstance(manifest, dict)
+        and manifest.get("archive_status") == "indexed"
+        and raw.get("indexing_status") == "indexed"
+    )
+    if required_epoch:
+        satisfied = bool(
+            published
+            and projected_epoch == required_epoch
+            and required_bytes >= 0
+            and projected_bytes >= required_bytes
+        )
+        proof_mode = "append_only_capture_epoch_watermark"
+    else:
+        satisfied = bool(
+            published
+            and required_bytes >= 0
+            and required_sha256
+            and projected_bytes == required_bytes
+            and projected_sha256 == required_sha256
+        )
+        proof_mode = "exact_monolithic_capture_digest"
+    return {
+        "schema_version": 1,
+        "artifact_type": (
+            "session_projection_freshness_obligation_status"
+        ),
+        "ok": satisfied,
+        "status": "satisfied" if satisfied else "remaining",
+        "session_id": session_id,
+        "session_dir": str(session_dir),
+        "proof_mode": proof_mode,
+        "required_capture_epoch_id": required_epoch,
+        "required_capture_bytes": required_bytes,
+        "required_capture_sha256": required_sha256,
+        "projected_capture_epoch_id": projected_epoch,
+        "projected_capture_bytes": projected_bytes,
+        "projected_raw_sha256": projected_sha256,
+        "published_projection": published,
+        "truth_status": (
+            "published_projection_covers_required_capture_watermark"
+            if satisfied
+            else "required_capture_watermark_not_yet_published"
+        ),
+    }
+
+
+def session_projection_freshness_obligation_child_command(
+    *,
+    workspace_root: Path,
+    aoa_root: Path,
+    profile: str,
+    target: str,
+) -> list[str]:
+    settings = auto_maintenance_profile(profile)
+    budget_seconds = max(
+        1.0,
+        min(
+            900.0,
+            float(settings.get("budget_seconds") or 900.0),
+        ),
+    )
+    return [
+        "python3",
+        str(Path(__file__).resolve()),
+        "reindex-sessions",
+        target,
+        "--workspace-root",
+        str(workspace_root),
+        "--aoa-root",
+        str(aoa_root),
+        "--budget-seconds",
+        f"{budget_seconds:g}",
+        "--progress-every",
+        "1",
+        "--write-report",
+    ]
+
+
+def schedule_session_projection_freshness_obligation(
+    *,
+    aoa_root: Path,
+    session_id: str,
+    session_dir: Path,
+    transcript_path: Path,
+    freshness_reason: str,
+    now_epoch: float,
+) -> dict[str, Any]:
+    options = session_projection_freshness_obligation_options(
+        aoa_root=aoa_root,
+        session_id=session_id,
+        session_dir=session_dir,
+        transcript_path=transcript_path,
+        freshness_reason=freshness_reason,
+    )
+    required_bytes = int_value(
+        options.get("required_capture_bytes"), -1
+    )
+    if required_bytes < 0:
+        return {
+            "status": "not_scheduled_capture_watermark_missing",
+            "session_id": session_id,
+            "persistent_obligation": False,
+        }
+    profile = (
+        "deep"
+        if required_bytes >= SESSION_PROJECTION_HEAVY_LANE_RAW_BYTES
+        else "backlog"
+    )
+
+    def schedule(
+        queue_payload: dict[str, Any],
+    ) -> tuple[dict[str, Any], bool]:
+        items = (
+            queue_payload.get("items")
+            if isinstance(queue_payload.get("items"), dict)
+            else {}
+        )
+        queue_payload["items"] = items
+        destination_key = auto_maintenance_retry_key(
+            profile, session_id
+        )
+        for existing_key, existing_item in list(items.items()):
+            existing_options = (
+                existing_item.get("options")
+                if isinstance(existing_item, dict)
+                and isinstance(existing_item.get("options"), dict)
+                else {}
+            )
+            if not (
+                existing_key != destination_key
+                and existing_options.get("obligation_kind")
+                == SESSION_PROJECTION_FRESHNESS_OBLIGATION_KIND
+                and str(existing_options.get("session_id") or "")
+                == session_id
+            ):
+                continue
+            if destination_key not in items:
+                migrated = dict(existing_item)
+                migrated["queue_key"] = destination_key
+                migrated["profile"] = profile
+                migrated["target"] = session_id
+                items[destination_key] = migrated
+            items.pop(existing_key, None)
+        return (
+            auto_maintenance_retry_upsert_item(
+                queue_payload,
+                profile=profile,
+                target=session_id,
+                reason=(
+                    "session_projection_freshness:"
+                    f"{freshness_reason}"
+                ),
+                launch_status="freshness_obligation_enqueued",
+                options=options,
+                now_epoch=now_epoch,
+                initial_delay_seconds=0,
+            ),
+            True,
+        )
+
+    scheduled, queue = mutate_auto_maintenance_retry_queue(
+        aoa_root,
+        schedule,
+        now_epoch=now_epoch,
+    )
+    return {
+        **scheduled,
+        "profile": profile,
+        "target": session_id,
+        "persistent_obligation": True,
+        "obligation_kind": (
+            SESSION_PROJECTION_FRESHNESS_OBLIGATION_KIND
+        ),
+        "required_capture_epoch_id": options.get(
+            "required_capture_epoch_id"
+        ),
+        "required_capture_bytes": required_bytes,
+        "queue_path": queue.get("path"),
+        "truth_status": (
+            "persistent_retry_intent_bound_to_preserved_capture_watermark"
+        ),
+    }
 
 
 def hook_only_receipts_present(session_dir: Path) -> bool:
@@ -18262,6 +18537,12 @@ def sweep_codex_sessions(
             session_dir=archive_session_dirs.get(session_id),
         )
         base = sweep_result_base(record, freshness, age_seconds=age_seconds)
+        base["freshness_reason_handling"] = (
+            "declared_repair_reason"
+            if str(freshness.get("reason") or "")
+            in SWEEP_REPAIR_REASONS
+            else "fallback_repair_route"
+        )
         mirror_only = bool(
             index_max_raw_bytes is not None
             and int(record.get("bytes") or 0)
@@ -18279,9 +18560,6 @@ def sweep_codex_sessions(
         elif max_raw_bytes is not None and int(record.get("bytes") or 0) > max_raw_bytes:
             status = "skipped_over_max_raw"
             result = {**base, "status": status, "max_raw_bytes": max_raw_bytes}
-        elif str(freshness.get("reason") or "") not in SWEEP_REPAIR_REASONS:
-            status = "skipped_unhandled_freshness"
-            result = {**base, "status": status}
         elif limit is not None and selected_repair_count >= limit:
             repair_candidate_count += 1
             status = "skipped_over_limit"
@@ -18376,6 +18654,34 @@ def sweep_codex_sessions(
                                 heavy_handle,
                                 heavy_lease,
                             )
+                if bool(result.get("retry_required")) or status in {
+                    "deferred_heavy_lane_lease",
+                    "error",
+                    "synced_stale_readable",
+                    "sync_completed_unverified",
+                }:
+                    obligation_session_dir = Path(
+                        str(
+                            result.get("session_dir")
+                            or freshness.get("session_dir")
+                            or archive_session_dirs.get(session_id)
+                            or session_dir_for_id(aoa_root, session_id)
+                        )
+                    )
+                    result["freshness_obligation"] = (
+                        schedule_session_projection_freshness_obligation(
+                            aoa_root=aoa_root,
+                            session_id=session_id,
+                            session_dir=obligation_session_dir,
+                            transcript_path=transcript_path,
+                            freshness_reason=str(
+                                result.get("freshness_reason")
+                                or freshness.get("reason")
+                                or status
+                            ),
+                            now_epoch=now_seconds,
+                        )
+                    )
         counts[status] += 1
         results.append(result)
 
@@ -58290,7 +58596,13 @@ def session_memory_resource_demand_floor_resolution(
 
 def session_memory_child_resource_route(child_command: Iterable[str]) -> str:
     parts = [str(item) for item in child_command]
-    for route in ("auto-maintenance", "index-maintenance", "graph-maintenance", "projection-catchup"):
+    for route in (
+        "auto-maintenance",
+        "index-maintenance",
+        "graph-maintenance",
+        "projection-catchup",
+        "reindex-sessions",
+    ):
         if route in parts:
             return route
     return "custom"
@@ -61680,6 +61992,21 @@ def auto_maintenance_retry_queue_status_from_payload(
         if isinstance(item, dict) and not bool(item.get("in_flight")) and float(item.get("next_attempt_epoch") or 0.0) > 0
     ]
     diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), list) else []
+    obligation_items = {
+        key: item
+        for key, item in items.items()
+        if isinstance(item, dict)
+        and isinstance(item.get("options"), dict)
+        and item["options"].get("obligation_kind")
+        == SESSION_PROJECTION_FRESHNESS_OBLIGATION_KIND
+    }
+    obligation_enqueued_epochs = [
+        float(item.get("enqueued_at_epoch") or effective_now)
+        for item in obligation_items.values()
+    ]
+    obligation_due_keys = [
+        key for key in due_keys if key in obligation_items
+    ]
     status = "empty"
     if in_flight_keys:
         status = "in_flight"
@@ -61698,6 +62025,19 @@ def auto_maintenance_retry_queue_status_from_payload(
         "queued_count": len(items),
         "due_count": len(due_keys),
         "in_flight_count": len(in_flight_keys),
+        "freshness_obligation_count": len(obligation_items),
+        "freshness_obligation_due_count": len(
+            obligation_due_keys
+        ),
+        "freshness_obligation_due_keys": obligation_due_keys,
+        "oldest_freshness_obligation_age_seconds": (
+            max(
+                0.0,
+                effective_now - min(obligation_enqueued_epochs),
+            )
+            if obligation_enqueued_epochs
+            else 0.0
+        ),
         "due_keys": due_keys,
         "dispatch_order_due_keys": due_keys,
         "due_items": ordered_due_items,
@@ -61708,7 +62048,10 @@ def auto_maintenance_retry_queue_status_from_payload(
         "items": dict(items),
         "history": list(payload.get("history") or [])[:AUTO_MAINTENANCE_RETRY_HISTORY_LIMIT],
         "diagnostics": list(diagnostics),
-        "truth_status": "generated_persistent_retry_queue_not_semantic_freshness",
+        "truth_status": (
+            "persistent_retry_queue_with_watermark_bound_freshness_"
+            "obligations_not_global_semantic_freshness"
+        ),
     }
 
 
@@ -62103,9 +62446,43 @@ def auto_maintenance_retry_reconcile(
     if launch_ok:
         def clear_success(queue_payload: dict[str, Any]) -> tuple[dict[str, Any], bool]:
             items = queue_payload.get("items") if isinstance(queue_payload.get("items"), dict) else {}
-            existing = items.pop(queue_key, None)
+            existing = items.get(queue_key)
             if not isinstance(existing, dict):
                 return ({"status": "not_needed"}, False)
+            existing_options = (
+                existing.get("options")
+                if isinstance(existing.get("options"), dict)
+                else {}
+            )
+            if (
+                existing_options.get("persistent_obligation")
+                and existing_options.get("obligation_kind")
+                == SESSION_PROJECTION_FRESHNESS_OBLIGATION_KIND
+            ):
+                obligation = (
+                    session_projection_freshness_obligation_status(
+                        aoa_root,
+                        existing_options,
+                    )
+                )
+                if obligation.get("ok") is not True:
+                    existing["last_status"] = (
+                        "periodic_launch_ok_obligation_remaining"
+                    )
+                    existing["updated_at"] = (
+                        auto_maintenance_retry_iso(effective_now)
+                    )
+                    items[queue_key] = existing
+                    return (
+                        {
+                            "status": (
+                                "success_not_cleared_obligation_remaining"
+                            ),
+                            "obligation": obligation,
+                        },
+                        True,
+                    )
+            items.pop(queue_key, None)
             auto_maintenance_retry_add_history(
                 queue_payload,
                 {
@@ -62424,31 +62801,69 @@ def auto_maintenance_retry_dispatch(
                 else {}
             )
             stored_options = claimed.get("options") if isinstance(claimed.get("options"), dict) else {}
+            persistent_freshness_obligation = bool(
+                stored_options.get("persistent_obligation")
+                and stored_options.get("obligation_kind")
+                == SESSION_PROJECTION_FRESHNESS_OBLIGATION_KIND
+            )
+            obligation_before = (
+                session_projection_freshness_obligation_status(
+                    aoa_root,
+                    stored_options,
+                )
+                if persistent_freshness_obligation
+                else {}
+            )
             launch_options = {
                 key: value
                 for key, value in stored_options.items()
                 if key in AUTO_MAINTENANCE_RETRY_OPTION_KEYS
             }
-            try:
-                launch_payload = auto_maintenance_resource_launch(
-                    workspace_root=workspace_root,
-                    aoa_root=aoa_root,
-                    profile=profile,
-                    target=target,
-                    apply=True,
-                    write_report=True,
-                    reason=f"automatic_retry:{profile}:attempt_{attempt}",
-                    fail_on_block=False,
-                    resource_force=False,
-                    schedule_automatic_retry=False,
-                    **launch_options,
+            if persistent_freshness_obligation:
+                launch_options.update(
+                    {
+                        "index_drip_on_block": False,
+                        "graph_drip_on_block": False,
+                        "repair_indexes": False,
+                        "repair_graph": False,
+                        "child_command_override": (
+                            session_projection_freshness_obligation_child_command(
+                                workspace_root=workspace_root,
+                                aoa_root=aoa_root,
+                                profile=profile,
+                                target=target,
+                            )
+                        ),
+                    }
                 )
-            except Exception as exc:
+            if obligation_before.get("ok") is True:
                 launch_payload = {
-                    "ok": False,
-                    "status": "resource_launcher_failed",
-                    "diagnostics": [f"automatic_retry_launch_exception:{exc.__class__.__name__}:{exc}"],
+                    "ok": True,
+                    "status": "freshness_obligation_already_satisfied",
+                    "result_verified": True,
+                    "mutates": False,
                 }
+            else:
+                try:
+                    launch_payload = auto_maintenance_resource_launch(
+                        workspace_root=workspace_root,
+                        aoa_root=aoa_root,
+                        profile=profile,
+                        target=target,
+                        apply=True,
+                        write_report=True,
+                        reason=f"automatic_retry:{profile}:attempt_{attempt}",
+                        fail_on_block=False,
+                        resource_force=False,
+                        schedule_automatic_retry=False,
+                        **launch_options,
+                    )
+                except Exception as exc:
+                    launch_payload = {
+                        "ok": False,
+                        "status": "resource_launcher_failed",
+                        "diagnostics": [f"automatic_retry_launch_exception:{exc.__class__.__name__}:{exc}"],
+                    }
 
             reported_launch_status = str(launch_payload.get("status") or "unknown")
             reported_launch_ok = launch_payload.get("ok") is True
@@ -62468,6 +62883,41 @@ def auto_maintenance_retry_dispatch(
             if launch_ok and not launch_result_verified:
                 launch_status = "resource_child_result_unverified"
                 launch_ok = False
+            obligation_after = (
+                session_projection_freshness_obligation_status(
+                    aoa_root,
+                    stored_options,
+                )
+                if persistent_freshness_obligation
+                else {}
+            )
+            obligation_progressed = bool(
+                persistent_freshness_obligation
+                and int_value(
+                    obligation_after.get(
+                        "projected_capture_bytes"
+                    ),
+                    -1,
+                )
+                > int_value(
+                    obligation_before.get(
+                        "projected_capture_bytes"
+                    ),
+                    -1,
+                )
+            )
+            if persistent_freshness_obligation:
+                launch_result_verified = True
+                if obligation_after.get("ok") is True:
+                    launch_status = "freshness_obligation_satisfied"
+                    launch_ok = True
+                else:
+                    launch_status = (
+                        "freshness_obligation_progressed"
+                        if obligation_progressed
+                        else "freshness_obligation_remaining"
+                    )
+                    launch_ok = False
             completion_semantics = (
                 launch_payload.get("completion_semantics")
                 if isinstance(launch_payload.get("completion_semantics"), dict)
@@ -62494,6 +62944,9 @@ def auto_maintenance_retry_dispatch(
                 launch_status,
                 launch_payload,
             )
+            if persistent_freshness_obligation and not launch_ok:
+                retryable = True
+                progressed = progressed or obligation_progressed
             attempt_finished_epoch = (
                 effective_now
                 if now_epoch is not None
@@ -62517,6 +62970,11 @@ def auto_maintenance_retry_dispatch(
                     "launch_contended": contended,
                     "handoff_required": handoff_required,
                     "handoff_profile": handoff_profile or None,
+                    "persistent_freshness_obligation": (
+                        persistent_freshness_obligation
+                    ),
+                    "freshness_obligation_before": obligation_before,
+                    "freshness_obligation_after": obligation_after,
                     "dispatch_selection": dispatch_selection,
                     "report_json": launch_payload.get("report_json"),
                     "completed_at": auto_maintenance_retry_iso(attempt_finished_epoch),
@@ -62637,6 +63095,48 @@ def auto_maintenance_retry_dispatch(
                     result_row["next_attempt_at"] = current["next_attempt_at"]
                     result_row["next_delay_seconds"] = next_delay
                     return result_row, True
+                if persistent_freshness_obligation:
+                    base_delay = max(
+                        1,
+                        int_value(
+                            current.get("base_delay_seconds"), 300
+                        ),
+                    )
+                    max_delay = max(
+                        base_delay,
+                        int_value(
+                            current.get("max_delay_seconds"), 3600
+                        ),
+                    )
+                    next_epoch = attempt_finished_epoch + max_delay
+                    current["attempts_started"] = 0
+                    current["exhaustion_cycles"] = max(
+                        0,
+                        int_value(current.get("exhaustion_cycles")),
+                    ) + 1
+                    current["next_delay_seconds"] = max_delay
+                    current["next_attempt_epoch"] = next_epoch
+                    current["next_attempt_at"] = (
+                        auto_maintenance_retry_iso(next_epoch)
+                    )
+                    current["updated_at"] = (
+                        auto_maintenance_retry_iso(
+                            attempt_finished_epoch
+                        )
+                    )
+                    current["status"] = (
+                        "blocked_persistent_obligation"
+                    )
+                    items[queue_key] = current
+                    result_row["disposition"] = (
+                        "persistent_obligation_rescheduled_after_"
+                        "bounded_cycle"
+                    )
+                    result_row["next_attempt_at"] = current[
+                        "next_attempt_at"
+                    ]
+                    result_row["next_delay_seconds"] = max_delay
+                    return result_row, True
                 items.pop(queue_key, None)
                 result_row["disposition"] = "exhausted_bounded_retries" if retryable else "failed_terminal"
                 auto_maintenance_retry_add_history(
@@ -62729,6 +63229,7 @@ def auto_maintenance_resource_launch(
     budget_seconds: float | None = None,
     progress_every: int | None = None,
     schedule_automatic_retry: bool = True,
+    child_command_override: list[str] | None = None,
 ) -> dict[str, Any]:
     settings = auto_maintenance_profile(profile)
     runtime_envelope = auto_maintenance_runtime_envelope(
@@ -62829,29 +63330,37 @@ def auto_maintenance_resource_launch(
         budget_seconds=effective_budget_argument,
         progress_every=progress_every,
     )
-    live_tail_fast_path = auto_maintenance_live_tail_resource_route(
-        workspace_root=workspace_root,
-        aoa_root=aoa_root,
-        profile=profile,
-        target=target,
-        apply=apply,
-        since=since,
-        since_days=since_days,
-        until=until,
-        limit=limit,
-        repair_indexes=repair_indexes,
-        repair_graph=repair_graph,
-        reason=reason,
-        budget_seconds=effective_budget_argument,
-        route_max_raw_bytes=(
-            None
-            if int_value(settings.get("route_max_raw_mb")) <= 0
-            else int(
-                float(settings.get("route_max_raw_mb"))
-                * 1024
-                * 1024
-            )
-        ),
+    live_tail_fast_path = (
+        {
+            "used": False,
+            "status": "skipped_explicit_child_command",
+            "child_command": [],
+        }
+        if child_command_override
+        else auto_maintenance_live_tail_resource_route(
+            workspace_root=workspace_root,
+            aoa_root=aoa_root,
+            profile=profile,
+            target=target,
+            apply=apply,
+            since=since,
+            since_days=since_days,
+            until=until,
+            limit=limit,
+            repair_indexes=repair_indexes,
+            repair_graph=repair_graph,
+            reason=reason,
+            budget_seconds=effective_budget_argument,
+            route_max_raw_bytes=(
+                None
+                if int_value(settings.get("route_max_raw_mb")) <= 0
+                else int(
+                    float(settings.get("route_max_raw_mb"))
+                    * 1024
+                    * 1024
+                )
+            ),
+        )
     )
     live_tail_child_command = (
         live_tail_fast_path.get("child_command")
@@ -62867,9 +63376,14 @@ def auto_maintenance_resource_launch(
         and repair_indexes is not False
         and live_tail_child_command is None
     )
+    effective_child_command = (
+        [str(item) for item in child_command_override]
+        if child_command_override
+        else live_tail_child_command
+    )
     demand_key_child_command = (
-        live_tail_child_command
-        if live_tail_child_command
+        effective_child_command
+        if effective_child_command
         else ["python3", str(Path(__file__).resolve()), "auto-maintenance", profile]
     )
     demand_key = auto_maintenance_resource_demand_key(profile, demand_key_child_command)
@@ -62901,8 +63415,8 @@ def auto_maintenance_resource_launch(
         apply=apply,
         write_report=write_report,
         reason=reason,
-        extra_auto_args=None if live_tail_child_command else extra_args,
-        child_command=live_tail_child_command,
+        extra_auto_args=None if effective_child_command else extra_args,
+        child_command=effective_child_command,
         resource_force=resource_force,
         resource_binary=resource_binary,
         resource_memory_demand_mib=effective_resource_memory_demand_mib,
@@ -63794,6 +64308,7 @@ def auto_maintenance_resource_launch(
         "target": target,
         "reason": reason,
         "live_tail_fast_path": live_tail_fast_path,
+        "explicit_child_command": bool(child_command_override),
         "bounded_index_drip_preferred": bounded_index_drip_preferred,
         "bounded_index_drip_preference_reason": (
             "catchup_live_tail_not_ready"
@@ -67320,36 +67835,66 @@ def heavy_projection_lane_candidates(
             "raw_mirrored_index_deferred",
         }:
             continue
+        capture_state = raw_capture_state_for_session(
+            session_dir
+        )
+        capture_ahead = bool(
+            str(capture_state.get("status") or "")
+            in {"preserved_unindexed", "preserved_unstable_unindexed"}
+            and Path(
+                str(capture_state.get("capture_path") or "")
+            ).is_file()
+            and (
+                int_value(capture_state.get("raw_bytes"), -1)
+                > int_value(
+                    (
+                        manifest.get("raw")
+                        if isinstance(manifest.get("raw"), dict)
+                        else {}
+                    ).get("bytes"),
+                    -1,
+                )
+                or str(capture_state.get("raw_sha256") or "")
+                != str(
+                    (
+                        manifest.get("raw")
+                        if isinstance(manifest.get("raw"), dict)
+                        else {}
+                    ).get("sha256")
+                    or ""
+                )
+            )
+        )
         if (
             archive_status == "indexed"
             and not session_record_has_stale_route_index(record)
+            and not capture_ahead
         ):
             # A compatible published projection can stay in the ordinary
             # metadata/search lane.  Only indexed sessions that would require
             # an actual projection rebuild belong to the unlocked heavy lane;
             # token-only drift retains its dedicated atomic backfill.
             continue
-        raw = (
-            manifest.get("raw")
-            if isinstance(manifest.get("raw"), dict)
-            else {}
-        )
-        raw_path = Path(
-            str(
-                raw.get("path")
-                or session_dir / "raw" / "session.raw.jsonl"
-            )
+        raw_path, raw_source_mode = session_projection_build_raw_path(
+            session_dir=session_dir,
+            manifest=manifest,
         )
         try:
             raw_bytes = raw_path.stat().st_size
         except OSError:
             continue
         if raw_bytes < SESSION_PROJECTION_HEAVY_LANE_RAW_BYTES:
+            # A small capture-ahead session is owned by its targeted retry
+            # obligation, not by the automatic heavy-lane exclusion set.  This
+            # keeps hot capture-watch reconciliation available while the
+            # dispatcher still invokes the same resumable reindex command.
             continue
         candidates.append(
             {
                 **record,
                 "heavy_lane_raw_bytes": raw_bytes,
+                "heavy_lane_raw_source_mode": raw_source_mode,
+                "freshness_obligation_candidate": capture_ahead,
             }
         )
     return candidates
@@ -176881,6 +177426,76 @@ def session_memory_maintenance_status(
         }
     if search_projection_advisory is not None:
         agent_route["search_projection_advisory"] = agent_route.get("search_projection_next_action")
+    freshness_obligation_count = int_value(
+        automatic_retry.get("freshness_obligation_count")
+    )
+    freshness_obligation_due_count = int_value(
+        automatic_retry.get("freshness_obligation_due_count")
+    )
+    if freshness_obligation_count > 0:
+        retry_dispatch_command = [
+            *session_memory_cli_command(aoa_root),
+            "auto-maintenance-retry",
+            "--workspace-root",
+            str(workspace_root),
+            "--aoa-root",
+            str(aoa_root),
+            "--apply",
+            "--limit",
+            "1",
+            "--write-report",
+        ]
+        obligation_action = {
+            "id": (
+                "dispatch_session_freshness_obligation"
+                if freshness_obligation_due_count > 0
+                else "wait_for_session_freshness_obligation_retry"
+            ),
+            "reason": (
+                "watermark_bound_session_projection_obligation_due"
+                if freshness_obligation_due_count > 0
+                else "watermark_bound_session_projection_obligation_pending_backoff"
+            ),
+            "route_kind": "session_projection_freshness_obligation",
+            "command": retry_dispatch_command,
+            "freshness_obligation_count": freshness_obligation_count,
+            "freshness_obligation_due_count": freshness_obligation_due_count,
+            "oldest_age_seconds": automatic_retry.get(
+                "oldest_freshness_obligation_age_seconds"
+            ),
+            "next_attempt_at": automatic_retry.get(
+                "next_attempt_at"
+            ),
+            "note": (
+                "The obligation remains open until the published session "
+                "projection proves coverage of its preserved raw watermark."
+            ),
+        }
+        if not any(
+            isinstance(action, dict)
+            and action.get("route_kind")
+            == "session_projection_freshness_obligation"
+            for action in next_actions
+        ):
+            next_actions = [obligation_action, *next_actions]
+        recommendation = (
+            "wait_active_writer"
+            if automatic_retry.get("status") == "in_flight"
+            else "run_maintenance"
+        )
+        agent_route = session_memory_agent_route_status(
+            recommendation=recommendation,
+            search=search,
+            graph=graph,
+            route=route,
+            live_tail=live_tail,
+        )
+        agent_route["entity_registry_status"] = entity_registry.get(
+            "status"
+        )
+        agent_route["entity_registry_entities"] = entity_registry.get(
+            "entity_count"
+        )
     graph_next_actions = [
         action
         for action in next_actions
@@ -176913,6 +177528,17 @@ def session_memory_maintenance_status(
     agent_route["automatic_retry_status"] = automatic_retry.get("status")
     agent_route["automatic_retry_queued_count"] = automatic_retry.get("queued_count")
     agent_route["automatic_retry_due_count"] = automatic_retry.get("due_count")
+    agent_route["freshness_obligation_count"] = (
+        freshness_obligation_count
+    )
+    agent_route["freshness_obligation_due_count"] = (
+        freshness_obligation_due_count
+    )
+    agent_route["oldest_freshness_obligation_age_seconds"] = (
+        automatic_retry.get(
+            "oldest_freshness_obligation_age_seconds"
+        )
+    )
     agent_route["automatic_retry_next_attempt_at"] = automatic_retry.get("next_attempt_at")
     automatic_retry_due_items = (
         automatic_retry.get("due_items")
@@ -176947,7 +177573,7 @@ def session_memory_maintenance_status(
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "session_memory_maintenance_status",
         "generated_at": now,
-        "ok": recommendation
+        "ok": freshness_obligation_count == 0 and recommendation
         in {
             "use_graph_search",
             "wait_live_catchup",
@@ -178328,6 +178954,7 @@ def maintenance_status_markdown(payload: dict[str, Any]) -> str:
         f"- coordinator_active: `{coordinator.get('active')}` owner=`{owner.get('owner_job', '')}` mode=`{owner.get('mode', '')}` surfaces=`{','.join(str(item) for item in owner.get('touched_surfaces', []) if item)}`",
         f"- last_maintenance: `{last_job.get('owner_job', '')}` status=`{last_job.get('status', '')}` finished_at=`{last_job.get('finished_at', '')}` elapsed_ms=`{last_job.get('elapsed_ms', '')}`",
         f"- automatic_retry: `{automatic_retry.get('status')}` queued=`{automatic_retry.get('queued_count')}` due=`{automatic_retry.get('due_count')}` in_flight=`{automatic_retry.get('in_flight_count')}` next=`{automatic_retry.get('next_attempt_at')}`",
+        f"- freshness_obligations: queued=`{automatic_retry.get('freshness_obligation_count')}` due=`{automatic_retry.get('freshness_obligation_due_count')}` oldest_age_sec=`{automatic_retry.get('oldest_freshness_obligation_age_seconds')}`",
         f"- search_db: `{search_db.get('size_human')}` wal=`{(search_db.get('wal') or {}).get('size_human') if isinstance(search_db.get('wal'), dict) else ''}` total=`{search_db.get('total_with_wal_human')}`",
         f"- search_shards: `{search_shards.get('status')}` materialized=`{search_shards.get('materialized_shard_count')}/{search_shards.get('shard_count')}` shard_total=`{search_shards.get('shard_db_total_human')}` combined=`{search_shards.get('combined_search_projection_total_human')}`",
         f"- search_pressure: `{search_pressure.get('status')}` freshness=`{search_pressure.get('freshness_status')}` combined=`{search_pressure.get('combined_search_projection_total_human')}` physical=`{search_pressure_compaction.get('status')}` next=`{search_pressure.get('next_route')}`",
