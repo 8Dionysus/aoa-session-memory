@@ -296,6 +296,7 @@
 | [AOA-SM-D-0068 Session-Coherent Graph Queue Windows](../AOA-SM-D-0068-session-coherent-graph-queue-windows.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0068-session-coherent-graph-queue-windows.md` |
 | [AOA-SM-D-0069 Graph Predecessor Reindex Handoff](../AOA-SM-D-0069-graph-predecessor-reindex-handoff.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0069-graph-predecessor-reindex-handoff.md` |
 | [AOA-SM-D-0090 Session Freshness Obligations Close on Watermark Proof](../AOA-SM-D-0090-session-freshness-obligations-close-on-watermark-proof.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0090-session-freshness-obligations-close-on-watermark-proof.md` |
+| [AOA-SM-D-0091 Projection Generations Follow Materializer Boundaries](../AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md` |
 
 ## freshness contract
 
@@ -472,6 +473,7 @@
 | [AOA-SM-D-0070 Coalesced Hook Intent and Contention-Neutral Retry](../AOA-SM-D-0070-coalesced-hook-intent-and-contention-neutral-retry.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0070-coalesced-hook-intent-and-contention-neutral-retry.md` |
 | [AOA-SM-D-0071 Preflight Global State Handoff for Bounded Maintenance](../AOA-SM-D-0071-preflight-global-state-handoff-for-bounded-maintenance.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0071-preflight-global-state-handoff-for-bounded-maintenance.md` |
 | [AOA-SM-D-0088 Independent Validation Nodes and Bounded Proof Kernels](../AOA-SM-D-0088-independent-validation-nodes-and-bounded-proof-kernels.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0088-independent-validation-nodes-and-bounded-proof-kernels.md` |
+| [AOA-SM-D-0091 Projection Generations Follow Materializer Boundaries](../AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md` |
 
 ## index discovery
 
@@ -609,6 +611,7 @@
 | [AOA-SM-D-0083 Additive Registry Repair Replaces Full Layer Reconstruction](../AOA-SM-D-0083-additive-registry-repair-replaces-full-layer-reconstruction.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0083-additive-registry-repair-replaces-full-layer-reconstruction.md` |
 | [AOA-SM-D-0088 Independent Validation Nodes and Bounded Proof Kernels](../AOA-SM-D-0088-independent-validation-nodes-and-bounded-proof-kernels.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0088-independent-validation-nodes-and-bounded-proof-kernels.md` |
 | [AOA-SM-D-0089 Durable Thin Hook Ingress Before Projection](../AOA-SM-D-0089-durable-thin-hook-ingress-before-projection.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0089-durable-thin-hook-ingress-before-projection.md` |
+| [AOA-SM-D-0091 Projection Generations Follow Materializer Boundaries](../AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md` |
 
 ## physical storage transition
 
@@ -674,6 +677,7 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0036 Explicit Context Additions Continue Open Task Episodes](../AOA-SM-D-0036-explicit-context-additions-continue-open-task-episodes.md) | 2026-07-28 | Accepted | `docs/decisions/AOA-SM-D-0036-explicit-context-additions-continue-open-task-episodes.md` |
+| [AOA-SM-D-0091 Projection Generations Follow Materializer Boundaries](../AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md` |
 
 ## projection publication
 

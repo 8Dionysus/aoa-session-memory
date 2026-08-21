@@ -247,6 +247,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0017 Bounded Temporal Interval Reading Before Answer Admission](../AOA-SM-D-0017-bounded-temporal-interval-reading-before-answer-admission.md) | 2026-07-18 | Accepted | `docs/decisions/AOA-SM-D-0017-bounded-temporal-interval-reading-before-answer-admission.md` |
 
+## bounded producer contract
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0091 Projection Generations Follow Materializer Boundaries](../AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md` |
+
 ## bounded promotion
 
 | Decision | Date | Status | Path |
@@ -519,6 +525,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0027 Evidence-Specific Sparse Anchors in Hybrid Fusion](../AOA-SM-D-0027-evidence-specific-sparse-anchors-in-hybrid-fusion.md) | 2026-07-20 | Accepted | `docs/decisions/AOA-SM-D-0027-evidence-specific-sparse-anchors-in-hybrid-fusion.md` |
 
+## declared predecessor
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0091 Projection Generations Follow Materializer Boundaries](../AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md` |
+
 ## declared schema transition
 
 | Decision | Date | Status | Path |
@@ -558,6 +570,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0048 Stage-Scoped Producer ABI and Guarded Predecessor Admission](../AOA-SM-D-0048-stage-scoped-producer-abi-and-guarded-predecessor-admission.md) | 2026-08-10 | Accepted | `docs/decisions/AOA-SM-D-0048-stage-scoped-producer-abi-and-guarded-predecessor-admission.md` |
+
+## dependency generation
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0091 Projection Generations Follow Materializer Boundaries](../AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md` |
 
 ## dependency pinning
 
@@ -841,6 +859,7 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0048 Stage-Scoped Producer ABI and Guarded Predecessor Admission](../AOA-SM-D-0048-stage-scoped-producer-abi-and-guarded-predecessor-admission.md) | 2026-08-10 | Accepted | `docs/decisions/AOA-SM-D-0048-stage-scoped-producer-abi-and-guarded-predecessor-admission.md` |
 | [AOA-SM-D-0088 Independent Validation Nodes and Bounded Proof Kernels](../AOA-SM-D-0088-independent-validation-nodes-and-bounded-proof-kernels.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0088-independent-validation-nodes-and-bounded-proof-kernels.md` |
+| [AOA-SM-D-0091 Projection Generations Follow Materializer Boundaries](../AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md` |
 
 ## fail-closed child validation
 
@@ -1576,6 +1595,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0002 Semantic Projection Generation Identity](../AOA-SM-D-0002-semantic-projection-generation-identity.md) | 2026-07-14 | Accepted | `docs/decisions/AOA-SM-D-0002-semantic-projection-generation-identity.md` |
+
+## reuse then restamp
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0091 Projection Generations Follow Materializer Boundaries](../AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md` |
 
 ## rollback
 

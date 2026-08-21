@@ -230,6 +230,7 @@
 | [AOA-SM-D-0030 Projection-Scoped Producer Generation Identity](../AOA-SM-D-0030-projection-scoped-producer-generation-identity.md) | 2026-07-26 | Accepted | `docs/decisions/AOA-SM-D-0030-projection-scoped-producer-generation-identity.md` |
 | [AOA-SM-D-0042 Complete Registry Source Sets Gate Projection Retirement](../AOA-SM-D-0042-complete-registry-source-sets-gate-projection-retirement.md) | 2026-08-01 | Accepted | `docs/decisions/AOA-SM-D-0042-complete-registry-source-sets-gate-projection-retirement.md` |
 | [AOA-SM-D-0051 Transactional Component Outbox and Vector Freshness](../AOA-SM-D-0051-transactional-component-outbox-and-vector-freshness.md) | 2026-08-10 | Accepted | `docs/decisions/AOA-SM-D-0051-transactional-component-outbox-and-vector-freshness.md` |
+| [AOA-SM-D-0091 Projection Generations Follow Materializer Boundaries](../AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md` |
 
 ## episode semantic evidence packet
 
@@ -342,6 +343,7 @@
 | [AOA-SM-D-0082 Proved Materialization Drift Admits Exact Source Refresh](../AOA-SM-D-0082-proved-materialization-drift-admits-exact-source-refresh.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0082-proved-materialization-drift-admits-exact-source-refresh.md` |
 | [AOA-SM-D-0083 Additive Registry Repair Replaces Full Layer Reconstruction](../AOA-SM-D-0083-additive-registry-repair-replaces-full-layer-reconstruction.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0083-additive-registry-repair-replaces-full-layer-reconstruction.md` |
 | [AOA-SM-D-0084 Predecessor Proof Preserves Stored Dependency Generations](../AOA-SM-D-0084-predecessor-proof-preserves-stored-dependency-generations.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0084-predecessor-proof-preserves-stored-dependency-generations.md` |
+| [AOA-SM-D-0091 Projection Generations Follow Materializer Boundaries](../AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md` |
 
 ## graph anchor resolution
 
@@ -961,6 +963,7 @@
 | [AOA-SM-D-0069 Graph Predecessor Reindex Handoff](../AOA-SM-D-0069-graph-predecessor-reindex-handoff.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0069-graph-predecessor-reindex-handoff.md` |
 | [AOA-SM-D-0074 Graph Blockers Transfer to the Upstream Owner](../AOA-SM-D-0074-graph-blockers-transfer-to-upstream-owner.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0074-graph-blockers-transfer-to-upstream-owner.md` |
 | [AOA-SM-D-0081 Session Reindex Follow-Ups Stay Session Scoped](../AOA-SM-D-0081-session-reindex-followups-stay-session-scoped.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0081-session-reindex-followups-stay-session-scoped.md` |
+| [AOA-SM-D-0091 Projection Generations Follow Materializer Boundaries](../AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md` |
 
 ## session lineage
 
@@ -1051,6 +1054,7 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0053 Single-Pass Task-Episode Reduction and Shard Redaction](../AOA-SM-D-0053-single-pass-task-episode-reduction-and-shard-redaction.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0053-single-pass-task-episode-reduction-and-shard-redaction.md` |
+| [AOA-SM-D-0091 Projection Generations Follow Materializer Boundaries](../AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md` |
 
 ## task episodes
 

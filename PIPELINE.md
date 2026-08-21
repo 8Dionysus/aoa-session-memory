@@ -763,6 +763,15 @@ watermark; a monolithic capture requires exact bytes and digest. Failed cycles,
 oldest obligation age, due count, and next attempt remain visible in
 `maintenance-status`.
 
+Projection generation follows materializer ownership rather than file
+co-location. In particular, task-episode generation covers lineage and the
+task-episode builder/materializer, not transcript discovery, capture, import,
+sweep, retry, or resource orchestration. An orchestration-only edit must not
+create task-episode, episode-semantic, or graph rebuild debt. Moving a
+materializer boundary requires a source-contract regression test; exact known
+predecessors may cross only through reuse-then-restamp proof, while unknown
+generations remain incompatible.
+
 A periodic launch that observes an open graph-drip circuit must not clear the
 same profile's retry intent while the dispatcher owns it in flight. The
 dispatcher alone reconciles that claim and, when bounded work remains, creates

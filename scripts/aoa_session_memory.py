@@ -129,6 +129,11 @@ DECLARED_PROJECTION_PREDECESSOR_GENERATION_IDS: dict[
             "6eeec4c0f1c84c088b9f5458aabe857bc70ea3f21e6b76ebfc32198e4c6cf119",
             "8670e45ec88cd97f817d02782a1b85328d2db1ad6d5e70f089622b51de43011d",
             "40f99adce63164d107878cfe7be37352361ac11cf679d5ac14f574ec569ae7dc",
+            # AOA-SM-D-0091: D-0090 changed only capture/sweep orchestration,
+            # but the former over-broad source range accidentally included
+            # that lane. Reuse still requires the ordinary exact artifact
+            # and dependency proofs before restamping.
+            "e68ae2ff3a2eaf79b045ddf7f4b0c797a55bf670317341596d532c307cbb7eaf",
         }
     ),
     "session_index": frozenset(
@@ -143,15 +148,16 @@ DECLARED_GRAPH_PROJECTION_GENERATION_TRANSITIONS: dict[
     str,
     dict[str, str],
 ] = {
-    # AOA-SM-D-0067/D-0090: the graph producer contract is unchanged by the
-    # session-freshness scheduling repair; the current source generation still
-    # admits only the explicitly reconstructed predecessor identities below.
+    # AOA-SM-D-0067/D-0090/D-0091: the graph producer contract is unchanged by
+    # the session-freshness scheduling repair and by the narrowed task-episode
+    # source boundary; the current source generation still admits only the
+    # explicitly reconstructed predecessor identities below.
     # The 0f10ba1 graph producer changes only how an
     # append-only batch refreshes already-defined aggregates.  Admission is
     # still conditional on reconstructing the exact predecessor identity from
     # its source and on the complete graph materialization proof performed by
     # graph-registry-rebind.
-    "b1cc18f49c5545828f141aa0cdfb54d90d5664376a254f3d28d1ad12c2afe186": (
+    "010165b3fce35a26f49a5ae03bb00747f424bc186a5142e3d7f9314ba484a706": (
         {
             "bae847f241b3c19e3ca11d177df29089f8760aec72e1d0e50790eb6955d710c9": (
                 "e065b0e0399f986829c524f79cbf371b0fe6925c9f9aeb39c944c6309adcadb3"
@@ -214,6 +220,10 @@ PROJECTION_PRODUCER_SOURCE_RANGES: dict[
     "task_episode_source": (
         (
             "def task_episode_lineage_for_range(",
+            "def transcript_probe(",
+        ),
+        (
+            "def task_episode_counts_for_episodes(",
             "def goal_usage_fields_from_mapping(",
         ),
         (

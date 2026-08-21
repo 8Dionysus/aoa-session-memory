@@ -100899,6 +100899,29 @@ def test_task_episode_materializer_change_is_not_episode_semantic_abi() -> None:
     assert session_before["sha256"] != session_after["sha256"]
 
 
+def test_sweep_orchestration_change_does_not_invalidate_task_episode_source() -> None:
+    source = SCRIPT.read_bytes()
+    task_before = module.projection_producer_contract_from_source_bytes(
+        source,
+        "task_episode_source",
+    )
+    sweep_before = source.index(b"\ndef sweep_codex_sessions(")
+    sweep_after = source.index(
+        b"\ndef codex_session_import_markdown(", sweep_before
+    )
+    sentinel = b"\n# sweep-only freshness orchestration sentinel\n"
+    changed = source[:sweep_after] + sentinel + source[sweep_after:]
+
+    task_after = module.projection_producer_contract_from_source_bytes(
+        changed,
+        "task_episode_source",
+    )
+
+    assert task_before["status"] == "current"
+    assert task_after["status"] == "current"
+    assert task_before["sha256"] == task_after["sha256"]
+
+
 def test_task_episode_streaming_replay_fails_closed_on_generation() -> None:
     current = module.task_episode_source_generation_identity()
     assert module.task_episode_incremental_replay_admitted(
