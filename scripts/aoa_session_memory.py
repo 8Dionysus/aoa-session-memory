@@ -18145,7 +18145,14 @@ def session_projection_freshness_obligation_status(
         and manifest.get("archive_status") == "indexed"
         and raw.get("indexing_status") == "indexed"
     )
-    if required_epoch:
+    exact_digest_satisfied = bool(
+        published
+        and required_bytes >= 0
+        and required_sha256
+        and projected_bytes == required_bytes
+        and projected_sha256 == required_sha256
+    )
+    if required_epoch and projected_epoch:
         satisfied = bool(
             published
             and projected_epoch == required_epoch
@@ -18153,14 +18160,14 @@ def session_projection_freshness_obligation_status(
             and projected_bytes >= required_bytes
         )
         proof_mode = "append_only_capture_epoch_watermark"
+    elif required_epoch:
+        # A legacy monolithic manifest cannot publish an append-only epoch.
+        # Exact bytes plus digest still prove that it covers the preserved
+        # capture content; do not leave that obligation permanently open.
+        satisfied = exact_digest_satisfied
+        proof_mode = "exact_monolithic_capture_digest_fallback"
     else:
-        satisfied = bool(
-            published
-            and required_bytes >= 0
-            and required_sha256
-            and projected_bytes == required_bytes
-            and projected_sha256 == required_sha256
-        )
+        satisfied = exact_digest_satisfied
         proof_mode = "exact_monolithic_capture_digest"
     return {
         "schema_version": 1,

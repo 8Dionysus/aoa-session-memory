@@ -61721,6 +61721,75 @@ def test_freshness_obligation_closes_only_after_watermark_proof(
     assert queue["freshness_obligation_count"] == 0
 
 
+def test_freshness_obligation_accepts_exact_legacy_monolithic_projection(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    session_id = "legacy-monolithic-proof"
+    session_dir = aoa_root / module.SESSION_ROOT / session_id
+    session_dir.mkdir(parents=True)
+    module.write_json(
+        session_dir / "session.manifest.json",
+        {
+            "session_id": session_id,
+            "archive_status": "indexed",
+            "raw": {
+                "indexing_status": "indexed",
+                "bytes": 20,
+                "sha256": "exact-capture-digest",
+                "storage_mode": "monolithic_snapshot_v1",
+            },
+        },
+    )
+    options = {
+        "persistent_obligation": True,
+        "obligation_kind": (
+            module.SESSION_PROJECTION_FRESHNESS_OBLIGATION_KIND
+        ),
+        "session_id": session_id,
+        "session_dir": str(session_dir),
+        "required_capture_epoch_id": "capture-epoch-unavailable-in-legacy-manifest",
+        "required_capture_bytes": 20,
+        "required_capture_sha256": "exact-capture-digest",
+    }
+
+    status = module.session_projection_freshness_obligation_status(
+        aoa_root,
+        options,
+    )
+
+    assert status["ok"] is True
+    assert status["status"] == "satisfied"
+    assert status["proof_mode"] == (
+        "exact_monolithic_capture_digest_fallback"
+    )
+    assert status["projected_capture_epoch_id"] == ""
+
+    manifest = module.read_json(
+        session_dir / "session.manifest.json",
+        {},
+    )
+    manifest["raw"]["capture_ledger"] = {
+        "epoch_id": "different-published-epoch",
+        "processed_watermark_bytes": 20,
+    }
+    module.write_json(
+        session_dir / "session.manifest.json",
+        manifest,
+    )
+    mismatched_epoch = (
+        module.session_projection_freshness_obligation_status(
+            aoa_root,
+            options,
+        )
+    )
+    assert mismatched_epoch["ok"] is False
+    assert mismatched_epoch["proof_mode"] == (
+        "append_only_capture_epoch_watermark"
+    )
+
+
 def test_deep_auto_maintenance_resource_defaults_to_graph_drip_fallback(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
