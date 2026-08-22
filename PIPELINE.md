@@ -398,6 +398,22 @@ semantic freshness. An unattended scheduler may use
 on the next timer tick rather than a false service failure; the cleanup packet
 still reports `deferred_active_writer` and no mutation.
 
+Projection-work reclamation is producer-local first. Once a session builder
+has proved the current work identity and owns that session's build lease, it
+removes only quiet, shape-valid sibling work whose stored identity is
+incompatible with the proved current identity. This avoids rescanning
+unrelated raw transcripts and prevents normal source growth from leaving an
+unbounded trail of obsolete generations. A producer-local mutation writes a
+compact diagnostics receipt immediately, so a later build failure cannot hide
+the already observed cleanup effect. The scheduled contour is a recovery
+fallback: `--session-work-verification-limit` selects one persisted
+round-robin batch per run, records its cursor under diagnostics, and leaves all
+unselected work as explicit `verification_deferred`. A host scheduler must use
+a calendar trigger with a visible next elapse; an elapsed timer without a next
+trigger is unhealthy even if its unit remains active. Doctor excludes both
+projection stages and projection-work directories from archive counts and
+reports them separately.
+
 ## 6. Count-only accounting
 
 Token observations are separated by basis:
@@ -721,6 +737,17 @@ counts separately. Projection receipts, generation checks, resolvable evidence,
 and atomic publication prove semantic progress; heartbeat delivery, process
 exit, timer completion, and lock acquisition do not.
 
+Bounded projection work also persists a durable progress receipt immediately
+after the atomic publication and its component-delta outbox record. The
+receipt is correlated to the maintenance execution, session, work identity,
+and publish identity, so a resource hard-timeout or missing child stdout can
+recover the exact bounded publication evidence from the owner store. Recovery
+proves bounded publication progress and keeps the retry obligation, but it
+does not prove child completion, remaining-work exhaustion, or global
+freshness. Work checkpoints and the retry queue use the same durable atomic
+write boundary, allowing continuation to reuse completed segments instead of
+restarting the session.
+
 Multi-lane evaluations use the same coordinator in read mode. They pin
 source and projection semantic identities before candidate generation, reject
 an active writer or incompatible generation without publishing a pin, and
@@ -943,6 +970,11 @@ The recurring catch-up route has a narrow hard-timeout grace after its
 cooperative budget. The host resource launcher terminates a child that cannot
 reach an internal checkpoint within that envelope and records a retryable
 timeout instead of allowing an unbounded service run.
+
+When that termination follows a completed atomic publication, the launcher
+matches only the exact execution-correlated progress receipts for its target.
+It reports `progress_recovered` alongside the unverified process result and
+retains the retry item until a later run proves the required watermark.
 
 Interrupted projection stages are removable only after a stronger raw authority
 is verified again at deletion time. A content-addressed owner capture qualifies

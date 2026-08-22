@@ -297,6 +297,7 @@
 | [AOA-SM-D-0069 Graph Predecessor Reindex Handoff](../AOA-SM-D-0069-graph-predecessor-reindex-handoff.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0069-graph-predecessor-reindex-handoff.md` |
 | [AOA-SM-D-0090 Session Freshness Obligations Close on Watermark Proof](../AOA-SM-D-0090-session-freshness-obligations-close-on-watermark-proof.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0090-session-freshness-obligations-close-on-watermark-proof.md` |
 | [AOA-SM-D-0091 Projection Generations Follow Materializer Boundaries](../AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md` |
+| [AOA-SM-D-0092 Durable Publication Progress Receipts Survive Timeout](../AOA-SM-D-0092-durable-publication-progress-receipts-under-timeout.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0092-durable-publication-progress-receipts-under-timeout.md` |
 
 ## freshness contract
 
@@ -579,6 +580,7 @@
 | [AOA-SM-D-0046 Content-Addressed Session-Index Components With Compatibility View](../AOA-SM-D-0046-content-addressed-session-index-components-with-compatibility-view.md) | 2026-08-09 | Accepted | `docs/decisions/AOA-SM-D-0046-content-addressed-session-index-components-with-compatibility-view.md` |
 | [AOA-SM-D-0047 Exclusive Heavy Projection Lane and Isolated Segment Workers](../AOA-SM-D-0047-exclusive-heavy-projection-lane-and-isolated-segment-workers.md) | 2026-08-09 | Accepted | `docs/decisions/AOA-SM-D-0047-exclusive-heavy-projection-lane-and-isolated-segment-workers.md` |
 | [AOA-SM-D-0058 Persisted Live-Tail State Precedes Resource Admission](../AOA-SM-D-0058-persisted-live-tail-state-precedes-resource-admission.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0058-persisted-live-tail-state-precedes-resource-admission.md` |
+| [AOA-SM-D-0092 Durable Publication Progress Receipts Survive Timeout](../AOA-SM-D-0092-durable-publication-progress-receipts-under-timeout.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0092-durable-publication-progress-receipts-under-timeout.md` |
 
 ## partial-failure recovery
 
@@ -684,6 +686,7 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0086 Live Tail Publish Watermark Authority](../AOA-SM-D-0086-live-tail-publish-watermark-authority.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0086-live-tail-publish-watermark-authority.md` |
+| [AOA-SM-D-0092 Durable Publication Progress Receipts Survive Timeout](../AOA-SM-D-0092-durable-publication-progress-receipts-under-timeout.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0092-durable-publication-progress-receipts-under-timeout.md` |
 
 ## provider status
 
@@ -847,6 +850,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0004 Declared Incremental Search Schema Transitions](../AOA-SM-D-0004-declared-incremental-search-schema-transitions.md) | 2026-07-15 | Accepted | `docs/decisions/AOA-SM-D-0004-declared-incremental-search-schema-transitions.md` |
+
+## resumability
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0092 Durable Publication Progress Receipts Survive Timeout](../AOA-SM-D-0092-durable-publication-progress-receipts-under-timeout.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0092-durable-publication-progress-receipts-under-timeout.md` |
 
 ## retry queue
 

@@ -94,6 +94,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0040 Served-Request Health Is Distinct from Provider Availability](../AOA-SM-D-0040-served-request-health-is-distinct-from-provider-availability.md) | 2026-07-31 | Accepted | `docs/decisions/AOA-SM-D-0040-served-request-health-is-distinct-from-provider-availability.md` |
 
+## component-delta outbox
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0092 Durable Publication Progress Receipts Survive Timeout](../AOA-SM-D-0092-durable-publication-progress-receipts-under-timeout.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0092-durable-publication-progress-receipts-under-timeout.md` |
+
 ## decision lane
 
 | Decision | Date | Status | Path |
@@ -572,6 +578,12 @@
 | [AOA-SM-D-0066 Set-Wise Append-Only Graph Batches](../AOA-SM-D-0066-set-wise-append-only-graph-batches.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0066-set-wise-append-only-graph-batches.md` |
 | [AOA-SM-D-0068 Session-Coherent Graph Queue Windows](../AOA-SM-D-0068-session-coherent-graph-queue-windows.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0068-session-coherent-graph-queue-windows.md` |
 
+## maintenance retry
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0092 Durable Publication Progress Receipts Survive Timeout](../AOA-SM-D-0092-durable-publication-progress-receipts-under-timeout.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0092-durable-publication-progress-receipts-under-timeout.md` |
+
 ## maintenance retry queue
 
 | Decision | Date | Status | Path |
@@ -985,6 +997,7 @@
 | [AOA-SM-D-0061 Freshness Profiles Do Not Own Heavy Tail](../AOA-SM-D-0061-freshness-profiles-do-not-own-heavy-tail.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0061-freshness-profiles-do-not-own-heavy-tail.md` |
 | [AOA-SM-D-0070 Coalesced Hook Intent and Contention-Neutral Retry](../AOA-SM-D-0070-coalesced-hook-intent-and-contention-neutral-retry.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0070-coalesced-hook-intent-and-contention-neutral-retry.md` |
 | [AOA-SM-D-0090 Session Freshness Obligations Close on Watermark Proof](../AOA-SM-D-0090-session-freshness-obligations-close-on-watermark-proof.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0090-session-freshness-obligations-close-on-watermark-proof.md` |
+| [AOA-SM-D-0092 Durable Publication Progress Receipts Survive Timeout](../AOA-SM-D-0092-durable-publication-progress-receipts-under-timeout.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0092-durable-publication-progress-receipts-under-timeout.md` |
 
 ## session projection stage
 

@@ -20772,6 +20772,97 @@ def test_committed_publish_recovery_finalizes_without_rollback(
     assert not journal_path.exists()
 
 
+def test_progress_receipt_recovery_finalizes_publish_after_journal_gap(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    session_dir = aoa_root / "sessions" / "receipt-session"
+    session_dir.mkdir(parents=True)
+    current = session_dir / "session.manifest.json"
+    current.write_text('{"state":"committed"}\n', encoding="utf-8")
+    stage_dir = session_dir.parent / (
+        f".{session_dir.name}.projection-work-receipt"
+    )
+    backup_root = session_dir.parent / (
+        f".{session_dir.name}.projection-backup-receipt"
+    )
+    stage_dir.mkdir()
+    backup_root.mkdir()
+    (backup_root / "session.manifest.json").write_text(
+        '{"state":"old"}\n',
+        encoding="utf-8",
+    )
+    outbox_path = (
+        aoa_root
+        / module.PROJECTION_OUTBOX_RECORDS_DIR
+        / "receipt-record.json"
+    )
+    module.write_json(
+        outbox_path,
+        {
+            "record_id": "receipt-record",
+            "changes": [],
+            "required_consumers": [],
+        },
+    )
+    progress_receipt_path = module.session_projection_progress_receipt_path(
+        aoa_root,
+        execution_id="receipt-execution",
+        session_id="receipt-session",
+        publish_id="receipt-publish",
+    )
+    module.write_json(
+        progress_receipt_path,
+        {
+            "schema_version": module.SESSION_PROJECTION_PROGRESS_RECEIPT_SCHEMA_VERSION,
+            "artifact_type": "session_projection_publication_progress_receipt",
+            "status": "published",
+            "mutates": True,
+            "publish_id": "receipt-publish",
+            "outbox": {"record_id": "receipt-record"},
+        },
+    )
+    journal_path = module.session_projection_publish_journal_path(
+        session_dir
+    )
+    module.write_json(
+        journal_path,
+        {
+            "schema_version": 1,
+            "status": "publishing",
+            "publish_id": "receipt-publish",
+            "stage_dir": str(stage_dir),
+            "backup_root": str(backup_root),
+            "operations": [],
+            "outbox_record": {
+                "record_id": "receipt-record",
+                "path": str(outbox_path),
+                "preexisting": False,
+                "expected": True,
+                "written": True,
+            },
+            "progress_receipt": {
+                "path": str(progress_receipt_path),
+                "expected": True,
+                "written": False,
+            },
+        },
+    )
+
+    recovered = module.recover_interrupted_session_projection_publish(
+        session_dir
+    )
+
+    assert recovered["status"] == "finalized_committed_publish"
+    assert recovered["progress_receipt_recovered"] is True
+    assert module.read_json(current, {}) == {"state": "committed"}
+    assert outbox_path.is_file()
+    assert progress_receipt_path.is_file()
+    assert not stage_dir.exists()
+    assert not backup_root.exists()
+    assert not journal_path.exists()
+
+
 def test_segment_index_records_universal_facets_and_relationships(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
@@ -55852,6 +55943,100 @@ def test_auto_maintenance_resource_launch_reports_host_hard_timeout_and_retries(
     ).read_text(encoding="utf-8")
 
 
+def test_auto_maintenance_resource_launch_recovers_persisted_publication_progress_without_child_stdout(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    execution_id = "resource-hard-timeout-run"
+    progress = module.write_session_projection_progress_receipt(
+        aoa_root=aoa_root,
+        session_dir=aoa_root / "sessions" / "session-1",
+        session_id="session-1",
+        session_label="session-1",
+        work_id="work-1",
+        execution_id=execution_id,
+        publish_identity={
+            "schema_version": 1,
+            "publish_id": "publish-1",
+            "source": {
+                "raw_sha256": "a" * 64,
+                "raw_bytes": 120,
+                "raw_line_count": 4,
+            },
+            "processed_watermark": {"to_line": 4},
+        },
+        outbox_record={
+            "record_id": "outbox-1",
+            "changes": [
+                {
+                    "component_id": "session-index",
+                    "component_type": "session_index",
+                    "operation": "replace",
+                    "new_digest": "b" * 64,
+                }
+            ],
+            "required_consumers": ["exact_and_lexical_search"],
+        },
+        outbox_write={
+            "status": "written",
+            "path": str(aoa_root / "projection-outbox" / "records" / "outbox-1.json"),
+        },
+    )
+    assert Path(progress["path"]).is_file()
+
+    def fake_run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        stdout = json.dumps(
+            {
+                "schema": "abyss_machine_resource_launch_v1",
+                "ok": False,
+                "blocked_reasons": [],
+                "denied_reasons": [],
+                "execution": {
+                    "ok": False,
+                    "returncode": 124,
+                    "stdout_tail": "",
+                    "stderr_tail": "hard timeout after atomic publication",
+                    "timeout_cleanup": {
+                        "unit": "bounded-maintenance.service",
+                        "kill": {"returncode": 0},
+                    },
+                },
+            }
+        )
+        return subprocess.CompletedProcess(command, 1, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    payload = module.auto_maintenance_resource_launch(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        profile="backlog",
+        target="session-1",
+        apply=True,
+        reason="timer_backlog",
+        graph_drip_on_block=False,
+        execution_id=execution_id,
+    )
+
+    assert payload["status"] == "resource_hard_timeout_progress_recovered"
+    assert payload["ok"] is False
+    assert payload["mutates"] is True
+    assert payload["child_result_verified"] is False
+    assert payload["result_verified"] is False
+    assert payload["persisted_progress_recovered"] is True
+    assert payload["persisted_progress_evidence"]["receipt_count"] == 1
+    assert payload["completion_semantics"]["semantic_progress"]["proven"] is True
+    assert payload["completion_semantics"]["global_freshness"]["proven"] is False
+    assert payload["automatic_retry"]["status"] == "scheduled"
+    queue = module.auto_maintenance_retry_queue_status(aoa_root)
+    assert queue["items"]["backlog:session-1"]["last_status"] == (
+        "resource_hard_timeout_progress_recovered"
+    )
+
+
 def test_live_tail_fast_status_uses_persisted_search_state_before_graph_or_global_status(
     tmp_path: Path,
     monkeypatch: Any,
@@ -61559,6 +61744,8 @@ def test_freshness_obligation_survives_bounded_retry_exhaustion(
         "required_capture_epoch_id": "epoch-1",
         "required_capture_bytes": 20,
         "required_capture_sha256": "new",
+        "required_stable_projection": False,
+        "required_search_consumer": False,
     }
 
     def schedule(queue_payload: dict[str, Any]) -> tuple[dict[str, Any], bool]:
@@ -61646,6 +61833,8 @@ def test_freshness_obligation_closes_only_after_watermark_proof(
         "required_capture_epoch_id": "epoch-1",
         "required_capture_bytes": 20,
         "required_capture_sha256": "new",
+        "required_stable_projection": False,
+        "required_search_consumer": False,
     }
 
     def schedule(queue_payload: dict[str, Any]) -> tuple[dict[str, Any], bool]:
@@ -61709,7 +61898,8 @@ def test_freshness_obligation_closes_only_after_watermark_proof(
     assert result["freshness_obligation_after"]["status"] == "satisfied"
     assert result["disposition"] == "completed"
     child_command = launch_kwargs[0]["child_command_override"]
-    assert "reindex-sessions" in child_command
+    assert "projection-catchup" in child_command
+    assert "--apply" in child_command
     assert session_id in child_command
     assert launch_kwargs[0]["repair_indexes"] is False
     assert launch_kwargs[0]["repair_graph"] is False
@@ -61752,6 +61942,8 @@ def test_freshness_obligation_accepts_exact_legacy_monolithic_projection(
         "required_capture_epoch_id": "capture-epoch-unavailable-in-legacy-manifest",
         "required_capture_bytes": 20,
         "required_capture_sha256": "exact-capture-digest",
+        "required_stable_projection": False,
+        "required_search_consumer": False,
     }
 
     status = module.session_projection_freshness_obligation_status(
@@ -61787,6 +61979,290 @@ def test_freshness_obligation_accepts_exact_legacy_monolithic_projection(
     assert mismatched_epoch["ok"] is False
     assert mismatched_epoch["proof_mode"] == (
         "append_only_capture_epoch_watermark"
+    )
+
+
+def test_freshness_obligation_does_not_relaunch_when_session_watermarks_are_current(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    session_id = "watermarks-current"
+    session_dir = aoa_root / module.SESSION_ROOT / session_id
+    session_dir.mkdir(parents=True)
+    module.write_json(
+        session_dir / "session.manifest.json",
+        {
+            "session_id": session_id,
+            "archive_status": "indexed",
+            "raw": {
+                "indexing_status": "indexed",
+                "bytes": 20,
+                "sha256": "capture-current",
+            },
+        },
+    )
+    options = {
+        "persistent_obligation": True,
+        "obligation_kind": module.SESSION_PROJECTION_FRESHNESS_OBLIGATION_KIND,
+        "session_id": session_id,
+        "session_dir": str(session_dir),
+        "required_capture_bytes": 20,
+        "required_capture_sha256": "capture-current",
+    }
+    current_vector = {
+        "axes": {
+            "stable_session_projection": {"current": True},
+            "search": {"current": True},
+        }
+    }
+    monkeypatch.setattr(
+        module,
+        "session_projection_freshness_vector",
+        lambda **_kwargs: current_vector,
+    )
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        module,
+        "auto_maintenance_resource_launch",
+        lambda **kwargs: calls.append(kwargs),
+    )
+
+    def schedule(queue_payload: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        return (
+            module.auto_maintenance_retry_upsert_item(
+                queue_payload,
+                profile="backlog",
+                target=session_id,
+                reason="test_current_watermarks",
+                launch_status="freshness_obligation_enqueued",
+                options=options,
+                now_epoch=300.0,
+                initial_delay_seconds=0,
+            ),
+            True,
+        )
+
+    module.mutate_auto_maintenance_retry_queue(
+        aoa_root,
+        schedule,
+        now_epoch=300.0,
+    )
+    dispatched = module.auto_maintenance_retry_dispatch(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        apply=True,
+        limit=1,
+        now_epoch=301.0,
+    )
+
+    assert calls == []
+    result = dispatched["results"][0]
+    assert result["launch_status"] == "freshness_obligation_satisfied"
+    assert result["freshness_obligation_before"]["remaining_axes"] == []
+    assert result["freshness_obligation_before"]["satisfied_axes"] == [
+        "capture",
+        "stable_session_projection",
+        "search",
+    ]
+    assert result["disposition"] == "completed"
+
+
+def _targeted_freshness_vector(
+    *,
+    stable: bool,
+    search: bool,
+    episode: bool,
+) -> dict[str, Any]:
+    return {
+        "axes": {
+            "raw_capture": {"current": True},
+            "live_overlay": {"current": True},
+            "stable_session_projection": {"current": stable},
+            "search": {"current": search},
+            "episode_semantic": {"current": episode},
+            "entity_registry": {"current": False},
+            "graph": {"current": False},
+        }
+    }
+
+
+def test_targeted_projection_catchup_skips_a_current_session(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    session_id = "targeted-current"
+    session_dir = aoa_root / module.SESSION_ROOT / session_id
+    session_dir.mkdir(parents=True)
+    module.write_json(
+        aoa_root / module.REGISTRY_NAME,
+        {
+            "sessions": [
+                {
+                    "session_id": session_id,
+                    "session_label": session_id,
+                    "path": str(session_dir),
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "session_projection_freshness_vector",
+        lambda **_kwargs: _targeted_freshness_vector(
+            stable=True,
+            search=True,
+            episode=True,
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "session_memory_search_shard_projection_summary",
+        lambda _aoa_root: {"status": "deferred"},
+    )
+    for name in (
+        "reconcile_capture_watch",
+        "reindex_sessions",
+        "search_index_sessions",
+        "episode_semantic_index_sessions",
+    ):
+        monkeypatch.setattr(
+            module,
+            name,
+            lambda **_kwargs: pytest.fail(f"unexpected targeted route: {name}"),
+        )
+
+    payload = module.projection_catchup(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        target=session_id,
+        profile="catchup",
+        apply=True,
+    )
+
+    assert payload["targeted"] is True
+    assert payload["status"] == "freshness_obligation_already_satisfied"
+    assert payload["mutates"] is False
+    assert payload["routed_axes"] == []
+    assert payload["actions"] == []
+    assert payload["required_stale_axes_after"] == []
+    assert set(payload["deferred_global_derivatives"]) == {
+        "search_catalog",
+        "entity_registry",
+        "graph",
+    }
+
+
+def test_targeted_projection_catchup_routes_only_stale_local_axes(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    session_id = "targeted-stale-local"
+    session_dir = aoa_root / module.SESSION_ROOT / session_id
+    session_dir.mkdir(parents=True)
+    module.write_json(
+        aoa_root / module.REGISTRY_NAME,
+        {
+            "sessions": [
+                {
+                    "session_id": session_id,
+                    "session_label": session_id,
+                    "path": str(session_dir),
+                }
+            ]
+        },
+    )
+    phase = {"stable_done": False, "search_done": False}
+
+    def vector(**_kwargs: Any) -> dict[str, Any]:
+        if phase["search_done"]:
+            return _targeted_freshness_vector(
+                stable=True,
+                search=True,
+                episode=True,
+            )
+        return _targeted_freshness_vector(
+            stable=phase["stable_done"],
+            search=False,
+            episode=True,
+        )
+
+    monkeypatch.setattr(module, "session_projection_freshness_vector", vector)
+    monkeypatch.setattr(
+        module,
+        "session_memory_search_shard_projection_summary",
+        lambda _aoa_root: {"status": "deferred"},
+    )
+    monkeypatch.setattr(
+        module,
+        "targeted_projection_catchup_search_gate",
+        lambda _aoa_root: {"admitted": True, "status": "incremental_search_admitted"},
+    )
+    calls: list[str] = []
+
+    def stable_route(**_kwargs: Any) -> dict[str, Any]:
+        calls.append("stable_session_projection")
+        phase["stable_done"] = True
+        return {
+            "ok": True,
+            "mutates": True,
+            "status": "applied",
+            "processed_count": 1,
+        }
+
+    def search_route(**_kwargs: Any) -> dict[str, Any]:
+        calls.append("search")
+        phase["search_done"] = True
+        return {
+            "ok": True,
+            "mutates": True,
+            "status": "applied",
+            "processed_count": 1,
+        }
+
+    monkeypatch.setattr(module, "reindex_sessions", stable_route)
+    monkeypatch.setattr(module, "search_index_sessions", search_route)
+    monkeypatch.setattr(
+        module,
+        "episode_semantic_index_sessions",
+        lambda **_kwargs: pytest.fail("episode semantic axis was current"),
+    )
+    monkeypatch.setattr(
+        module,
+        "reconcile_capture_watch",
+        lambda **_kwargs: pytest.fail("capture axis was current"),
+    )
+
+    payload = module.projection_catchup(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        target=session_id,
+        profile="catchup",
+        apply=True,
+    )
+
+    assert calls == ["stable_session_projection", "search"]
+    assert payload["required_stale_axes_before"] == [
+        "stable_session_projection",
+        "search",
+    ]
+    assert payload["required_stale_axes_after"] == []
+    assert payload["routed_axes"] == [
+        "stable_session_projection",
+        "search",
+    ]
+    assert payload["status"] == (
+        "targeted_catchup_applied_with_deferred_global_derivatives"
+    )
+    assert payload["mutates"] is True
+    assert all(
+        item["status"] == "deferred_bounded_session_scope"
+        for item in payload["deferred_global_derivatives"].values()
     )
 
 
@@ -88928,6 +89404,7 @@ def test_session_projection_checkpoint_resumes_completed_segments_without_raw_mu
         record,
         cooperative_deadline_monotonic=1.0,
         segment_workers=1,
+        execution_id="checkpoint-resume-run",
     )
 
     assert interrupted["status"] == "checkpointed"
@@ -88953,13 +89430,314 @@ def test_session_projection_checkpoint_resumes_completed_segments_without_raw_mu
         aoa_root,
         record,
         segment_workers=1,
+        execution_id="checkpoint-resume-run",
     )
 
     assert resumed["status"] == "reindexed"
     assert 0 not in calls
     assert len(calls) == resumed["segment_count"] - 1
     assert module.sha256_file(raw_path) == raw_sha_before
+    progress_receipt = resumed["publish_result"]["progress_receipt"]
+    assert progress_receipt["status"] == "written"
+    assert module.read_json(Path(progress_receipt["path"]), {})[
+        "execution_id"
+    ] == "checkpoint-resume-run"
+    recovered_progress = module.recover_session_projection_progress_evidence(
+        aoa_root=aoa_root,
+        execution_id="checkpoint-resume-run",
+        target="checkpoint-resume-session",
+    )
+    assert recovered_progress["verified"] is True
+    assert recovered_progress["receipt_count"] == 1
     assert not Path(interrupted["work_dir"]).exists()
+
+
+def test_session_projection_hard_timeout_after_checkpoint_resumes_without_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "hard-timeout-resume-session.jsonl"
+    session_id = "hard-timeout-resume-session"
+    rows: list[dict[str, Any]] = [
+        {
+            "timestamp": "2026-07-20T00:00:00Z",
+            "type": "session_meta",
+            "payload": {"id": session_id, "cwd": str(workspace)},
+        }
+    ]
+    for ordinal in range(4):
+        rows.extend(
+            [
+                {
+                    "timestamp": (
+                        f"2026-07-20T00:00:{ordinal * 2 + 1:02d}Z"
+                    ),
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": f"hard timeout segment {ordinal}",
+                            }
+                        ],
+                    },
+                },
+                {
+                    "timestamp": (
+                        f"2026-07-20T00:00:{ordinal * 2 + 2:02d}Z"
+                    ),
+                    "type": "turn_context",
+                    "payload": {"summary": f"hard boundary {ordinal}"},
+                },
+            ]
+        )
+    write_jsonl(transcript, rows)
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": session_id,
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    record = module.resolve_session_record(aoa_root, session_id)
+    original_write_segment = module.write_segment
+    calls: list[int] = []
+
+    def counted_write_segment(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        result = original_write_segment(*args, **kwargs)
+        calls.append(int(args[2]))
+        return result
+
+    class InjectedHardTimeout(BaseException):
+        pass
+
+    observed_work_dirs: list[Path] = []
+
+    def hard_timeout_after_first_checkpoint(
+        *, phase: str, work_dir: Path
+    ) -> None:
+        if phase != "segments_in_progress":
+            return
+        checkpoint = module.read_json(
+            module.session_projection_work_checkpoint_path(work_dir), {}
+        )
+        if len(checkpoint.get("segments", {})) >= 1:
+            observed_work_dirs.append(work_dir)
+            raise InjectedHardTimeout("simulated hard timeout")
+
+    monkeypatch.setattr(module, "write_segment", counted_write_segment)
+    monkeypatch.setattr(
+        module,
+        "reuse_published_session_segment",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        module,
+        "session_projection_checkpoint_observer",
+        hard_timeout_after_first_checkpoint,
+    )
+    with pytest.raises(InjectedHardTimeout, match="simulated hard timeout"):
+        module.reindex_session_from_raw(
+            aoa_root,
+            record,
+            segment_workers=1,
+            execution_id="hard-timeout-run",
+        )
+
+    assert calls == [0]
+    assert observed_work_dirs
+    work_dir = observed_work_dirs[-1]
+    checkpoint = module.read_json(
+        module.session_projection_work_checkpoint_path(work_dir), {}
+    )
+    assert checkpoint["phase"] == "segments_in_progress"
+    assert list(checkpoint["segments"]) == ["000"]
+
+    monkeypatch.setattr(
+        module,
+        "session_projection_checkpoint_observer",
+        lambda **_kwargs: None,
+    )
+    calls.clear()
+    resumed = module.reindex_session_from_raw(
+        aoa_root,
+        record,
+        segment_workers=1,
+        execution_id="hard-timeout-run",
+    )
+
+    assert resumed["status"] == "reindexed"
+    assert 0 not in calls
+    assert calls == list(range(1, resumed["segment_count"]))
+    assert not work_dir.exists()
+    assert resumed["publish_result"]["progress_receipt"]["status"] == (
+        "written"
+    )
+
+
+def test_continuous_session_freshness_and_retry_queue_slos_remain_bounded(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "continuous-session.jsonl"
+    session_id = "continuous-session"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-07-21T00:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": session_id, "cwd": str(workspace)},
+            },
+            {
+                "timestamp": "2026-07-21T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "continuous session seed",
+                        }
+                    ],
+                },
+            },
+            {
+                "timestamp": "2026-07-21T00:00:02Z",
+                "type": "turn_context",
+                "payload": {"summary": "continuous seed boundary"},
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": session_id,
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    record = module.resolve_session_record(aoa_root, session_id)
+    session_dir = module.session_dir_from_record(record)
+    raw_path = Path(
+        module.read_json(session_dir / "session.manifest.json", {})[
+            "raw"
+        ]["path"]
+    )
+    initial = module.reindex_session_from_raw(
+        aoa_root,
+        record,
+        segment_workers=1,
+        execution_id="continuous-run-0",
+    )
+    assert initial["status"] == "reindexed"
+
+    max_queue_count = 0
+    completed_slices = 0
+    max_publish_ms = 0
+    for iteration in range(1, 7):
+        with raw_path.open("a", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(
+                    {
+                        "timestamp": (
+                            f"2026-07-21T00:01:{iteration:02d}Z"
+                        ),
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "input_text",
+                                    "text": f"continuous tick {iteration}",
+                                }
+                            ],
+                        },
+                    }
+                )
+                + "\n"
+            )
+            handle.write(
+                json.dumps(
+                    {
+                        "timestamp": (
+                            f"2026-07-21T00:01:{iteration:02d}Z"
+                        ),
+                        "type": "turn_context",
+                        "payload": {
+                            "summary": f"continuous boundary {iteration}"
+                        },
+                    }
+                )
+                + "\n"
+            )
+        result = module.reindex_session_from_raw(
+            aoa_root,
+            record,
+            segment_workers=1,
+            execution_id=f"continuous-run-{iteration}",
+        )
+        assert result["status"] == "reindexed"
+        completed_slices += 1
+        max_publish_ms = max(
+            max_publish_ms,
+            int(
+                result.get("phase_timings_ms", {}).get(
+                    "validate_and_atomic_publish", 0
+                )
+            ),
+        )
+        current_manifest = module.read_json(
+            session_dir / "session.manifest.json", {}
+        )
+        current_index = module.read_json(
+            session_dir / module.SESSION_INDEX_JSON,
+            {},
+        )
+        assert current_manifest["raw"]["sha256"] == module.sha256_file(
+            raw_path
+        )
+        assert module.projection_publish_id(
+            current_manifest["index_schema"]
+        ) == module.projection_publish_id(current_index)
+
+        retry = module.auto_maintenance_retry_reconcile(
+            aoa_root=aoa_root,
+            profile="hot",
+            target=session_id,
+            reason="timer_continuous_session",
+            apply=True,
+            launch_ok=False,
+            launch_status="resource_hard_timeout_progress_recovered",
+            options={"continuous_iteration": iteration},
+            now_epoch=10_000.0 + iteration,
+        )
+        assert retry["retryable"] is True
+        queue = module.auto_maintenance_retry_queue_status(
+            aoa_root,
+            now_epoch=10_000.0 + iteration,
+        )
+        max_queue_count = max(max_queue_count, queue["queued_count"])
+        assert queue["queued_count"] <= 1
+        assert queue["items"][f"hot:{session_id}"]["occurrence_count"] == iteration
+
+    assert completed_slices == 6
+    assert max_queue_count == 1
+    assert max_publish_ms >= 0
 
 
 @pytest.mark.parametrize(

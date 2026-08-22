@@ -32,6 +32,7 @@ import urllib.error
 import urllib.request
 import warnings
 import zlib
+import uuid
 from collections import Counter, defaultdict, deque
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
@@ -148,17 +149,24 @@ DECLARED_GRAPH_PROJECTION_GENERATION_TRANSITIONS: dict[
     str,
     dict[str, str],
 ] = {
-    # AOA-SM-D-0067/D-0090/D-0091: the graph producer contract is unchanged by
-    # the session-freshness scheduling repair and by the narrowed task-episode
-    # source boundary; the current source generation still admits only the
-    # explicitly reconstructed predecessor identities below.
+    # AOA-SM-D-0067/D-0090/D-0091/D-0092: the graph producer contract is
+    # unchanged by the session-freshness scheduling repair, the narrowed
+    # task-episode source boundary, or durable timeout progress receipts. The
+    # latter changes the pinned session-index/entity-registry generations, so
+    # the current graph target must advance while retaining every exact,
+    # source-verified predecessor below.
     # The 0f10ba1 graph producer changes only how an
     # append-only batch refreshes already-defined aggregates.  Admission is
     # still conditional on reconstructing the exact predecessor identity from
     # its source and on the complete graph materialization proof performed by
     # graph-registry-rebind.
-    "010165b3fce35a26f49a5ae03bb00747f424bc186a5142e3d7f9314ba484a706": (
+    "d50ac6cc3b40630a4136ffed87860c8908b4342293404bc766430f50683139d4": (
         {
+            # AOA-SM-D-0092: the previous current graph is admitted only when
+            # the exact source-line bytes reconstruct its prior identity.
+            "010165b3fce35a26f49a5ae03bb00747f424bc186a5142e3d7f9314ba484a706": (
+                "8518001be1895ad95bfab86e4bb7428ad93d136bc163ac9f10d72ca3292a1ad4"
+            ),
             "bae847f241b3c19e3ca11d177df29089f8760aec72e1d0e50790eb6955d710c9": (
                 "e065b0e0399f986829c524f79cbf371b0fe6925c9f9aeb39c944c6309adcadb3"
             ),
@@ -542,6 +550,10 @@ PROJECTION_OUTBOX_CONSUMER_STATE_DIR = (
     PROJECTION_OUTBOX_ROOT / "consumer-state"
 )
 PROJECTION_OUTBOX_SCHEMA_VERSION = 1
+SESSION_PROJECTION_PROGRESS_RECEIPTS_ROOT = (
+    DIAGNOSTICS_ROOT / "session-projection-progress"
+)
+SESSION_PROJECTION_PROGRESS_RECEIPT_SCHEMA_VERSION = 1
 PROJECTION_OUTBOX_CONSUMERS = (
     "exact_and_lexical_search",
     "episode_semantic",
@@ -1679,6 +1691,9 @@ AUTO_MAINTENANCE_RETRY_HISTORY_LIMIT = 40
 AUTO_MAINTENANCE_CHILD_PROGRESS_RETRY_STATUSES = frozenset(
     {
         "applied_with_remaining_backlog",
+        "resource_hard_timeout_progress_recovered",
+        "resource_launcher_timeout_progress_recovered",
+        "resource_child_result_unverified_progress_recovered",
     }
 )
 SESSION_MEMORY_QUERY_DEMAND_TTL_SECONDS = 6 * 60 * 60
@@ -18094,6 +18109,14 @@ def session_projection_freshness_obligation_options(
         "required_capture_stable": bool(
             capture.get("source_stable_during_capture")
         ),
+        # A scheduled freshness obligation is not complete when only the
+        # preserved capture has advanced.  The session projection and its
+        # exact/lexical consumer must cover that same watermark before the
+        # retry queue may release the item.  Keep these explicit in newly
+        # scheduled entries; an explicitly false legacy fixture is the only
+        # remaining capture-only compatibility mode.
+        "required_stable_projection": True,
+        "required_search_consumer": True,
         "freshness_reason": freshness_reason,
     }
 
@@ -18169,13 +18192,66 @@ def session_projection_freshness_obligation_status(
     else:
         satisfied = exact_digest_satisfied
         proof_mode = "exact_monolithic_capture_digest"
+    required_stable_projection = (
+        options.get("required_stable_projection", True) is not False
+    )
+    required_search_consumer = (
+        options.get("required_search_consumer", True) is not False
+    )
+    freshness_vector: dict[str, Any] = {}
+    stable_projection_satisfied = True
+    search_consumer_satisfied = True
+    if required_stable_projection or required_search_consumer:
+        freshness_vector = session_projection_freshness_vector(
+            aoa_root=aoa_root,
+            session_dir=session_dir,
+        )
+        vector_axes = (
+            freshness_vector.get("axes")
+            if isinstance(freshness_vector.get("axes"), dict)
+            else {}
+        )
+        stable_axis = (
+            vector_axes.get("stable_session_projection")
+            if isinstance(vector_axes.get("stable_session_projection"), dict)
+            else {}
+        )
+        search_axis = (
+            vector_axes.get("search")
+            if isinstance(vector_axes.get("search"), dict)
+            else {}
+        )
+        stable_projection_satisfied = bool(stable_axis.get("current"))
+        search_consumer_satisfied = bool(search_axis.get("current"))
+    required_axes = ["capture"]
+    satisfied_axes = ["capture"] if satisfied else []
+    remaining_axes: list[str] = [] if satisfied else ["capture"]
+    if required_stable_projection:
+        required_axes.append("stable_session_projection")
+        if stable_projection_satisfied:
+            satisfied_axes.append("stable_session_projection")
+        else:
+            remaining_axes.append("stable_session_projection")
+    if required_search_consumer:
+        required_axes.append("search")
+        if search_consumer_satisfied:
+            satisfied_axes.append("search")
+        else:
+            remaining_axes.append("search")
+    overall_satisfied = bool(
+        satisfied
+        and stable_projection_satisfied
+        and search_consumer_satisfied
+    )
+    if required_stable_projection or required_search_consumer:
+        proof_mode = f"{proof_mode}+session_projection_watermarks"
     return {
         "schema_version": 1,
         "artifact_type": (
             "session_projection_freshness_obligation_status"
         ),
-        "ok": satisfied,
-        "status": "satisfied" if satisfied else "remaining",
+        "ok": overall_satisfied,
+        "status": "satisfied" if overall_satisfied else "remaining",
         "session_id": session_id,
         "session_dir": str(session_dir),
         "proof_mode": proof_mode,
@@ -18186,10 +18262,18 @@ def session_projection_freshness_obligation_status(
         "projected_capture_bytes": projected_bytes,
         "projected_raw_sha256": projected_sha256,
         "published_projection": published,
+        "required_axes": required_axes,
+        "satisfied_axes": satisfied_axes,
+        "remaining_axes": remaining_axes,
+        "required_stable_projection": required_stable_projection,
+        "required_search_consumer": required_search_consumer,
+        "stable_projection_satisfied": stable_projection_satisfied,
+        "search_consumer_satisfied": search_consumer_satisfied,
+        "freshness_vector": freshness_vector,
         "truth_status": (
-            "published_projection_covers_required_capture_watermark"
-            if satisfied
-            else "required_capture_watermark_not_yet_published"
+            "published_projection_covers_required_capture_and_session_watermarks"
+            if overall_satisfied
+            else "required_capture_or_session_projection_watermark_not_yet_published"
         ),
     }
 
@@ -18212,16 +18296,19 @@ def session_projection_freshness_obligation_child_command(
     return [
         "python3",
         str(Path(__file__).resolve()),
-        "reindex-sessions",
+        "projection-catchup",
         target,
         "--workspace-root",
         str(workspace_root),
         "--aoa-root",
         str(aoa_root),
+        "--profile",
+        "deep" if profile == "deep" else "catchup",
         "--budget-seconds",
         f"{budget_seconds:g}",
         "--progress-every",
         "1",
+        "--apply",
         "--write-report",
     ]
 
@@ -26891,6 +26978,158 @@ def write_projection_outbox_record(
     }
 
 
+def session_projection_progress_receipt_path(
+    aoa_root: Path,
+    *,
+    execution_id: str | None,
+    session_id: str,
+    publish_id: str,
+) -> Path:
+    execution_key = safe_slug(
+        str(execution_id or "unbound"),
+        fallback="unbound",
+    )
+    session_key = safe_slug(session_id, fallback="session")
+    publish_key = safe_slug(publish_id, fallback="publish")
+    return (
+        aoa_root
+        / SESSION_PROJECTION_PROGRESS_RECEIPTS_ROOT
+        / execution_key
+        / f"{session_key}-{publish_key}.json"
+    )
+
+
+def write_session_projection_progress_receipt(
+    *,
+    aoa_root: Path,
+    session_dir: Path,
+    session_id: str,
+    session_label: str,
+    work_id: str,
+    execution_id: str | None,
+    publish_identity: dict[str, Any],
+    outbox_record: dict[str, Any],
+    outbox_write: dict[str, Any],
+) -> dict[str, Any]:
+    """Persist bounded publication progress before the caller can report it.
+
+    This receipt is intentionally weaker than a child completion report.  It
+    proves that one content-addressed session projection was atomically
+    published and records the downstream consumers still represented by the
+    outbox.  The resource wrapper may recover this mutation evidence after a
+    timeout, but it must keep child completion and global freshness unresolved.
+    """
+    publish_id = projection_publish_id(publish_identity)
+    receipt_path = session_projection_progress_receipt_path(
+        aoa_root,
+        execution_id=execution_id,
+        session_id=session_id,
+        publish_id=publish_id,
+    )
+    receipt = {
+        "schema_version": SESSION_PROJECTION_PROGRESS_RECEIPT_SCHEMA_VERSION,
+        "artifact_type": "session_projection_publication_progress_receipt",
+        "status": "published",
+        "mutates": True,
+        "execution_id": str(execution_id or ""),
+        "session_id": session_id,
+        "session_label": session_label,
+        "session_dir": str(session_dir),
+        "work_id": work_id,
+        "publish_id": publish_id,
+        "published_at": utc_now(),
+        "publication_receipt": {
+            "session_dir": str(session_dir),
+            "publish_id": publish_id,
+        },
+        "source_watermark": {
+            "source": (
+                dict(publish_identity.get("source"))
+                if isinstance(publish_identity.get("source"), dict)
+                else {}
+            ),
+            "processed_watermark": (
+                dict(publish_identity.get("processed_watermark"))
+                if isinstance(
+                    publish_identity.get("processed_watermark"), dict
+                )
+                else {}
+            ),
+        },
+        "outbox": {
+            "record_id": str(outbox_record.get("record_id") or ""),
+            "path": str(outbox_write.get("path") or ""),
+            "status": str(outbox_write.get("status") or ""),
+            "change_count": len(
+                outbox_record.get("changes", [])
+                if isinstance(outbox_record.get("changes"), list)
+                else []
+            ),
+            "changed_components": [
+                {
+                    "component_id": str(item.get("component_id") or ""),
+                    "component_type": str(item.get("component_type") or ""),
+                    "operation": str(item.get("operation") or ""),
+                    "new_digest": str(item.get("new_digest") or ""),
+                }
+                for item in (
+                    outbox_record.get("changes", [])
+                    if isinstance(outbox_record.get("changes"), list)
+                    else []
+                )
+                if isinstance(item, dict)
+            ],
+            "required_downstream_consumers": sorted(
+                str(item)
+                for item in (
+                    outbox_record.get("required_consumers", [])
+                    if isinstance(outbox_record.get("required_consumers"), list)
+                    else []
+                )
+                if item
+            ),
+        },
+        "truth_status": (
+            "bounded_atomic_session_projection_publication_progress_"
+            "not_child_completion_or_global_freshness"
+        ),
+    }
+    existing = read_json(receipt_path, {})
+    if isinstance(existing, dict) and existing:
+        comparable_keys = (
+            "schema_version",
+            "artifact_type",
+            "execution_id",
+            "session_id",
+            "work_id",
+            "publish_id",
+            "source_watermark",
+            "outbox",
+        )
+        if any(
+            existing.get(key) != receipt.get(key)
+            for key in comparable_keys
+        ):
+            raise ValueError("session_projection_progress_receipt_collision")
+        return {
+            "status": "reused",
+            "path": str(receipt_path),
+            "receipt_id": f"{session_id}:{publish_id}",
+            "execution_id": str(execution_id or ""),
+            "session_id": session_id,
+            "publish_id": publish_id,
+        }
+    write_json_durable(receipt_path, receipt)
+    return {
+        "status": "written",
+        "path": str(receipt_path),
+        "receipt_id": f"{session_id}:{publish_id}",
+        "execution_id": str(execution_id or ""),
+        "session_id": session_id,
+        "publish_id": publish_id,
+    }
+
+
 def projection_outbox_consumer_state_path(
     session_dir: Path,
     *,
@@ -27926,6 +28165,107 @@ def session_projection_build_lease_path(
     )
 
 
+def reclaim_incompatible_session_projection_work(
+    *,
+    session_dir: Path,
+    current_work_identity: dict[str, Any],
+    aoa_root: Path | None = None,
+    exclude: set[Path] | None = None,
+    now_epoch: float | None = None,
+) -> dict[str, Any]:
+    """Reclaim stale siblings while the caller owns the session lease."""
+    current_work_id = str(current_work_identity.get("work_id") or "")
+    if not current_work_id:
+        return {
+            "status": "blocked_unverified_current_identity",
+            "removed_count": 0,
+            "removed_bytes": 0,
+            "removed_paths": [],
+        }
+    excluded = {
+        path.resolve()
+        for path in (exclude or set())
+        if path.exists() or path.is_symlink()
+    }
+    observed_now = time.time() if now_epoch is None else now_epoch
+    prefix = f".{session_dir.name}.projection-work-"
+    removed_paths: list[str] = []
+    removed_bytes = 0
+    preserved_count = 0
+    for path in sorted(session_dir.parent.glob(f"{prefix}*")):
+        if path.is_symlink() or not path.is_dir():
+            preserved_count += 1
+            continue
+        if path.resolve() in excluded:
+            preserved_count += 1
+            continue
+        checkpoint = read_json(
+            session_projection_work_checkpoint_path(path), {}
+        )
+        stored_identity = (
+            checkpoint.get("work_identity")
+            if isinstance(checkpoint, dict)
+            and isinstance(checkpoint.get("work_identity"), dict)
+            else {}
+        )
+        stored_work_id = str(stored_identity.get("work_id") or "")
+        if (
+            not stored_work_id
+            or not path.name.endswith(stored_work_id[:24])
+            or stored_identity == current_work_identity
+        ):
+            preserved_count += 1
+            continue
+        latest_mtime = max(
+            [path_mtime(path)]
+            + [
+                path_mtime(item)
+                for item in path.rglob("*")
+                if item.exists() or item.is_symlink()
+            ]
+        )
+        if (
+            max(0, int(observed_now - latest_mtime))
+            < SESSION_PROJECTION_OBSOLETE_WORK_MIN_AGE_SECONDS
+        ):
+            preserved_count += 1
+            continue
+        removed_bytes += path_total_size(path)
+        remove_projection_publish_path(path)
+        removed_paths.append(str(path))
+    result = {
+        "status": "reclaimed" if removed_paths else "nothing_to_do",
+        "removed_count": len(removed_paths),
+        "removed_bytes": removed_bytes,
+        "removed_paths": removed_paths,
+        "preserved_count": preserved_count,
+        "truth_status": (
+            "session_lease_owned_incompatible_generated_work_only"
+        ),
+    }
+    if removed_paths and aoa_root is not None:
+        diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        report_path = diagnostics_dir / (
+            f"{compact_stamp()}__session-projection-work-reclaim-"
+            f"{os.getpid()}.json"
+        )
+        write_json(
+            report_path,
+            {
+                "schema_version": 1,
+                "artifact_type": (
+                    "session_projection_work_local_reclaim"
+                ),
+                "generated_at": utc_now(),
+                "session_dir": str(session_dir),
+                **result,
+            },
+        )
+        result["report_json"] = str(report_path)
+    return result
+
+
 def session_projection_artifact_receipt(path: Path) -> dict[str, Any]:
     return {
         "rel": str(path),
@@ -28034,6 +28374,63 @@ def recover_interrupted_session_projection_publish(
             "removed_new": [],
             "outbox_record": journal.get("outbox_record", {}),
         }
+    progress_receipt = (
+        journal.get("progress_receipt")
+        if isinstance(journal.get("progress_receipt"), dict)
+        else {}
+    )
+    progress_receipt_path = Path(
+        str(progress_receipt.get("path") or "")
+    )
+    outbox_record = (
+        journal.get("outbox_record")
+        if isinstance(journal.get("outbox_record"), dict)
+        else {}
+    )
+    outbox_path = Path(str(outbox_record.get("path") or ""))
+    persisted_progress_receipt = read_json(
+        progress_receipt_path,
+        {},
+    ) if progress_receipt_path.name else {}
+    persisted_outbox = read_json(outbox_path, {}) if outbox_path.name else {}
+    receipt_proves_committed_publish = bool(
+        outbox_record.get("written")
+        and isinstance(persisted_progress_receipt, dict)
+        and persisted_progress_receipt.get("status") == "published"
+        and persisted_progress_receipt.get("mutates") is True
+        and str(persisted_progress_receipt.get("publish_id") or "")
+        == str(journal.get("publish_id") or "")
+        and isinstance(persisted_progress_receipt.get("outbox"), dict)
+        and str(
+            persisted_progress_receipt["outbox"].get("record_id") or ""
+        )
+        == str(outbox_record.get("record_id") or "")
+        and isinstance(persisted_outbox, dict)
+        and str(persisted_outbox.get("record_id") or "")
+        == str(outbox_record.get("record_id") or "")
+    )
+    if receipt_proves_committed_publish:
+        stage_dir = Path(str(journal.get("stage_dir") or ""))
+        backup_root = Path(str(journal.get("backup_root") or ""))
+        if stage_dir.name.startswith(
+            f".{session_dir.name}.projection-stage-"
+        ) or stage_dir.name.startswith(
+            f".{session_dir.name}.projection-work-"
+        ):
+            remove_projection_publish_path(stage_dir)
+        if backup_root.name.startswith(
+            f".{session_dir.name}.projection-backup-"
+        ):
+            remove_projection_publish_path(backup_root)
+        journal_path.unlink(missing_ok=True)
+        return {
+            "status": "finalized_committed_publish",
+            "recovered": True,
+            "restored": [],
+            "removed_new": [],
+            "progress_receipt_recovered": True,
+            "outbox_record": outbox_record,
+        }
     operations = (
         journal.get("operations")
         if isinstance(journal.get("operations"), list)
@@ -28059,18 +28456,20 @@ def recover_interrupted_session_projection_publish(
         elif published and not had_original:
             remove_projection_publish_path(final_path)
             removed_new.append(str(final_path))
-    outbox_record = (
-        journal.get("outbox_record")
-        if isinstance(journal.get("outbox_record"), dict)
-        else {}
-    )
-    outbox_path = Path(str(outbox_record.get("path") or ""))
     if (
         outbox_path.name
-        and bool(outbox_record.get("written"))
+        and bool(
+            outbox_record.get("written")
+            or outbox_record.get("expected")
+        )
         and not bool(outbox_record.get("preexisting"))
     ):
         outbox_path.unlink(missing_ok=True)
+    if (
+        progress_receipt_path.name
+        and bool(progress_receipt.get("written"))
+    ):
+        progress_receipt_path.unlink(missing_ok=True)
     if stage_dir.name.startswith(
         f".{session_dir.name}.projection-stage-"
     ):
@@ -29563,7 +29962,13 @@ def atomic_publish_session_projection(
     stage_dir: Path,
     session_dir: Path,
     publish_identity: dict[str, Any],
+    execution_id: str | None = None,
+    work_id: str = "",
 ) -> dict[str, Any]:
+    execution_id = execution_id or (
+        f"projection-{compact_stamp()}-{os.getpid()}-"
+        f"{uuid.uuid4().hex[:12]}"
+    )
     atomic_started = time.monotonic()
     recovery = recover_interrupted_session_projection_publish(
         session_dir
@@ -29626,6 +30031,17 @@ def atomic_publish_session_projection(
         str(outbox_record["record_id"]),
     )
     outbox_preexisting = outbox_path.is_file()
+    progress_receipt_session_id = str(
+        new_manifest.get("session_id")
+        if isinstance(new_manifest, dict)
+        else session_dir.name
+    )
+    progress_receipt_path = session_projection_progress_receipt_path(
+        session_dir.parent.parent,
+        execution_id=execution_id,
+        session_id=progress_receipt_session_id,
+        publish_id=new_publish_id,
+    )
     publish_started = time.monotonic()
     backup_root = Path(
         tempfile.mkdtemp(
@@ -29683,11 +30099,20 @@ def atomic_publish_session_projection(
             "record_id": outbox_record["record_id"],
             "path": str(outbox_path),
             "preexisting": outbox_preexisting,
+            "expected": True,
             "written": False,
             "change_count": len(outbox_record["changes"]),
         },
+        "progress_receipt": {
+            "path": str(progress_receipt_path),
+            "expected": True,
+            "written": False,
+            "execution_id": str(execution_id or ""),
+            "session_id": progress_receipt_session_id,
+            "publish_id": new_publish_id,
+        },
     }
-    write_json(journal_path, journal)
+    write_json_durable(journal_path, journal)
     try:
         for operation in operations:
             staged_path = Path(operation["staged"])
@@ -29704,13 +30129,13 @@ def atomic_publish_session_projection(
                     backup_path,
                 )
                 operation["backed_up"] = True
-                write_json(journal_path, journal)
+                write_json_durable(journal_path, journal)
             publish_session_projection_replace(
                 staged_path,
                 final_path,
             )
             operation["published"] = True
-            write_json(journal_path, journal)
+            write_json_durable(journal_path, journal)
         producer_source_state = (
             session_memory_loaded_producer_source_state()
         )
@@ -29726,15 +30151,44 @@ def atomic_publish_session_projection(
         journal["outbox_record"]["write_status"] = (
             outbox_write["status"]
         )
-        write_json(journal_path, journal)
+        write_json_durable(journal_path, journal)
+        progress_receipt = (
+            write_session_projection_progress_receipt(
+                aoa_root=session_dir.parent.parent,
+                session_dir=session_dir,
+                session_id=str(
+                    new_manifest.get("session_id")
+                    if isinstance(new_manifest, dict)
+                    else session_dir.name
+                ),
+                session_label=str(
+                    new_manifest.get("session_label") or ""
+                    if isinstance(new_manifest, dict)
+                    else ""
+                ),
+                work_id=work_id,
+                execution_id=execution_id,
+                publish_identity=publish_identity,
+                outbox_record=outbox_record,
+                outbox_write=outbox_write,
+            )
+        )
+        journal["progress_receipt"]["written"] = True
+        journal["progress_receipt"]["status"] = progress_receipt.get(
+            "status"
+        )
+        journal["progress_receipt"]["receipt_id"] = progress_receipt.get(
+            "receipt_id"
+        )
+        write_json_durable(journal_path, journal)
     except BaseException:
-        write_json(journal_path, journal)
+        write_json_durable(journal_path, journal)
         recover_interrupted_session_projection_publish(
             session_dir
         )
         raise
     journal["status"] = "published"
-    write_json(journal_path, journal)
+    write_json_durable(journal_path, journal)
     remove_projection_publish_path(backup_root)
     remove_projection_publish_path(stage_dir)
     journal_path.unlink(missing_ok=True)
@@ -29746,6 +30200,7 @@ def atomic_publish_session_projection(
         "producer_source_state": producer_source_state,
         "prior_recovery": recovery,
         "outbox": outbox_write,
+        "progress_receipt": progress_receipt,
         "changed_components": outbox_record["changes"],
         "required_downstream_consumers": outbox_record[
             "required_consumers"
@@ -41476,7 +41931,7 @@ def write_event_classification_cache_index(
             include_privacy_scan=True,
         )
     )
-    write_json(
+    write_json_durable(
         event_classification_cache_index_path(cache_root),
         {
             "schema_version": (
@@ -42222,6 +42677,7 @@ def reindex_session_from_raw(
     cooperative_deadline_monotonic: float | None = None,
     segment_workers: int | None = None,
     defer_publish: bool = False,
+    execution_id: str | None = None,
 ) -> dict[str, Any]:
     build_started = time.monotonic()
     build_cpu_started = time.process_time()
@@ -42368,6 +42824,14 @@ def reindex_session_from_raw(
         session_dir,
         str(work_identity["work_id"]),
     )
+    obsolete_work_cleanup = (
+        reclaim_incompatible_session_projection_work(
+            session_dir=session_dir,
+            current_work_identity=work_identity,
+            aoa_root=aoa_root,
+            exclude={stage_dir},
+        )
+    )
     checkpoint_path = session_projection_work_checkpoint_path(
         stage_dir
     )
@@ -42409,7 +42873,7 @@ def reindex_session_from_raw(
             ),
             "stage_invalidations": [],
         }
-        write_json(checkpoint_path, work_state)
+        write_json_durable(checkpoint_path, work_state)
     else:
         expected_stage_identities = (
             work_identity.get("stage_work_identities")
@@ -42513,7 +42977,7 @@ def reindex_session_from_raw(
             expected_stage_identities
         )
         work_state["stage_invalidations"] = sorted(changed_stages)
-        write_json(checkpoint_path, work_state)
+        write_json_durable(checkpoint_path, work_state)
     classification_generation = (
         event_classification_generation_identity()
     )
@@ -42629,7 +43093,7 @@ def reindex_session_from_raw(
                 "segments": completed_segments,
             }
         )
-        write_json(checkpoint_path, work_state)
+        write_json_durable(checkpoint_path, work_state)
         for stage, stage_identity in (
             work_identity.get("stage_work_identities", {}).items()
             if isinstance(
@@ -42637,7 +43101,7 @@ def reindex_session_from_raw(
             )
             else []
         ):
-            write_json(
+            write_json_durable(
                 session_projection_stage_checkpoint_path(
                     stage_dir, str(stage)
                 ),
@@ -44695,6 +45159,8 @@ def reindex_session_from_raw(
             stage_dir=stage_dir,
             session_dir=session_dir,
             publish_identity=publish_identity,
+            execution_id=execution_id,
+            work_id=str(work_identity.get("work_id") or ""),
         )
         projection_capture_attestation = (
             attest_raw_capture_projection_digest(
@@ -44792,6 +45258,7 @@ def reindex_session_from_raw(
         "session_dir": str(session_dir),
         "status": "reindexed",
         "work_id": work_identity["work_id"],
+        "obsolete_work_cleanup": obsolete_work_cleanup,
         "event_count": total_event_count,
         "segment_count": len(segment_payloads),
         "raw_block_count": len(raw_blocks.get("blocks", []) if isinstance(raw_blocks.get("blocks"), list) else []),
@@ -44851,6 +45318,7 @@ def publish_prebuilt_session_projection(
     aoa_root: Path,
     record: dict[str, Any],
     work_dir: Path,
+    execution_id: str | None = None,
 ) -> dict[str, Any]:
     """Revalidate and publish one complete build while caller owns global lock."""
     session_dir = session_dir_from_record(record)
@@ -44968,10 +45436,20 @@ def publish_prebuilt_session_projection(
             "current_projection_publish": current_publish_identity,
             "producer_source_state": producer_state,
         }
+    obsolete_work_cleanup = (
+        reclaim_incompatible_session_projection_work(
+            session_dir=session_dir,
+            current_work_identity=current_work_identity,
+            aoa_root=aoa_root,
+            exclude={work_dir},
+        )
+    )
     publish_result = atomic_publish_session_projection(
         stage_dir=work_dir,
         session_dir=session_dir,
         publish_identity=publish_identity,
+        execution_id=execution_id,
+        work_id=str(work_identity.get("work_id") or ""),
     )
     legacy_json = session_dir / LEGACY_SESSION_INDEX_JSON
     legacy_md = session_dir / LEGACY_SESSION_INDEX_MARKDOWN
@@ -45003,6 +45481,7 @@ def publish_prebuilt_session_projection(
         "ok": True,
         "mutates": True,
         "published": True,
+        "obsolete_work_cleanup": obsolete_work_cleanup,
         "session_id": published_manifest.get("session_id"),
         "session_label": published_manifest.get("session_label"),
         "session_dir": str(session_dir),
@@ -45042,6 +45521,7 @@ def publish_prebuilt_session_projection_under_maintenance_lock(
     record: dict[str, Any],
     work_dir: Path,
     lock_timeout_sec: float = 0.0,
+    execution_id: str | None = None,
 ) -> dict[str, Any]:
     return run_with_maintenance_lock(
         aoa_root,
@@ -45049,6 +45529,7 @@ def publish_prebuilt_session_projection_under_maintenance_lock(
             aoa_root=aoa_root,
             record=record,
             work_dir=work_dir,
+            execution_id=execution_id,
         ),
         owner_job="session-projection-publish",
         mode="publish",
@@ -45072,6 +45553,7 @@ def refresh_route_indexes_from_raw(
     max_raw_bytes: int | None = None,
     cooperative_deadline_monotonic: float | None = None,
     defer_publish: bool = False,
+    execution_id: str | None = None,
 ) -> dict[str, Any]:
     session_dir = session_dir_from_record(record)
     manifest_path = session_dir / "session.manifest.json"
@@ -45134,6 +45616,7 @@ def refresh_route_indexes_from_raw(
                 cooperative_deadline_monotonic
             ),
             defer_publish=defer_publish,
+            execution_id=execution_id,
         )
     segments = manifest.get("segments") if isinstance(manifest.get("segments"), list) else []
     if not segments:
@@ -45146,6 +45629,7 @@ def refresh_route_indexes_from_raw(
                 cooperative_deadline_monotonic
             ),
             defer_publish=defer_publish,
+            execution_id=execution_id,
         )
     if dry_run:
         return {
@@ -45170,6 +45654,7 @@ def refresh_route_indexes_from_raw(
             cooperative_deadline_monotonic
         ),
         defer_publish=defer_publish,
+        execution_id=execution_id,
     )
     if rebuilt.get("status") in {
         "reindexed",
@@ -45510,6 +45995,7 @@ def reindex_sessions(
     progress_every: int = 0,
     selected_records: list[dict[str, Any]] | None = None,
     split_publish_lock: bool = False,
+    execution_id: str | None = None,
 ) -> dict[str, Any]:
     now = utc_now()
     started = time.monotonic()
@@ -45574,6 +46060,7 @@ def reindex_sessions(
                 max_raw_bytes=max_raw_bytes,
                 cooperative_deadline_monotonic=deadline,
                 defer_publish=split_publish_lock,
+                execution_id=execution_id,
             )
         else:
             result = reindex_session_from_raw(
@@ -45583,6 +46070,7 @@ def reindex_sessions(
                 max_raw_bytes=max_raw_bytes,
                 cooperative_deadline_monotonic=deadline,
                 defer_publish=split_publish_lock,
+                execution_id=execution_id,
             )
         if (
             split_publish_lock
@@ -45594,6 +46082,7 @@ def reindex_sessions(
                     aoa_root=aoa_root,
                     record=record,
                     work_dir=Path(str(result["work_dir"])),
+                    execution_id=execution_id,
                 )
             )
             build_phase_timings = (
@@ -54953,6 +55442,7 @@ def maintain_indexes(
     query_demand: dict[str, Any] | None = None,
     observe_query_demand: bool = False,
     preflight_entity_registry_state: dict[str, Any] | None = None,
+    execution_id: str | None = None,
 ) -> dict[str, Any]:
     now = utc_now()
     started = time.monotonic()
@@ -56304,6 +56794,7 @@ def maintain_indexes(
                     budget_seconds=budget_remaining(),
                     progress_every=progress_every,
                     selected_records=route_repair_records,
+                    execution_id=execution_id,
                 )
                 reindex_action["status"] = (
                     "applied_partial"
@@ -58651,6 +59142,7 @@ def auto_maintenance_resource_launcher(
     resource_estimate_source: str | None = None,
     resource_estimate_confidence: str | None = None,
     hard_timeout_seconds: float | None = None,
+    execution_id: str | None = None,
 ) -> list[str]:
     settings = auto_maintenance_profile(profile)
     runtime_envelope = auto_maintenance_runtime_envelope(profile)
@@ -58674,6 +59166,7 @@ def auto_maintenance_resource_launcher(
             child_args.extend(["--reason", reason])
         if extra_auto_args:
             child_args.extend(str(item) for item in extra_auto_args)
+        append_child_arg(child_args, "--execution-id", execution_id)
     else:
         child_args = [str(item) for item in child_command]
     command = [
@@ -59378,6 +59871,698 @@ def projection_catchup_resource_launcher(
     if extra_args:
         command.extend(str(item) for item in extra_args)
     return command
+
+
+TARGETED_CATCHUP_REQUIRED_AXES = (
+    "raw_capture",
+    "stable_session_projection",
+    "search",
+)
+TARGETED_CATCHUP_LOCAL_AXES = (
+    "stable_session_projection",
+    "search",
+    "episode_semantic",
+)
+TARGETED_CATCHUP_GLOBAL_DERIVATIVES = (
+    "search_catalog",
+    "entity_registry",
+    "graph",
+)
+
+
+def targeted_projection_catchup_axis_current(
+    freshness: dict[str, Any],
+    axis: str,
+) -> bool:
+    axes = freshness.get("axes") if isinstance(freshness, dict) else {}
+    value = axes.get(axis) if isinstance(axes, dict) else {}
+    if not isinstance(value, dict):
+        return False
+    return bool(value.get("current"))
+
+
+def targeted_projection_catchup_stale_axes(
+    freshness: dict[str, Any],
+) -> list[str]:
+    axes = freshness.get("axes") if isinstance(freshness, dict) else {}
+    if not isinstance(axes, dict):
+        return list(TARGETED_CATCHUP_REQUIRED_AXES)
+    return [
+        axis
+        for axis in (
+            "raw_capture",
+            "live_overlay",
+            "stable_session_projection",
+            "search",
+            "episode_semantic",
+            "entity_registry",
+            "graph",
+        )
+        if not targeted_projection_catchup_axis_current(freshness, axis)
+    ]
+
+
+def targeted_projection_catchup_action_summary(
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    if not isinstance(result, dict):
+        return {}
+    summary_keys = (
+        "status",
+        "ok",
+        "mutates",
+        "target",
+        "session_id",
+        "selected_count",
+        "processed_count",
+        "successful_count",
+        "completed_session_ids",
+        "remaining_count",
+        "budget_exhausted",
+        "diagnostics",
+        "report_json",
+        "report_markdown",
+        "db_path",
+    )
+    summary = {
+        key: result.get(key)
+        for key in summary_keys
+        if key in result
+    }
+    for key in (
+        "outbox_completions",
+        "global_derivatives",
+        "search_catalog",
+        "coverage",
+    ):
+        if key in result:
+            summary[key] = result.get(key)
+    return summary
+
+
+def targeted_projection_catchup_search_gate(
+    aoa_root: Path,
+) -> dict[str, Any]:
+    """Admit only incremental search work that has a usable existing DB."""
+    db_path = search_db_path(aoa_root)
+    if not db_path.is_file():
+        return {
+            "admitted": False,
+            "status": "deferred_missing_search_index",
+            "reason": "targeted_route_never_bootstraps_global_search_db",
+            "db_path": str(db_path),
+        }
+    try:
+        hot = sqlite_search_index_hot_state(aoa_root)
+    except Exception as exc:  # pragma: no cover - defensive admission guard
+        return {
+            "admitted": False,
+            "status": "deferred_search_state_unavailable",
+            "reason": f"search_state_probe_failed:{exc.__class__.__name__}",
+            "db_path": str(db_path),
+        }
+    structural_reasons = [
+        str(reason)
+        for reason in hot.get("reasons", [])
+        if str(reason)
+        in {
+            "search_schema_mismatch",
+            "search_session_state_schema_mismatch",
+            "route_signal_classifier_version_changed",
+        }
+    ]
+    if structural_reasons:
+        return {
+            "admitted": False,
+            "status": "deferred_search_structural_rebuild",
+            "reason": "targeted_route_never_rebuilds_global_search_schema",
+            "db_path": str(db_path),
+            "structural_reasons": structural_reasons,
+        }
+    return {
+        "admitted": True,
+        "status": "incremental_search_admitted",
+        "db_path": str(db_path),
+        "hot_status": hot.get("status"),
+        "hot_reasons": hot.get("reasons", []),
+    }
+
+
+def targeted_projection_catchup(
+    *,
+    workspace_root: Path,
+    aoa_root: Path,
+    target: str,
+    profile: str = "catchup",
+    apply: bool = False,
+    max_raw_mb: float | None = None,
+    write_report: bool = False,
+    budget_seconds: float | None = None,
+    progress_every: int = 0,
+    reason: str = PROJECTION_CATCHUP_DEFAULT_REASON,
+) -> dict[str, Any]:
+    """Reconcile one session's stale local axes within one bounded slice.
+
+    This route intentionally does not invoke the all-session maintenance
+    planner.  Each mutation is admitted from a fresh session vector, and the
+    global catalog, entity registry, and graph remain explicit follow-up work.
+    """
+    if profile not in PROJECTION_CATCHUP_PROFILES:
+        raise ValueError(
+            f"projection-catchup profile must be one of {sorted(PROJECTION_CATCHUP_PROFILES)}"
+        )
+    generated_at = utc_now()
+    started = time.monotonic()
+    settings = auto_maintenance_profile(profile)
+    effective_budget = max(
+        1.0,
+        float(
+            budget_seconds
+            if budget_seconds is not None and budget_seconds > 0
+            else settings.get("budget_seconds") or 300.0
+        ),
+    )
+    deadline = started + effective_budget
+    max_raw_bytes = (
+        int(max_raw_mb * 1024 * 1024)
+        if max_raw_mb is not None
+        else None
+    )
+
+    def remaining_budget() -> float:
+        return max(0.1, deadline - time.monotonic())
+
+    def report_payload(payload: dict[str, Any]) -> dict[str, Any]:
+        if not write_report:
+            return payload
+        diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{compact_stamp()}__projection-catchup-targeted"
+        report_json = diagnostics_dir / f"{stem}.json"
+        report_md = diagnostics_dir / f"{stem}.md"
+        write_json(report_json, payload)
+        write_markdown(report_md, projection_catchup_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+        return payload
+
+    try:
+        record = resolve_session_record(aoa_root, target)
+    except ValueError as exc:
+        return report_payload(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "artifact_type": "session_memory_projection_catchup",
+                "generated_at": generated_at,
+                "ok": False,
+                "status": "targeted_session_unresolved",
+                "mutates": False,
+                "apply": apply,
+                "profile": profile,
+                "target": target,
+                "targeted": True,
+                "bounded": True,
+                "reason": reason,
+                "diagnostics": [str(exc)],
+                "actions": [],
+                "routed_axes": [],
+                "deferred_global_derivatives": {
+                    axis: {
+                        "status": "not_admitted",
+                        "reason": "targeted_session_unresolved",
+                    }
+                    for axis in TARGETED_CATCHUP_GLOBAL_DERIVATIVES
+                },
+                "expected_remaining_backlog": True,
+                "expected_catchup_remaining": True,
+                "next_route": {
+                    "id": "resolve_targeted_session",
+                    "status": "blocked",
+                    "command": [],
+                },
+            }
+        )
+
+    session_id = str(record.get("session_id") or target)
+    session_dir = session_dir_from_record(record)
+    before = session_projection_freshness_vector(
+        aoa_root=aoa_root,
+        session_dir=session_dir,
+    )
+    current = before
+    required_stale_before = [
+        axis
+        for axis in TARGETED_CATCHUP_REQUIRED_AXES
+        if not targeted_projection_catchup_axis_current(before, axis)
+    ]
+    actions: list[dict[str, Any]] = []
+    routed_axes: list[str] = []
+    deferred_axes: dict[str, dict[str, Any]] = {}
+    diagnostics: list[str] = []
+    required_route_errors: list[str] = []
+    mutates = False
+
+    def reprobe() -> dict[str, Any]:
+        nonlocal current
+        current = session_projection_freshness_vector(
+            aoa_root=aoa_root,
+            session_dir=session_dir,
+        )
+        return current
+
+    def record_action(
+        *,
+        axis: str,
+        route: str,
+        status: str,
+        result: dict[str, Any] | None = None,
+        detail: str = "",
+    ) -> None:
+        nonlocal mutates
+        summary = (
+            targeted_projection_catchup_action_summary(result or {})
+            if result is not None
+            else {}
+        )
+        route_mutates = bool(
+            result
+            and (
+                result.get("mutates") is True
+                or status == "applied"
+                and axis
+                in {
+                    "raw_capture",
+                    "stable_session_projection",
+                    "search",
+                    "episode_semantic",
+                }
+            )
+        )
+        if route_mutates:
+            mutates = True
+        row: dict[str, Any] = {
+            "axis": axis,
+            "route": route,
+            "status": status,
+            "mutates": route_mutates,
+        }
+        if detail:
+            row["detail"] = detail
+        if summary:
+            row["result"] = summary
+        actions.append(row)
+        if status in {"applied", "completed", "planned"}:
+            if axis not in routed_axes:
+                routed_axes.append(axis)
+        if status in {"error", "deferred"} and axis in TARGETED_CATCHUP_REQUIRED_AXES:
+            required_route_errors.append(axis)
+        if result and isinstance(result.get("diagnostics"), list):
+            diagnostics.extend(
+                str(item)
+                for item in result.get("diagnostics", [])
+                if item
+            )
+
+    # Fresh capture admission is the only bounded source reconciliation this
+    # route performs.  If it cannot prove the source watermark, downstream
+    # projection work is not admitted from a stale snapshot.
+    reprobe()
+    if not targeted_projection_catchup_axis_current(current, "raw_capture"):
+        if apply:
+            try:
+                capture_result = reconcile_capture_watch(
+                    aoa_root=aoa_root,
+                    limit=1,
+                    apply=True,
+                    target=session_id,
+                    now=utc_now(),
+                )
+                record_action(
+                    axis="raw_capture",
+                    route="reconcile_capture_watch",
+                    status=(
+                        "applied"
+                        if capture_result.get("ok") is True
+                        else "error"
+                    ),
+                    result=capture_result,
+                )
+            except Exception as exc:  # pragma: no cover - defensive route boundary
+                record_action(
+                    axis="raw_capture",
+                    route="reconcile_capture_watch",
+                    status="error",
+                    detail=f"{exc.__class__.__name__}:{exc}",
+                )
+            reprobe()
+        else:
+            record_action(
+                axis="raw_capture",
+                route="reconcile_capture_watch",
+                status="planned",
+                detail="fresh_capture_watermark_required_before_projection_admission",
+            )
+
+    # The required capture/stable/search chain is ordered.  A stale earlier
+    # axis prevents admission of later work in this slice.
+    if targeted_projection_catchup_axis_current(current, "raw_capture"):
+        reprobe()
+        if not targeted_projection_catchup_axis_current(
+            current,
+            "stable_session_projection",
+        ):
+            if apply:
+                try:
+                    stable_result = reindex_sessions(
+                        aoa_root=aoa_root,
+                        target=session_id,
+                        max_raw_bytes=max_raw_bytes,
+                        write_report=False,
+                        budget_seconds=remaining_budget(),
+                        progress_every=progress_every,
+                        selected_records=[record],
+                    )
+                    record_action(
+                        axis="stable_session_projection",
+                        route="reindex_sessions_targeted",
+                        status=(
+                            "applied"
+                            if stable_result.get("ok") is True
+                            else "error"
+                        ),
+                        result=stable_result,
+                    )
+                except Exception as exc:  # pragma: no cover - defensive route boundary
+                    record_action(
+                        axis="stable_session_projection",
+                        route="reindex_sessions_targeted",
+                        status="error",
+                        detail=f"{exc.__class__.__name__}:{exc}",
+                    )
+                reprobe()
+            else:
+                record_action(
+                    axis="stable_session_projection",
+                    route="reindex_sessions_targeted",
+                    status="planned",
+                    detail="stable_session_projection_stale",
+                )
+
+        reprobe()
+        if (
+            targeted_projection_catchup_axis_current(
+                current,
+                "stable_session_projection",
+            )
+            and not targeted_projection_catchup_axis_current(
+                current,
+                "search",
+            )
+        ):
+            search_gate = targeted_projection_catchup_search_gate(aoa_root)
+            if not search_gate.get("admitted"):
+                deferred_axes["search"] = search_gate
+                record_action(
+                    axis="search",
+                    route="search_index_sessions_targeted",
+                    status="deferred",
+                    detail=str(search_gate.get("reason") or search_gate.get("status") or "search_route_not_admitted"),
+                )
+            elif apply:
+                try:
+                    search_result = search_index_sessions(
+                        aoa_root=aoa_root,
+                        target=session_id,
+                        max_raw_bytes=max_raw_bytes,
+                        rebuild=False,
+                        write_report=False,
+                        selected_records=[record],
+                        budget_seconds=remaining_budget(),
+                        progress_every=progress_every,
+                        refresh_catalog=False,
+                        include_entity_registry=False,
+                        source_scope_complete=False,
+                        defer_global_derivatives=True,
+                    )
+                    record_action(
+                        axis="search",
+                        route="search_index_sessions_targeted",
+                        status=(
+                            "applied"
+                            if search_result.get("ok") is True
+                            else "error"
+                        ),
+                        result=search_result,
+                    )
+                except Exception as exc:  # pragma: no cover - defensive route boundary
+                    record_action(
+                        axis="search",
+                        route="search_index_sessions_targeted",
+                        status="error",
+                        detail=f"{exc.__class__.__name__}:{exc}",
+                    )
+                reprobe()
+            else:
+                record_action(
+                    axis="search",
+                    route="search_index_sessions_targeted",
+                    status="planned",
+                    detail="exact_and_lexical_search_consumer_stale",
+                )
+
+        # Episode semantic projection is a local per-session consumer.  It is
+        # admitted only after the required chain and an existing search DB;
+        # it never opens a global rebuild or registry route.
+        reprobe()
+        if (
+            targeted_projection_catchup_axis_current(
+                current,
+                "stable_session_projection",
+            )
+            and targeted_projection_catchup_axis_current(current, "search")
+            and not targeted_projection_catchup_axis_current(
+                current,
+                "episode_semantic",
+            )
+        ):
+            episode_gate = targeted_projection_catchup_search_gate(aoa_root)
+            if not episode_gate.get("admitted"):
+                deferred_axes["episode_semantic"] = episode_gate
+                record_action(
+                    axis="episode_semantic",
+                    route="episode_semantic_index_sessions_targeted",
+                    status="deferred",
+                    detail=str(episode_gate.get("reason") or episode_gate.get("status") or "episode_route_not_admitted"),
+                )
+            elif apply:
+                try:
+                    episode_result = episode_semantic_index_sessions(
+                        aoa_root=aoa_root,
+                        target=session_id,
+                        budget_seconds=remaining_budget(),
+                        progress_every=progress_every,
+                        write_report=False,
+                        dirty_only=False,
+                        max_cost_class="light"
+                        if profile == "catchup"
+                        else "auto",
+                        selected_records=[record],
+                    )
+                    record_action(
+                        axis="episode_semantic",
+                        route="episode_semantic_index_sessions_targeted",
+                        status=(
+                            "applied"
+                            if episode_result.get("ok") is True
+                            else "error"
+                        ),
+                        result=episode_result,
+                    )
+                except Exception as exc:  # pragma: no cover - defensive route boundary
+                    record_action(
+                        axis="episode_semantic",
+                        route="episode_semantic_index_sessions_targeted",
+                        status="error",
+                        detail=f"{exc.__class__.__name__}:{exc}",
+                    )
+                reprobe()
+            else:
+                record_action(
+                    axis="episode_semantic",
+                    route="episode_semantic_index_sessions_targeted",
+                    status="planned",
+                    detail="episode_semantic_consumer_stale",
+                )
+
+    # These are deliberately not invoked from a targeted session route.
+    # Search may write a bounded deferral marker, but no catalog rebuild,
+    # entity-registry refresh, or graph maintenance is admitted here.
+    deferred_global_derivatives = {
+        axis: {
+            "status": "deferred_bounded_session_scope",
+            "reason": "targeted_catchup_defers_global_derivative",
+            "target_session_id": session_id,
+            "next_route": (
+                "projection-catchup all --profile deep"
+                if axis == "graph"
+                else "search-catalog --refresh"
+            ),
+        }
+        for axis in TARGETED_CATCHUP_GLOBAL_DERIVATIVES
+    }
+    final = reprobe()
+    required_stale_after = [
+        axis
+        for axis in TARGETED_CATCHUP_REQUIRED_AXES
+        if not targeted_projection_catchup_axis_current(final, axis)
+    ]
+    optional_stale_after = [
+        axis
+        for axis in ("episode_semantic",)
+        if not targeted_projection_catchup_axis_current(final, axis)
+    ]
+    required_satisfied = not required_stale_after
+    initial_required_satisfied = not required_stale_before
+    global_derivative_deferred = bool(deferred_global_derivatives)
+    if initial_required_satisfied:
+        status = "freshness_obligation_already_satisfied"
+    elif not apply:
+        status = "planned_targeted_catchup"
+    elif required_satisfied:
+        status = (
+            "targeted_catchup_applied_with_deferred_global_derivatives"
+            if global_derivative_deferred or optional_stale_after
+            else "targeted_catchup_applied"
+        )
+    else:
+        status = "targeted_catchup_remaining"
+    if not required_satisfied:
+        diagnostics.append(
+            "targeted_required_axes_remaining:" + ",".join(required_stale_after)
+        )
+    diagnostics = list(dict.fromkeys(diagnostics))
+    command = [
+        "python3",
+        str(Path(__file__).resolve()),
+        "projection-catchup",
+        target,
+        "--workspace-root",
+        str(workspace_root),
+        "--aoa-root",
+        str(aoa_root),
+        "--profile",
+        profile,
+        "--apply",
+    ]
+    next_route: dict[str, Any]
+    if required_stale_after:
+        next_route = {
+            "id": "rerun_targeted_projection_catchup",
+            "status": "remaining",
+            "command": command,
+            "reason": "required_capture_stable_or_search_watermark_remaining",
+        }
+    elif optional_stale_after:
+        next_route = {
+            "id": "rerun_targeted_local_consumer_catchup",
+            "status": "remaining",
+            "command": command,
+            "reason": "local_episode_consumer_remaining",
+        }
+    else:
+        next_route = {
+            "id": "defer_targeted_global_derivatives",
+            "status": "deferred",
+            "command": [
+                "python3",
+                str(Path(__file__).resolve()),
+                "projection-catchup",
+                "all",
+                "--workspace-root",
+                str(workspace_root),
+                "--aoa-root",
+                str(aoa_root),
+                "--profile",
+                "deep",
+                "--apply",
+            ],
+            "reason": "catalog_entity_registry_and_graph_are_global_derivatives",
+        }
+    try:
+        search_shards = session_memory_search_shard_projection_summary(aoa_root)
+    except Exception as exc:  # pragma: no cover - defensive diagnostic layer
+        search_shards = {
+            "status": "unavailable",
+            "diagnostics": [f"{exc.__class__.__name__}:{exc}"],
+        }
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_projection_catchup",
+        "generated_at": generated_at,
+        "ok": bool(required_satisfied or not apply),
+        "status": status,
+        "mutates": mutates,
+        "apply": apply,
+        "profile": profile,
+        "target": target,
+        "session_id": session_id,
+        "session_dir": str(session_dir),
+        "targeted": True,
+        "bounded": True,
+        "reason": reason,
+        "budget_seconds": effective_budget,
+        "elapsed_ms": int((time.monotonic() - started) * 1000),
+        "admission": {
+            "reprobed_before_route": True,
+            "required_axes": list(TARGETED_CATCHUP_REQUIRED_AXES),
+            "stale_axes_before": targeted_projection_catchup_stale_axes(before),
+            "required_stale_before": required_stale_before,
+            "required_stale_after": required_stale_after,
+        },
+        "freshness_before": before,
+        "freshness_after": final,
+        "stale_axes_before": targeted_projection_catchup_stale_axes(before),
+        "stale_axes_after": targeted_projection_catchup_stale_axes(final),
+        "required_stale_axes_before": required_stale_before,
+        "required_stale_axes_after": required_stale_after,
+        "routed_axes": routed_axes,
+        "deferred_axes": deferred_axes,
+        "actions": actions,
+        "deferred_global_derivatives": deferred_global_derivatives,
+        "expected_remaining_backlog": bool(
+            required_stale_after or optional_stale_after or global_derivative_deferred
+        ),
+        "expected_catchup_remaining": bool(
+            required_stale_after or optional_stale_after or global_derivative_deferred
+        ),
+        "covers": {
+            "raw_authority": False,
+            "stable_session_projection": "targeted" if "stable_session_projection" in routed_axes else "not_admitted",
+            "search": "targeted" if "search" in routed_axes else "not_admitted",
+            "episode_semantic": "targeted" if "episode_semantic" in routed_axes else "not_admitted",
+            "search_catalog": "deferred_global_derivative",
+            "entity_registry": "deferred_global_derivative",
+            "graph": "deferred_global_derivative",
+        },
+        "search_shards": search_shards,
+        "next_route": next_route,
+        "next_command": next_route.get("command", []),
+        "resource_launcher": projection_catchup_resource_launcher(
+            profile=profile,
+            target=target,
+            workspace_root=workspace_root,
+            aoa_root=aoa_root,
+            apply=True,
+            write_report=True,
+            reason=reason,
+        ),
+        "diagnostics": diagnostics,
+        "authority_boundary": PROJECTION_CATCHUP_AUTHORITY_BOUNDARY,
+        "mcp_boundary": PROJECTION_CATCHUP_MCP_BOUNDARY,
+    }
+    if required_route_errors:
+        payload["required_route_errors"] = required_route_errors
+    return report_payload(payload)
 
 
 def projection_catchup_policy(profile: str) -> dict[str, Any]:
@@ -60161,6 +61346,23 @@ def projection_catchup(
 ) -> dict[str, Any]:
     if profile not in PROJECTION_CATCHUP_PROFILES:
         raise ValueError(f"projection-catchup profile must be one of {sorted(PROJECTION_CATCHUP_PROFILES)}")
+    # An explicit registered session uses the bounded per-session route.  An
+    # empty registry retains the legacy planner fallback for diagnostics and
+    # fixtures that intentionally exercise lock/selection behavior without a
+    # session source set.
+    if target != "all" and registry_sessions(aoa_root):
+        return targeted_projection_catchup(
+            workspace_root=workspace_root,
+            aoa_root=aoa_root,
+            target=target,
+            profile=profile,
+            apply=apply,
+            max_raw_mb=max_raw_mb,
+            write_report=write_report,
+            budget_seconds=budget_seconds,
+            progress_every=progress_every,
+            reason=reason,
+        )
     max_raw_bytes = int(max_raw_mb * 1024 * 1024) if max_raw_mb is not None else None
     token_max_raw_bytes = int(token_max_raw_mb * 1024 * 1024) if token_max_raw_mb is not None else None
     auto_payload = auto_maintenance(
@@ -61079,6 +62281,134 @@ def child_json_payload_from_stdout_tail(text: str, *, aoa_root: Path) -> dict[st
     return {}
 
 
+def recover_session_projection_progress_evidence(
+    *,
+    aoa_root: Path,
+    execution_id: str | None,
+    target: str = "all",
+) -> dict[str, Any]:
+    """Recover only exact-run publication receipts after child output loss."""
+    execution_key = str(execution_id or "").strip()
+    if not execution_key:
+        return {
+            "verified": False,
+            "source": "durable_session_projection_publication_receipts",
+            "reason": "missing_execution_id",
+            "receipt_count": 0,
+            "mutation_units": 0,
+            "scan_limit": 128,
+            "scan_truncated": False,
+            "remaining_work_unknown": True,
+            "truth_status": "bounded_mutation_progress_not_proven",
+        }
+    receipt_root = (
+        aoa_root
+        / SESSION_PROJECTION_PROGRESS_RECEIPTS_ROOT
+        / safe_slug(execution_key, fallback="unbound")
+    )
+    if not receipt_root.is_dir():
+        return {
+            "verified": False,
+            "source": "durable_session_projection_publication_receipts",
+            "execution_id": execution_key,
+            "reason": "receipt_directory_absent",
+            "receipt_count": 0,
+            "mutation_units": 0,
+            "scan_limit": 128,
+            "scan_truncated": False,
+            "remaining_work_unknown": True,
+            "truth_status": "bounded_mutation_progress_not_proven",
+        }
+    target_key = str(target or "all")
+    receipts: list[dict[str, Any]] = []
+    receipt_paths = sorted(receipt_root.glob("*.json"))
+    scan_truncated = len(receipt_paths) > 128
+    for receipt_path in receipt_paths[:128]:
+        receipt = read_json(receipt_path, {})
+        if not isinstance(receipt, dict):
+            continue
+        if not (
+            int_value(
+                receipt.get("schema_version"),
+                -1,
+            )
+            == SESSION_PROJECTION_PROGRESS_RECEIPT_SCHEMA_VERSION
+            and receipt.get("artifact_type")
+            == "session_projection_publication_progress_receipt"
+            and receipt.get("status") == "published"
+            and receipt.get("mutates") is True
+            and str(receipt.get("execution_id") or "") == execution_key
+        ):
+            continue
+        if target_key != "all" and target_key not in {
+            str(receipt.get("session_id") or ""),
+            str(receipt.get("session_label") or ""),
+        }:
+            continue
+        outbox = (
+            receipt.get("outbox")
+            if isinstance(receipt.get("outbox"), dict)
+            else {}
+        )
+        receipts.append(
+            {
+                "path": str(receipt_path),
+                "session_id": str(receipt.get("session_id") or ""),
+                "session_label": str(receipt.get("session_label") or ""),
+                "publish_id": str(receipt.get("publish_id") or ""),
+                "work_id": str(receipt.get("work_id") or ""),
+                "outbox_record_id": str(outbox.get("record_id") or ""),
+                "change_count": max(0, int_value(outbox.get("change_count"))),
+                "required_downstream_consumers": sorted(
+                    str(item)
+                    for item in (
+                        outbox.get("required_downstream_consumers", [])
+                        if isinstance(
+                            outbox.get("required_downstream_consumers"),
+                            list,
+                        )
+                        else []
+                    )
+                    if item
+                ),
+                "published_at": str(receipt.get("published_at") or ""),
+            }
+        )
+    mutation_units = len(receipts)
+    return {
+        "verified": bool(receipts),
+        "source": "durable_session_projection_publication_receipts",
+        "execution_id": execution_key,
+        "target": target_key,
+        "reason": (
+            "receipt_recovered"
+            if receipts
+            else "receipt_scan_truncated"
+            if scan_truncated
+            else "matching_receipt_absent"
+        ),
+        "receipt_count": mutation_units,
+        "mutation_units": mutation_units,
+        "scan_limit": 128,
+        "scan_truncated": scan_truncated,
+        "session_ids": sorted(
+            {
+                str(item.get("session_id") or "")
+                for item in receipts
+                if str(item.get("session_id") or "")
+            }
+        ),
+        "receipts": receipts[:32],
+        "remaining_work_unknown": True,
+        "truth_status": (
+            "bounded_atomic_publication_progress_recovered_"
+            "child_completion_and_global_freshness_unverified"
+            if receipts
+            else "bounded_mutation_progress_not_proven"
+        ),
+    }
+
+
 def maintenance_child_defer_status(child_payload: dict[str, Any]) -> str:
     if not isinstance(child_payload, dict) or not child_payload:
         return ""
@@ -61394,12 +62724,21 @@ def maintenance_child_completion_semantics(
     resource_ok: Any,
     execution_ok: Any,
     execution_returncode: Any,
+    persisted_progress_evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    persisted_progress_evidence = (
+        persisted_progress_evidence
+        if isinstance(persisted_progress_evidence, dict)
+        else {}
+    )
     child_result_present = bool(child_payload)
     child_artifact_type = str(child_payload.get("artifact_type") or "")
     recognized_child = bool(child_progress_evidence.get("recognized_child"))
     remaining_work = bool(child_progress_evidence.get("remaining_work"))
     progress_proven = bool(child_progress_evidence.get("verified") is True)
+    persisted_progress_proven = bool(
+        persisted_progress_evidence.get("verified") is True
+    )
     handoff_required = bool(deferred_handoff.get("required"))
     process_completed = bool(
         resource_ok is True
@@ -61410,6 +62749,8 @@ def maintenance_child_completion_semantics(
         bounded_scope_status = "completed_with_deferred_handoff"
     elif progress_proven and remaining_work:
         bounded_scope_status = "progressed_with_remaining_same_scope"
+    elif persisted_progress_proven:
+        bounded_scope_status = "progressed_with_unknown_remaining"
     elif recognized_child and child_payload.get("ok") is True and not remaining_work:
         bounded_scope_status = "child_reported_complete"
     elif child_result_present:
@@ -61418,6 +62759,8 @@ def maintenance_child_completion_semantics(
         bounded_scope_status = "child_result_missing"
     if progress_proven:
         semantic_progress_status = "bounded_mutation_progress_proven"
+    elif persisted_progress_proven:
+        semantic_progress_status = "bounded_publication_progress_recovered"
     elif handoff_required and remaining_work:
         semantic_progress_status = "handoff_with_no_proven_bounded_mutation"
     else:
@@ -61445,9 +62788,17 @@ def maintenance_child_completion_semantics(
             "child_status": maintenance_child_defer_status(child_payload),
         },
         "semantic_progress": {
-            "proven": progress_proven,
+            "proven": progress_proven or persisted_progress_proven,
             "status": semantic_progress_status,
-            "evidence": child_progress_evidence,
+            "evidence": (
+                child_progress_evidence
+                if progress_proven
+                else persisted_progress_evidence
+                if persisted_progress_proven
+                else child_progress_evidence
+            ),
+            "child_result_verified": child_result_present,
+            "remaining_work_unknown": persisted_progress_proven,
         },
         "global_semantic_completion": {
             "proven": False,
@@ -62104,7 +63455,10 @@ def write_auto_maintenance_retry_queue(
             if isinstance(item, dict)
         ][:AUTO_MAINTENANCE_RETRY_HISTORY_LIMIT],
     }
-    write_json(auto_maintenance_retry_paths(aoa_root)["queue"], persisted)
+    write_json_durable(
+        auto_maintenance_retry_paths(aoa_root)["queue"],
+        persisted,
+    )
     payload.clear()
     payload.update(persisted)
     payload["diagnostics"] = []
@@ -62162,6 +63516,11 @@ def auto_maintenance_resource_status_progressed(
     payload: dict[str, Any] | None = None,
 ) -> bool:
     normalized = str(status or "")
+    if isinstance(payload, dict) and payload.get(
+        "persisted_progress_recovered"
+    ):
+        evidence = payload.get("persisted_progress_evidence")
+        return isinstance(evidence, dict) and evidence.get("verified") is True
     if normalized in AUTO_MAINTENANCE_CHILD_PROGRESS_RETRY_STATUSES and isinstance(payload, dict):
         progress_evidence = (
             payload.get("child_progress_evidence")
@@ -62924,6 +64283,26 @@ def auto_maintenance_retry_dispatch(
                 )
             )
             if persistent_freshness_obligation:
+                before_satisfied_axes = {
+                    str(item)
+                    for item in obligation_before.get(
+                        "satisfied_axes", []
+                    )
+                    if item
+                }
+                after_satisfied_axes = {
+                    str(item)
+                    for item in obligation_after.get(
+                        "satisfied_axes", []
+                    )
+                    if item
+                }
+                obligation_progressed = bool(
+                    obligation_progressed
+                    or len(after_satisfied_axes)
+                    > len(before_satisfied_axes)
+                )
+            if persistent_freshness_obligation:
                 launch_result_verified = True
                 if obligation_after.get("ok") is True:
                     launch_status = "freshness_obligation_satisfied"
@@ -63247,8 +64626,14 @@ def auto_maintenance_resource_launch(
     progress_every: int | None = None,
     schedule_automatic_retry: bool = True,
     child_command_override: list[str] | None = None,
+    execution_id: str | None = None,
 ) -> dict[str, Any]:
     settings = auto_maintenance_profile(profile)
+    execution_id = str(
+        execution_id
+        or f"resource-{compact_stamp()}-{os.getpid()}-"
+        f"{uuid.uuid4().hex[:12]}"
+    )
     runtime_envelope = auto_maintenance_runtime_envelope(
         profile,
         budget_seconds=budget_seconds,
@@ -63440,6 +64825,7 @@ def auto_maintenance_resource_launch(
         resource_estimate_source=effective_resource_estimate_source,
         resource_estimate_confidence=effective_resource_estimate_confidence,
         hard_timeout_seconds=effective_hard_timeout_seconds,
+        execution_id=execution_id,
     )
     started = time.monotonic()
     generated_at = utc_now()
@@ -63488,6 +64874,16 @@ def auto_maintenance_resource_launch(
         else {}
     )
     child_result_verified = bool(child_payload)
+    persisted_progress_evidence = (
+        recover_session_projection_progress_evidence(
+            aoa_root=aoa_root,
+            execution_id=execution_id,
+            target=target,
+        )
+    )
+    persisted_progress_recovered = bool(
+        persisted_progress_evidence.get("verified") is True
+    )
     child_status = maintenance_child_defer_status(child_payload)
     child_diagnostics = (
         [str(item) for item in child_payload.get("diagnostics", []) if item]
@@ -63523,9 +64919,17 @@ def auto_maintenance_resource_launch(
         status = "resource_denied"
         diagnostics.extend(f"resource_denied:{item}" for item in denied_reasons)
     elif "resource_launcher_timeout" in diagnostics:
-        status = "resource_launcher_timeout"
+        status = (
+            "resource_launcher_timeout_progress_recovered"
+            if persisted_progress_recovered
+            else "resource_launcher_timeout"
+        )
     elif execution_hard_timed_out:
-        status = "resource_hard_timeout"
+        status = (
+            "resource_hard_timeout_progress_recovered"
+            if persisted_progress_recovered
+            else "resource_hard_timeout"
+        )
         diagnostics.append("resource_hard_timeout")
     elif diagnostics:
         status = "resource_launcher_failed"
@@ -63554,7 +64958,11 @@ def auto_maintenance_resource_launch(
         status = "child_failed"
         diagnostics.extend(child_diagnostics or ["auto_maintenance_child_failed"])
     elif resource_ok is True and not child_result_verified:
-        status = "resource_child_result_unverified"
+        status = (
+            "resource_child_result_unverified_progress_recovered"
+            if persisted_progress_recovered
+            else "resource_child_result_unverified"
+        )
         diagnostics.append("resource_launcher_succeeded_without_verifiable_child_result")
     elif resource_ok is True and (execution_ok is True or execution_returncode == 0):
         status = "completed"
@@ -64303,6 +65711,7 @@ def auto_maintenance_resource_launch(
         resource_ok=resource_ok,
         execution_ok=execution_ok,
         execution_returncode=execution_returncode,
+        persisted_progress_evidence=persisted_progress_evidence,
     )
     payload = {
         "schema_version": SCHEMA_VERSION,
@@ -64310,12 +65719,14 @@ def auto_maintenance_resource_launch(
         "generated_at": generated_at,
         "ok": payload_ok,
         "status": status,
+        "execution_id": execution_id,
         "mutates": bool(
             apply
             and (
                 payload_ok
-                or child_progressed_with_remaining
-                or fallback_ok
+            or child_progressed_with_remaining
+            or persisted_progress_recovered
+            or fallback_ok
                 or fallback_progressed
                 or graph_predecessor_handoff_queued
             )
@@ -64392,6 +65803,8 @@ def auto_maintenance_resource_launch(
             child_progressed_with_remaining
         ),
         "child_progress_evidence": child_progress_evidence,
+        "persisted_progress_recovered": persisted_progress_recovered,
+        "persisted_progress_evidence": persisted_progress_evidence,
         "completion_semantics": completion_semantics,
         "child": compact_maintenance_child_summary(child_payload),
         "stdout_tail": stdout[-4000:],
@@ -66236,6 +67649,9 @@ def session_projection_current_work_identity(
 
 def session_projection_work_entries(
     aoa_root: Path,
+    *,
+    verification_limit: int | None = None,
+    start_after: str = "",
 ) -> list[dict[str, Any]]:
     """Classify resumable work without deleting current compatible progress."""
     sessions_root = aoa_root / SESSION_ROOT
@@ -66245,7 +67661,31 @@ def session_projection_work_entries(
     current_identity_cache: dict[str, dict[str, Any]] = {}
     entries: list[dict[str, Any]] = []
     marker = ".projection-work-"
-    for path in sorted(sessions_root.glob(".*.projection-work-*")):
+    paths = [
+        path
+        for path in sorted(sessions_root.glob(".*.projection-work-*"))
+        if not path.is_symlink() and path.is_dir()
+    ]
+    if verification_limit is None:
+        selected_paths = paths
+    elif verification_limit <= 0 or not paths:
+        selected_paths = []
+    else:
+        start_index = next(
+            (
+                index
+                for index, path in enumerate(paths)
+                if path.name > start_after
+            ),
+            0,
+        )
+        rotated = paths[start_index:] + paths[:start_index]
+        selected_paths = rotated[:verification_limit]
+    selection_rank = {
+        path: index + 1 for index, path in enumerate(selected_paths)
+    }
+    selected_path_set = set(selected_paths)
+    for path in paths:
         if path.is_symlink() or not path.is_dir():
             continue
         name = path.name
@@ -66255,6 +67695,23 @@ def session_projection_work_entries(
         if not re.fullmatch(r"[0-9a-f]{24}", work_id_prefix):
             continue
         owner_session_dir = sessions_root / session_name
+        if path not in selected_path_set:
+            entries.append(
+                {
+                    "path": str(path),
+                    "session_name": session_name,
+                    "owner_session_dir": str(owner_session_dir),
+                    "work_id_prefix": work_id_prefix,
+                    "status": "verification_deferred",
+                    "safe_to_remove": False,
+                    "verification_selected": False,
+                    "selection_rank": 0,
+                    "diagnostics": [
+                        "projection_work_verification_deferred_by_limit"
+                    ],
+                }
+            )
+            continue
         checkpoint = read_json(
             session_projection_work_checkpoint_path(path), {}
         )
@@ -66369,6 +67826,8 @@ def session_projection_work_entries(
                 "size_bytes": path_total_size(path),
                 "age_seconds": age_seconds,
                 "latest_mtime": latest_mtime,
+                "verification_selected": True,
+                "selection_rank": selection_rank[path],
                 "diagnostics": list(current.get("diagnostics", [])),
             }
         )
@@ -66377,8 +67836,15 @@ def session_projection_work_entries(
 
 def session_projection_work_status(
     aoa_root: Path,
+    *,
+    verification_limit: int | None = None,
+    start_after: str = "",
 ) -> dict[str, Any]:
-    entries = session_projection_work_entries(aoa_root)
+    entries = session_projection_work_entries(
+        aoa_root,
+        verification_limit=verification_limit,
+        start_after=start_after,
+    )
     obsolete = [
         entry
         for entry in entries
@@ -66391,6 +67857,19 @@ def session_projection_work_status(
         if entry.get("status")
         in {"blocked_unverified", "obsolete_lease_unresolved"}
     ]
+    deferred = [
+        entry
+        for entry in entries
+        if entry.get("status") == "verification_deferred"
+    ]
+    selected = sorted(
+        (
+            entry
+            for entry in entries
+            if entry.get("verification_selected")
+        ),
+        key=lambda entry: int_value(entry.get("selection_rank")),
+    )
     return {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "session_projection_work_status",
@@ -66400,6 +67879,8 @@ def session_projection_work_status(
             if obsolete
             else "blocked_unverified"
             if blocked
+            else "verification_deferred"
+            if deferred
             else "active_or_resumable"
             if entries
             else "clean"
@@ -66416,6 +67897,15 @@ def session_projection_work_status(
             for entry in entries
         ),
         "blocked_count": len(blocked),
+        "verified_count": len(selected),
+        "verification_deferred_count": len(deferred),
+        "verification_limit": verification_limit,
+        "start_after": start_after,
+        "next_cursor": (
+            Path(str(selected[-1].get("path") or "")).name
+            if selected
+            else start_after
+        ),
         "entries": entries,
         "diagnostics": (
             ["obsolete_session_projection_work"] if obsolete else []
@@ -66441,6 +67931,7 @@ def maintenance_cleanup_markdown(payload: dict[str, Any]) -> str:
         f"- search_rebuild_tmp_removed: `{action_counts.get('search_rebuild_tmp_removed', 0)}`",
         f"- session_projection_stage_removed: `{action_counts.get('session_projection_stage_removed', 0)}`",
         f"- obsolete_projection_work_removed: `{action_counts.get('obsolete_projection_work_removed', 0)}`",
+        f"- projection_work_cursor_advanced: `{action_counts.get('projection_work_cursor_advanced', 0)}`",
         "",
         payload.get("stop_line", ""),
     ]
@@ -66455,6 +67946,7 @@ def maintenance_cleanup(
     surface: str = "all",
     inspect_session_projection_work: bool = True,
     session_stage_verification_limit: int | None = None,
+    session_work_verification_limit: int | None = None,
     confirmed_unowned_session_stage_digests: set[str]
     | None = None,
 ) -> dict[str, Any]:
@@ -66491,6 +67983,17 @@ def maintenance_cleanup(
     }
     lock_path = maintenance_lock_path(aoa_root)
     state_path = maintenance_coordinator_state_path(aoa_root)
+    work_cleanup_state_path = (
+        aoa_root
+        / DIAGNOSTICS_ROOT
+        / "session-projection-work-cleanup-state.json"
+    )
+    work_cleanup_state = read_json(work_cleanup_state_path, {})
+    work_cleanup_cursor = str(
+        work_cleanup_state.get("cursor")
+        if isinstance(work_cleanup_state, dict)
+        else ""
+    )
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock_handle: Any | None = None
     lock_acquired = False
@@ -66535,7 +68038,11 @@ def maintenance_cleanup(
         else dict(empty_surface_status)
     )
     session_work_status = (
-        session_projection_work_status(aoa_root)
+        session_projection_work_status(
+            aoa_root,
+            verification_limit=session_work_verification_limit,
+            start_after=work_cleanup_cursor,
+        )
         if (
             include_session_projection
             and inspect_session_projection_work
@@ -66675,6 +68182,7 @@ def maintenance_cleanup(
         "search_rebuild_tmp_removed": 0,
         "session_projection_stage_removed": 0,
         "obsolete_projection_work_removed": 0,
+        "projection_work_cursor_advanced": 0,
     }
     if apply and not lock_active and not confirmation_errors:
         if stale_active_job:
@@ -66893,6 +68401,30 @@ def maintenance_cleanup(
                     except OSError:
                         pass
                 lease_handle.close()
+        next_work_cleanup_cursor = str(
+            session_work_status.get("next_cursor") or ""
+        )
+        if (
+            inspect_session_projection_work
+            and session_work_verification_limit is not None
+            and int_value(session_work_status.get("verified_count")) > 0
+            and next_work_cleanup_cursor
+            and next_work_cleanup_cursor != work_cleanup_cursor
+        ):
+            write_json(
+                work_cleanup_state_path,
+                {
+                    "schema_version": 1,
+                    "artifact_type": (
+                        "session_projection_work_cleanup_cursor"
+                    ),
+                    "updated_at": utc_now(),
+                    "cursor": next_work_cleanup_cursor,
+                    "verification_limit": session_work_verification_limit,
+                },
+            )
+            action_counts["projection_work_cursor_advanced"] = 1
+            work_cleanup_cursor = next_work_cleanup_cursor
         if include_graph:
             graph_tmp_status = graph_rebuild_tmp_status(aoa_root)
         if include_search:
@@ -66907,7 +68439,13 @@ def maintenance_cleanup(
                 )
             )
             session_work_status = session_projection_work_status(
-                aoa_root
+                aoa_root,
+                verification_limit=(
+                    0
+                    if session_work_verification_limit is not None
+                    else None
+                ),
+                start_after=work_cleanup_cursor,
             )
 
     if lock_handle is not None:
@@ -66927,6 +68465,9 @@ def maintenance_cleanup(
         )
         or bool(session_work_status.get("needs_cleanup"))
         or int_value(
+            session_work_status.get("verification_deferred_count")
+        )
+        or int_value(
             session_stage_status.get(
                 "journal_recovery_count"
             )
@@ -66943,6 +68484,9 @@ def maintenance_cleanup(
         or bool(search_tmp_status.get("needs_cleanup"))
         or bool(session_stage_status.get("needs_cleanup"))
         or bool(session_work_status.get("needs_cleanup"))
+        or int_value(
+            session_work_status.get("verification_deferred_count")
+        )
         or int_value(
             session_stage_status.get(
                 "journal_recovery_count"
@@ -66994,6 +68538,12 @@ def maintenance_cleanup(
         "surface": selected_surface,
         "session_stage_verification_limit": (
             session_stage_verification_limit
+        ),
+        "session_work_verification_limit": (
+            session_work_verification_limit
+        ),
+        "session_work_cleanup_state_path": str(
+            work_cleanup_state_path
         ),
         "status": status,
         "aoa_root": str(aoa_root),
@@ -67948,9 +69498,15 @@ def auto_maintenance(
     reason: str = "timer",
     budget_seconds: float | None = None,
     progress_every: int = 0,
+    execution_id: str | None = None,
 ) -> dict[str, Any]:
     now = utc_now()
     auto_function_started = time.monotonic()
+    execution_id = str(
+        execution_id
+        or f"auto-maintenance-{compact_stamp()}-{os.getpid()}-"
+        f"{uuid.uuid4().hex[:12]}"
+    )
     settings = auto_maintenance_profile(profile)
     profile_since_days = settings.get("since_days")
     effective_since_days = since_days if since_days is not None else (int_value(profile_since_days) if profile_since_days is not None else None)
@@ -68358,6 +69914,7 @@ def auto_maintenance(
                     budget_seconds=heavy_lane_budget,
                     split_publish_lock=True,
                     progress_every=progress_every,
+                    execution_id=execution_id,
                 )
             finally:
                 release_heavy_projection_lane(
@@ -68404,6 +69961,7 @@ def auto_maintenance(
         aoa_root=aoa_root,
         apply=apply,
         write_report=write_report,
+        execution_id=execution_id,
     )
     auto_touched_surfaces = maintenance_surfaces(
         repair_indexes=effective_repair_indexes,
@@ -68458,6 +70016,7 @@ def auto_maintenance(
                         "apply": apply,
                         "profile": profile,
                         "target": target,
+                        "execution_id": execution_id,
                         "selection_scope": selection_scope,
                         "query_demand": query_demand,
                         "resource_class": effective_resource_class,
@@ -68550,6 +70109,7 @@ def auto_maintenance(
 
         def finalize_auto_payload(payload: dict[str, Any]) -> dict[str, Any]:
             nonlocal coordinator_finished
+            payload["execution_id"] = execution_id
             coordinator_finished = finish_maintenance_coordinator_job(aoa_root, coordinator_owner, result=payload)
             write_maintenance_lock_owner(lock_handle, {**coordinator_finished, "lock_released_at": utc_now()})
             payload["maintenance_lock_path"] = str(lock_path)
@@ -69629,6 +71189,7 @@ def auto_maintenance(
                 )
                 else None
             ),
+            execution_id=execution_id,
         )
         maintenance_counts = (
             maintenance.get("action_counts")
@@ -199939,6 +201500,7 @@ def command_auto_maintenance(args: argparse.Namespace) -> int:
         reason=args.reason,
         budget_seconds=args.budget_seconds,
         progress_every=args.progress_every,
+        execution_id=getattr(args, "execution_id", None),
     )
     print(json.dumps(auto_maintenance_print_payload(payload, full=args.full), indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
@@ -201241,6 +202803,11 @@ def command_maintenance_cleanup(args: argparse.Namespace) -> int:
             if args.session_stage_verification_limit is not None
             else 1
             if args.apply
+            else None
+        ),
+        session_work_verification_limit=(
+            max(0, int(args.session_work_verification_limit))
+            if args.session_work_verification_limit is not None
             else None
         ),
         confirmed_unowned_session_stage_digests=set(
@@ -209174,16 +210741,24 @@ def command_doctor(args: argparse.Namespace) -> int:
     projection_stage_dirs = [
         path for path in session_dirs if session_projection_stage_identity(path)
     ]
+    projection_work_dirs = [
+        path
+        for path in session_dirs
+        if path.name.startswith(".")
+        and ".projection-work-" in path.name
+    ]
     archive_dirs = [
         path
         for path in session_dirs
         if path not in projection_stage_dirs
+        and path not in projection_work_dirs
         and (path / "session.manifest.json").exists()
     ]
     hook_only_dirs = [
         path for path in session_dirs
         if path not in archive_dirs
         and path not in projection_stage_dirs
+        and path not in projection_work_dirs
         and (path / "hooks").is_dir()
         and (
             (path / "hooks" / "events.jsonl").exists()
@@ -209195,12 +210770,20 @@ def command_doctor(args: argparse.Namespace) -> int:
         if path not in archive_dirs
         and path not in hook_only_dirs
         and path not in projection_stage_dirs
+        and path not in projection_work_dirs
     ]
     if projection_stage_dirs:
         warnings.append(
             "session projection stages are excluded from archive health counts; "
             "use maintenance-cleanup for authority-aware cleanup status: "
             + ", ".join(path.name for path in projection_stage_dirs[:8])
+        )
+    if projection_work_dirs:
+        warnings.append(
+            "session projection work dirs are excluded from archive health "
+            "counts; use maintenance-cleanup --inspect-session-projection-work "
+            "for authority-aware cleanup status: "
+            + ", ".join(path.name for path in projection_work_dirs[:8])
         )
     if hook_only_dirs:
         warnings.append(
@@ -209410,6 +210993,7 @@ def command_doctor(args: argparse.Namespace) -> int:
         "archive_dir_count": len(archive_dirs),
         "session_dir_count": len(session_dirs),
         "projection_stage_dir_count": len(projection_stage_dirs),
+        "projection_work_dir_count": len(projection_work_dirs),
         "hook_only_dir_count": len(hook_only_dirs),
         "runtime_optional_absent_root_files": (
             runtime_optional_absent_root_files
@@ -210067,6 +211651,7 @@ def build_parser() -> argparse.ArgumentParser:
     auto_maintenance_parser.add_argument("--lock-timeout-sec", type=float, default=0.0, help="Wait for an existing auto-maintenance lock before skipping.")
     auto_maintenance_parser.add_argument("--budget-seconds", type=float, help="Override the profile wall-clock maintenance budget.")
     auto_maintenance_parser.add_argument("--progress-every", type=int, default=0, help="Emit JSON heartbeat progress to stderr every N indexed sessions.")
+    auto_maintenance_parser.add_argument("--execution-id", help="Correlate durable publication progress receipts with this maintenance run.")
     auto_maintenance_parser.add_argument("--reason", default="operator_requested")
     auto_maintenance_parser.add_argument("--write-report", action="store_true", help="Write JSON and Markdown auto-maintenance reports under .aoa/diagnostics.")
     auto_maintenance_parser.add_argument("--full", action="store_true", help="Print complete auto-maintenance payload to stdout.")
@@ -211151,6 +212736,15 @@ def build_parser() -> argparse.ArgumentParser:
             "Explicitly inspect resumable projection-work identities during "
             "apply. This may parse large owner raw transcripts and belongs "
             "behind a resource-gated cleanup owner."
+        ),
+    )
+    maintenance_cleanup_parser.add_argument(
+        "--session-work-verification-limit",
+        type=int,
+        help=(
+            "Maximum projection-work identities verified in this run. "
+            "A persisted round-robin cursor prevents starvation; omitted "
+            "means an explicit complete inspection."
         ),
     )
     maintenance_cleanup_parser.add_argument(

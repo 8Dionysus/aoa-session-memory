@@ -253,6 +253,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0091 Projection Generations Follow Materializer Boundaries](../AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md` |
 
+## bounded progress
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0092 Durable Publication Progress Receipts Survive Timeout](../AOA-SM-D-0092-durable-publication-progress-receipts-under-timeout.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0092-durable-publication-progress-receipts-under-timeout.md` |
+
 ## bounded promotion
 
 | Decision | Date | Status | Path |
@@ -665,6 +671,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0089 Durable Thin Hook Ingress Before Projection](../AOA-SM-D-0089-durable-thin-hook-ingress-before-projection.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0089-durable-thin-hook-ingress-before-projection.md` |
 
+## durable atomic write
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0092 Durable Publication Progress Receipts Survive Timeout](../AOA-SM-D-0092-durable-publication-progress-receipts-under-timeout.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0092-durable-publication-progress-receipts-under-timeout.md` |
+
 ## durable enqueue
 
 | Decision | Date | Status | Path |
@@ -808,6 +820,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0089 Durable Thin Hook Ingress Before Projection](../AOA-SM-D-0089-durable-thin-hook-ingress-before-projection.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0089-durable-thin-hook-ingress-before-projection.md` |
 
+## execution correlation
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0092 Durable Publication Progress Receipts Survive Timeout](../AOA-SM-D-0092-durable-publication-progress-receipts-under-timeout.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0092-durable-publication-progress-receipts-under-timeout.md` |
+
 ## explicit convergence
 
 | Decision | Date | Status | Path |
@@ -880,6 +898,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0054 Native-Assisted Portable SHA-256 Continuation](../AOA-SM-D-0054-native-assisted-portable-sha256-continuation.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0054-native-assisted-portable-sha256-continuation.md` |
 | [AOA-SM-D-0056 Merkle Semantic Component Receipts](../AOA-SM-D-0056-merkle-semantic-component-receipts.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0056-merkle-semantic-component-receipts.md` |
+
+## fail-closed freshness
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0092 Durable Publication Progress Receipts Survive Timeout](../AOA-SM-D-0092-durable-publication-progress-receipts-under-timeout.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0092-durable-publication-progress-receipts-under-timeout.md` |
 
 ## fail-closed legacy fallback
 
