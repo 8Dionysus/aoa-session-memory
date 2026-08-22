@@ -4,6 +4,7 @@
 
 | Date | Decision | Status | Path |
 | --- | --- | --- | --- |
+| 2026-08-22 | [AOA-SM-D-0093 Identity-Bound Session Telemetry Uses Owner Receipt Admission](../AOA-SM-D-0093-identity-bound-session-telemetry-admission.md) | Accepted | `docs/decisions/AOA-SM-D-0093-identity-bound-session-telemetry-admission.md` |
 | 2026-08-21 | [AOA-SM-D-0092 Durable Publication Progress Receipts Survive Timeout](../AOA-SM-D-0092-durable-publication-progress-receipts-under-timeout.md) | Accepted | `docs/decisions/AOA-SM-D-0092-durable-publication-progress-receipts-under-timeout.md` |
 | 2026-08-21 | [AOA-SM-D-0091 Projection Generations Follow Materializer Boundaries](../AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md) | Accepted | `docs/decisions/AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md` |
 | 2026-08-21 | [AOA-SM-D-0090 Session Freshness Obligations Close on Watermark Proof](../AOA-SM-D-0090-session-freshness-obligations-close-on-watermark-proof.md) | Accepted | `docs/decisions/AOA-SM-D-0090-session-freshness-obligations-close-on-watermark-proof.md` |

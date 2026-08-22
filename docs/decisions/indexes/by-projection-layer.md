@@ -76,6 +76,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0013 Indexed Graph Seed Before Retrieval Fallback](../AOA-SM-D-0013-indexed-graph-seed-before-retrieval-fallback.md) | 2026-07-17 | Accepted | `docs/decisions/AOA-SM-D-0013-indexed-graph-seed-before-retrieval-fallback.md` |
 
+## capture-time envelope adapter
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0093 Identity-Bound Session Telemetry Uses Owner Receipt Admission](../AOA-SM-D-0093-identity-bound-session-telemetry-admission.md) | 2026-08-22 | Accepted | `docs/decisions/AOA-SM-D-0093-identity-bound-session-telemetry-admission.md` |
+
 ## captured raw overlay
 
 | Decision | Date | Status | Path |
@@ -512,6 +518,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0089 Durable Thin Hook Ingress Before Projection](../AOA-SM-D-0089-durable-thin-hook-ingress-before-projection.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0089-durable-thin-hook-ingress-before-projection.md` |
 
+## identity-bound evidence packet
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0093 Identity-Bound Session Telemetry Uses Owner Receipt Admission](../AOA-SM-D-0093-identity-bound-session-telemetry-admission.md) | 2026-08-22 | Accepted | `docs/decisions/AOA-SM-D-0093-identity-bound-session-telemetry-admission.md` |
+
 ## lexical search
 
 | Decision | Date | Status | Path |
@@ -642,6 +654,12 @@
 | [AOA-SM-D-0004 Declared Incremental Search Schema Transitions](../AOA-SM-D-0004-declared-incremental-search-schema-transitions.md) | 2026-07-15 | Accepted | `docs/decisions/AOA-SM-D-0004-declared-incremental-search-schema-transitions.md` |
 | [AOA-SM-D-0059 Transactional Dirty Marker for Observed Route Dependency](../AOA-SM-D-0059-transactional-dirty-marker-for-observed-route-dependency.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0059-transactional-dirty-marker-for-observed-route-dependency.md` |
 | [AOA-SM-D-0060 Bounded Process Digest Reuse and Resource Epochs](../AOA-SM-D-0060-bounded-process-digest-reuse-and-resource-epochs.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0060-bounded-process-digest-reuse-and-resource-epochs.md` |
+
+## post-hoc stage projection
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0093 Identity-Bound Session Telemetry Uses Owner Receipt Admission](../AOA-SM-D-0093-identity-bound-session-telemetry-admission.md) | 2026-08-22 | Accepted | `docs/decisions/AOA-SM-D-0093-identity-bound-session-telemetry-admission.md` |
 
 ## projection state
 

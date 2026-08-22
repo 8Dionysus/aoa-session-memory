@@ -19,6 +19,14 @@ import re
 import sys
 from typing import Any, Iterable
 
+try:
+    import identity_bound_session_telemetry as identity_telemetry
+except ModuleNotFoundError:
+    scripts_dir = str(Path(__file__).resolve().parent)
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    import identity_bound_session_telemetry as identity_telemetry
+
 
 SCHEMA_VERSION = "stage_profile_v1"
 PROFILER_VERSION = "structured_segment_index_correlated_call_result_v1"
@@ -1235,6 +1243,15 @@ def profile_session(
             "session_index": f"session:{session_label}#session.index.json",
             "raw_capture": "present" if raw_line_count is not None else "unknown",
         },
+        "source_identity": {
+            key: raw.get(source_key)
+            for key, source_key in (
+                ("raw_sha256", "sha256"),
+                ("raw_bytes", "bytes"),
+                ("raw_line_count", "line_count"),
+            )
+            if raw.get(source_key) is not None
+        },
         "coverage": {
             "indexed_event_count": indexed_event_count,
             "segment_event_count": len(events_by_line) or None,
@@ -1265,6 +1282,8 @@ def build_bounded_report(
     max_episodes: int,
     expected_pin: dict[str, Any] | None = None,
     delivery: dict[str, Any] | None = None,
+    owner_receipt: dict[str, Any] | None = None,
+    owner_receipt_rejection: str | None = None,
 ) -> dict[str, Any]:
     if len(selectors) != 1:
         raise BoundedPrefixError("bounded_prefix_requires_one_session_selector")
@@ -1366,6 +1385,18 @@ def build_bounded_report(
             else None
         ),
     }
+    identity_bound_telemetry = identity_telemetry.project_identity_bound_packet(
+        session_id=session_id,
+        session_ref=f"session:{session_id}",
+        source=scope["source"],
+        prefix_identity=scope["identity"],
+        publish_id=f"sha256:{scope['projection']['publish_id']}",
+        projection_status="stale-readable",
+        review_status=str(session_profile.get("review_status") or "unknown"),
+        profile=session_profile,
+        owner_receipt=owner_receipt,
+        receipt_rejection=owner_receipt_rejection,
+    )
     return {
         "schema_version": BOUNDED_MEASUREMENT_SCHEMA_VERSION,
         "route": {
@@ -1383,6 +1414,7 @@ def build_bounded_report(
         "measurement_scope": measurement_scope,
         "session": session_profile,
         "aggregate": aggregate,
+        "identity_bound_telemetry": identity_bound_telemetry,
         "stage_contract": {
             "stages": list(STAGES),
             **STAGE_CONTRACT,
@@ -1420,6 +1452,8 @@ def build_report(
     *,
     max_episodes: int,
     delivery: dict[str, Any] | None = None,
+    owner_receipt: dict[str, Any] | None = None,
+    owner_receipt_rejection: str | None = None,
 ) -> dict[str, Any]:
     sessions: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
@@ -1441,6 +1475,26 @@ def build_report(
         )
         or None,
     }
+    identity_bound_telemetry = []
+    for index, session in enumerate(sessions):
+        receipt = owner_receipt if len(sessions) == 1 and index == 0 else None
+        rejection = owner_receipt_rejection if len(sessions) == 1 and index == 0 else None
+        if len(sessions) != 1 and owner_receipt is not None:
+            rejection = "owner_receipt_requires_one_session_selector"
+        identity_bound_telemetry.append(
+            identity_telemetry.project_identity_bound_packet(
+                session_id=str(session.get("session_id") or "unknown"),
+                session_ref=str(session.get("session_ref") or "unknown"),
+                source=session.get("source_identity") if isinstance(session.get("source_identity"), dict) else {},
+                prefix_identity=None,
+                publish_id=None,
+                projection_status=str(session.get("freshness", {}).get("status") or "unknown"),
+                review_status=str(session.get("review_status") or "unknown"),
+                profile=session,
+                owner_receipt=receipt,
+                receipt_rejection=rejection,
+            )
+        )
     return {
         "schema_version": SCHEMA_VERSION,
         "profiler": {
@@ -1463,6 +1517,7 @@ def build_report(
         },
         "sessions": sessions,
         "aggregate": aggregate,
+        "identity_bound_telemetry": identity_bound_telemetry,
         "evaluator_input": {
             "method_id": PROFILER_VERSION,
             "comparison_posture": "data_and_support_basis_only",
@@ -1510,6 +1565,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--changed-path", action="append", default=[])
     parser.add_argument("--commit")
     parser.add_argument("--verification", action="append", default=[])
+    parser.add_argument(
+        "--owner-telemetry-receipt",
+        type=Path,
+        help="Optional public-safe validation-owner telemetry receipt; it is admitted only on an exact session/source join.",
+    )
     return parser.parse_args(argv)
 
 
@@ -1525,6 +1585,13 @@ def main(argv: list[str] | None = None) -> int:
             "focused_verification": args.verification or None,
             "no_change": False,
         }
+        owner_receipt = None
+        owner_receipt_rejection = None
+        if args.owner_telemetry_receipt:
+            try:
+                owner_receipt = identity_telemetry.load_owner_receipt(str(args.owner_telemetry_receipt.expanduser()))
+            except identity_telemetry.TelemetryError as exc:
+                owner_receipt_rejection = str(exc)
         if args.bounded_prefix:
             expected_pin = {
                 key: value
@@ -1545,6 +1612,8 @@ def main(argv: list[str] | None = None) -> int:
                 max_episodes=args.max_episodes,
                 expected_pin=expected_pin,
                 delivery=delivery,
+                owner_receipt=owner_receipt,
+                owner_receipt_rejection=owner_receipt_rejection,
             )
         else:
             report = build_report(
@@ -1552,6 +1621,8 @@ def main(argv: list[str] | None = None) -> int:
                 args.session,
                 max_episodes=args.max_episodes,
                 delivery=delivery,
+                owner_receipt=owner_receipt,
+                owner_receipt_rejection=owner_receipt_rejection,
             )
     except ProfileError as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False), file=sys.stderr)

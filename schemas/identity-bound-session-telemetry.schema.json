@@ -1,0 +1,353 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AoA identity-bound session telemetry",
+  "description": "Public-safe typed validation-owner receipts, session-memory packets, and admission-only pair results. This schema does not grant validation or evaluation authority.",
+  "oneOf": [
+    {"$ref": "#/$defs/ownerReceipt"},
+    {"$ref": "#/$defs/packet"},
+    {"$ref": "#/$defs/comparisonAdmission"}
+  ],
+  "$defs": {
+    "field": {
+      "type": "object",
+      "required": ["state", "value"],
+      "properties": {
+        "state": {"enum": ["known", "unknown", "missing", "null", "unobservable", "excluded"]},
+        "value": {"type": ["string", "number", "boolean", "null"]},
+        "reason": {"type": "string", "minLength": 1},
+        "source": {"type": "string", "minLength": 1},
+        "ref": {"type": "string", "minLength": 1},
+        "unit": {"type": "string", "minLength": 1}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"state": {"const": "known"}}},
+          "then": {"properties": {"value": {"not": {"type": "null"}}}},
+          "else": {"properties": {"value": {"type": "null"}}}
+        }
+      ],
+      "additionalProperties": false
+    },
+    "source": {
+      "type": "object",
+      "required": ["raw_sha256", "raw_bytes", "raw_line_count"],
+      "properties": {
+        "raw_sha256": {"$ref": "#/$defs/field"},
+        "raw_bytes": {"$ref": "#/$defs/field"},
+        "raw_line_count": {"$ref": "#/$defs/field"}
+      },
+      "additionalProperties": false
+    },
+    "ref": {
+      "type": "object",
+      "required": ["kind", "value"],
+      "properties": {
+        "kind": {"type": "string", "minLength": 1},
+        "value": {"type": "string", "minLength": 1},
+        "basis": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    },
+    "producer": {
+      "type": "object",
+      "required": ["owner_repo", "producer_ref", "mode"],
+      "properties": {
+        "owner_repo": {"type": "string", "minLength": 1},
+        "producer_ref": {"type": "string", "minLength": 1},
+        "mode": {"enum": ["capture_time_envelope", "post_hoc_projection", "owner_receipt_federation"]}
+      },
+      "additionalProperties": false
+    },
+    "step": {
+      "type": "object",
+      "required": ["state", "reason", "correlation_id", "timestamp", "outcome", "evidence_refs"],
+      "properties": {
+        "state": {"enum": ["known", "unknown", "missing", "null", "unobservable", "excluded"]},
+        "reason": {"type": "string", "minLength": 1},
+        "correlation_id": {"$ref": "#/$defs/field"},
+        "timestamp": {"$ref": "#/$defs/field"},
+        "outcome": {"$ref": "#/$defs/field"},
+        "evidence_refs": {"type": "array", "items": {"$ref": "#/$defs/ref"}, "maxItems": 32}
+      },
+      "additionalProperties": false
+    },
+    "trajectory": {
+      "type": "object",
+      "required": ["chain_id", "steps"],
+      "properties": {
+        "chain_id": {"$ref": "#/$defs/field"},
+        "steps": {
+          "type": "object",
+          "required": ["first_failure", "repair", "validation", "rerun"],
+          "properties": {
+            "first_failure": {"$ref": "#/$defs/step"},
+            "repair": {"$ref": "#/$defs/step"},
+            "validation": {"$ref": "#/$defs/step"},
+            "rerun": {"$ref": "#/$defs/step"}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "identity": {
+      "type": "object",
+      "required": [
+        "workload_id",
+        "candidate_or_source_identity",
+        "source_ref_or_digest",
+        "environment_id",
+        "route_or_treatment_identity",
+        "evidence_class",
+        "acceptance_target",
+        "cache_posture",
+        "resource_posture"
+      ],
+      "properties": {
+        "workload_id": {"$ref": "#/$defs/field"},
+        "candidate_or_source_identity": {"$ref": "#/$defs/field"},
+        "source_ref_or_digest": {"$ref": "#/$defs/field"},
+        "environment_id": {"$ref": "#/$defs/field"},
+        "route_or_treatment_identity": {"$ref": "#/$defs/field"},
+        "evidence_class": {"$ref": "#/$defs/field"},
+        "acceptance_target": {"$ref": "#/$defs/field"},
+        "cache_posture": {"$ref": "#/$defs/field"},
+        "resource_posture": {"$ref": "#/$defs/field"}
+      },
+      "additionalProperties": false
+    },
+    "timing": {
+      "type": "object",
+      "required": [
+        "first_failure_latency_seconds",
+        "repair_latency_seconds",
+        "validation_latency_seconds",
+        "rerun_latency_seconds"
+      ],
+      "properties": {
+        "first_failure_latency_seconds": {"$ref": "#/$defs/field"},
+        "repair_latency_seconds": {"$ref": "#/$defs/field"},
+        "validation_latency_seconds": {"$ref": "#/$defs/field"},
+        "rerun_latency_seconds": {"$ref": "#/$defs/field"}
+      },
+      "additionalProperties": false
+    },
+    "cache": {
+      "type": "object",
+      "required": ["posture", "identity", "observed_state"],
+      "properties": {
+        "posture": {"$ref": "#/$defs/field"},
+        "identity": {"$ref": "#/$defs/field"},
+        "observed_state": {"$ref": "#/$defs/field"}
+      },
+      "additionalProperties": false
+    },
+    "metrics": {
+      "type": "object",
+      "required": ["cpu_ms", "peak_rss_bytes", "io_read_bytes", "io_write_bytes"],
+      "properties": {
+        "cpu_ms": {"$ref": "#/$defs/field"},
+        "peak_rss_bytes": {"$ref": "#/$defs/field"},
+        "io_read_bytes": {"$ref": "#/$defs/field"},
+        "io_write_bytes": {"$ref": "#/$defs/field"}
+      },
+      "additionalProperties": false
+    },
+    "resource": {
+      "type": "object",
+      "required": ["posture", "metrics"],
+      "properties": {
+        "posture": {"$ref": "#/$defs/field"},
+        "metrics": {"$ref": "#/$defs/metrics"}
+      },
+      "additionalProperties": false
+    },
+    "review": {
+      "type": "object",
+      "required": ["status", "review_ref"],
+      "properties": {
+        "status": {"enum": ["provisional", "reviewed", "excluded", "unknown"]},
+        "review_ref": {"type": ["string", "null"]},
+        "reason": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    },
+    "binding": {
+      "type": "object",
+      "required": ["session_id", "session_ref", "correlation_id", "source", "projection"],
+      "properties": {
+        "session_id": {"$ref": "#/$defs/field"},
+        "session_ref": {"$ref": "#/$defs/field"},
+        "correlation_id": {"$ref": "#/$defs/field"},
+        "source": {"$ref": "#/$defs/source"},
+        "projection": {
+          "type": "object",
+          "required": ["prefix_identity", "publish_id"],
+          "properties": {
+            "prefix_identity": {"$ref": "#/$defs/field"},
+            "publish_id": {"$ref": "#/$defs/field"}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "ownerReceipt": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "artifact_type",
+        "receipt_id",
+        "producer",
+        "binding",
+        "identity",
+        "trajectory",
+        "timing",
+        "cache",
+        "resource",
+        "review",
+        "evidence_refs",
+        "claim_ceiling"
+      ],
+      "properties": {
+        "schema_version": {"const": "validation_owner_telemetry_receipt_v1"},
+        "artifact_type": {"const": "validation_owner_telemetry_receipt"},
+        "receipt_id": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+        "producer": {"$ref": "#/$defs/producer"},
+        "binding": {"$ref": "#/$defs/binding"},
+        "identity": {"$ref": "#/$defs/identity"},
+        "trajectory": {"$ref": "#/$defs/trajectory"},
+        "timing": {"$ref": "#/$defs/timing"},
+        "cache": {"$ref": "#/$defs/cache"},
+        "resource": {"$ref": "#/$defs/resource"},
+        "review": {"$ref": "#/$defs/review"},
+        "evidence_refs": {"type": "array", "items": {"$ref": "#/$defs/ref"}, "maxItems": 32},
+        "claim_ceiling": {"const": "identity_bound_observation_only"}
+      },
+      "additionalProperties": false
+    },
+    "scope": {
+      "type": "object",
+      "required": ["status", "session_id", "session_ref", "source", "prefix_identity", "publish_id", "global_currentness"],
+      "properties": {
+        "status": {"type": "string", "minLength": 1},
+        "session_id": {"type": "string", "minLength": 1},
+        "session_ref": {"type": "string", "minLength": 1},
+        "source": {"$ref": "#/$defs/source"},
+        "prefix_identity": {"$ref": "#/$defs/field"},
+        "publish_id": {"$ref": "#/$defs/field"},
+        "global_currentness": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "method": {
+      "type": "object",
+      "required": ["status", "claim_ceiling"],
+      "properties": {
+        "status": {"type": "string", "minLength": 1},
+        "receipt_id": {"type": ["string", "null"]},
+        "claim_ceiling": {"type": "string", "minLength": 1},
+        "rejection": {"type": ["string", "null"]}
+      },
+      "additionalProperties": false
+    },
+    "eligibility": {
+      "type": "object",
+      "required": ["status", "reasons", "effect_verdict", "proof", "acceptance"],
+      "properties": {
+        "status": {"enum": ["eligible_identity_packet", "excluded", "unknown", "unobservable"]},
+        "reasons": {"type": "array", "items": {"type": "string"}},
+        "effect_verdict": {"type": "null"},
+        "proof": {"const": false},
+        "acceptance": {"const": false}
+      },
+      "additionalProperties": false
+    },
+    "packet": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "artifact_type",
+        "producer",
+        "scope",
+        "identity",
+        "trajectory",
+        "timing",
+        "cache",
+        "resource",
+        "review",
+        "evidence_refs",
+        "methods",
+        "post_hoc_projection",
+        "eligibility",
+        "authority",
+        "integrity",
+        "packet_id"
+      ],
+      "properties": {
+        "schema_version": {"const": "identity_bound_session_telemetry_v1"},
+        "artifact_type": {"const": "identity_bound_session_telemetry"},
+        "producer": {"$ref": "#/$defs/producer"},
+        "scope": {"$ref": "#/$defs/scope"},
+        "identity": {"$ref": "#/$defs/identity"},
+        "trajectory": {"$ref": "#/$defs/trajectory"},
+        "timing": {"$ref": "#/$defs/timing"},
+        "cache": {"$ref": "#/$defs/cache"},
+        "resource": {"$ref": "#/$defs/resource"},
+        "review": {"$ref": "#/$defs/review"},
+        "evidence_refs": {"type": "array", "items": {"$ref": "#/$defs/ref"}, "maxItems": 32},
+        "methods": {
+          "type": "object",
+          "required": ["capture_time_envelope", "post_hoc_structured_projection", "owner_receipt_federation"],
+          "properties": {
+            "capture_time_envelope": {"$ref": "#/$defs/method"},
+            "post_hoc_structured_projection": {"$ref": "#/$defs/method"},
+            "owner_receipt_federation": {"$ref": "#/$defs/method"}
+          },
+          "additionalProperties": false
+        },
+        "post_hoc_projection": {"type": "object"},
+        "eligibility": {"$ref": "#/$defs/eligibility"},
+        "authority": {
+          "type": "object",
+          "required": ["owner", "claim_ceiling", "validation_claim_owner", "comparison_verdict", "proof", "acceptance"],
+          "properties": {
+            "owner": {"const": "aoa-session-memory"},
+            "claim_ceiling": {"const": "identity_bound_evidence_packet_only"},
+            "validation_claim_owner": {"const": "external_validation_owner"},
+            "comparison_verdict": {"type": "null"},
+            "proof": {"const": false},
+            "acceptance": {"const": false}
+          },
+          "additionalProperties": false
+        },
+        "integrity": {
+          "type": "object",
+          "required": ["status", "receipt_id", "projection_binding"],
+          "properties": {
+            "status": {"const": "verified"},
+            "receipt_id": {"type": ["string", "null"], "pattern": "^sha256:[a-f0-9]{64}$"},
+            "projection_binding": {"const": "exact_session_projection_context"}
+          },
+          "additionalProperties": false
+        },
+        "packet_id": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"}
+      },
+      "additionalProperties": false
+    },
+    "comparisonAdmission": {
+      "type": "object",
+      "required": ["schema_version", "status", "eligible", "reasons", "effect", "verdict", "authority"],
+      "properties": {
+        "schema_version": {"const": "identity_bound_session_comparison_admission_v1"},
+        "status": {"enum": ["matched_identity_bound_pair", "excluded_identity_bound_pair"]},
+        "eligible": {"type": "boolean"},
+        "reasons": {"type": "array", "items": {"type": "string"}},
+        "effect": {"type": "null"},
+        "verdict": {"type": "null"},
+        "authority": {"const": "session-memory-admission-only; validation-owner-and-eval-verdicts-external"}
+      },
+      "additionalProperties": false
+    }
+  }
+}

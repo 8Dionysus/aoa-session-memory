@@ -344,6 +344,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0060 Bounded Process Digest Reuse and Resource Epochs](../AOA-SM-D-0060-bounded-process-digest-reuse-and-resource-epochs.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0060-bounded-process-digest-reuse-and-resource-epochs.md` |
 
+## cache posture
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0093 Identity-Bound Session Telemetry Uses Owner Receipt Admission](../AOA-SM-D-0093-identity-bound-session-telemetry-admission.md) | 2026-08-22 | Accepted | `docs/decisions/AOA-SM-D-0093-identity-bound-session-telemetry-admission.md` |
+
 ## candidate preservation
 
 | Decision | Date | Status | Path |
@@ -493,6 +499,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0015 Deadline-Aware Cooperative Retry Dispatch](../AOA-SM-D-0015-deadline-aware-cooperative-retry-dispatch.md) | 2026-07-17 | Accepted | `docs/decisions/AOA-SM-D-0015-deadline-aware-cooperative-retry-dispatch.md` |
+
+## correlation completeness
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0093 Identity-Bound Session Telemetry Uses Owner Receipt Admission](../AOA-SM-D-0093-identity-bound-session-telemetry-admission.md) | 2026-08-22 | Accepted | `docs/decisions/AOA-SM-D-0093-identity-bound-session-telemetry-admission.md` |
 
 ## correlation ownership
 
@@ -807,6 +819,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0088 Independent Validation Nodes and Bounded Proof Kernels](../AOA-SM-D-0088-independent-validation-nodes-and-bounded-proof-kernels.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0088-independent-validation-nodes-and-bounded-proof-kernels.md` |
+
+## exact source identity
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0093 Identity-Bound Session Telemetry Uses Owner Receipt Admission](../AOA-SM-D-0093-identity-bound-session-telemetry-admission.md) | 2026-08-22 | Accepted | `docs/decisions/AOA-SM-D-0093-identity-bound-session-telemetry-admission.md` |
 
 ## exact source scope
 
@@ -1361,6 +1379,7 @@
 | [AOA-SM-D-0050 Manifest-First Session Components and Lazy Review Rendering](../AOA-SM-D-0050-manifest-first-session-components-and-lazy-review-rendering.md) | 2026-08-10 | Accepted | `docs/decisions/AOA-SM-D-0050-manifest-first-session-components-and-lazy-review-rendering.md` |
 | [AOA-SM-D-0052 Generation-Bound Segment Privacy Admission](../AOA-SM-D-0052-generation-bound-segment-privacy-admission.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0052-generation-bound-segment-privacy-admission.md` |
 | [AOA-SM-D-0053 Single-Pass Task-Episode Reduction and Shard Redaction](../AOA-SM-D-0053-single-pass-task-episode-reduction-and-shard-redaction.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0053-single-pass-task-episode-reduction-and-shard-redaction.md` |
+| [AOA-SM-D-0093 Identity-Bound Session Telemetry Uses Owner Receipt Admission](../AOA-SM-D-0093-identity-bound-session-telemetry-admission.md) | 2026-08-22 | Accepted | `docs/decisions/AOA-SM-D-0093-identity-bound-session-telemetry-admission.md` |
 
 ## privacy-safe health
 
@@ -1429,6 +1448,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0018 Owner Capability Home And Skill Evidence Lifecycle](../AOA-SM-D-0018-owner-capability-home-and-skill-evidence-lifecycle.md) | 2026-07-18 | Accepted | `docs/decisions/AOA-SM-D-0018-owner-capability-home-and-skill-evidence-lifecycle.md` |
+
+## projection currentness
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0093 Identity-Bound Session Telemetry Uses Owner Receipt Admission](../AOA-SM-D-0093-identity-bound-session-telemetry-admission.md) | 2026-08-22 | Accepted | `docs/decisions/AOA-SM-D-0093-identity-bound-session-telemetry-admission.md` |
 
 ## projection reproducibility
 
@@ -1608,6 +1633,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0060 Bounded Process Digest Reuse and Resource Epochs](../AOA-SM-D-0060-bounded-process-digest-reuse-and-resource-epochs.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0060-bounded-process-digest-reuse-and-resource-epochs.md` |
 
+## resource posture
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0093 Identity-Bound Session Telemetry Uses Owner Receipt Admission](../AOA-SM-D-0093-identity-bound-session-telemetry-admission.md) | 2026-08-22 | Accepted | `docs/decisions/AOA-SM-D-0093-identity-bound-session-telemetry-admission.md` |
+
 ## retry convergence
 
 | Decision | Date | Status | Path |
@@ -1726,6 +1757,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0021 Raw-Preserving Derived-Text Privacy Boundary](../AOA-SM-D-0021-raw-preserving-derived-text-privacy-boundary.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0021-raw-preserving-derived-text-privacy-boundary.md` |
+
+## session binding
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0093 Identity-Bound Session Telemetry Uses Owner Receipt Admission](../AOA-SM-D-0093-identity-bound-session-telemetry-admission.md) | 2026-08-22 | Accepted | `docs/decisions/AOA-SM-D-0093-identity-bound-session-telemetry-admission.md` |
 
 ## session coherence
 
@@ -1861,6 +1898,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0016 Quantitative Comparisons Require Correlated Count Evidence](../AOA-SM-D-0016-quantitative-comparisons-require-correlated-count-evidence.md) | 2026-07-17 | Accepted | `docs/decisions/AOA-SM-D-0016-quantitative-comparisons-require-correlated-count-evidence.md` |
+
+## tamper rejection
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0093 Identity-Bound Session Telemetry Uses Owner Receipt Admission](../AOA-SM-D-0093-identity-bound-session-telemetry-admission.md) | 2026-08-22 | Accepted | `docs/decisions/AOA-SM-D-0093-identity-bound-session-telemetry-admission.md` |
 
 ## time scope
 

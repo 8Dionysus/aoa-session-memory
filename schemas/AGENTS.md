@@ -21,6 +21,10 @@ or naming semantics by themselves.
 - `segment.index.schema.json` describes generated segment event indexes.
   It includes immutable segment component identity, index-first render mode,
   and route-signal projections such as `by_route_layer` and `by_route_signal`.
+- `identity-bound-session-telemetry.schema.json` describes public-safe typed
+  validation-owner receipts, session-memory identity packets, and
+  admission-only pair results. It does not grant validation or evaluation
+  authority.
 - `session.manifest.schema.json` describes session archive manifests.
 - `skill-usage-receipt.schema.json` describes one immutable, owner-reviewed
   positive skill-use evidence packet. It may admit invocation, verification,

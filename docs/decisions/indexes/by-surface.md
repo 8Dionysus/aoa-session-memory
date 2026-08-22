@@ -228,6 +228,7 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0089 Durable Thin Hook Ingress Before Projection](../AOA-SM-D-0089-durable-thin-hook-ingress-before-projection.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0089-durable-thin-hook-ingress-before-projection.md` |
+| [AOA-SM-D-0093 Identity-Bound Session Telemetry Uses Owner Receipt Admission](../AOA-SM-D-0093-identity-bound-session-telemetry-admission.md) | 2026-08-22 | Accepted | `docs/decisions/AOA-SM-D-0093-identity-bound-session-telemetry-admission.md` |
 
 ## evidence preservation
 
@@ -298,6 +299,7 @@
 | [AOA-SM-D-0090 Session Freshness Obligations Close on Watermark Proof](../AOA-SM-D-0090-session-freshness-obligations-close-on-watermark-proof.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0090-session-freshness-obligations-close-on-watermark-proof.md` |
 | [AOA-SM-D-0091 Projection Generations Follow Materializer Boundaries](../AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md` |
 | [AOA-SM-D-0092 Durable Publication Progress Receipts Survive Timeout](../AOA-SM-D-0092-durable-publication-progress-receipts-under-timeout.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0092-durable-publication-progress-receipts-under-timeout.md` |
+| [AOA-SM-D-0093 Identity-Bound Session Telemetry Uses Owner Receipt Admission](../AOA-SM-D-0093-identity-bound-session-telemetry-admission.md) | 2026-08-22 | Accepted | `docs/decisions/AOA-SM-D-0093-identity-bound-session-telemetry-admission.md` |
 
 ## freshness contract
 
@@ -491,6 +493,12 @@
 | [AOA-SM-D-0041 Incompatible Atlas Generations Use the Deep Clean-Rebuild Route](../AOA-SM-D-0041-incompatible-atlas-generations-use-the-deep-clean-rebuild-route.md) | 2026-07-31 | Accepted | `docs/decisions/AOA-SM-D-0041-incompatible-atlas-generations-use-the-deep-clean-rebuild-route.md` |
 | [AOA-SM-D-0042 Complete Registry Source Sets Gate Projection Retirement](../AOA-SM-D-0042-complete-registry-source-sets-gate-projection-retirement.md) | 2026-08-01 | Accepted | `docs/decisions/AOA-SM-D-0042-complete-registry-source-sets-gate-projection-retirement.md` |
 
+## instrumentation
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0093 Identity-Bound Session Telemetry Uses Owner Receipt Admission](../AOA-SM-D-0093-identity-bound-session-telemetry-admission.md) | 2026-08-22 | Accepted | `docs/decisions/AOA-SM-D-0093-identity-bound-session-telemetry-admission.md` |
+
 ## lifecycle
 
 | Decision | Date | Status | Path |
@@ -665,6 +673,13 @@
 | [AOA-SM-D-0053 Single-Pass Task-Episode Reduction and Shard Redaction](../AOA-SM-D-0053-single-pass-task-episode-reduction-and-shard-redaction.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0053-single-pass-task-episode-reduction-and-shard-redaction.md` |
 | [AOA-SM-D-0088 Independent Validation Nodes and Bounded Proof Kernels](../AOA-SM-D-0088-independent-validation-nodes-and-bounded-proof-kernels.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0088-independent-validation-nodes-and-bounded-proof-kernels.md` |
 | [AOA-SM-D-0089 Durable Thin Hook Ingress Before Projection](../AOA-SM-D-0089-durable-thin-hook-ingress-before-projection.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0089-durable-thin-hook-ingress-before-projection.md` |
+| [AOA-SM-D-0093 Identity-Bound Session Telemetry Uses Owner Receipt Admission](../AOA-SM-D-0093-identity-bound-session-telemetry-admission.md) | 2026-08-22 | Accepted | `docs/decisions/AOA-SM-D-0093-identity-bound-session-telemetry-admission.md` |
+
+## projection
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0093 Identity-Bound Session Telemetry Uses Owner Receipt Admission](../AOA-SM-D-0093-identity-bound-session-telemetry-admission.md) | 2026-08-22 | Accepted | `docs/decisions/AOA-SM-D-0093-identity-bound-session-telemetry-admission.md` |
 
 ## projection freshness
 
@@ -838,6 +853,7 @@
 | [AOA-SM-D-0052 Generation-Bound Segment Privacy Admission](../AOA-SM-D-0052-generation-bound-segment-privacy-admission.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0052-generation-bound-segment-privacy-admission.md` |
 | [AOA-SM-D-0053 Single-Pass Task-Episode Reduction and Shard Redaction](../AOA-SM-D-0053-single-pass-task-episode-reduction-and-shard-redaction.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0053-single-pass-task-episode-reduction-and-shard-redaction.md` |
 | [AOA-SM-D-0058 Persisted Live-Tail State Precedes Resource Admission](../AOA-SM-D-0058-persisted-live-tail-state-precedes-resource-admission.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0058-persisted-live-tail-state-precedes-resource-admission.md` |
+| [AOA-SM-D-0093 Identity-Bound Session Telemetry Uses Owner Receipt Admission](../AOA-SM-D-0093-identity-bound-session-telemetry-admission.md) | 2026-08-22 | Accepted | `docs/decisions/AOA-SM-D-0093-identity-bound-session-telemetry-admission.md` |
 
 ## resource fallback
 

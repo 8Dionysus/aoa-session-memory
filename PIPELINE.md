@@ -58,6 +58,28 @@ are not executed repeatedly or discarded as if they never existed. A running
 job may have one pending successor so source growth observed during execution
 is not lost.
 
+### Identity-bound validation telemetry
+
+Validation-owner telemetry enters session memory only as a dedicated typed
+receipt or an explicitly named structured capture facet. The generic hook does
+not infer workload, candidate, source, environment, treatment, acceptance,
+cache, resource, or trajectory identity from operation text. A capture facet is
+kept lightweight; it does not make the hook a validation owner.
+
+The post-hoc profiler may read generated indexes for correlated structured
+call-to-result spans, but it retains missing, unknown, unobservable, and
+excluded states and never reads transcript bodies to fill owner fields. An
+external receipt is admitted only after digest, session, source, and declared
+projection identities join to the exact expected context. A stale-readable
+prefix remains explicitly stale and cannot enter a current comparison pair.
+
+The resulting identity-bound packet is an evidence projection owned by
+session-memory. Pair admission checks exact identity, reviewed trajectory,
+correlation completeness, cache posture, resource posture, and currentness;
+it emits no effect, causal, proof, evaluator, or acceptance verdict. Heavy
+receipt production, reindex, and catch-up stay behind their owning resource and
+resumability routes.
+
 ## 2. Raw preservation
 
 Readable source JSONL is mirrored into the local archive before semantic
