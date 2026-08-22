@@ -22,6 +22,8 @@ from typing import Any, Iterable
 
 SCHEMA_VERSION = "stage_profile_v1"
 PROFILER_VERSION = "structured_segment_index_correlated_call_result_v1"
+BOUNDED_MEASUREMENT_SCHEMA_VERSION = "bounded_measurement_v1"
+BOUNDED_PREFIX_ROUTE = "last_good_stable_projection_exact_prefix_v1"
 
 STAGES = (
     "kag_navigation_index_gate",
@@ -80,6 +82,10 @@ STAGE_CONTRACT: dict[str, Any] = {
 
 class ProfileError(RuntimeError):
     """Raised when a selected session cannot be read safely."""
+
+
+class BoundedPrefixError(ProfileError):
+    """Raised when an exact prefix cannot be admitted fail-closed."""
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -332,8 +338,17 @@ def select_session_dir(aoa_root: Path, selector: str) -> Path:
     return matches[0]
 
 
-def load_segment_events(session_dir: Path, index: dict[str, Any]) -> dict[int, dict[str, Any]]:
+def load_segment_events(
+    session_dir: Path,
+    index: dict[str, Any],
+    *,
+    expected_projection: dict[str, Any] | None = None,
+    expected_segment_generation: str | None = None,
+    expected_line_count: int | None = None,
+) -> dict[int, dict[str, Any]]:
     events_by_line: dict[int, dict[str, Any]] = {}
+    strict = expected_projection is not None
+    observed_event_count = 0
     segments = index.get("segments") if isinstance(index.get("segments"), list) else []
     for segment in segments:
         if not isinstance(segment, dict):
@@ -343,19 +358,53 @@ def load_segment_events(session_dir: Path, index: dict[str, Any]) -> dict[int, d
         if not index_path.is_file():
             index_path = session_dir / "segments" / Path(index_value).name
         if not index_path.is_file():
+            if strict:
+                raise BoundedPrefixError("bounded_prefix_segment_index_missing")
             continue
         try:
             segment_index = read_json(index_path)
         except ProfileError:
+            if strict:
+                raise BoundedPrefixError("bounded_prefix_segment_index_unreadable")
             continue
+        if strict:
+            if segment_index.get("projection_publish") != expected_projection:
+                raise BoundedPrefixError("bounded_prefix_segment_projection_mismatch")
+            generation_id = str(segment_index.get("generation_id") or "")
+            if generation_id != str(expected_segment_generation or ""):
+                raise BoundedPrefixError("bounded_prefix_segment_generation_mismatch")
+            generation_identity = segment_index.get("generation_identity")
+            if not isinstance(generation_identity, dict):
+                raise BoundedPrefixError("bounded_prefix_segment_generation_missing")
+            if str(generation_identity.get("generation_id") or "") != generation_id:
+                raise BoundedPrefixError("bounded_prefix_segment_generation_identity_mismatch")
+            if generation_identity.get("projection") != "segment_index":
+                raise BoundedPrefixError("bounded_prefix_segment_projection_unknown")
+            if generation_identity.get("producer_contract_status") != "current":
+                raise BoundedPrefixError("bounded_prefix_segment_producer_generation_unresolved")
         events = segment_index.get("events") if isinstance(segment_index.get("events"), list) else []
         for event in events:
             if not isinstance(event, dict):
                 continue
             line = int_value(event.get("line"))
             if line is None:
+                if strict:
+                    raise BoundedPrefixError("bounded_prefix_segment_event_line_missing")
                 continue
-            events_by_line.setdefault(line, event)
+            if strict:
+                if expected_line_count is not None and not 1 <= line <= expected_line_count:
+                    raise BoundedPrefixError("bounded_prefix_segment_event_outside_prefix")
+                if line in events_by_line:
+                    raise BoundedPrefixError("bounded_prefix_segment_event_duplicate")
+                observed_event_count += 1
+                events_by_line[line] = event
+            else:
+                events_by_line.setdefault(line, event)
+    if strict and expected_line_count is not None:
+        if observed_event_count != expected_line_count or len(events_by_line) != expected_line_count:
+            raise BoundedPrefixError("bounded_prefix_segment_coverage_incomplete")
+        if set(events_by_line) != set(range(1, expected_line_count + 1)):
+            raise BoundedPrefixError("bounded_prefix_segment_line_range_incomplete")
     return events_by_line
 
 
@@ -771,11 +820,342 @@ def aggregate_repeats(episodes: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def profile_session(aoa_root: Path, selector: str, *, max_episodes: int) -> dict[str, Any]:
+def bounded_required_int(value: Any, field: str) -> int:
+    parsed = int_value(value)
+    if parsed is None or parsed < 0:
+        raise BoundedPrefixError(f"bounded_prefix_invalid:{field}")
+    return parsed
+
+
+def bounded_required_hex(value: Any, field: str) -> str:
+    text = str(value or "")
+    if not re.fullmatch(r"[0-9a-f]{64}", text):
+        raise BoundedPrefixError(f"bounded_prefix_invalid:{field}")
+    return text
+
+
+def bounded_required_dict(value: Any, field: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise BoundedPrefixError(f"bounded_prefix_missing:{field}")
+    return value
+
+
+def bounded_prefix_source_identity(
+    manifest: dict[str, Any],
+    projection_publish: dict[str, Any],
+) -> dict[str, Any]:
+    raw = bounded_required_dict(manifest.get("raw"), "manifest_raw")
+    source = bounded_required_dict(projection_publish.get("source"), "projection_source")
+    identity = {
+        "raw_sha256": bounded_required_hex(raw.get("sha256"), "raw_sha256"),
+        "raw_bytes": bounded_required_int(raw.get("bytes"), "raw_bytes"),
+        "raw_line_count": bounded_required_int(raw.get("line_count"), "raw_line_count"),
+    }
+    for key in ("raw_sha256", "raw_bytes", "raw_line_count"):
+        if source.get(key) != identity[key]:
+            raise BoundedPrefixError(f"bounded_prefix_source_mismatch:{key}")
+    if raw.get("indexing_status") != "indexed":
+        raise BoundedPrefixError("bounded_prefix_projection_not_indexed")
+    return identity
+
+
+def bounded_projection_publish_identity(
+    manifest: dict[str, Any],
+    index: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    index_schema = bounded_required_dict(manifest.get("index_schema"), "manifest_index_schema")
+    manifest_projection = bounded_required_dict(
+        index_schema.get("projection_publish"),
+        "manifest_projection_publish",
+    )
+    index_projection = bounded_required_dict(index.get("projection_publish"), "index_projection_publish")
+    if manifest_projection != index_projection:
+        raise BoundedPrefixError("bounded_prefix_projection_publish_mismatch")
+    raw_blocks = manifest.get("raw_blocks")
+    if isinstance(raw_blocks, dict) and raw_blocks.get("projection_publish") is not None:
+        if raw_blocks.get("projection_publish") != manifest_projection:
+            raise BoundedPrefixError("bounded_prefix_raw_blocks_projection_mismatch")
+    source = bounded_prefix_source_identity(manifest, manifest_projection)
+    watermark = bounded_required_dict(
+        manifest_projection.get("processed_watermark"),
+        "processed_watermark",
+    )
+    to_line = bounded_required_int(watermark.get("to_line"), "processed_watermark.to_line")
+    if to_line != source["raw_line_count"]:
+        raise BoundedPrefixError("bounded_prefix_watermark_line_mismatch")
+    publish_id = bounded_required_hex(manifest_projection.get("publish_id"), "publish_id")
+    dependencies = bounded_required_dict(
+        manifest_projection.get("dependency_generations"),
+        "dependency_generations",
+    )
+    dependency_ids = {
+        name: bounded_required_hex(dependencies.get(name), f"dependency_generations.{name}")
+        for name in ("session_index", "segment_index", "task_episode_source")
+    }
+    index_generation_id = bounded_required_hex(index.get("generation_id"), "session_index_generation_id")
+    if index_generation_id != dependency_ids["session_index"]:
+        raise BoundedPrefixError("bounded_prefix_session_generation_mismatch")
+    if str(index_schema.get("session_index_generation_id") or "") != index_generation_id:
+        raise BoundedPrefixError("bounded_prefix_manifest_session_generation_mismatch")
+    if str(index_schema.get("segment_index_generation_id") or "") != dependency_ids["segment_index"]:
+        raise BoundedPrefixError("bounded_prefix_manifest_segment_generation_mismatch")
+    generation_identity = bounded_required_dict(index.get("generation_identity"), "session_generation_identity")
+    if str(generation_identity.get("generation_id") or "") != index_generation_id:
+        raise BoundedPrefixError("bounded_prefix_session_generation_identity_mismatch")
+    if generation_identity.get("projection") != "session_index":
+        raise BoundedPrefixError("bounded_prefix_session_projection_unknown")
+    if generation_identity.get("producer_contract_status") != "current":
+        raise BoundedPrefixError("bounded_prefix_session_producer_generation_unresolved")
+    dependency_identities = bounded_required_dict(
+        index.get("dependency_generation_identities"),
+        "dependency_generation_identities",
+    )
+    producer_generations: dict[str, dict[str, Any]] = {}
+    for name in ("segment_index", "task_episode_source"):
+        identity = bounded_required_dict(dependency_identities.get(name), f"dependency_generation_identities.{name}")
+        if str(identity.get("generation_id") or "") != dependency_ids[name]:
+            raise BoundedPrefixError(f"bounded_prefix_{name}_generation_mismatch")
+        producer_generations[name] = {
+            "generation_id": dependency_ids[name],
+            "producer_sha256": bounded_required_hex(
+                identity.get("producer_sha256"),
+                f"dependency_generation_identities.{name}.producer_sha256",
+            ),
+            "producer_contract_status": identity.get("producer_contract_status"),
+        }
+        if identity.get("producer_contract_status") != "current":
+            raise BoundedPrefixError(f"bounded_prefix_{name}_producer_generation_unresolved")
+    producer_generations["session_index"] = {
+        "generation_id": index_generation_id,
+        "producer_sha256": bounded_required_hex(
+            generation_identity.get("producer_sha256"),
+            "session_generation_identity.producer_sha256",
+        ),
+        "producer_contract_status": generation_identity.get("producer_contract_status"),
+    }
+    projection = {
+        "publish_id": publish_id,
+        "source": source,
+        "processed_watermark": {
+            "to_line": to_line,
+            "to_timestamp": iso_or_none(watermark.get("to_timestamp")),
+        },
+        "dependency_generations": dependency_ids,
+    }
+    if projection["processed_watermark"]["to_timestamp"] is None:
+        raise BoundedPrefixError("bounded_prefix_watermark_timestamp_missing")
+    return manifest_projection, projection, {
+        "session_index": index_generation_id,
+        "segment_index": dependency_ids["segment_index"],
+        "task_episode_source": dependency_ids["task_episode_source"],
+        "producer_generations": producer_generations,
+    }
+
+
+def bounded_component_source_identity(
+    session_dir: Path,
+    *,
+    projection_publish: dict[str, Any],
+    source: dict[str, Any],
+    task_episode_generation: str,
+) -> None:
+    component_manifest_path = session_dir / "session-index-shards" / "manifest.json"
+    component_manifest = read_json(component_manifest_path)
+    if component_manifest.get("projection_publish") != projection_publish:
+        raise BoundedPrefixError("bounded_prefix_task_episode_projection_mismatch")
+    component_source = bounded_required_dict(
+        component_manifest.get("source_identity"),
+        "task_episode_source_identity",
+    )
+    for key in ("raw_sha256", "raw_bytes", "raw_line_count"):
+        expected = source[key]
+        actual = component_source.get(key)
+        if key == "raw_sha256":
+            actual = bounded_required_hex(actual, f"task_episode_source_identity.{key}")
+        else:
+            actual = bounded_required_int(actual, f"task_episode_source_identity.{key}")
+        if actual != expected:
+            raise BoundedPrefixError(f"bounded_prefix_task_episode_source_mismatch:{key}")
+    if str(component_source.get("task_episode_generation_id") or "") != task_episode_generation:
+        raise BoundedPrefixError("bounded_prefix_task_episode_generation_mismatch")
+    refs = (
+        component_manifest.get("components", {}).get("task_episodes")
+        if isinstance(component_manifest.get("components"), dict)
+        else None
+    )
+    if not isinstance(refs, list) or not refs:
+        raise BoundedPrefixError("bounded_prefix_task_episode_components_missing")
+    count = int_value(
+        (component_manifest.get("component_counts") or {}).get("task_episodes")
+        if isinstance(component_manifest.get("component_counts"), dict)
+        else None
+    )
+    if count is not None and count != len(refs):
+        raise BoundedPrefixError("bounded_prefix_task_episode_component_count_mismatch")
+    for entry in refs:
+        if not isinstance(entry, dict):
+            raise BoundedPrefixError("bounded_prefix_task_episode_component_entry_invalid")
+        ref = str(entry.get("ref") or "")
+        if not ref:
+            raise BoundedPrefixError("bounded_prefix_task_episode_component_ref_missing")
+        component_path = session_dir / ref
+        if not component_path.is_file():
+            raise BoundedPrefixError("bounded_prefix_task_episode_component_missing")
+        component = read_json(component_path)
+        if component.get("component") != "task_episodes":
+            raise BoundedPrefixError("bounded_prefix_task_episode_component_kind_mismatch")
+        identity = bounded_required_dict(component.get("source_identity"), "task_episode_component_identity")
+        if str(identity.get("task_episode_generation_id") or "") != task_episode_generation:
+            raise BoundedPrefixError("bounded_prefix_task_episode_component_generation_mismatch")
+        if int_value(identity.get("privacy_policy_version")) is None:
+            raise BoundedPrefixError("bounded_prefix_task_episode_component_privacy_identity_missing")
+        if int_value(identity.get("redaction_policy_version")) is None:
+            raise BoundedPrefixError("bounded_prefix_task_episode_component_redaction_identity_missing")
+        source_range = bounded_required_dict(identity.get("event_range"), "task_episode_component_event_range")
+        from_line = bounded_required_int(source_range.get("from_line"), "task_episode_component_event_range.from_line")
+        to_line = bounded_required_int(source_range.get("to_line"), "task_episode_component_event_range.to_line")
+        if from_line < 1 or to_line < from_line or to_line > source["raw_line_count"]:
+            raise BoundedPrefixError("bounded_prefix_task_episode_component_outside_prefix")
+        payload = bounded_required_dict(component.get("payload"), "task_episode_component_payload")
+        payload_range = event_range(payload)
+        if payload_range is None or payload_range[0] < 1 or payload_range[1] > source["raw_line_count"]:
+            raise BoundedPrefixError("bounded_prefix_task_episode_payload_outside_prefix")
+        for key in ("artifact_sha256", "payload_sha256"):
+            bounded_required_hex(entry.get(key), f"task_episode_component_entry.{key}")
+
+
+def _optional_json(path: Path) -> dict[str, Any] | None:
+    if not path.is_file():
+        return None
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def observe_bounded_tail(session_dir: Path, prefix_source: dict[str, Any], publish_id: str) -> dict[str, Any]:
+    capture = _optional_json(session_dir / "raw" / "capture.latest.json") or {}
+    capture_bytes = int_value(capture.get("raw_bytes"))
+    source_path = Path(str(capture.get("source_path") or ""))
+    source_bytes: int | None = None
+    try:
+        if source_path.is_file():
+            source_bytes = source_path.stat().st_size
+    except OSError:
+        source_bytes = None
+    observed_sizes = [value for value in (capture_bytes, source_bytes) if value is not None]
+    beyond = [value for value in observed_sizes if value > prefix_source["raw_bytes"]]
+    if beyond:
+        status = "excluded_beyond_prefix"
+        reasons = ["observed_tail_beyond_exact_prefix"]
+    elif observed_sizes:
+        status = "no_tail_observed"
+        reasons = ["tail_not_observed_beyond_exact_prefix"]
+    else:
+        status = "unresolved"
+        reasons = ["live_tail_metadata_unavailable"]
+    capture_anchor = "unresolved"
+    if capture:
+        anchor_matches = (
+            capture.get("projection_raw_sha256_at_capture") == prefix_source["raw_sha256"]
+            and capture.get("projection_publish_id_at_capture") == publish_id
+        )
+        capture_anchor = "matched" if anchor_matches else "different_or_missing"
+        if not anchor_matches:
+            reasons.append("capture_prefix_anchor_not_required_for_exact_prefix")
+    return {
+        "status": status,
+        "source_bytes_observed": source_bytes,
+        "capture_bytes_observed": capture_bytes,
+        "capture_prefix_anchor": capture_anchor,
+        "moved_during_measurement": False,
+        "reasons": reasons,
+        "absence_not_admitted": True,
+    }
+
+
+def bounded_scope_identity(material: dict[str, Any]) -> str:
+    encoded = json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+
+
+def validate_bounded_prefix(
+    aoa_root: Path,
+    selector: str,
+    *,
+    expected_pin: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     session_dir = select_session_dir(aoa_root, selector)
     manifest = read_json(session_dir / "session.manifest.json")
     index = read_json(session_dir / "session.index.json")
-    session_label = str(manifest.get("session_label") or session_dir.name)
+    session_id = str(manifest.get("session_id") or index.get("session_id") or "")
+    if not session_id or session_id != str(index.get("session_id") or ""):
+        raise BoundedPrefixError("bounded_prefix_session_identity_mismatch")
+    manifest_projection, projection, generation = bounded_projection_publish_identity(manifest, index)
+    source = projection["source"]
+    load_segment_events(
+        session_dir,
+        index,
+        expected_projection=manifest_projection,
+        expected_segment_generation=generation["segment_index"],
+        expected_line_count=source["raw_line_count"],
+    )
+    bounded_component_source_identity(
+        session_dir,
+        projection_publish=manifest_projection,
+        source=source,
+        task_episode_generation=generation["task_episode_source"],
+    )
+    observed_pin = {
+        "raw_bytes": source["raw_bytes"],
+        "raw_sha256": source["raw_sha256"],
+        "raw_line_count": source["raw_line_count"],
+        "publish_id": projection["publish_id"],
+        "session_index_generation_id": generation["session_index"],
+        "segment_index_generation_id": generation["segment_index"],
+        "task_episode_generation_id": generation["task_episode_source"],
+    }
+    for key, expected in (expected_pin or {}).items():
+        if expected is not None and str(expected) != str(observed_pin.get(key)):
+            raise BoundedPrefixError(f"bounded_prefix_expected_pin_mismatch:{key}")
+    identity_material = {
+        "schema_version": BOUNDED_MEASUREMENT_SCHEMA_VERSION,
+        "route": BOUNDED_PREFIX_ROUTE,
+        "session_id": session_id,
+        "source": source,
+        "processed_watermark": projection["processed_watermark"],
+        "publish_id": projection["publish_id"],
+        "dependency_generations": generation,
+    }
+    return {
+        "session_dir": session_dir,
+        "session_id": session_id,
+        "manifest": manifest,
+        "index": index,
+        "source": source,
+        "projection": projection,
+        "generation": generation,
+        "identity_material": identity_material,
+        "identity": bounded_scope_identity(identity_material),
+        "pin": {
+            "provided_fields": sorted((expected_pin or {}).keys()),
+            "matched": True,
+        },
+    }
+
+
+def profile_session(
+    aoa_root: Path,
+    selector: str,
+    *,
+    max_episodes: int,
+    session_label_override: str | None = None,
+) -> dict[str, Any]:
+    session_dir = select_session_dir(aoa_root, selector)
+    manifest = read_json(session_dir / "session.manifest.json")
+    index = read_json(session_dir / "session.index.json")
+    session_label = session_label_override or str(manifest.get("session_label") or session_dir.name)
     events_by_line = load_segment_events(session_dir, index)
     episodes = load_episode_payloads(session_dir)
     raw = manifest.get("raw") if isinstance(manifest.get("raw"), dict) else {}
@@ -878,6 +1258,162 @@ def profile_session(aoa_root: Path, selector: str, *, max_episodes: int) -> dict
     }
 
 
+def build_bounded_report(
+    aoa_root: Path,
+    selectors: list[str],
+    *,
+    max_episodes: int,
+    expected_pin: dict[str, Any] | None = None,
+    delivery: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if len(selectors) != 1:
+        raise BoundedPrefixError("bounded_prefix_requires_one_session_selector")
+    scope = validate_bounded_prefix(
+        aoa_root,
+        selectors[0],
+        expected_pin=expected_pin,
+    )
+    session_id = scope["session_id"]
+    tail_before = observe_bounded_tail(
+        scope["session_dir"],
+        scope["source"],
+        scope["projection"]["publish_id"],
+    )
+    session_profile = profile_session(
+        aoa_root,
+        selectors[0],
+        max_episodes=max_episodes,
+        session_label_override=session_id,
+    )
+    tail_after = observe_bounded_tail(
+        scope["session_dir"],
+        scope["source"],
+        scope["projection"]["publish_id"],
+    )
+    if (
+        tail_before.get("source_bytes_observed") != tail_after.get("source_bytes_observed")
+        or tail_before.get("capture_bytes_observed") != tail_after.get("capture_bytes_observed")
+    ):
+        tail_after["status"] = "moving_tail_observed"
+        tail_after["moved_during_measurement"] = True
+        tail_after["reasons"] = [
+            *tail_after.get("reasons", []),
+            "tail_observation_advanced_during_measurement",
+        ]
+    episodes = session_profile.get("episodes") if isinstance(session_profile.get("episodes"), list) else []
+    positive_event_count = sum(
+        int(episode.get("event_count") or 0)
+        for episode in episodes
+        if isinstance(episode, dict)
+    )
+    measurement_scope = {
+        "status": "stale-readable",
+        "scope_currentness": "identity_bound_prefix_only",
+        "session_ref": f"session:{session_id}",
+        "prefix": {
+            "identity": scope["identity"],
+            "source": {
+                "sha256": f"sha256:{scope['source']['raw_sha256']}",
+                "bytes": scope["source"]["raw_bytes"],
+                "line_count": scope["source"]["raw_line_count"],
+            },
+            "processed_watermark": scope["projection"]["processed_watermark"],
+            "projection_publish_id": f"sha256:{scope['projection']['publish_id']}",
+            "producer_generations": scope["generation"]["producer_generations"],
+            "dependency_generation_ids": {
+                key: value
+                for key, value in scope["generation"].items()
+                if key != "producer_generations"
+            },
+        },
+        "returned_positive_evidence": {
+            "status": "observed" if episodes else "empty_bounded_scope",
+            "episode_count": len(episodes),
+            "event_count": positive_event_count or 0,
+            "basis": "closed task episodes with event ranges and generated segment coverage inside the exact prefix",
+            "semantic_absence_admitted": False,
+        },
+        "excluded_live_tail": tail_after,
+        "global_recall": {
+            "status": "incomplete",
+            "complete": False,
+            "reason": "prefix_scope_does_not_cover_the_moving_or_unprojected_tail",
+        },
+        "negative_claims": {
+            "admitted": False,
+            "reason": "zero_or_missing_results_under_prefix_scope_are_not_semantic_absence",
+        },
+        "profiler_semantics": {
+            "stage_profile_schema_version": SCHEMA_VERSION,
+            "correlated_call_result_spans": True,
+            "agent_model_time": "unknown",
+            "operator_active_time": "unknown",
+            "unresolved_calls": "unknown_not_zero",
+            "open_tail": "excluded",
+            "raw_transcript_scanned": False,
+            "capture_ledger_blocks_scanned": False,
+            "privacy": "public_safe_normalized_shapes_and_logical_refs_only",
+        },
+    }
+    aggregate = {
+        "session_count": 1,
+        "profiled_closed_episode_count": len(episodes) or None,
+        "stage_spans": aggregate_stage_buckets(episodes),
+        "repeat_amplification": aggregate_repeats(episodes),
+        "unknown_stage_count": (
+            1
+            if session_profile.get("stage_spans", {}).get("unknown", {}).get("span_seconds") is not None
+            else None
+        ),
+    }
+    return {
+        "schema_version": BOUNDED_MEASUREMENT_SCHEMA_VERSION,
+        "route": {
+            "id": BOUNDED_PREFIX_ROUTE,
+            "owner": "aoa-session-memory",
+            "mode": "read_only_generated_index_profile",
+            "mutation": False,
+            "scope": "one identity-bound stable projection prefix",
+        },
+        "corpus": {
+            "selection_status": "one_explicit_session_selector",
+            "session_ref": f"session:{session_id}",
+            "scope": "closed_task_episodes_only; live/open tails are excluded",
+        },
+        "measurement_scope": measurement_scope,
+        "session": session_profile,
+        "aggregate": aggregate,
+        "stage_contract": {
+            "stages": list(STAGES),
+            **STAGE_CONTRACT,
+        },
+        "evaluator_input": {
+            "method_id": BOUNDED_PREFIX_ROUTE,
+            "comparison_posture": "bounded_positive_measurement_only",
+            "supported_claims": [
+                "positive evidence from eligible closed episodes inside one exact stable prefix",
+                "identity-bound correlated structured call-to-result wall-clock spans",
+                "explicit excluded-tail, unknown, and zero-result claim boundaries",
+            ],
+            "not_supported": [
+                "global recall completeness",
+                "negative or semantic absence claims",
+                "effectiveness, causality, policy, or evaluator verdict",
+                "model compute time or human active time",
+            ],
+            "verdict": None,
+        },
+        "delivery": delivery
+        or {
+            "changed_paths": None,
+            "commit": None,
+            "focused_verification": None,
+            "no_change": False,
+        },
+        "return_status": "positive_evidence_observed" if episodes else "empty_bounded_scope_not_absence",
+    }
+
+
 def build_report(
     aoa_root: Path,
     selectors: list[str],
@@ -958,6 +1494,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--aoa-root", type=Path, required=True)
     parser.add_argument("--session", action="append", required=True, help="Session label, id, fragment, or explicit session directory.")
     parser.add_argument("--max-episodes", type=int, default=500)
+    parser.add_argument(
+        "--bounded-prefix",
+        action="store_true",
+        help="Require and report one fail-closed exact stable-projection prefix.",
+    )
+    parser.add_argument("--expected-raw-bytes", type=int)
+    parser.add_argument("--expected-raw-sha256")
+    parser.add_argument("--expected-raw-line-count", type=int)
+    parser.add_argument("--expected-publish-id")
+    parser.add_argument("--expected-session-index-generation-id")
+    parser.add_argument("--expected-segment-index-generation-id")
+    parser.add_argument("--expected-task-episode-generation-id")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--changed-path", action="append", default=[])
     parser.add_argument("--commit")
@@ -971,17 +1519,40 @@ def main(argv: list[str] | None = None) -> int:
         print("--max-episodes must be positive", file=sys.stderr)
         return 2
     try:
-        report = build_report(
-            args.aoa_root.expanduser(),
-            args.session,
-            max_episodes=args.max_episodes,
-            delivery={
-                "changed_paths": args.changed_path or None,
-                "commit": args.commit,
-                "focused_verification": args.verification or None,
-                "no_change": False,
-            },
-        )
+        delivery = {
+            "changed_paths": args.changed_path or None,
+            "commit": args.commit,
+            "focused_verification": args.verification or None,
+            "no_change": False,
+        }
+        if args.bounded_prefix:
+            expected_pin = {
+                key: value
+                for key, value in {
+                    "raw_bytes": args.expected_raw_bytes,
+                    "raw_sha256": args.expected_raw_sha256,
+                    "raw_line_count": args.expected_raw_line_count,
+                    "publish_id": args.expected_publish_id,
+                    "session_index_generation_id": args.expected_session_index_generation_id,
+                    "segment_index_generation_id": args.expected_segment_index_generation_id,
+                    "task_episode_generation_id": args.expected_task_episode_generation_id,
+                }.items()
+                if value is not None
+            }
+            report = build_bounded_report(
+                args.aoa_root.expanduser(),
+                args.session,
+                max_episodes=args.max_episodes,
+                expected_pin=expected_pin,
+                delivery=delivery,
+            )
+        else:
+            report = build_report(
+                args.aoa_root.expanduser(),
+                args.session,
+                max_episodes=args.max_episodes,
+                delivery=delivery,
+            )
     except ProfileError as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
         return 1
