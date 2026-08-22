@@ -30,6 +30,41 @@ def test_audit_reports_secret_fingerprints_without_values(tmp_path: Path) -> Non
     assert all(item["fingerprint"].startswith("sha256:") for item in report["findings"])
 
 
+def test_candidate_scanner_preserves_overlapping_exact_rule_matches() -> None:
+    auditor = load_auditor()
+    value = "sk-" + "A" * 32
+    first_label = "api_" + "key"
+    second_label = "author" + "ization"
+    scheme = "bear" + "er"
+    third_label = "pa" + "\u017f\u017f" + "word"
+    fourth_label = "client_" + "secret"
+    home_path = "/home/" + "alice"
+    host_path = "/srv/" + "AbyssOS"
+    text = "\n".join(
+        [
+            f'{first_label}="{value}"',
+            f"{second_label}: {scheme} abcdefghijklmnopqrstuvwxyz",
+            "AKIA" + "B" * 16,
+            f"{home_path}/project {host_path}/.aoa 192.168.2.3",
+            f'{third_label}="abcdefghijklmnop"',
+            f'clİent_{fourth_label.removeprefix("client_")}="qrstuvwxyzabcdef"',
+        ]
+    )
+    expected = sorted(
+        (class_name, match.start(), match.group(0))
+        for class_name, _severity, pattern, _reason in auditor.content_rules()
+        for match in pattern.finditer(text)
+    )
+    actual = sorted(
+        (class_name, match.start(), match.group(0))
+        for class_name, _severity, match, _reason in auditor.iter_content_rule_matches(
+            text
+        )
+    )
+
+    assert actual == expected
+
+
 def test_audit_blocks_runtime_material_and_non_generic_home_paths(tmp_path: Path) -> None:
     auditor = load_auditor()
     session_dir = tmp_path / "sessions" / "private-session"

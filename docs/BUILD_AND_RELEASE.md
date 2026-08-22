@@ -39,6 +39,21 @@ Use `examples/synthetic/bootstrap_demo.py` and
 then `examples/synthetic/negative_case_matrix.py` for installed-package root,
 transport, bearer, drift, and stale-evidence refusal cases.
 
+## Projection benchmark receipts
+
+`scripts/benchmark_session_projection.py` runs cold serial/four-worker parity,
+fresh-session, and append-growth paths with repeated p50/p95 summaries. The
+default corpus is synthetic. To admit an owner snapshot without touching its
+source, pass `--source-transcript /read-only/session.raw.jsonl` and a
+public-safe `--fixture-alias`; the harness copies the source into its external
+temporary root and fails if device, inode, size, or mtime changes during that
+copy. Receipt metadata deliberately omits the source path and session id.
+
+Large benchmark roots and outputs belong on the host-approved external
+artifact volume, after the storage/resource preflight. A benchmark receipt is performance evidence
+for its fixed snapshot or synthetic corpus, not permission to mutate live AoA
+state and not proof that every runtime projection is current.
+
 ## Maintainer projection route
 
 Package changes originate in the clean committed

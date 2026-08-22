@@ -1,0 +1,132 @@
+{
+  "schema_version": 1,
+  "artifact_type": "session_projection_incremental_hot_append_actual_430mb_receipt",
+  "generated_at": "2026-08-11T15:30:00Z",
+  "fixture": {
+    "synthetic": false,
+    "source_kind": "retained_actual_event_dense_snapshot_with_synthetic_tail_only",
+    "fixture_alias": "event-dense-readonly-430mb",
+    "steady_raw_bytes_from": 430105160,
+    "steady_raw_bytes_to": 430174296,
+    "append_bytes_per_run": 17284,
+    "append_events_per_run": 6
+  },
+  "source": {
+    "branch": "agent/session-memory-incremental-core-20260810",
+    "revision": "43435c5",
+    "checkout_kind": "isolated_worktree",
+    "canonical_checkout_mutated": false,
+    "live_install_mutated": false,
+    "github_mutated": false
+  },
+  "steady_samples": [
+    {
+      "raw_bytes_before": 430105160,
+      "wall_seconds": 13.116234,
+      "cpu_seconds": 13.193332,
+      "input_bytes_physical_counter": 331280384,
+      "output_bytes_physical_counter": 23584768,
+      "raw_source_bytes_read": 17285,
+      "raw_target_bytes_written": 0,
+      "candidate_line_bytes_read": 4338826,
+      "privacy_ms": 324,
+      "session_index_ms": 6932,
+      "cgroup_swap_peak_growth_bytes": 0,
+      "status": "reindexed"
+    },
+    {
+      "raw_bytes_before": 430122444,
+      "wall_seconds": 11.998534,
+      "cpu_seconds": 13.309404,
+      "input_bytes_physical_counter": 335446016,
+      "output_bytes_physical_counter": 23629824,
+      "raw_source_bytes_read": 17285,
+      "raw_target_bytes_written": 0,
+      "candidate_line_bytes_read": 4338826,
+      "privacy_ms": 351,
+      "session_index_ms": 7150,
+      "cgroup_swap_peak_growth_bytes": 0,
+      "status": "reindexed"
+    },
+    {
+      "raw_bytes_before": 430139728,
+      "wall_seconds": 10.772224,
+      "cpu_seconds": 12.860816,
+      "input_bytes_physical_counter": 159563776,
+      "output_bytes_physical_counter": 23687168,
+      "raw_source_bytes_read": 17285,
+      "raw_target_bytes_written": 0,
+      "candidate_line_bytes_read": 4338826,
+      "privacy_ms": 310,
+      "session_index_ms": 6466,
+      "cgroup_swap_peak_growth_bytes": 2142208,
+      "shared_cgroup_contamination": true,
+      "status": "reindexed"
+    },
+    {
+      "raw_bytes_before": 430157012,
+      "wall_seconds": 13.478708,
+      "cpu_seconds": 15.447904,
+      "input_bytes_physical_counter": 259731456,
+      "output_bytes_physical_counter": 23732224,
+      "raw_source_bytes_read": 17285,
+      "raw_target_bytes_written": 0,
+      "candidate_line_bytes_read": 4338826,
+      "privacy_ms": 351,
+      "session_index_ms": 8028,
+      "cgroup_memory_peak_bytes": 1241882624,
+      "cgroup_swap_max_bytes": 0,
+      "cgroup_swap_current_before_bytes": 0,
+      "cgroup_swap_current_after_bytes": 0,
+      "cgroup_swap_peak_growth_bytes": 0,
+      "execution_scope": "dedicated_systemd_user_scope_with_MemorySwapMax_0",
+      "status": "reindexed"
+    }
+  ],
+  "steady_summary": {
+    "sample_count": 4,
+    "wall_seconds_min": 10.772224,
+    "wall_seconds_median": 12.557384,
+    "wall_seconds_max": 13.478708,
+    "wall_seconds_p95_linear_interpolation": 13.424337,
+    "hot_overlay_upper_slo_seconds": 30,
+    "hot_overlay_slo_met": true,
+    "isolated_no_swap_proof": true,
+    "all_process_rusage_swap_deltas_zero": true,
+    "raw_scan_mode": "attested_prefix_plus_captured_tail_v1",
+    "raw_publication_mode": "append_only_capture_ledger_with_bounded_materialization_v1",
+    "historical_raw_bytes_read": 0,
+    "historical_raw_target_bytes_rewritten": 0,
+    "published_prefix_aggregate_mode": "published_prefix_plus_classification_tail_v1",
+    "privacy_range_admitted_historical_blocks": 98,
+    "privacy_full_scan_blocks_per_append": 1,
+    "privacy_selected_block_bytes": 93244406,
+    "privacy_candidate_line_bytes_read": 4338826
+  },
+  "migration_and_amplification": {
+    "classification_index_bytes_before": 33085064,
+    "classification_index_bytes_after_initial_compaction": 576042,
+    "classification_summary_values_in_compact_index": false,
+    "pre_compact_checkpoint_output_bytes": 72839168,
+    "compact_checkpoint_output_bytes_range": [23584768, 23732224],
+    "stable_segment_prefix_in_umbrella_checkpoint": false,
+    "raw_block_payload_map_in_umbrella_checkpoint": false
+  },
+  "verification": {
+    "focused_tests_passed_before_receipt": 15,
+    "decision_index_records": 57,
+    "decision_indexes_current": true,
+    "captured_append_full_replay_semantic_parity_test": true,
+    "deep_artifact_audit_test": true,
+    "malformed_candidate_range_full_scan_fallback_test": true,
+    "full_source_suite": {
+      "revision": "5f58221cdf2141cc5928c0a7f03c8932e3a3439f",
+      "passed": 1328,
+      "elapsed_seconds": 548.07,
+      "ok": true
+    }
+  },
+  "authority_boundary": "Raw capture and immutable raw refs remain evidence authority. Physical input block counters include executable, filesystem-cache, and spawned-worker reads and are not claimed as exact logical projection input. One shared cgroup sample observed unrelated swap growth; the dedicated no-swap scope is the isolated memory proof.",
+  "truth_status": "four_sample_actual_430mb_hot_append_receipt_with_isolated_no_swap_proof_not_a_long_horizon_production_percentile",
+  "ok": true
+}

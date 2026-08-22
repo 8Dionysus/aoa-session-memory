@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "artifact_type": "session_projection_incremental_core_comparison",
+  "generated_at": "2026-08-11T03:56:04Z",
+  "fixture_raw_bytes": 167337941,
+  "reference_live_baseline": {
+    "wall_seconds": 756.366,
+    "scope": "full_auto_maintenance_cycle",
+    "source": "owner-supplied live operational receipt"
+  },
+  "diagnostic_same_fixture": {
+    "cold_serial_wall_seconds": 720.257896,
+    "cold_parallel_wall_seconds": 323.501844,
+    "serial_parallel_semantic_parity": true,
+    "parallel_speedup": 2.226441
+  },
+  "repeatable_parallel_gate": {
+    "run_count": 3,
+    "wall_seconds_p50": 382.540991,
+    "wall_seconds_p95": 392.706949,
+    "internal_semantic_parity": true
+  },
+  "speedup": {
+    "reference_live_baseline_vs_diagnostic_parallel": 2.338058,
+    "reference_live_baseline_vs_parallel_p95": 1.926032
+  },
+  "truth_status": "cross_receipt_comparison_with_scope_difference",
+  "authority_boundary": "The live reference covers a full maintenance cycle while the benchmark measures the session projection core. Speedups are directional comparisons, not identical-scope claims."
+}

@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, Pattern
 
@@ -221,6 +222,97 @@ def content_rules() -> list[tuple[str, str, Pattern[str], str]]:
     ]
 
 
+CONTENT_RULE_CLASS_PEM = "".join(("private_", "key"))
+CONTENT_RULE_CLASS_PROVIDER = "".join(("openai_", "api_", "key"))
+CONTENT_RULE_CLASS_ASSIGNMENT = "".join(("credential_", "assignment"))
+CONTENT_RULE_CLASS_AUTH_HEADER = "".join(("bearer_", "credential"))
+HOST_PROFILE_START_MARKER = "/srv/" + "AbyssOS"
+CONTENT_RULE_START_MARKERS = {
+    CONTENT_RULE_CLASS_PEM: ("-----BEGIN ",),
+    CONTENT_RULE_CLASS_PROVIDER: ("sk-",),
+    "github_token": ("gh",),
+    "aws_access_key": ("AKIA", "ASIA"),
+    CONTENT_RULE_CLASS_ASSIGNMENT: ("api", "access", "client", "password"),
+    CONTENT_RULE_CLASS_AUTH_HEADER: ("authorization", "bearer"),
+    "personal_home_path": ("/home/", "/Users/"),
+    "host_profile_path": (HOST_PROFILE_START_MARKER,),
+    "private_network_address": ("10.", "192.168.", "172."),
+}
+CASE_INSENSITIVE_MARKER_RULES = frozenset(
+    {CONTENT_RULE_CLASS_ASSIGNMENT, CONTENT_RULE_CLASS_AUTH_HEADER}
+)
+CASE_INSENSITIVE_MARKER_LETTERS = tuple(
+    sorted(
+        set(
+            "".join(
+                marker
+                for class_name in CASE_INSENSITIVE_MARKER_RULES
+                for marker in CONTENT_RULE_START_MARKERS[class_name]
+            )
+        )
+    )
+)
+CASE_INSENSITIVE_MARKER_PATTERNS = tuple(
+    (letter, re.compile(re.escape(letter), re.IGNORECASE))
+    for letter in CASE_INSENSITIVE_MARKER_LETTERS
+)
+
+
+def _literal_positions(text: str, markers: tuple[str, ...]) -> Iterator[int]:
+    positions: set[int] = set()
+    for marker in markers:
+        position = text.find(marker)
+        while position >= 0:
+            positions.add(position)
+            position = text.find(marker, position + 1)
+    yield from sorted(positions)
+
+
+def _case_insensitive_marker_view(text: str) -> str | None:
+    """Return a position-preserving lowercase view or require exact regex fallback."""
+
+    lowered = text.lower()
+    if len(lowered) != len(text):
+        return None
+    for character in set(text):
+        if character.isascii():
+            continue
+        for letter, pattern in CASE_INSENSITIVE_MARKER_PATTERNS:
+            if pattern.fullmatch(character) is not None and character.lower() != letter:
+                return None
+    return lowered
+
+
+def iter_content_rule_matches(
+    text: str,
+) -> Iterator[tuple[str, str, re.Match[str], str]]:
+    """Find guaranteed starts cheaply, then confirm with each original exact rule."""
+
+    rules = content_rules()
+    rule_names = {rule[0] for rule in rules}
+    if rule_names != CONTENT_RULE_START_MARKERS.keys():
+        raise RuntimeError("content-rule start markers are incomplete")
+    case_insensitive_view = _case_insensitive_marker_view(text)
+    for class_name, severity, pattern, reason in rules:
+        if class_name in CASE_INSENSITIVE_MARKER_RULES and case_insensitive_view is None:
+            for match in pattern.finditer(text):
+                yield class_name, severity, match, reason
+            continue
+        candidate_text = (
+            case_insensitive_view
+            if class_name in CASE_INSENSITIVE_MARKER_RULES
+            else text
+        )
+        assert candidate_text is not None
+        for position in _literal_positions(
+            candidate_text,
+            CONTENT_RULE_START_MARKERS[class_name],
+        ):
+            match = pattern.match(text, position)
+            if match is not None:
+                yield class_name, severity, match, reason
+
+
 def content_findings(relative: Path, absolute: Path) -> list[dict[str, Any]]:
     if not absolute.is_file() or absolute.stat().st_size > MAX_TEXT_BYTES:
         return []
@@ -232,10 +324,18 @@ def content_findings(relative: Path, absolute: Path) -> list[dict[str, Any]]:
     except UnicodeDecodeError:
         return [finding("non_utf8_file", "review", relative, data[:256], "non-UTF-8 content requires explicit review")]
     results: list[dict[str, Any]] = []
-    for class_name, severity, pattern, reason in content_rules():
-        for match in pattern.finditer(text):
-            line = text.count("\n", 0, match.start()) + 1
-            results.append(finding(class_name, severity, relative, match.group(0).encode("utf-8"), reason, line=line))
+    for class_name, severity, match, reason in iter_content_rule_matches(text):
+        line = text.count("\n", 0, match.start()) + 1
+        results.append(
+            finding(
+                class_name,
+                severity,
+                relative,
+                match.group(0).encode("utf-8"),
+                reason,
+                line=line,
+            )
+        )
     return results
 
 

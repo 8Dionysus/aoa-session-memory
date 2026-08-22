@@ -255,10 +255,18 @@ sessions/
     raw/
       session.raw.jsonl
       source.json
+      capture-ledger.json
+      live-tail.index.json
+      live-tail.postings.json
+      live-tail-postings/
+      capture-blocks/
+      captures/
       blocks/
       blocks.index.json
       compaction-events.jsonl
     segments/
+      rendered/
+    session-index-shards/
     incidents/
     distillation/
 ```
@@ -267,6 +275,54 @@ The full raw transcript remains the preserved black box. Raw blocks provide
 bounded interval access. Segment Markdown is a readable projection. Segment
 and session indexes provide navigation. Naming rules and exact generated
 shapes belong to `NAMING.md`, schemas, and `PIPELINE.md`.
+
+While a source is live, immutable content-addressed capture blocks preserve
+only the newly observed byte suffix in one hash-chained source epoch. The
+ledger records device/inode identity, byte and line watermarks, boundary
+completeness, and source-epoch transitions. A persistent live-tail index binds
+the current chain head and any archived-prefix attestation. A sibling redacted
+postings frontier advances across new complete lines as bounded immutable
+shards. Its compact manifest binds exact shard receipts and no-false-negative
+filters over already-redacted safe tokens; each shard owns its local inverted
+map to exact entry positions and byte ranges. Ordinary append replaces only an
+open-shard revision and the compact manifest. Candidate selection filters
+shards, intersects only selected local maps, and reverifies a positive candidate
+against those raw ranges; a miss cannot prove global absence. Together they allow
+bounded positive raw-tail retrieval without a repeated whole-prefix scan. The concatenated
+capture file is a rebuildable compatibility view, not a stronger authority
+than the ledger blocks.
+
+Once a stable build binds an exact capture watermark, its raw storage contract
+may point to that append-only ledger and bounded materialization instead of
+recopying the entire materialization into `raw/session.raw.jsonl`. The manifest
+binds the processed byte/line watermark, conventional SHA-256, epoch, chain
+root, and block count. The prior monolithic file remains a readable last-good
+compatibility snapshot; readers of the ledger-backed mode must stop at the
+manifest watermark even if capture has already advanced.
+
+When an unprojected backlog exceeds the live bootstrap budget, postings begin
+at the first complete line in a bounded recent byte window. Immutable capture
+block receipts provide the exact count of preceding lines with at most one
+bounded partial-block read. The manifest exposes the omitted prefix and the
+coverage start; it never relabels bounded recent coverage as global recall.
+Stable projection and raw verification retain responsibility for older
+evidence, while later live appends remain proportional to their delta.
+
+The ledger carries portable SHA-256 continuation state and hashes only appended
+bytes. Small epochs derive it with the portable implementation. On supported
+Linux hosts, a first large capture uses the public OpenSSL `SHA256_CTX` during
+the already-required delta pass, self-tests its layout and continuation, and
+exports only the block-aligned eight-word state into the same portable schema.
+No OpenSSL object or pending raw bytes are persisted. The next append rereads
+at most the 63-byte alignment gap, then hashes only the new tail. If the native
+accelerator is unavailable or fails its self-test, capture preserves the exact
+block chain and snapshot digest but visibly defers conventional digest
+continuation instead of weakening verification. An already-required stable
+full scan may migrate such an older deferred epoch by binding its exact digest
+and aligned portable state to the identical watermark. A bounded watch frontier
+records hook-observed sources. The ordinary hot timer stats that frontier and
+reads explicit outbox readiness; unchanged sources cost zero raw bytes and a
+missed hook is recovered without archive rediscovery.
 
 Physical topology may evolve, but migrations must preserve stable identity,
 evidence refs, source provenance, rebuildability, and rollback.
@@ -427,6 +483,21 @@ dependency generations that can change its meaning. Lexical/exact rows,
 episodes, dense vectors, graph contributions, entity registry candidates, and
 Atlas routes from an absent or incompatible generation are not candidates.
 
+Core session stages use a directional generation DAG. Raw-block event
+classification has no derived upstream; segment indexes and task-episode
+sources depend on that classification generation; the session index depends
+on both. A mapped stage uses its own producer source contract rather than the
+whole monolithic script as its semantic ABI. The whole loaded-source digest is
+retained separately as a process-stability and publication guard. Missing or
+ambiguous stage contracts fall back to whole-source identity. A migration may
+reuse an earlier generation only when its exact generation payload is on the
+declared predecessor allowlist and its content-addressed inputs and artifact
+receipts still validate; the next write restamps it to the current generation.
+The atomic manifest records a content-addressed migration receipt naming the
+exact predecessor IDs, current target IDs, artifact counts, raw fingerprint,
+and publish identity. Unknown or payload-mismatched predecessors remain
+incompatible.
+
 The search catalog has its own generation bound to the lexical and exact
 generations. It may route to a shard only when that shard's session state
 carries the expected lexical generation. An incompatible catalog falls back
@@ -447,9 +518,39 @@ generation readable. Repeating the same dense input and generation must
 produce identical document hashes and vector bytes even if observation
 timestamps differ.
 
-Atomic publication does not require monolithic computation. Session projection
-work is content-addressed by raw publish identity, producer generations, and
-policy versions, and may checkpoint between phases and segment waves. A
+Every atomic session publication also commits an immutable changed-component
+outbox record before the publish journal becomes committed. The record carries
+old/new component digests, stage identity, replace/tombstone semantics, required
+consumers, and the publication receipt. Mutable consumer retry/completion state
+lives outside semantic session artifacts. Recovery rolls back both an
+uncommitted publication and its newly created outbox record; recovery of a
+committed journal finalizes cleanup. Segment downstream work is selected by
+semantic component digest, so restamping an unchanged sealed segment to a new
+session publish identity does not queue it again.
+
+Outbox records and completion states use an fsync-before-rename durable write
+boundary. Replaying an identical completion receipt is a no-op; a different
+receipt for an already completed record is a collision and fails closed.
+
+Exact search completes an outbox component only after its committed search
+generation contains the change. Episode-semantic completion is joined by
+session ID to that same transaction and is admitted only for an exact current
+or explicit no-content status. Entity-registry completion also requires that
+search receipt and a current route dependency. Graph completion requires a
+successful mutation whose source-ledger publish identity exactly matches the
+outbox record. Freshness is a vector: raw capture, live overlay, stable session projection,
+search, episode semantic, entity registry, graph, returned evidence, and global
+recall are independent axes. Current returned raw evidence never promotes a
+stale graph, and a current graph never proves an uncaptured tail. Exhaustive
+negative claims require proven completeness for the requested recall scope.
+
+Atomic publication does not require monolithic computation. The umbrella work
+directory is content-addressed by raw publish identity and the publication
+contract; classification, correlation, segment index, review rendering, task
+episodes, goal lifecycles, and component-manifest work each carry an independent
+stage identity and checkpoint below it. A stage ABI change invalidates that
+stage and its downstream checkpoints without changing unrelated upstream work.
+A
 per-session lease prevents duplicate builders while allowing unrelated sessions
 to advance. Automatic oversized builders additionally share one nonblocking
 heavy-lane lease so different large sessions cannot multiply their capture or
@@ -460,14 +561,55 @@ dependency recheck, atomic publish, registry update, and dirty propagation use
 the global writer boundary. Last-good remains the reader generation until that
 boundary succeeds.
 
-Segment input digests bind the bounded raw event slice, role, raw-block content,
+The umbrella checkpoint is a control receipt, not a second projection payload.
+Classification state is referenced through its compact cache index; raw-block
+state through the staged block index and its receipts; stable published segments
+are omitted and may be relinked again after interruption. Only newly completed
+tail segments remain inline for bounded resume, so phase checkpoint writes do
+not duplicate stable historical component maps.
+
+Segment input digests bind the bounded raw event range, role, raw-block content,
 and generation policies. An unchanged segment may be reused across growth of a
 live session; the changed tail and new segments are rebuilt. Deterministic
 process workers alter execution cost, not semantic ordering or projection
-digests. Segment workers use isolated interpreter processes and receive only a
-bounded segment slice; they do not inherit the parent's reconciled whole-session
-event graph. Token-only accounting drift is a projection metadata transition, not
+digests. Segment workers use isolated interpreter processes and receive only
+immutable classification-block refs, exact line ranges, bounded reconciliation
+patches, and raw-block refs; they do not receive serialized event slices or
+inherit a parent whole-session event graph. On an admitted append the parent
+hydrates only a bounded replay tail. Historical typed counts and route counts
+come from the exact published session aggregate plus raw-free summaries loaded
+only for the appended classification tail. Block summaries live in immutable
+block artifacts; the compact classification index carries identities, receipts,
+and privacy markers without duplicating summary payloads. Sealed raw blocks and
+segments cross the transaction by exact prefix attestation. A non-contiguous or
+incompatible aggregate prefix uses explicit full summary hydration. Cold,
+migration, and small-frontier fallbacks remain explicit full reductions. Goal lifecycle
+state carries line ranges, so an open lifecycle crossing the append boundary
+expands only the bounded replay tail and merges with stable prior lifecycles.
+Token-only accounting drift is a projection metadata transition, not
 by itself a reason to repeat parsing and segmentation.
+
+Published classification records and sealed segment components bind content
+SHA-256 plus size and filesystem metadata. The hot append path can relink an
+exact attested component without opening or rewriting its payload. This is an
+acceleration receipt, not permanent content proof: `doctor
+--deep-projection-artifacts` bypasses the stat-keyed hash cache, re-hashes every
+such artifact, validates component identities and classification payloads, and
+detects same-size mutations even when modification time was restored.
+
+Atomic semantic validation is component-rooted rather than a hidden full-tree
+rescan. Segment-index receipts bind an exact artifact SHA and a canonical JSON
+semantic SHA excluding only the established projection-clock keys; Markdown
+uses its exact content SHA. The session v2 semantic receipt combines those
+named roots with the manifest, raw metadata, and compact session-index roots.
+Current size/mtime/ctime receipts admit unchanged components without opening
+them. A legacy or drifted receipt is recomputed once, while deep audit remains
+the independent full-content proof lane.
+
+The compact session-index root redacts fresh metadata, lifecycles, and other
+root-owned text before attaching already-redacted immutable segment manifests
+and raw-block refs/digests/counts. This keeps the root privacy pass bounded by
+new root material instead of recursively revisiting historical components.
 
 Raw-block reuse is independently evidence-bearing. Current event bytes are
 hashed and compared with both the prior record and the actual published block
@@ -476,17 +618,62 @@ raw blocks and their compatible block-local token summaries while preserving
 raw authority and atomic publication. Privacy scanning likewise uses a
 necessary-label prefilter before the exact sensitive-assignment matcher; the
 prefilter is a semantic no-op and removes the dominant benign-input
-backtracking cost.
+backtracking cost. Root-bound privacy markers may retain only exact relative
+byte ranges of candidate-bearing raw lines, never literal values or literal
+digests. After one full block discovery pass, hot policy reconstruction reads
+those ranges from raw authority; malformed or unavailable ranges fail over to
+the full block scan.
 
-Session-index assembly is likewise decomposed without changing reader truth.
-Privacy-safe task episodes are immutable content-addressed component shards;
-their compact manifest binds raw source, producer generation, policy versions,
-artifact hashes, payload hashes, and the session publish identity. Completed
-shards checkpoint inside exact projection work and may be produced in bounded
-deterministic waves. During the coordinated reader migration,
-`session.index.json` retains its embedded task-episode compatibility view and
-staged validation proves exact shard-to-view parity. The shard store is a
-rebuildable acceleration and storage projection, not a second evidence owner.
+Raw publication is independently componentized. If capture state and its
+content-addressed block ledger prove the exact build watermark, atomic stable
+publication records that chain receipt and writes zero historical raw bytes.
+Admission recomputes the record chain, verifies contiguous coverage and block
+metadata, and hashes the frontier block; a non-attested source keeps the exact
+monolithic snapshot fallback. Full historical content verification remains an
+explicit deep-audit responsibility.
+
+Session-index assembly is manifest first. Privacy-safe task episodes are
+immutable content-addressed component shards; their compact manifest binds
+episode-local semantic source identity, producer generation, policy versions,
+artifact hashes, payload hashes, order, and the session publish identity.
+Each newly written or exactly relinked shard also carries a SHA-256 plus
+size/mtime publication receipt. Ctime is not stable across the atomic
+hardlink/rename lifecycle; the content-addressed filename remains mandatory.
+Atomic hot validation admits that receipt only while those metadata match; otherwise it
+falls back to full content validation. Explicit deep projection audit always
+re-hashes and revalidates every task-episode shard and payload.
+Completed shards checkpoint inside exact projection work and may be produced
+in bounded deterministic waves. Closed compatible episodes survive unrelated
+tail growth. A persisted builder frontier admits a compatible segment prefix,
+reuses its sealed episodes, and replays only two boundary-adjacent episodes plus
+the new tail so continuation semantics remain deterministic. The bounded task-
+episode CLI, and therefore its MCP wrapper, validates the manifest header and
+hydrates content-addressed shards only until its result limit is satisfied.
+Each returned shard is verified, while unvisited shards remain explicitly
+unresolved and cannot support a global negative claim. Full digest, audit, and
+projection consumers still validate the complete ordered manifest;
+`session.index.json` retains only aggregate counts, a semantic digest, component
+metadata, and an empty compatibility field. Legacy indexes without component
+storage may still expose their embedded array. The shard store remains a
+rebuildable projection, not a second evidence owner.
+
+Task-episode reduction computes each event's normalized semantic text once and
+passes that immutable value to its deterministic admission consumers. Ordered,
+non-overlapping segment ranges are resolved logarithmically. A new shard is
+privacy-projected once in its worker; when a prior shard must be compared or
+restamped, the parent computes that exact redacted payload once and transfers
+it to the worker. These are producer-ABI changes for task episodes and the
+dependent session index only; classification and segment generations remain
+independent.
+
+Segment publication is index first. The machine index and compact Markdown
+synopsis preserve typed metadata, stable anchors, and exact raw/block refs, but
+ordinary builds do not duplicate full raw event bodies. A selected segment can
+be rendered explicitly into `segments/rendered/` with current redaction and a
+generation-bearing receipt. Rendering ABI changes do not invalidate the
+machine index. Oversized event bodies leave only a safe
+`omitted_large_raw_event` marker, character count, and raw ref in the machine
+index.
 
 ## Query and Evidence-Reading Contract
 
@@ -615,7 +802,8 @@ selective dependency digest changes. Legacy rows receive this dependency in a
 controlled idempotent migration; missing or unverifiable dependency data stays
 fail closed.
 
-Active sessions need quiet-window/debounce behavior. Resource-heavy work needs
+Active sessions remain retrievable through the persistent captured tail while
+debounce controls only heavier projection assembly. Resource-heavy work needs
 backpressure, bounded retry, priority, and starvation visibility. A timer or
 systemd success proves only that a launcher ran; it does not prove semantic
 freshness.
@@ -635,8 +823,21 @@ Classification is itself an incremental projection: append-stable raw blocks
 are content-addressed, checkpointed before segment work, and rebuilt only when
 their raw digest or classifier/privacy generation changes. The persisted cache
 excludes raw text, parsed payloads, and exact sensitive literals; deterministic
-rehydration rereads raw authority and applies global reconciliation before
-downstream projection.
+artifacts also carry mergeable raw-free typed counts, route counts, compaction
+markers, and correlation frontier metadata. Those summaries remain block-local;
+the cache index is a compact admission map rather than a growing summary read
+model. Spawned segment workers are
+bounded block/range consumers. After exact cache generation, block identity,
+artifact receipt, and payload shape are admitted, a segment worker may reuse
+the cache's completed privacy projection for classification metadata. Values
+newly derived from parsed raw, including token observations, are redacted
+before admission; context-sensitive facet maps and unattested writer calls
+retain the complete policy pass. This changes only the segment producer
+generation, not the reusable classification generation. On an admitted ordinary append the parent
+selects the previous open segment and episode frontier, materializes only that
+bounded raw tail, and merges historical summaries; it does not allocate a
+`RawEvent` object for every historical line. Cold, incompatible, small-frontier,
+and goal-signal routes retain an explicit full-reduction fallback.
 
 Explicit semantic non-progress is also a control signal. When a globally
 applicable graph pass selected work but changed no semantic graph content, the

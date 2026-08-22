@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "artifact_type": "session_projection_incremental_core_benchmark_summary",
+  "generated_at": "2026-08-11T03:56:04Z",
+  "fixture": {
+    "source_kind": "synthetic_live_equivalent",
+    "raw_bytes": 167337941,
+    "event_count": 73161,
+    "segment_count": 295,
+    "growth_bytes": 1700529,
+    "growth_fraction": 0.010162244
+  },
+  "cold_parallel": {
+    "workers": 4,
+    "run_count": 3,
+    "wall_seconds": [
+      392.706949,
+      356.421298,
+      382.540991
+    ],
+    "wall_seconds_p50": 382.540991,
+    "wall_seconds_p95": 392.706949,
+    "cpu_seconds_p50": 992.318913,
+    "cpu_seconds_p95": 1039.292805,
+    "max_self_rss_kib": 1155236,
+    "max_child_rss_kib": 1155236,
+    "reported_swap_delta": 0,
+    "internal_semantic_parity": true
+  },
+  "resource_observation": {
+    "systemd_memory_peak_mib": 2529.188,
+    "systemd_swap_peak_mib": 314.895,
+    "swap_gate_met": false,
+    "note": "The benchmark-level rusage swap delta was zero, but the containing systemd cgroup observed swap. A no-swap 430 MB acceptance run remains required."
+  },
+  "fresh_fixture": {
+    "wall_seconds": 4.935534,
+    "raw_unchanged": true
+  },
+  "one_percent_append": {
+    "wall_seconds": 51.32342,
+    "appended_bytes": 1700529,
+    "sha256_state_bootstrap_bytes_read": 0,
+    "sha256_delta_bytes_hashed": 1700529,
+    "source_bytes_read": 1700530,
+    "prefix_bytes_reused": 167337941,
+    "parent_raw_bytes_read": 3917093,
+    "full_event_object_list_materialized": false,
+    "historical_raw_bodies_retained": false,
+    "classification_blocks_reused": 143,
+    "classification_blocks_rebuilt": 2,
+    "raw_blocks_reused": 295,
+    "raw_blocks_rebuilt": 3,
+    "segments_reused": 295,
+    "segments_rebuilt": 3,
+    "sealed_episodes_reused": 293,
+    "events_replayed": 1240,
+    "episode_shards_reused": 294,
+    "episode_shards_rebuilt": 4,
+    "goal_lifecycle_mode": "reuse_no_goal_signal_in_tail_v1"
+  },
+  "acceptance": {
+    "cold_under_900_seconds": true,
+    "append_reads_only_delta_source_bytes": true,
+    "append_does_not_rebuild_previous_segments": true,
+    "append_uses_bounded_tail_rehydration": true,
+    "semantic_parity": true,
+    "no_swap_growth": false
+  },
+  "truth_status": "synthetic_target_host_measurement_not_live_archive_freshness",
+  "authority_boundary": "This receipt proves repeatable cold and append behavior on a synthetic target-host fixture. It does not prove an actual archived source snapshot, global downstream freshness, or the no-swap 430 MB gate."
+}

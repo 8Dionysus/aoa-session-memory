@@ -29,6 +29,22 @@
       },
       "additionalProperties": true
     },
+    "component_identity": {
+      "type": "object",
+      "required": ["schema_version", "component_type", "component_id", "segment_id", "role", "source_range", "input_digest", "raw_block_sha256", "generation_id"],
+      "properties": {
+        "schema_version": {"const": 1},
+        "component_type": {"const": "segment_index"},
+        "component_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "segment_id": {"type": "string", "minLength": 1},
+        "role": {"type": "string", "minLength": 1},
+        "source_range": {"$ref": "#/$defs/source_range"},
+        "input_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "raw_block_sha256": {"type": "string", "pattern": "^$|^[a-f0-9]{64}$"},
+        "generation_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+      },
+      "additionalProperties": false
+    },
     "projection_publish": {
       "type": "object",
       "required": ["schema_version", "publish_id", "source", "processed_watermark", "dependency_generations"],
@@ -47,17 +63,20 @@
     },
     "segment_id": {"type": "string"},
     "segment_role": {"type": "string"},
+    "input_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
     "source_raw": {"type": "string"},
-    "source_range": {
+    "source_range": {"$ref": "#/$defs/source_range"},
+    "source_block": {"type": "object"},
+    "markdown_render": {
       "type": "object",
-      "required": ["from_line", "to_line"],
+      "required": ["mode", "full_raw_views_rendered", "on_demand_supported"],
       "properties": {
-        "from_line": {"type": "integer", "minimum": 1},
-        "to_line": {"type": "integer", "minimum": 1}
+        "mode": {"enum": ["index_first_compact_v1", "full_review_v1"]},
+        "full_raw_views_rendered": {"type": "boolean"},
+        "on_demand_supported": {"const": true}
       },
       "additionalProperties": true
     },
-    "source_block": {"type": "object"},
     "events": {"type": "array", "items": {"type": "object"}},
     "by_type": {"type": "object"},
     "by_tag": {"type": "object"},
@@ -72,6 +91,17 @@
     "route_signal_schema_version": {"type": "integer"},
     "by_route_layer": {"type": "object"},
     "by_route_signal": {"type": "object"}
+  },
+  "$defs": {
+    "source_range": {
+      "type": "object",
+      "required": ["from_line", "to_line"],
+      "properties": {
+        "from_line": {"type": "integer", "minimum": 1},
+        "to_line": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": true
+    }
   },
   "additionalProperties": true
 }

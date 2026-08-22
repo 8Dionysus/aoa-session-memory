@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AoA session projection component outbox record",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "artifact_type",
+    "record_id",
+    "session_id",
+    "old_publish_id",
+    "new_publish_id",
+    "changes",
+    "required_consumers",
+    "created_at",
+    "status",
+    "publication_receipt",
+    "truth_status"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "artifact_type": {"const": "session_projection_component_outbox"},
+    "record_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "session_id": {"type": "string", "minLength": 1},
+    "old_publish_id": {"type": "string", "pattern": "^([a-f0-9]{64})?$"},
+    "new_publish_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "changes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "component_id",
+          "component_type",
+          "operation",
+          "old_digest",
+          "new_digest",
+          "source_ref",
+          "generation_identity",
+          "required_consumers"
+        ],
+        "properties": {
+          "component_id": {"type": "string", "minLength": 1},
+          "component_type": {"type": "string", "minLength": 1},
+          "operation": {"enum": ["publish", "replace", "tombstone"]},
+          "old_digest": {"type": "string", "pattern": "^([a-f0-9]{64})?$"},
+          "new_digest": {"type": "string", "pattern": "^([a-f0-9]{64})?$"},
+          "source_ref": {"type": "string"},
+          "generation_identity": {"type": "object"},
+          "required_consumers": {
+            "type": "array",
+            "items": {"type": "string"},
+            "uniqueItems": true
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "required_consumers": {
+      "type": "array",
+      "items": {"type": "string"},
+      "uniqueItems": true
+    },
+    "created_at": {"type": "string", "minLength": 1},
+    "status": {"const": "pending"},
+    "retry_policy": {"type": "object"},
+    "publication_receipt": {
+      "type": "object",
+      "required": ["session_dir", "publish_id"],
+      "properties": {
+        "session_dir": {"type": "string", "minLength": 1},
+        "publish_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+      },
+      "additionalProperties": false
+    },
+    "truth_status": {"const": "changed_component_work_intent_not_downstream_completion"}
+  },
+  "additionalProperties": false
+}

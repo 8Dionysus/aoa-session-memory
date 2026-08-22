@@ -43,9 +43,13 @@ prints matched credential or host values.
 
 ## Existing installations
 
-Kernel upgrades preserve existing session directories and rebuild the
-registry/index views from those archives. Forced export may replace portable
-files while preserving repository-owned `.git`, `.github`, and `kag` surfaces.
+Kernel upgrades preserve existing session directories and the generated
+projection overlay. Changed producer identities mark only their owned stages or
+components dirty; normal catch-up reuses unchanged raw blocks, segments,
+classification summaries, and task-episode shards. A full rebuild is reserved
+for explicit bootstrap, migration, or deep-repair cases. Forced export may
+replace portable files while preserving repository-owned `.git`, `.github`, and
+`kag` surfaces.
 It must not silently delete runtime evidence. `export-bundle --force` therefore
 fails closed before mutation when its target contains a runtime install
 profile, archived sessions, or generated runtime stores. Upgrade an installed
@@ -97,3 +101,8 @@ The executable CLI owns exact export, install, hook-rendering, skill-install,
 validate, doctor, and audit syntax. Inspect the selected subcommand help in
 `scripts/aoa_session_memory.py`. Short focused check routes live in the nearest
 `AGENTS.md` rather than in this document.
+
+After installation, `projection-status` and `freshness-vector <session>` expose
+capture, live-overlay, stable-projection, and downstream-consumer progress.
+`auto-maintenance hot --apply` consumes the bounded event-driven queue;
+`projection-catchup` and deep maintenance remain explicit repair routes.

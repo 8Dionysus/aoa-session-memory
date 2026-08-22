@@ -16,6 +16,7 @@
 | [AOA-SM-D-0034 Bounded Dirty-First Automatic Index Discovery](../AOA-SM-D-0034-bounded-dirty-first-automatic-index-discovery.md) | 2026-07-28 | Accepted | `docs/decisions/AOA-SM-D-0034-bounded-dirty-first-automatic-index-discovery.md` |
 | [AOA-SM-D-0041 Incompatible Atlas Generations Use the Deep Clean-Rebuild Route](../AOA-SM-D-0041-incompatible-atlas-generations-use-the-deep-clean-rebuild-route.md) | 2026-07-31 | Accepted | `docs/decisions/AOA-SM-D-0041-incompatible-atlas-generations-use-the-deep-clean-rebuild-route.md` |
 | [AOA-SM-D-0042 Complete Registry Source Sets Gate Projection Retirement](../AOA-SM-D-0042-complete-registry-source-sets-gate-projection-retirement.md) | 2026-08-01 | Accepted | `docs/decisions/AOA-SM-D-0042-complete-registry-source-sets-gate-projection-retirement.md` |
+| [AOA-SM-D-0072 Evidence Absence Is Not Maintenance Backlog](../AOA-SM-D-0072-evidence-absence-is-not-maintenance-backlog.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0072-evidence-absence-is-not-maintenance-backlog.md` |
 
 ## agent event
 
@@ -36,6 +37,12 @@
 | [AOA-SM-D-0003 Session-Scoped Archived Raw Exact Fallback](../AOA-SM-D-0003-session-scoped-archived-raw-exact-fallback.md) | 2026-07-15 | Accepted | `docs/decisions/AOA-SM-D-0003-session-scoped-archived-raw-exact-fallback.md` |
 | [AOA-SM-D-0014 Session-Scoped Structured Prompt-Visibility Probe](../AOA-SM-D-0014-session-scoped-structured-prompt-visibility-probe.md) | 2026-07-17 | Accepted | `docs/decisions/AOA-SM-D-0014-session-scoped-structured-prompt-visibility-probe.md` |
 
+## archived route terms
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0059 Transactional Dirty Marker for Observed Route Dependency](../AOA-SM-D-0059-transactional-dirty-marker-for-observed-route-dependency.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0059-transactional-dirty-marker-for-observed-route-dependency.md` |
+
 ## Atlas
 
 | Decision | Date | Status | Path |
@@ -49,6 +56,7 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0030 Projection-Scoped Producer Generation Identity](../AOA-SM-D-0030-projection-scoped-producer-generation-identity.md) | 2026-07-26 | Accepted | `docs/decisions/AOA-SM-D-0030-projection-scoped-producer-generation-identity.md` |
+| [AOA-SM-D-0061 Freshness Profiles Do Not Own Heavy Tail](../AOA-SM-D-0061-freshness-profiles-do-not-own-heavy-tail.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0061-freshness-profiles-do-not-own-heavy-tail.md` |
 
 ## atlas indexes
 
@@ -68,11 +76,29 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0013 Indexed Graph Seed Before Retrieval Fallback](../AOA-SM-D-0013-indexed-graph-seed-before-retrieval-fallback.md) | 2026-07-17 | Accepted | `docs/decisions/AOA-SM-D-0013-indexed-graph-seed-before-retrieval-fallback.md` |
 
+## captured raw overlay
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0086 Live Tail Publish Watermark Authority](../AOA-SM-D-0086-live-tail-publish-watermark-authority.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0086-live-tail-publish-watermark-authority.md` |
+
+## classification cache
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0055 Bounded Incremental Reuse Admission](../AOA-SM-D-0055-bounded-incremental-reuse-admission.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0055-bounded-incremental-reuse-admission.md` |
+
 ## compact retrieval route packet
 
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0040 Served-Request Health Is Distinct from Provider Availability](../AOA-SM-D-0040-served-request-health-is-distinct-from-provider-availability.md) | 2026-07-31 | Accepted | `docs/decisions/AOA-SM-D-0040-served-request-health-is-distinct-from-provider-availability.md` |
+
+## component-delta outbox
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0092 Durable Publication Progress Receipts Survive Timeout](../AOA-SM-D-0092-durable-publication-progress-receipts-under-timeout.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0092-durable-publication-progress-receipts-under-timeout.md` |
 
 ## decision lane
 
@@ -102,6 +128,12 @@
 | [AOA-SM-D-0030 Projection-Scoped Producer Generation Identity](../AOA-SM-D-0030-projection-scoped-producer-generation-identity.md) | 2026-07-26 | Accepted | `docs/decisions/AOA-SM-D-0030-projection-scoped-producer-generation-identity.md` |
 | [AOA-SM-D-0034 Bounded Dirty-First Automatic Index Discovery](../AOA-SM-D-0034-bounded-dirty-first-automatic-index-discovery.md) | 2026-07-28 | Accepted | `docs/decisions/AOA-SM-D-0034-bounded-dirty-first-automatic-index-discovery.md` |
 
+## derived-text redaction
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0088 Independent Validation Nodes and Bounded Proof Kernels](../AOA-SM-D-0088-independent-validation-nodes-and-bounded-proof-kernels.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0088-independent-validation-nodes-and-bounded-proof-kernels.md` |
+
 ## dirty session state
 
 | Decision | Date | Status | Path |
@@ -122,6 +154,21 @@
 | [AOA-SM-D-0035 Transactional Preservation of Runtime-Generated Maps Across Upgrades](../AOA-SM-D-0035-transactional-preservation-of-runtime-generated-maps-across-upgrades.md) | 2026-07-28 | Accepted | `docs/decisions/AOA-SM-D-0035-transactional-preservation-of-runtime-generated-maps-across-upgrades.md` |
 | [AOA-SM-D-0043 Split Registry Semantic Epoch from Content Revision](../AOA-SM-D-0043-split-registry-semantic-epoch-from-content-revision.md) | 2026-07-30 | Accepted | `docs/decisions/AOA-SM-D-0043-split-registry-semantic-epoch-from-content-revision.md` |
 | [AOA-SM-D-0044 Content-Addressed Resumable Projection Work](../AOA-SM-D-0044-content-addressed-resumable-projection-work.md) | 2026-08-08 | Accepted | `docs/decisions/AOA-SM-D-0044-content-addressed-resumable-projection-work.md` |
+| [AOA-SM-D-0051 Transactional Component Outbox and Vector Freshness](../AOA-SM-D-0051-transactional-component-outbox-and-vector-freshness.md) | 2026-08-10 | Accepted | `docs/decisions/AOA-SM-D-0051-transactional-component-outbox-and-vector-freshness.md` |
+| [AOA-SM-D-0059 Transactional Dirty Marker for Observed Route Dependency](../AOA-SM-D-0059-transactional-dirty-marker-for-observed-route-dependency.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0059-transactional-dirty-marker-for-observed-route-dependency.md` |
+| [AOA-SM-D-0060 Bounded Process Digest Reuse and Resource Epochs](../AOA-SM-D-0060-bounded-process-digest-reuse-and-resource-epochs.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0060-bounded-process-digest-reuse-and-resource-epochs.md` |
+| [AOA-SM-D-0063 Bounded Freshness Defers Global Derivatives](../AOA-SM-D-0063-bounded-freshness-defers-global-derivatives.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0063-bounded-freshness-defers-global-derivatives.md` |
+| [AOA-SM-D-0067 Guarded Graph Generation Rebind](../AOA-SM-D-0067-guarded-graph-generation-rebind.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0067-guarded-graph-generation-rebind.md` |
+| [AOA-SM-D-0071 Preflight Global State Handoff for Bounded Maintenance](../AOA-SM-D-0071-preflight-global-state-handoff-for-bounded-maintenance.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0071-preflight-global-state-handoff-for-bounded-maintenance.md` |
+| [AOA-SM-D-0072 Evidence Absence Is Not Maintenance Backlog](../AOA-SM-D-0072-evidence-absence-is-not-maintenance-backlog.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0072-evidence-absence-is-not-maintenance-backlog.md` |
+| [AOA-SM-D-0075 Runtime Owner Overlay Does Not Rescan Observed Routes](../AOA-SM-D-0075-runtime-owner-overlay-does-not-rescan-observed-routes.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0075-runtime-owner-overlay-does-not-rescan-observed-routes.md` |
+| [AOA-SM-D-0076 Observed Route Refresh Is One Covering Pass](../AOA-SM-D-0076-observed-route-refresh-is-one-covering-pass.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0076-observed-route-refresh-is-one-covering-pass.md` |
+| [AOA-SM-D-0077 Entry-Set-Equivalent Graph Rebind Is Metadata Only](../AOA-SM-D-0077-entry-set-equivalent-graph-rebind-is-metadata-only.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0077-entry-set-equivalent-graph-rebind-is-metadata-only.md` |
+| [AOA-SM-D-0079 Materialization-Equivalent Rebind Does Not Rehash the Graph](../AOA-SM-D-0079-materialization-equivalent-rebind-does-not-rehash-graph.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0079-materialization-equivalent-rebind-does-not-rehash-graph.md` |
+| [AOA-SM-D-0080 Compact Route-Token Proof Replaces Payload Scan](../AOA-SM-D-0080-compact-route-token-proof-replaces-payload-scan.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0080-compact-route-token-proof-replaces-payload-scan.md` |
+| [AOA-SM-D-0082 Proved Materialization Drift Admits Exact Source Refresh](../AOA-SM-D-0082-proved-materialization-drift-admits-exact-source-refresh.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0082-proved-materialization-drift-admits-exact-source-refresh.md` |
+| [AOA-SM-D-0083 Additive Registry Repair Replaces Full Layer Reconstruction](../AOA-SM-D-0083-additive-registry-repair-replaces-full-layer-reconstruction.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0083-additive-registry-repair-replaces-full-layer-reconstruction.md` |
+| [AOA-SM-D-0084 Predecessor Proof Preserves Stored Dependency Generations](../AOA-SM-D-0084-predecessor-proof-preserves-stored-dependency-generations.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0084-predecessor-proof-preserves-stored-dependency-generations.md` |
 
 ## entity usage chain
 
@@ -188,6 +235,8 @@
 | [AOA-SM-D-0029 Warm-Budgeted Automatic Rerank Escalation](../AOA-SM-D-0029-warm-budgeted-automatic-rerank-escalation.md) | 2026-07-21 | Accepted | `docs/decisions/AOA-SM-D-0029-warm-budgeted-automatic-rerank-escalation.md` |
 | [AOA-SM-D-0030 Projection-Scoped Producer Generation Identity](../AOA-SM-D-0030-projection-scoped-producer-generation-identity.md) | 2026-07-26 | Accepted | `docs/decisions/AOA-SM-D-0030-projection-scoped-producer-generation-identity.md` |
 | [AOA-SM-D-0042 Complete Registry Source Sets Gate Projection Retirement](../AOA-SM-D-0042-complete-registry-source-sets-gate-projection-retirement.md) | 2026-08-01 | Accepted | `docs/decisions/AOA-SM-D-0042-complete-registry-source-sets-gate-projection-retirement.md` |
+| [AOA-SM-D-0051 Transactional Component Outbox and Vector Freshness](../AOA-SM-D-0051-transactional-component-outbox-and-vector-freshness.md) | 2026-08-10 | Accepted | `docs/decisions/AOA-SM-D-0051-transactional-component-outbox-and-vector-freshness.md` |
+| [AOA-SM-D-0091 Projection Generations Follow Materializer Boundaries](../AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md` |
 
 ## episode semantic evidence packet
 
@@ -207,6 +256,13 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0025 Process-Loaded Producer Generation Identity](../AOA-SM-D-0025-process-loaded-producer-generation-identity.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0025-process-loaded-producer-generation-identity.md` |
+
+## event classification
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0048 Stage-Scoped Producer ABI and Guarded Predecessor Admission](../AOA-SM-D-0048-stage-scoped-producer-abi-and-guarded-predecessor-admission.md) | 2026-08-10 | Accepted | `docs/decisions/AOA-SM-D-0048-stage-scoped-producer-abi-and-guarded-predecessor-admission.md` |
+| [AOA-SM-D-0088 Independent Validation Nodes and Bounded Proof Kernels](../AOA-SM-D-0088-independent-validation-nodes-and-bounded-proof-kernels.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0088-independent-validation-nodes-and-bounded-proof-kernels.md` |
 
 ## event route signals
 
@@ -281,6 +337,19 @@
 | [AOA-SM-D-0025 Process-Loaded Producer Generation Identity](../AOA-SM-D-0025-process-loaded-producer-generation-identity.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0025-process-loaded-producer-generation-identity.md` |
 | [AOA-SM-D-0026 Best-Effort Progress Transport](../AOA-SM-D-0026-best-effort-progress-transport.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0026-best-effort-progress-transport.md` |
 | [AOA-SM-D-0030 Projection-Scoped Producer Generation Identity](../AOA-SM-D-0030-projection-scoped-producer-generation-identity.md) | 2026-07-26 | Accepted | `docs/decisions/AOA-SM-D-0030-projection-scoped-producer-generation-identity.md` |
+| [AOA-SM-D-0051 Transactional Component Outbox and Vector Freshness](../AOA-SM-D-0051-transactional-component-outbox-and-vector-freshness.md) | 2026-08-10 | Accepted | `docs/decisions/AOA-SM-D-0051-transactional-component-outbox-and-vector-freshness.md` |
+| [AOA-SM-D-0072 Evidence Absence Is Not Maintenance Backlog](../AOA-SM-D-0072-evidence-absence-is-not-maintenance-backlog.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0072-evidence-absence-is-not-maintenance-backlog.md` |
+| [AOA-SM-D-0073 Verified Fallback Completion Retires Retry](../AOA-SM-D-0073-verified-fallback-completion-retires-retry.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0073-verified-fallback-completion-retires-retry.md` |
+| [AOA-SM-D-0074 Graph Blockers Transfer to the Upstream Owner](../AOA-SM-D-0074-graph-blockers-transfer-to-upstream-owner.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0074-graph-blockers-transfer-to-upstream-owner.md` |
+| [AOA-SM-D-0075 Runtime Owner Overlay Does Not Rescan Observed Routes](../AOA-SM-D-0075-runtime-owner-overlay-does-not-rescan-observed-routes.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0075-runtime-owner-overlay-does-not-rescan-observed-routes.md` |
+| [AOA-SM-D-0077 Entry-Set-Equivalent Graph Rebind Is Metadata Only](../AOA-SM-D-0077-entry-set-equivalent-graph-rebind-is-metadata-only.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0077-entry-set-equivalent-graph-rebind-is-metadata-only.md` |
+| [AOA-SM-D-0079 Materialization-Equivalent Rebind Does Not Rehash the Graph](../AOA-SM-D-0079-materialization-equivalent-rebind-does-not-rehash-graph.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0079-materialization-equivalent-rebind-does-not-rehash-graph.md` |
+| [AOA-SM-D-0080 Compact Route-Token Proof Replaces Payload Scan](../AOA-SM-D-0080-compact-route-token-proof-replaces-payload-scan.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0080-compact-route-token-proof-replaces-payload-scan.md` |
+| [AOA-SM-D-0081 Session Reindex Follow-Ups Stay Session Scoped](../AOA-SM-D-0081-session-reindex-followups-stay-session-scoped.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0081-session-reindex-followups-stay-session-scoped.md` |
+| [AOA-SM-D-0082 Proved Materialization Drift Admits Exact Source Refresh](../AOA-SM-D-0082-proved-materialization-drift-admits-exact-source-refresh.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0082-proved-materialization-drift-admits-exact-source-refresh.md` |
+| [AOA-SM-D-0083 Additive Registry Repair Replaces Full Layer Reconstruction](../AOA-SM-D-0083-additive-registry-repair-replaces-full-layer-reconstruction.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0083-additive-registry-repair-replaces-full-layer-reconstruction.md` |
+| [AOA-SM-D-0084 Predecessor Proof Preserves Stored Dependency Generations](../AOA-SM-D-0084-predecessor-proof-preserves-stored-dependency-generations.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0084-predecessor-proof-preserves-stored-dependency-generations.md` |
+| [AOA-SM-D-0091 Projection Generations Follow Materializer Boundaries](../AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md` |
 
 ## graph anchor resolution
 
@@ -293,6 +362,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0028 Authoritative Registry Rebuild Excludes Generated History](../AOA-SM-D-0028-authoritative-registry-rebuild-excludes-generated-history.md) | 2026-07-20 | Accepted | `docs/decisions/AOA-SM-D-0028-authoritative-registry-rebuild-excludes-generated-history.md` |
+
+## graph dependency binding
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0071 Preflight Global State Handoff for Bounded Maintenance](../AOA-SM-D-0071-preflight-global-state-handoff-for-bounded-maintenance.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0071-preflight-global-state-handoff-for-bounded-maintenance.md` |
 
 ## graph edges
 
@@ -312,6 +387,8 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0006 Bounded Query-Demand Projection Catch-Up](../AOA-SM-D-0006-bounded-query-demand-projection-catch-up.md) | 2026-07-16 | Accepted | `docs/decisions/AOA-SM-D-0006-bounded-query-demand-projection-catch-up.md` |
 | [AOA-SM-D-0012 Bounded Background Graph Queue Reserve](../AOA-SM-D-0012-bounded-background-graph-queue-reserve.md) | 2026-07-17 | Accepted | `docs/decisions/AOA-SM-D-0012-bounded-background-graph-queue-reserve.md` |
+| [AOA-SM-D-0069 Graph Predecessor Reindex Handoff](../AOA-SM-D-0069-graph-predecessor-reindex-handoff.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0069-graph-predecessor-reindex-handoff.md` |
+| [AOA-SM-D-0070 Coalesced Hook Intent and Contention-Neutral Retry](../AOA-SM-D-0070-coalesced-hook-intent-and-contention-neutral-retry.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0070-coalesced-hook-intent-and-contention-neutral-retry.md` |
 
 ## graph metadata
 
@@ -370,6 +447,16 @@
 | [AOA-SM-D-0031 Proof-Gated Entity-Registry Graph Rebind](../AOA-SM-D-0031-proof-gated-entity-registry-graph-rebind.md) | 2026-07-26 | Accepted | `docs/decisions/AOA-SM-D-0031-proof-gated-entity-registry-graph-rebind.md` |
 | [AOA-SM-D-0043 Split Registry Semantic Epoch from Content Revision](../AOA-SM-D-0043-split-registry-semantic-epoch-from-content-revision.md) | 2026-07-30 | Accepted | `docs/decisions/AOA-SM-D-0043-split-registry-semantic-epoch-from-content-revision.md` |
 | [AOA-SM-D-0044 Content-Addressed Resumable Projection Work](../AOA-SM-D-0044-content-addressed-resumable-projection-work.md) | 2026-08-08 | Accepted | `docs/decisions/AOA-SM-D-0044-content-addressed-resumable-projection-work.md` |
+| [AOA-SM-D-0066 Set-Wise Append-Only Graph Batches](../AOA-SM-D-0066-set-wise-append-only-graph-batches.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0066-set-wise-append-only-graph-batches.md` |
+| [AOA-SM-D-0067 Guarded Graph Generation Rebind](../AOA-SM-D-0067-guarded-graph-generation-rebind.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0067-guarded-graph-generation-rebind.md` |
+| [AOA-SM-D-0068 Session-Coherent Graph Queue Windows](../AOA-SM-D-0068-session-coherent-graph-queue-windows.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0068-session-coherent-graph-queue-windows.md` |
+| [AOA-SM-D-0069 Graph Predecessor Reindex Handoff](../AOA-SM-D-0069-graph-predecessor-reindex-handoff.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0069-graph-predecessor-reindex-handoff.md` |
+
+## graph source ledger
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0058 Persisted Live-Tail State Precedes Resource Admission](../AOA-SM-D-0058-persisted-live-tail-state-precedes-resource-admission.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0058-persisted-live-tail-state-precedes-resource-admission.md` |
 
 ## graph source-state ledger
 
@@ -384,6 +471,9 @@
 | [AOA-SM-D-0022 Pinned Entity-Registry Generation for Graph Publication](../AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0022-pinned-entity-registry-generation-for-graph-publication.md` |
 | [AOA-SM-D-0023 Manifest-Committed Graph Sidecar Publication](../AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md` |
 | [AOA-SM-D-0043 Split Registry Semantic Epoch from Content Revision](../AOA-SM-D-0043-split-registry-semantic-epoch-from-content-revision.md) | 2026-07-30 | Accepted | `docs/decisions/AOA-SM-D-0043-split-registry-semantic-epoch-from-content-revision.md` |
+| [AOA-SM-D-0066 Set-Wise Append-Only Graph Batches](../AOA-SM-D-0066-set-wise-append-only-graph-batches.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0066-set-wise-append-only-graph-batches.md` |
+| [AOA-SM-D-0067 Guarded Graph Generation Rebind](../AOA-SM-D-0067-guarded-graph-generation-rebind.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0067-guarded-graph-generation-rebind.md` |
+| [AOA-SM-D-0068 Session-Coherent Graph Queue Windows](../AOA-SM-D-0068-session-coherent-graph-queue-windows.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0068-session-coherent-graph-queue-windows.md` |
 
 ## graph timeline
 
@@ -392,11 +482,53 @@
 | [AOA-SM-D-0008 Scoped Graph Evidence Freshness](../AOA-SM-D-0008-scoped-graph-evidence-freshness.md) | 2026-07-16 | Accepted | `docs/decisions/AOA-SM-D-0008-scoped-graph-evidence-freshness.md` |
 | [AOA-SM-D-0013 Indexed Graph Seed Before Retrieval Fallback](../AOA-SM-D-0013-indexed-graph-seed-before-retrieval-fallback.md) | 2026-07-17 | Accepted | `docs/decisions/AOA-SM-D-0013-indexed-graph-seed-before-retrieval-fallback.md` |
 
+## graph type counts
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0066 Set-Wise Append-Only Graph Batches](../AOA-SM-D-0066-set-wise-append-only-graph-batches.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0066-set-wise-append-only-graph-batches.md` |
+
+## hook ingress
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0089 Durable Thin Hook Ingress Before Projection](../AOA-SM-D-0089-durable-thin-hook-ingress-before-projection.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0089-durable-thin-hook-ingress-before-projection.md` |
+
+## hook receipts
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0089 Durable Thin Hook Ingress Before Projection](../AOA-SM-D-0089-durable-thin-hook-ingress-before-projection.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0089-durable-thin-hook-ingress-before-projection.md` |
+
+## hook sync queue
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0070 Coalesced Hook Intent and Contention-Neutral Retry](../AOA-SM-D-0070-coalesced-hook-intent-and-contention-neutral-retry.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0070-coalesced-hook-intent-and-contention-neutral-retry.md` |
+
+## hook worker queue
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0089 Durable Thin Hook Ingress Before Projection](../AOA-SM-D-0089-durable-thin-hook-ingress-before-projection.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0089-durable-thin-hook-ingress-before-projection.md` |
+
 ## lexical search
 
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0030 Projection-Scoped Producer Generation Identity](../AOA-SM-D-0030-projection-scoped-producer-generation-identity.md) | 2026-07-26 | Accepted | `docs/decisions/AOA-SM-D-0030-projection-scoped-producer-generation-identity.md` |
+
+## live owner transcript
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0086 Live Tail Publish Watermark Authority](../AOA-SM-D-0086-live-tail-publish-watermark-authority.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0086-live-tail-publish-watermark-authority.md` |
+
+## live tail
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0062 Catch-Up Prefers Bounded Index Drip](../AOA-SM-D-0062-catchup-prefers-bounded-index-drip.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0062-catchup-prefers-bounded-index-drip.md` |
 
 ## live-tail exact fallback
 
@@ -421,6 +553,21 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0015 Deadline-Aware Cooperative Retry Dispatch](../AOA-SM-D-0015-deadline-aware-cooperative-retry-dispatch.md) | 2026-07-17 | Accepted | `docs/decisions/AOA-SM-D-0015-deadline-aware-cooperative-retry-dispatch.md` |
+| [AOA-SM-D-0078 Hot Status Does Not Parse Raw Projection Work](../AOA-SM-D-0078-hot-status-does-not-parse-raw-projection-work.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0078-hot-status-does-not-parse-raw-projection-work.md` |
+| [AOA-SM-D-0085 Bounded Orphan Stage Verification](../AOA-SM-D-0085-bounded-orphan-stage-verification.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0085-bounded-orphan-stage-verification.md` |
+
+## maintenance diagnostics
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0058 Persisted Live-Tail State Precedes Resource Admission](../AOA-SM-D-0058-persisted-live-tail-state-precedes-resource-admission.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0058-persisted-live-tail-state-precedes-resource-admission.md` |
+| [AOA-SM-D-0059 Transactional Dirty Marker for Observed Route Dependency](../AOA-SM-D-0059-transactional-dirty-marker-for-observed-route-dependency.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0059-transactional-dirty-marker-for-observed-route-dependency.md` |
+| [AOA-SM-D-0060 Bounded Process Digest Reuse and Resource Epochs](../AOA-SM-D-0060-bounded-process-digest-reuse-and-resource-epochs.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0060-bounded-process-digest-reuse-and-resource-epochs.md` |
+| [AOA-SM-D-0061 Freshness Profiles Do Not Own Heavy Tail](../AOA-SM-D-0061-freshness-profiles-do-not-own-heavy-tail.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0061-freshness-profiles-do-not-own-heavy-tail.md` |
+| [AOA-SM-D-0062 Catch-Up Prefers Bounded Index Drip](../AOA-SM-D-0062-catchup-prefers-bounded-index-drip.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0062-catchup-prefers-bounded-index-drip.md` |
+| [AOA-SM-D-0063 Bounded Freshness Defers Global Derivatives](../AOA-SM-D-0063-bounded-freshness-defers-global-derivatives.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0063-bounded-freshness-defers-global-derivatives.md` |
+| [AOA-SM-D-0064 Freshness Drip Admits Only Light Session Work](../AOA-SM-D-0064-freshness-drip-admits-only-light-session-work.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0064-freshness-drip-admits-only-light-session-work.md` |
+| [AOA-SM-D-0065 Registry Cost Admission Precedes Semantic Fingerprints](../AOA-SM-D-0065-registry-cost-admission-precedes-semantic-fingerprints.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0065-registry-cost-admission-precedes-semantic-fingerprints.md` |
 
 ## maintenance queue
 
@@ -428,6 +575,21 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0002 Semantic Projection Generation Identity](../AOA-SM-D-0002-semantic-projection-generation-identity.md) | 2026-07-14 | Accepted | `docs/decisions/AOA-SM-D-0002-semantic-projection-generation-identity.md` |
 | [AOA-SM-D-0043 Split Registry Semantic Epoch from Content Revision](../AOA-SM-D-0043-split-registry-semantic-epoch-from-content-revision.md) | 2026-07-30 | Accepted | `docs/decisions/AOA-SM-D-0043-split-registry-semantic-epoch-from-content-revision.md` |
+| [AOA-SM-D-0066 Set-Wise Append-Only Graph Batches](../AOA-SM-D-0066-set-wise-append-only-graph-batches.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0066-set-wise-append-only-graph-batches.md` |
+| [AOA-SM-D-0068 Session-Coherent Graph Queue Windows](../AOA-SM-D-0068-session-coherent-graph-queue-windows.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0068-session-coherent-graph-queue-windows.md` |
+
+## maintenance retry
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0092 Durable Publication Progress Receipts Survive Timeout](../AOA-SM-D-0092-durable-publication-progress-receipts-under-timeout.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0092-durable-publication-progress-receipts-under-timeout.md` |
+
+## maintenance retry queue
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0070 Coalesced Hook Intent and Contention-Neutral Retry](../AOA-SM-D-0070-coalesced-hook-intent-and-contention-neutral-retry.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0070-coalesced-hook-intent-and-contention-neutral-retry.md` |
+| [AOA-SM-D-0090 Session Freshness Obligations Close on Watermark Proof](../AOA-SM-D-0090-session-freshness-obligations-close-on-watermark-proof.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0090-session-freshness-obligations-close-on-watermark-proof.md` |
 
 ## map entries
 
@@ -441,6 +603,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0024 Semantic Generation Pins for Evaluation Admission](../AOA-SM-D-0024-semantic-generation-pins-for-evaluation-admission.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0024-semantic-generation-pins-for-evaluation-admission.md` |
 | [AOA-SM-D-0025 Process-Loaded Producer Generation Identity](../AOA-SM-D-0025-process-loaded-producer-generation-identity.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0025-process-loaded-producer-generation-identity.md` |
+
+## persistent live-tail overlay
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0049 Append-Only Raw Capture Ledger and Persistent Live-Tail Overlay](../AOA-SM-D-0049-append-only-raw-capture-ledger-and-persistent-live-tail-overlay.md) | 2026-08-10 | Accepted | `docs/decisions/AOA-SM-D-0049-append-only-raw-capture-ledger-and-persistent-live-tail-overlay.md` |
 
 ## persistent retry queue
 
@@ -472,6 +640,8 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0004 Declared Incremental Search Schema Transitions](../AOA-SM-D-0004-declared-incremental-search-schema-transitions.md) | 2026-07-15 | Accepted | `docs/decisions/AOA-SM-D-0004-declared-incremental-search-schema-transitions.md` |
+| [AOA-SM-D-0059 Transactional Dirty Marker for Observed Route Dependency](../AOA-SM-D-0059-transactional-dirty-marker-for-observed-route-dependency.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0059-transactional-dirty-marker-for-observed-route-dependency.md` |
+| [AOA-SM-D-0060 Bounded Process Digest Reuse and Resource Epochs](../AOA-SM-D-0060-bounded-process-digest-reuse-and-resource-epochs.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0060-bounded-process-digest-reuse-and-resource-epochs.md` |
 
 ## projection state
 
@@ -504,11 +674,30 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0024 Semantic Generation Pins for Evaluation Admission](../AOA-SM-D-0024-semantic-generation-pins-for-evaluation-admission.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0024-semantic-generation-pins-for-evaluation-admission.md` |
 
+## raw authority
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0087 Resource-Gated Session Projection Cleanup Conveyor](../AOA-SM-D-0087-resource-gated-session-projection-cleanup-conveyor.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0087-resource-gated-session-projection-cleanup-conveyor.md` |
+
+## raw block projection
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0057 Append-Only Capture Ledger Stable Raw Publication](../AOA-SM-D-0057-append-only-capture-ledger-stable-raw-publication.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0057-append-only-capture-ledger-stable-raw-publication.md` |
+
 ## raw blocks
 
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0044 Content-Addressed Resumable Projection Work](../AOA-SM-D-0044-content-addressed-resumable-projection-work.md) | 2026-08-08 | Accepted | `docs/decisions/AOA-SM-D-0044-content-addressed-resumable-projection-work.md` |
+
+## raw capture
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0057 Append-Only Capture Ledger Stable Raw Publication](../AOA-SM-D-0057-append-only-capture-ledger-stable-raw-publication.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0057-append-only-capture-ledger-stable-raw-publication.md` |
+| [AOA-SM-D-0090 Session Freshness Obligations Close on Watermark Proof](../AOA-SM-D-0090-session-freshness-obligations-close-on-watermark-proof.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0090-session-freshness-obligations-close-on-watermark-proof.md` |
 
 ## raw capture state
 
@@ -521,6 +710,21 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0045 Block-Addressed Incremental Event Classification](../AOA-SM-D-0045-block-addressed-incremental-event-classification.md) | 2026-08-09 | Accepted | `docs/decisions/AOA-SM-D-0045-block-addressed-incremental-event-classification.md` |
+| [AOA-SM-D-0052 Generation-Bound Segment Privacy Admission](../AOA-SM-D-0052-generation-bound-segment-privacy-admission.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0052-generation-bound-segment-privacy-admission.md` |
+
+## raw evidence
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0049 Append-Only Raw Capture Ledger and Persistent Live-Tail Overlay](../AOA-SM-D-0049-append-only-raw-capture-ledger-and-persistent-live-tail-overlay.md) | 2026-08-10 | Accepted | `docs/decisions/AOA-SM-D-0049-append-only-raw-capture-ledger-and-persistent-live-tail-overlay.md` |
+| [AOA-SM-D-0054 Native-Assisted Portable SHA-256 Continuation](../AOA-SM-D-0054-native-assisted-portable-sha256-continuation.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0054-native-assisted-portable-sha256-continuation.md` |
+
+## raw session
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0078 Hot Status Does Not Parse Raw Projection Work](../AOA-SM-D-0078-hot-status-does-not-parse-raw-projection-work.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0078-hot-status-does-not-parse-raw-projection-work.md` |
+| [AOA-SM-D-0085 Bounded Orphan Stage Verification](../AOA-SM-D-0085-bounded-orphan-stage-verification.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0085-bounded-orphan-stage-verification.md` |
 
 ## raw-block storage
 
@@ -540,11 +744,32 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0012 Bounded Background Graph Queue Reserve](../AOA-SM-D-0012-bounded-background-graph-queue-reserve.md) | 2026-07-17 | Accepted | `docs/decisions/AOA-SM-D-0012-bounded-background-graph-queue-reserve.md` |
 
+## resumable projection work
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0087 Resource-Gated Session Projection Cleanup Conveyor](../AOA-SM-D-0087-resource-gated-session-projection-cleanup-conveyor.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0087-resource-gated-session-projection-cleanup-conveyor.md` |
+
+## review rendering
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0050 Manifest-First Session Components and Lazy Review Rendering](../AOA-SM-D-0050-manifest-first-session-components-and-lazy-review-rendering.md) | 2026-08-10 | Accepted | `docs/decisions/AOA-SM-D-0050-manifest-first-session-components-and-lazy-review-rendering.md` |
+
+## route indexes
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0062 Catch-Up Prefers Bounded Index Drip](../AOA-SM-D-0062-catchup-prefers-bounded-index-drip.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0062-catchup-prefers-bounded-index-drip.md` |
+| [AOA-SM-D-0064 Freshness Drip Admits Only Light Session Work](../AOA-SM-D-0064-freshness-drip-admits-only-light-session-work.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0064-freshness-drip-admits-only-light-session-work.md` |
+| [AOA-SM-D-0065 Registry Cost Admission Precedes Semantic Fingerprints](../AOA-SM-D-0065-registry-cost-admission-precedes-semantic-fingerprints.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0065-registry-cost-admission-precedes-semantic-fingerprints.md` |
+
 ## route readiness
 
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0041 Incompatible Atlas Generations Use the Deep Clean-Rebuild Route](../AOA-SM-D-0041-incompatible-atlas-generations-use-the-deep-clean-rebuild-route.md) | 2026-07-31 | Accepted | `docs/decisions/AOA-SM-D-0041-incompatible-atlas-generations-use-the-deep-clean-rebuild-route.md` |
+| [AOA-SM-D-0072 Evidence Absence Is Not Maintenance Backlog](../AOA-SM-D-0072-evidence-absence-is-not-maintenance-backlog.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0072-evidence-absence-is-not-maintenance-backlog.md` |
 
 ## route terms
 
@@ -571,6 +796,20 @@
 | [AOA-SM-D-0024 Semantic Generation Pins for Evaluation Admission](../AOA-SM-D-0024-semantic-generation-pins-for-evaluation-admission.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0024-semantic-generation-pins-for-evaluation-admission.md` |
 | [AOA-SM-D-0025 Process-Loaded Producer Generation Identity](../AOA-SM-D-0025-process-loaded-producer-generation-identity.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0025-process-loaded-producer-generation-identity.md` |
 | [AOA-SM-D-0026 Best-Effort Progress Transport](../AOA-SM-D-0026-best-effort-progress-transport.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0026-best-effort-progress-transport.md` |
+| [AOA-SM-D-0051 Transactional Component Outbox and Vector Freshness](../AOA-SM-D-0051-transactional-component-outbox-and-vector-freshness.md) | 2026-08-10 | Accepted | `docs/decisions/AOA-SM-D-0051-transactional-component-outbox-and-vector-freshness.md` |
+| [AOA-SM-D-0061 Freshness Profiles Do Not Own Heavy Tail](../AOA-SM-D-0061-freshness-profiles-do-not-own-heavy-tail.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0061-freshness-profiles-do-not-own-heavy-tail.md` |
+| [AOA-SM-D-0062 Catch-Up Prefers Bounded Index Drip](../AOA-SM-D-0062-catchup-prefers-bounded-index-drip.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0062-catchup-prefers-bounded-index-drip.md` |
+| [AOA-SM-D-0063 Bounded Freshness Defers Global Derivatives](../AOA-SM-D-0063-bounded-freshness-defers-global-derivatives.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0063-bounded-freshness-defers-global-derivatives.md` |
+| [AOA-SM-D-0064 Freshness Drip Admits Only Light Session Work](../AOA-SM-D-0064-freshness-drip-admits-only-light-session-work.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0064-freshness-drip-admits-only-light-session-work.md` |
+| [AOA-SM-D-0065 Registry Cost Admission Precedes Semantic Fingerprints](../AOA-SM-D-0065-registry-cost-admission-precedes-semantic-fingerprints.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0065-registry-cost-admission-precedes-semantic-fingerprints.md` |
+| [AOA-SM-D-0075 Runtime Owner Overlay Does Not Rescan Observed Routes](../AOA-SM-D-0075-runtime-owner-overlay-does-not-rescan-observed-routes.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0075-runtime-owner-overlay-does-not-rescan-observed-routes.md` |
+| [AOA-SM-D-0076 Observed Route Refresh Is One Covering Pass](../AOA-SM-D-0076-observed-route-refresh-is-one-covering-pass.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0076-observed-route-refresh-is-one-covering-pass.md` |
+
+## search catalog
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0063 Bounded Freshness Defers Global Derivatives](../AOA-SM-D-0063-bounded-freshness-defers-global-derivatives.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0063-bounded-freshness-defers-global-derivatives.md` |
 
 ## search entity documents
 
@@ -584,12 +823,26 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0032 Task-Episode Interval Membership for Search Events](../AOA-SM-D-0032-task-episode-interval-membership-for-search-events.md) | 2026-07-26 | Accepted | `docs/decisions/AOA-SM-D-0032-task-episode-interval-membership-for-search-events.md` |
 
+## search freshness state
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0058 Persisted Live-Tail State Precedes Resource Admission](../AOA-SM-D-0058-persisted-live-tail-state-precedes-resource-admission.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0058-persisted-live-tail-state-precedes-resource-admission.md` |
+
 ## search generation metadata
 
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0037 Evidence-Backed Representation Vectors for Dense Episode Retrieval](../AOA-SM-D-0037-evidence-backed-representation-vectors-for-dense-episode-retrieval.md) | 2026-07-29 | Accepted | `docs/decisions/AOA-SM-D-0037-evidence-backed-representation-vectors-for-dense-episode-retrieval.md` |
 | [AOA-SM-D-0038 Primary-Preserving Role-Diverse Dense Evidence Hydration](../AOA-SM-D-0038-primary-preserving-role-diverse-dense-evidence-hydration.md) | 2026-07-29 | Accepted | `docs/decisions/AOA-SM-D-0038-primary-preserving-role-diverse-dense-evidence-hydration.md` |
+
+## search index
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0071 Preflight Global State Handoff for Bounded Maintenance](../AOA-SM-D-0071-preflight-global-state-handoff-for-bounded-maintenance.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0071-preflight-global-state-handoff-for-bounded-maintenance.md` |
+| [AOA-SM-D-0072 Evidence Absence Is Not Maintenance Backlog](../AOA-SM-D-0072-evidence-absence-is-not-maintenance-backlog.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0072-evidence-absence-is-not-maintenance-backlog.md` |
+| [AOA-SM-D-0073 Verified Fallback Completion Retires Retry](../AOA-SM-D-0073-verified-fallback-completion-retires-retry.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0073-verified-fallback-completion-retires-retry.md` |
 
 ## search projection
 
@@ -615,6 +868,8 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0025 Process-Loaded Producer Generation Identity](../AOA-SM-D-0025-process-loaded-producer-generation-identity.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0025-process-loaded-producer-generation-identity.md` |
 | [AOA-SM-D-0030 Projection-Scoped Producer Generation Identity](../AOA-SM-D-0030-projection-scoped-producer-generation-identity.md) | 2026-07-26 | Accepted | `docs/decisions/AOA-SM-D-0030-projection-scoped-producer-generation-identity.md` |
+| [AOA-SM-D-0050 Manifest-First Session Components and Lazy Review Rendering](../AOA-SM-D-0050-manifest-first-session-components-and-lazy-review-rendering.md) | 2026-08-10 | Accepted | `docs/decisions/AOA-SM-D-0050-manifest-first-session-components-and-lazy-review-rendering.md` |
+| [AOA-SM-D-0088 Independent Validation Nodes and Bounded Proof Kernels](../AOA-SM-D-0088-independent-validation-nodes-and-bounded-proof-kernels.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0088-independent-validation-nodes-and-bounded-proof-kernels.md` |
 
 ## segment indexes
 
@@ -627,12 +882,20 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0020 Preserved Capture and Last-Good Projection Publication](../AOA-SM-D-0020-preserved-capture-and-last-good-projection-publication.md) | 2026-07-18 | Accepted | `docs/decisions/AOA-SM-D-0020-preserved-capture-and-last-good-projection-publication.md` |
+| [AOA-SM-D-0055 Bounded Incremental Reuse Admission](../AOA-SM-D-0055-bounded-incremental-reuse-admission.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0055-bounded-incremental-reuse-admission.md` |
+| [AOA-SM-D-0056 Merkle Semantic Component Receipts](../AOA-SM-D-0056-merkle-semantic-component-receipts.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0056-merkle-semantic-component-receipts.md` |
 
 ## segment relationships
 
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0009 Correlated Agent Activity Status Relation](../AOA-SM-D-0009-correlated-agent-activity-status-relation.md) | 2026-07-16 | Accepted | `docs/decisions/AOA-SM-D-0009-correlated-agent-activity-status-relation.md` |
+
+## semantic component receipt
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0088 Independent Validation Nodes and Bounded Proof Kernels](../AOA-SM-D-0088-independent-validation-nodes-and-bounded-proof-kernels.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0088-independent-validation-nodes-and-bounded-proof-kernels.md` |
 
 ## semantic episode
 
@@ -666,6 +929,25 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0021 Raw-Preserving Derived-Text Privacy Boundary](../AOA-SM-D-0021-raw-preserving-derived-text-privacy-boundary.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0021-raw-preserving-derived-text-privacy-boundary.md` |
 
+## session component manifest
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0050 Manifest-First Session Components and Lazy Review Rendering](../AOA-SM-D-0050-manifest-first-session-components-and-lazy-review-rendering.md) | 2026-08-10 | Accepted | `docs/decisions/AOA-SM-D-0050-manifest-first-session-components-and-lazy-review-rendering.md` |
+| [AOA-SM-D-0056 Merkle Semantic Component Receipts](../AOA-SM-D-0056-merkle-semantic-component-receipts.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0056-merkle-semantic-component-receipts.md` |
+
+## session component shards
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0055 Bounded Incremental Reuse Admission](../AOA-SM-D-0055-bounded-incremental-reuse-admission.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0055-bounded-incremental-reuse-admission.md` |
+
+## session components
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0051 Transactional Component Outbox and Vector Freshness](../AOA-SM-D-0051-transactional-component-outbox-and-vector-freshness.md) | 2026-08-10 | Accepted | `docs/decisions/AOA-SM-D-0051-transactional-component-outbox-and-vector-freshness.md` |
+
 ## session document search
 
 | Decision | Date | Status | Path |
@@ -688,6 +970,12 @@
 | [AOA-SM-D-0044 Content-Addressed Resumable Projection Work](../AOA-SM-D-0044-content-addressed-resumable-projection-work.md) | 2026-08-08 | Accepted | `docs/decisions/AOA-SM-D-0044-content-addressed-resumable-projection-work.md` |
 | [AOA-SM-D-0045 Block-Addressed Incremental Event Classification](../AOA-SM-D-0045-block-addressed-incremental-event-classification.md) | 2026-08-09 | Accepted | `docs/decisions/AOA-SM-D-0045-block-addressed-incremental-event-classification.md` |
 | [AOA-SM-D-0046 Content-Addressed Session-Index Components With Compatibility View](../AOA-SM-D-0046-content-addressed-session-index-components-with-compatibility-view.md) | 2026-08-09 | Accepted | `docs/decisions/AOA-SM-D-0046-content-addressed-session-index-components-with-compatibility-view.md` |
+| [AOA-SM-D-0048 Stage-Scoped Producer ABI and Guarded Predecessor Admission](../AOA-SM-D-0048-stage-scoped-producer-abi-and-guarded-predecessor-admission.md) | 2026-08-10 | Accepted | `docs/decisions/AOA-SM-D-0048-stage-scoped-producer-abi-and-guarded-predecessor-admission.md` |
+| [AOA-SM-D-0053 Single-Pass Task-Episode Reduction and Shard Redaction](../AOA-SM-D-0053-single-pass-task-episode-reduction-and-shard-redaction.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0053-single-pass-task-episode-reduction-and-shard-redaction.md` |
+| [AOA-SM-D-0069 Graph Predecessor Reindex Handoff](../AOA-SM-D-0069-graph-predecessor-reindex-handoff.md) | 2026-08-12 | Accepted | `docs/decisions/AOA-SM-D-0069-graph-predecessor-reindex-handoff.md` |
+| [AOA-SM-D-0074 Graph Blockers Transfer to the Upstream Owner](../AOA-SM-D-0074-graph-blockers-transfer-to-upstream-owner.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0074-graph-blockers-transfer-to-upstream-owner.md` |
+| [AOA-SM-D-0081 Session Reindex Follow-Ups Stay Session Scoped](../AOA-SM-D-0081-session-reindex-followups-stay-session-scoped.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0081-session-reindex-followups-stay-session-scoped.md` |
+| [AOA-SM-D-0091 Projection Generations Follow Materializer Boundaries](../AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md` |
 
 ## session lineage
 
@@ -695,11 +983,27 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0005 Provenance-Preserving Fork Lineage Consolidation](../AOA-SM-D-0005-provenance-preserving-fork-lineage-consolidation.md) | 2026-07-15 | Accepted | `docs/decisions/AOA-SM-D-0005-provenance-preserving-fork-lineage-consolidation.md` |
 
+## session manifest
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0057 Append-Only Capture Ledger Stable Raw Publication](../AOA-SM-D-0057-append-only-capture-ledger-stable-raw-publication.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0057-append-only-capture-ledger-stable-raw-publication.md` |
+
 ## session projection
 
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0020 Preserved Capture and Last-Good Projection Publication](../AOA-SM-D-0020-preserved-capture-and-last-good-projection-publication.md) | 2026-07-18 | Accepted | `docs/decisions/AOA-SM-D-0020-preserved-capture-and-last-good-projection-publication.md` |
+| [AOA-SM-D-0061 Freshness Profiles Do Not Own Heavy Tail](../AOA-SM-D-0061-freshness-profiles-do-not-own-heavy-tail.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0061-freshness-profiles-do-not-own-heavy-tail.md` |
+| [AOA-SM-D-0070 Coalesced Hook Intent and Contention-Neutral Retry](../AOA-SM-D-0070-coalesced-hook-intent-and-contention-neutral-retry.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0070-coalesced-hook-intent-and-contention-neutral-retry.md` |
+| [AOA-SM-D-0090 Session Freshness Obligations Close on Watermark Proof](../AOA-SM-D-0090-session-freshness-obligations-close-on-watermark-proof.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0090-session-freshness-obligations-close-on-watermark-proof.md` |
+| [AOA-SM-D-0092 Durable Publication Progress Receipts Survive Timeout](../AOA-SM-D-0092-durable-publication-progress-receipts-under-timeout.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0092-durable-publication-progress-receipts-under-timeout.md` |
+
+## session projection stage
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0087 Resource-Gated Session Projection Cleanup Conveyor](../AOA-SM-D-0087-resource-gated-session-projection-cleanup-conveyor.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0087-resource-gated-session-projection-cleanup-conveyor.md` |
 
 ## session projection work
 
@@ -708,6 +1012,13 @@
 | [AOA-SM-D-0046 Content-Addressed Session-Index Components With Compatibility View](../AOA-SM-D-0046-content-addressed-session-index-components-with-compatibility-view.md) | 2026-08-09 | Accepted | `docs/decisions/AOA-SM-D-0046-content-addressed-session-index-components-with-compatibility-view.md` |
 | [AOA-SM-D-0047 Exclusive Heavy Projection Lane and Isolated Segment Workers](../AOA-SM-D-0047-exclusive-heavy-projection-lane-and-isolated-segment-workers.md) | 2026-08-09 | Accepted | `docs/decisions/AOA-SM-D-0047-exclusive-heavy-projection-lane-and-isolated-segment-workers.md` |
 
+## session registry
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0065 Registry Cost Admission Precedes Semantic Fingerprints](../AOA-SM-D-0065-registry-cost-admission-precedes-semantic-fingerprints.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0065-registry-cost-admission-precedes-semantic-fingerprints.md` |
+| [AOA-SM-D-0089 Durable Thin Hook Ingress Before Projection](../AOA-SM-D-0089-durable-thin-hook-ingress-before-projection.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0089-durable-thin-hook-ingress-before-projection.md` |
+
 ## session segments
 
 | Decision | Date | Status | Path |
@@ -715,6 +1026,8 @@
 | [AOA-SM-D-0044 Content-Addressed Resumable Projection Work](../AOA-SM-D-0044-content-addressed-resumable-projection-work.md) | 2026-08-08 | Accepted | `docs/decisions/AOA-SM-D-0044-content-addressed-resumable-projection-work.md` |
 | [AOA-SM-D-0045 Block-Addressed Incremental Event Classification](../AOA-SM-D-0045-block-addressed-incremental-event-classification.md) | 2026-08-09 | Accepted | `docs/decisions/AOA-SM-D-0045-block-addressed-incremental-event-classification.md` |
 | [AOA-SM-D-0047 Exclusive Heavy Projection Lane and Isolated Segment Workers](../AOA-SM-D-0047-exclusive-heavy-projection-lane-and-isolated-segment-workers.md) | 2026-08-09 | Accepted | `docs/decisions/AOA-SM-D-0047-exclusive-heavy-projection-lane-and-isolated-segment-workers.md` |
+| [AOA-SM-D-0048 Stage-Scoped Producer ABI and Guarded Predecessor Admission](../AOA-SM-D-0048-stage-scoped-producer-abi-and-guarded-predecessor-admission.md) | 2026-08-10 | Accepted | `docs/decisions/AOA-SM-D-0048-stage-scoped-producer-abi-and-guarded-predecessor-admission.md` |
+| [AOA-SM-D-0052 Generation-Bound Segment Privacy Admission](../AOA-SM-D-0052-generation-bound-segment-privacy-admission.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0052-generation-bound-segment-privacy-admission.md` |
 
 ## shortest path
 
@@ -728,12 +1041,33 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0014 Session-Scoped Structured Prompt-Visibility Probe](../AOA-SM-D-0014-session-scoped-structured-prompt-visibility-probe.md) | 2026-07-17 | Accepted | `docs/decisions/AOA-SM-D-0014-session-scoped-structured-prompt-visibility-probe.md` |
 
+## stable session projection
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0054 Native-Assisted Portable SHA-256 Continuation](../AOA-SM-D-0054-native-assisted-portable-sha256-continuation.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0054-native-assisted-portable-sha256-continuation.md` |
+| [AOA-SM-D-0078 Hot Status Does Not Parse Raw Projection Work](../AOA-SM-D-0078-hot-status-does-not-parse-raw-projection-work.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0078-hot-status-does-not-parse-raw-projection-work.md` |
+| [AOA-SM-D-0086 Live Tail Publish Watermark Authority](../AOA-SM-D-0086-live-tail-publish-watermark-authority.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0086-live-tail-publish-watermark-authority.md` |
+
+## staged session projection
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0085 Bounded Orphan Stage Verification](../AOA-SM-D-0085-bounded-orphan-stage-verification.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0085-bounded-orphan-stage-verification.md` |
+
 ## task episode
 
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0005 Provenance-Preserving Fork Lineage Consolidation](../AOA-SM-D-0005-provenance-preserving-fork-lineage-consolidation.md) | 2026-07-15 | Accepted | `docs/decisions/AOA-SM-D-0005-provenance-preserving-fork-lineage-consolidation.md` |
 | [AOA-SM-D-0009 Correlated Agent Activity Status Relation](../AOA-SM-D-0009-correlated-agent-activity-status-relation.md) | 2026-07-16 | Accepted | `docs/decisions/AOA-SM-D-0009-correlated-agent-activity-status-relation.md` |
+
+## task episode source
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0053 Single-Pass Task-Episode Reduction and Shard Redaction](../AOA-SM-D-0053-single-pass-task-episode-reduction-and-shard-redaction.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0053-single-pass-task-episode-reduction-and-shard-redaction.md` |
+| [AOA-SM-D-0091 Projection Generations Follow Materializer Boundaries](../AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md` |
 
 ## task episodes
 
@@ -743,6 +1077,8 @@
 | [AOA-SM-D-0032 Task-Episode Interval Membership for Search Events](../AOA-SM-D-0032-task-episode-interval-membership-for-search-events.md) | 2026-07-26 | Accepted | `docs/decisions/AOA-SM-D-0032-task-episode-interval-membership-for-search-events.md` |
 | [AOA-SM-D-0036 Explicit Context Additions Continue Open Task Episodes](../AOA-SM-D-0036-explicit-context-additions-continue-open-task-episodes.md) | 2026-07-28 | Accepted | `docs/decisions/AOA-SM-D-0036-explicit-context-additions-continue-open-task-episodes.md` |
 | [AOA-SM-D-0046 Content-Addressed Session-Index Components With Compatibility View](../AOA-SM-D-0046-content-addressed-session-index-components-with-compatibility-view.md) | 2026-08-09 | Accepted | `docs/decisions/AOA-SM-D-0046-content-addressed-session-index-components-with-compatibility-view.md` |
+| [AOA-SM-D-0048 Stage-Scoped Producer ABI and Guarded Predecessor Admission](../AOA-SM-D-0048-stage-scoped-producer-abi-and-guarded-predecessor-admission.md) | 2026-08-10 | Accepted | `docs/decisions/AOA-SM-D-0048-stage-scoped-producer-abi-and-guarded-predecessor-admission.md` |
+| [AOA-SM-D-0050 Manifest-First Session Components and Lazy Review Rendering](../AOA-SM-D-0050-manifest-first-session-components-and-lazy-review-rendering.md) | 2026-08-10 | Accepted | `docs/decisions/AOA-SM-D-0050-manifest-first-session-components-and-lazy-review-rendering.md` |
 
 ## task-local DAG
 
