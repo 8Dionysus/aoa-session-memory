@@ -71,6 +71,28 @@ and native Codex hook trust are explicit user operations.
 Project and user hooks may both run. Archive writes are idempotent for the same
 raw source, while duplicate receipts remain possible and visible.
 
+## Systemd unit rendering
+
+Fresh capture and discovery are separate owner lanes. The fresh-capture unit is
+capture-watch-only; discovery and stable projection run in a separately named,
+resource-gated sweep unit. Render them into an explicitly chosen target when a
+runtime owner is ready to review deployment:
+
+```bash
+python3 scripts/aoa_session_memory.py render-systemd-units \
+  --workspace-root /absolute/path/to/workspace \
+  --aoa-root /absolute/path/to/workspace/.aoa \
+  --output-dir /absolute/path/to/user/systemd \
+  --force
+```
+
+An installed-root upgrade can render the same four named files with
+`install --systemd-unit-dir <target> --force`. The installer never enables,
+starts, reloads, or trusts a unit, and it never changes a live systemd
+directory unless that directory is explicitly supplied by the caller. The
+rendered capture contract must remain one `capture-watch` `ExecStart`; the
+resource-gated sweep owns transcript discovery and stable projection.
+
 ## User skills
 
 The global session-memory router and the evidence route are approved for

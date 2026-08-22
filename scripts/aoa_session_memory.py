@@ -160,7 +160,7 @@ DECLARED_GRAPH_PROJECTION_GENERATION_TRANSITIONS: dict[
     # still conditional on reconstructing the exact predecessor identity from
     # its source and on the complete graph materialization proof performed by
     # graph-registry-rebind.
-    "54c113abc0cb5120c9a24e5482cdb36ed155a9c469f65f17e33cee60ad51db23": (
+    "a46a0da0ac1e20446586946183cb58d495449ac826c8dba72490e86139e64b82": (
         {
             # AOA-SM-D-0092: the previous current graph is admitted only when
             # the exact source-line bytes reconstruct its prior identity.
@@ -565,6 +565,10 @@ SEARCH_DB_NAME = "aoa-search.sqlite3"
 SEARCH_PROVIDER_CONFIG_PATH = Path("config/search-providers.json")
 LEGACY_SESSION_ROOT = Path("codex-sessions")
 REGISTRY_NAME = "session-registry.json"
+PHYSICAL_ARCHIVE_LINEAGE_SCHEMA_VERSION = 1
+PRESERVED_PHYSICAL_ARCHIVE_STATUSES = frozenset(
+    {"raw_unavailable", "raw_mirrored_index_deferred"}
+)
 SESSION_NAME_INDEX_JSON = "session-name-index.json"
 SESSION_NAME_INDEX_MARKDOWN = "SESSION_NAMES.md"
 NAMING_POLICY_PATH = Path("config/naming-policy.json")
@@ -1680,6 +1684,14 @@ SESSION_MEMORY_RESOURCE_MAINTENANCE_UNITS = {
     "aoa-session-memory-catchup-maintenance.service": "catchup",
     "aoa-session-memory-deep-maintenance.service": "deep",
 }
+SESSION_MEMORY_CAPTURE_SERVICE = "aoa-session-memory-fresh-capture.service"
+SESSION_MEMORY_CAPTURE_TIMER = "aoa-session-memory-fresh-capture.timer"
+SESSION_MEMORY_RESOURCE_GATED_SWEEP_SERVICE = (
+    "aoa-session-memory-resource-gated-sweep.service"
+)
+SESSION_MEMORY_RESOURCE_GATED_SWEEP_TIMER = (
+    "aoa-session-memory-resource-gated-sweep.timer"
+)
 SESSION_MEMORY_RESOURCE_DEMAND_OWNER = "aoa-session-memory"
 SESSION_MEMORY_RESOURCE_DEMAND_KEY_PREFIX = "aoa-session-memory"
 AUTO_MAINTENANCE_RETRY_QUEUE_SCHEMA_VERSION = 2
@@ -3565,7 +3577,32 @@ def install_portable_bundle(
     overwrite: bool = False,
     hooks_path: Path | None = None,
     backup_hooks: bool = True,
+    systemd_unit_dir: Path | None = None,
 ) -> dict[str, Any]:
+    rendered_systemd_units: dict[str, str] | None = None
+    systemd_target = Path(systemd_unit_dir).expanduser() if systemd_unit_dir else None
+    if systemd_target is not None:
+        rendered_systemd_units = render_session_memory_systemd_units(
+            workspace_root=workspace_root,
+            aoa_root=aoa_root,
+            source_root=Path.home() / ".codex" / "sessions",
+        )
+        existing_systemd_units = [
+            str(systemd_target / name)
+            for name in rendered_systemd_units
+            if (systemd_target / name).exists()
+        ]
+        if existing_systemd_units and not overwrite:
+            return {
+                "schema_version": SCHEMA_VERSION,
+                "ok": False,
+                "status": "systemd_unit_target_exists",
+                "systemd_units": {
+                    "unit_dir": str(systemd_target),
+                    "existing": existing_systemd_units,
+                    "written": [],
+                },
+            }
     copy_payload = copy_portable_bundle(
         source_aoa_root=source_aoa_root,
         target_aoa_root=aoa_root,
@@ -3589,6 +3626,8 @@ def install_portable_bundle(
         "include_tests": bool(include_tests),
         "producer": "aoa-session-memory install",
     }
+    if systemd_target is not None:
+        install_profile["systemd_unit_dir"] = str(systemd_target.resolve(strict=False))
     write_json(aoa_root / INSTALL_PROFILE_PATH, install_profile)
 
     live_hooks_payload: dict[str, Any] | None = None
@@ -3602,15 +3641,31 @@ def install_portable_bundle(
         write_json(hooks_path, hook_config)
         live_hooks_payload = {"path": str(hooks_path), "backup_path": str(backup_path) if backup_path else None}
 
+    systemd_payload: dict[str, Any]
+    if systemd_target is not None and rendered_systemd_units is not None:
+        systemd_payload = write_session_memory_systemd_units(
+            systemd_target,
+            rendered_systemd_units,
+            overwrite=overwrite,
+        )
+    else:
+        systemd_payload = {
+            "ok": True,
+            "status": "not_requested",
+            "unit_dir": None,
+            "written": [],
+        }
+
     return {
         "schema_version": SCHEMA_VERSION,
-        "ok": True,
+        "ok": bool(systemd_payload.get("ok")),
         "workspace_root": str(workspace_root),
         "aoa_root": str(aoa_root),
         "copy": copy_payload,
         "hook_example": str(aoa_root / "hooks" / "codex-hooks.user.example.json"),
         "install_profile": install_profile,
         "live_hooks": live_hooks_payload,
+        "systemd_units": systemd_payload,
     }
 
 
@@ -36109,6 +36164,114 @@ def update_registry(
     return True
 
 
+def path_identity_key(path: Path) -> str:
+    """Return a comparison key without requiring the path to exist."""
+    try:
+        return str(path.expanduser().resolve(strict=False))
+    except (OSError, RuntimeError):
+        return str(path.expanduser())
+
+
+def physical_archive_lineage_entry(
+    manifest: dict[str, Any],
+    session_dir: Path,
+    *,
+    relation: str = "physical_archive",
+) -> dict[str, Any]:
+    """Describe one physical archive without reading raw or derived content."""
+    display = manifest.get("display") if isinstance(manifest.get("display"), dict) else {}
+    session_id = str(manifest.get("session_id") or "")
+    session_label = str(
+        manifest.get("session_label")
+        or display.get("label")
+        or ""
+    )
+    path = Path(session_dir)
+    path_value = str(path)
+    diagnostics: list[str] = []
+    if not session_id:
+        diagnostics.append("missing_manifest_session_id")
+    if not session_label:
+        diagnostics.append("missing_manifest_session_label")
+    if session_label and path.name != session_label:
+        diagnostics.append("session_label_does_not_match_directory_name")
+    navigation_path = str(display.get("navigation_path") or "")
+    if navigation_path and path_identity_key(Path(navigation_path)) != path_identity_key(path):
+        diagnostics.append("display_navigation_path_does_not_match_directory")
+    declared = manifest.get("physical_archive_lineage")
+    if declared is not None:
+        if not isinstance(declared, dict):
+            diagnostics.append("physical_archive_lineage_is_not_an_object")
+        else:
+            declared_session_id = str(declared.get("logical_session_id") or "")
+            if declared_session_id and declared_session_id != session_id:
+                diagnostics.append("declared_lineage_session_id_mismatch")
+            declared_path = str(declared.get("physical_path") or "")
+            if declared_path and path_identity_key(Path(declared_path)) != path_identity_key(path):
+                diagnostics.append("declared_lineage_path_mismatch")
+            if declared.get("lineage_explicit") is False:
+                diagnostics.append("declared_lineage_not_explicit")
+    return {
+        "path": path_value,
+        "path_key": path_identity_key(path),
+        "session_id": session_id,
+        "session_label": session_label,
+        "archive_status": str(manifest.get("archive_status") or ""),
+        "relation": relation,
+        "identity_source": "manifest.session_id",
+        "path_source": "manifest.session_label+physical_directory_name",
+        "lineage_explicit": not diagnostics,
+        "lineage_diagnostics": diagnostics,
+    }
+
+
+def physical_archive_paths_for_session(
+    aoa_root: Path,
+    session_id: str,
+) -> list[Path]:
+    """Find all manifest-backed physical paths for one logical session id."""
+    paths: list[Path] = []
+    for manifest_path in sorted((aoa_root / SESSION_ROOT).glob("*/session.manifest.json")):
+        manifest = read_json(manifest_path, {})
+        if isinstance(manifest, dict) and str(manifest.get("session_id") or "") == str(session_id):
+            paths.append(manifest_path.parent)
+    unique: dict[str, Path] = {}
+    for path in paths:
+        unique.setdefault(path_identity_key(path), path)
+    return sorted(unique.values(), key=lambda path: str(path))
+
+
+def physical_archive_lineage_payload(
+    manifest: dict[str, Any],
+    session_dir: Path,
+    *,
+    physical_paths: Iterable[Path] | None = None,
+) -> dict[str, Any]:
+    """Build the logical-record sidecar for physical archive multiplicity."""
+    paths = list(physical_paths or [session_dir])
+    unique: dict[str, Path] = {}
+    for path in paths:
+        unique.setdefault(path_identity_key(Path(path)), Path(path))
+    ordered_paths = sorted(unique.values(), key=lambda path: str(path))
+    current_path = Path(session_dir)
+    return {
+        "schema_version": PHYSICAL_ARCHIVE_LINEAGE_SCHEMA_VERSION,
+        "logical_session_id": str(manifest.get("session_id") or ""),
+        "current_path": str(current_path),
+        "physical_paths": [str(path) for path in ordered_paths],
+        "physical_archive_count": len(ordered_paths),
+        "identity_basis": [
+            "manifest.session_id",
+            "manifest.session_label",
+            "physical_directory_name",
+        ],
+        "current_path_selection": "registry_path_exact_match",
+        "lineage_explicit": bool(
+            physical_archive_lineage_entry(manifest, current_path)["lineage_explicit"]
+        ),
+    }
+
+
 def update_registry_locked(
     aoa_root: Path,
     manifest: dict[str, Any],
@@ -36128,12 +36291,30 @@ def update_registry_locked(
     seen = False
     for item in sessions:
         if isinstance(item, dict) and item.get("session_id") == manifest["session_id"]:
-            updated.append(registry_record(manifest, session_dir))
+            updated.append(
+                registry_record(
+                    manifest,
+                    session_dir,
+                    physical_paths=physical_archive_paths_for_session(
+                        aoa_root,
+                        str(manifest["session_id"]),
+                    ),
+                )
+            )
             seen = True
         elif isinstance(item, dict):
             updated.append(item)
     if not seen:
-        updated.append(registry_record(manifest, session_dir))
+        updated.append(
+            registry_record(
+                manifest,
+                session_dir,
+                physical_paths=physical_archive_paths_for_session(
+                    aoa_root,
+                    str(manifest["session_id"]),
+                ),
+            )
+        )
     updated.sort(key=lambda item: str(item.get("updated_at", "")), reverse=True)
     write_json(
         registry_path,
@@ -36149,11 +36330,25 @@ def update_registry_locked(
 
 
 def registry_records_from_manifests(aoa_root: Path) -> list[dict[str, Any]]:
-    records: list[dict[str, Any]] = []
+    grouped: dict[str, list[tuple[dict[str, Any], Path]]] = {}
     for manifest_path in sorted((aoa_root / SESSION_ROOT).glob("*/session.manifest.json")):
         manifest = read_json(manifest_path, {})
-        if isinstance(manifest, dict) and manifest:
-            records.append(registry_record(manifest, manifest_path.parent))
+        session_id = str(manifest.get("session_id") or "") if isinstance(manifest, dict) else ""
+        if isinstance(manifest, dict) and manifest and session_id:
+            grouped.setdefault(session_id, []).append((manifest, manifest_path.parent))
+    records: list[dict[str, Any]] = []
+    for candidates in grouped.values():
+        manifest, session_dir = max(
+            candidates,
+            key=lambda item: (str(item[0].get("updated_at") or ""), str(item[1])),
+        )
+        records.append(
+            registry_record(
+                manifest,
+                session_dir,
+                physical_paths=[path for _candidate, path in candidates],
+            )
+        )
     records.sort(key=lambda item: str(item.get("updated_at", "")), reverse=True)
     return records
 
@@ -40691,7 +40886,12 @@ def naming_readiness_markdown(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def registry_record(manifest: dict[str, Any], session_dir: Path) -> dict[str, Any]:
+def registry_record(
+    manifest: dict[str, Any],
+    session_dir: Path,
+    *,
+    physical_paths: Iterable[Path] | None = None,
+) -> dict[str, Any]:
     source = manifest.get("source", {})
     display = manifest.get("display", {}) if isinstance(manifest.get("display"), dict) else {}
     semantic_names = semantic_names_payload(manifest)
@@ -40712,8 +40912,13 @@ def registry_record(manifest: dict[str, Any], session_dir: Path) -> dict[str, An
         "session_title": display.get("title") or manifest.get("session_title"),
         "navigation_path": display.get("navigation_path") or str(session_dir),
         "path": str(session_dir),
-        "updated_at": manifest["updated_at"],
-        "archive_status": manifest["archive_status"],
+        "physical_archive_lineage": physical_archive_lineage_payload(
+            manifest,
+            session_dir,
+            physical_paths=physical_paths,
+        ),
+        "updated_at": manifest.get("updated_at", ""),
+        "archive_status": manifest.get("archive_status", ""),
         "distillation_status": manifest.get("distillation_status", "raw_archived"),
         "transcript_path": source.get("transcript_path") if isinstance(source, dict) else None,
         "cwd": source.get("cwd") if isinstance(source, dict) else None,
@@ -166970,6 +167175,249 @@ def systemd_unit_execstart_lines(unit_text: str) -> list[str]:
     return lines
 
 
+def render_session_memory_systemd_units(
+    *,
+    workspace_root: Path,
+    aoa_root: Path,
+    source_root: Path | None = None,
+    python_bin: str = "/usr/bin/python3",
+    resource_launcher: str = "/usr/local/bin/abyss-machine",
+) -> dict[str, str]:
+    """Render source-owned unit topology without enabling or starting it."""
+    workspace = Path(workspace_root).expanduser().resolve(strict=False)
+    root = Path(aoa_root).expanduser().resolve(strict=False)
+    codex_root = Path(source_root or (Path.home() / ".codex" / "sessions"))
+    codex_root = codex_root.expanduser().resolve(strict=False)
+    script = root / "scripts" / "aoa_session_memory.py"
+    quote = shlex.quote
+    documentation = f"file:{root / 'PIPELINE.md'}"
+    python_environment = "Environment=PYTHON" + "DONTWRITEBYTECODE=1"
+    capture_exec = " ".join(
+        [
+            quote(python_bin),
+            quote(str(script)),
+            "capture-watch",
+            "all",
+            "--workspace-root",
+            quote(str(workspace)),
+            "--aoa-root",
+            quote(str(root)),
+            "--limit",
+            "64",
+            "--apply",
+        ]
+    )
+    sweep_exec = " ".join(
+        [
+            quote(resource_launcher),
+            "resource",
+            "launch",
+            "--class",
+            "medium",
+            "--kind",
+            "indexing",
+            "--unattended",
+            "--timeout",
+            "3600",
+            "--success-on-block",
+            "--no-thermal-sample",
+            "--json",
+            "--",
+            quote(python_bin),
+            quote(str(script)),
+            "sweep-codex-sessions",
+            "--workspace-root",
+            quote(str(workspace)),
+            "--aoa-root",
+            quote(str(root)),
+            "--source-root",
+            quote(str(codex_root)),
+            "--since-days",
+            "2",
+            "--activity-since-days",
+            "2",
+            "--min-age-sec",
+            "300",
+            "--index-max-raw-mb",
+            "256",
+            "--limit",
+            "16",
+            "--apply",
+            "--write-report",
+        ]
+    )
+    return {
+        SESSION_MEMORY_CAPTURE_SERVICE: "\n".join(
+            [
+                "[Unit]",
+                "Description=AoA session-memory fresh capture watch",
+                f"Documentation={documentation}",
+                f"ConditionPathExists={script}",
+                f"ConditionPathExists={codex_root}",
+                "",
+                "[Service]",
+                "Type=oneshot",
+                f"WorkingDirectory={root}",
+                python_environment,
+                "Nice=5",
+                "IOSchedulingClass=idle",
+                "IOSchedulingPriority=7",
+                "TimeoutStartSec=120",
+                "StandardOutput=null",
+                "StandardError=journal",
+                f"ExecStart={capture_exec}",
+                "",
+            ]
+        ),
+        SESSION_MEMORY_CAPTURE_TIMER: "\n".join(
+            [
+                "[Unit]",
+                "Description=AoA session-memory fresh capture watch timer",
+                "",
+                "[Timer]",
+                "OnBootSec=2min",
+                "OnUnitActiveSec=2min",
+                "AccuracySec=30s",
+                "Persistent=true",
+                f"Unit={SESSION_MEMORY_CAPTURE_SERVICE}",
+                "",
+                "[Install]",
+                "WantedBy=timers.target",
+                "",
+            ]
+        ),
+        SESSION_MEMORY_RESOURCE_GATED_SWEEP_SERVICE: "\n".join(
+            [
+                "[Unit]",
+                "Description=AoA session-memory resource-gated discovery and stable sweep",
+                f"Documentation={documentation}",
+                f"ConditionPathExists={script}",
+                f"ConditionPathExists={codex_root}",
+                f"ConditionPathExists={resource_launcher}",
+                "",
+                "[Service]",
+                "Type=oneshot",
+                f"WorkingDirectory={root}",
+                python_environment,
+                "Nice=12",
+                "IOSchedulingClass=idle",
+                "IOSchedulingPriority=7",
+                "TimeoutStartSec=75min",
+                "StandardOutput=journal",
+                "StandardError=journal",
+                f"ExecStart={sweep_exec}",
+                "",
+            ]
+        ),
+        SESSION_MEMORY_RESOURCE_GATED_SWEEP_TIMER: "\n".join(
+            [
+                "[Unit]",
+                "Description=AoA session-memory resource-gated discovery and stable sweep timer",
+                "",
+                "[Timer]",
+                "OnBootSec=15min",
+                "OnUnitActiveSec=30min",
+                "AccuracySec=2min",
+                "Persistent=true",
+                f"Unit={SESSION_MEMORY_RESOURCE_GATED_SWEEP_SERVICE}",
+                "",
+                "[Install]",
+                "WantedBy=timers.target",
+                "",
+            ]
+        ),
+    }
+
+
+def session_memory_capture_unit_contract(
+    service: str,
+    unit_text: str,
+) -> dict[str, Any]:
+    """Validate capture-only and resource-gated sweep unit semantics."""
+    expected = {
+        SESSION_MEMORY_CAPTURE_SERVICE: "capture",
+        SESSION_MEMORY_RESOURCE_GATED_SWEEP_SERVICE: "resource_gated_sweep",
+    }.get(service)
+    if expected is None:
+        return {
+            "service": service,
+            "status": "not_session_memory_capture_unit",
+            "diagnostics": [],
+        }
+    diagnostics: list[str] = []
+    execstart_lines = systemd_unit_execstart_lines(unit_text)
+    if len(execstart_lines) != 1:
+        diagnostics.append(f"systemd_unit_expected_one_execstart:{len(execstart_lines)}")
+    command_line = execstart_lines[0] if execstart_lines else ""
+    lowered = command_line.lower()
+    if expected == "capture":
+        if "capture-watch" not in lowered:
+            diagnostics.append("capture_unit_missing_capture_watch")
+        for forbidden in (
+            "sweep-codex-sessions",
+            "import-codex-sessions",
+            "auto-maintenance",
+            "projection-catchup",
+            "reindex",
+        ):
+            if forbidden in lowered:
+                diagnostics.append(f"capture_unit_contains_non_capture_route:{forbidden}")
+        dependency_lines = [
+            line.strip()
+            for line in str(unit_text).splitlines()
+            if line.strip().startswith(("After=", "Requires=", "Wants="))
+        ]
+        if any("sweep" in line.lower() for line in dependency_lines):
+            diagnostics.append("capture_unit_depends_on_sweep_lane")
+    else:
+        if "resource launch" not in lowered:
+            diagnostics.append("resource_gated_sweep_missing_resource_launch")
+        if "sweep-codex-sessions" not in lowered:
+            diagnostics.append("resource_gated_sweep_missing_discovery_sweep")
+        if "capture-watch" in lowered:
+            diagnostics.append("resource_gated_sweep_contains_capture_watch")
+    return {
+        "service": service,
+        "topology": expected,
+        "status": "current" if not diagnostics else "drift",
+        "command_line": command_line,
+        "execstart_count": len(execstart_lines),
+        "diagnostics": diagnostics,
+        "truth_status": "source_rendered_systemd_unit_contract",
+    }
+
+
+def write_session_memory_systemd_units(
+    unit_dir: Path,
+    units: dict[str, str],
+    *,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Write only explicitly requested source-owned unit files."""
+    target = Path(unit_dir).expanduser()
+    paths = {name: target / name for name in units}
+    existing = [str(path) for path in paths.values() if path.exists()]
+    if existing and not overwrite:
+        return {
+            "ok": False,
+            "status": "target_exists",
+            "unit_dir": str(target),
+            "existing": existing,
+            "written": [],
+        }
+    target.mkdir(parents=True, exist_ok=True)
+    for name, text in units.items():
+        paths[name].write_text(text, encoding="utf-8")
+    return {
+        "ok": True,
+        "status": "rendered_and_written",
+        "unit_dir": str(target),
+        "existing": existing,
+        "written": [str(path) for path in paths.values()],
+        "overwrite": bool(overwrite),
+    }
+
+
 def argv_flag_value(argv: list[str], flag: str) -> str | None:
     if flag not in argv:
         return None
@@ -167061,7 +167509,12 @@ def session_memory_resource_unit_contract(service: str, unit_text: str) -> dict[
 def session_memory_unit_file_contracts(unit_dir: Path | None = None) -> list[dict[str, Any]]:
     root = unit_dir or (Path.home() / ".config" / "systemd" / "user")
     contracts: list[dict[str, Any]] = []
-    for service in sorted(SESSION_MEMORY_RESOURCE_MAINTENANCE_UNITS):
+    services = [
+        *sorted(SESSION_MEMORY_RESOURCE_MAINTENANCE_UNITS),
+        SESSION_MEMORY_CAPTURE_SERVICE,
+        SESSION_MEMORY_RESOURCE_GATED_SWEEP_SERVICE,
+    ]
+    for service in services:
         path = root / service
         if not path.exists():
             continue
@@ -167077,7 +167530,15 @@ def session_memory_unit_file_contracts(unit_dir: Path | None = None) -> list[dic
                 }
             )
             continue
-        contract = session_memory_resource_unit_contract(service, text)
+        contract = (
+            session_memory_capture_unit_contract(service, text)
+            if service
+            in {
+                SESSION_MEMORY_CAPTURE_SERVICE,
+                SESSION_MEMORY_RESOURCE_GATED_SWEEP_SERVICE,
+            }
+            else session_memory_resource_unit_contract(service, text)
+        )
         contract["path"] = str(path)
         contract["probe_source"] = "unit_file"
         contracts.append(contract)
@@ -209617,9 +210078,63 @@ def command_install(args: argparse.Namespace) -> int:
         overwrite=args.force,
         hooks_path=hooks_path,
         backup_hooks=not args.no_hooks_backup,
+        systemd_unit_dir=Path(args.systemd_unit_dir).expanduser()
+        if args.systemd_unit_dir
+        else None,
     )
     print(json.dumps(payload, indent=2, ensure_ascii=False))
-    return 0
+    return 0 if payload.get("ok") else 1
+
+
+def command_render_systemd_units(args: argparse.Namespace) -> int:
+    workspace_root = Path(args.workspace_root)
+    root = aoa_root_for(
+        workspace_root,
+        Path(args.aoa_root) if args.aoa_root else None,
+    )
+    units = render_session_memory_systemd_units(
+        workspace_root=workspace_root,
+        aoa_root=root,
+        source_root=Path(args.source_root).expanduser() if args.source_root else None,
+        python_bin=args.python_bin,
+        resource_launcher=args.resource_launcher,
+    )
+    contracts = [
+        session_memory_capture_unit_contract(name, text)
+        for name, text in units.items()
+        if name
+        in {
+            SESSION_MEMORY_CAPTURE_SERVICE,
+            SESSION_MEMORY_RESOURCE_GATED_SWEEP_SERVICE,
+        }
+    ]
+    write_payload: dict[str, Any] = {
+        "ok": True,
+        "status": "rendered_not_written",
+        "unit_dir": None,
+        "written": [],
+    }
+    if args.output_dir:
+        write_payload = write_session_memory_systemd_units(
+            Path(args.output_dir).expanduser(),
+            units,
+            overwrite=bool(args.force),
+        )
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "ok": bool(write_payload.get("ok")) and not any(
+            contract.get("status") != "current" for contract in contracts
+        ),
+        "status": write_payload.get("status"),
+        "workspace_root": str(workspace_root),
+        "aoa_root": str(root),
+        "units": units,
+        "contracts": contracts,
+        "write": write_payload,
+        "activation": "not_performed",
+    }
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload["ok"] else 1
 
 
 def command_install_user_skill(args: argparse.Namespace) -> int:
@@ -211041,8 +211556,150 @@ def command_doctor(args: argparse.Namespace) -> int:
             "unexpected non-archive session dirs: "
             + ", ".join(path.name for path in unexpected_session_dirs[:8])
         )
-    if isinstance(sessions, list) and len(sessions) != len(archive_dirs):
-        problems.append(f"session registry count {len(sessions)} does not match archive directory count {len(archive_dirs)}")
+    logical_registry_by_id: dict[str, dict[str, Any]] = {}
+    if isinstance(sessions, list):
+        for item in sessions:
+            if not isinstance(item, dict):
+                problems.append("session registry contains a non-object record")
+                continue
+            session_id = str(item.get("session_id") or "")
+            if not session_id:
+                problems.append("session registry record is missing session_id")
+                continue
+            if session_id in logical_registry_by_id:
+                problems.append(f"session registry contains duplicate logical session_id: {session_id}")
+                continue
+            logical_registry_by_id[session_id] = item
+
+    physical_lineage_entries: list[dict[str, Any]] = []
+    physical_lineage_by_id: dict[str, list[dict[str, Any]]] = {}
+    for session_path in sorted(archive_dirs, key=lambda path: str(path)):
+        manifest_path = session_path / "session.manifest.json"
+        try:
+            manifest_text = manifest_path.read_text(encoding="utf-8")
+            manifest_payload = json.loads(manifest_text)
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            problems.append(f"malformed archive manifest: {manifest_path} ({exc.__class__.__name__})")
+            continue
+        if not isinstance(manifest_payload, dict):
+            problems.append(f"malformed archive manifest: {manifest_path} (object required)")
+            continue
+        lineage_entry = physical_archive_lineage_entry(manifest_payload, session_path)
+        physical_lineage_entries.append({"manifest": manifest_payload, **lineage_entry})
+        session_id = str(lineage_entry.get("session_id") or "")
+        if not session_id:
+            problems.append(f"archive manifest missing session_id: {manifest_path}")
+            continue
+        physical_lineage_by_id.setdefault(session_id, []).append(
+            {"manifest": manifest_payload, **lineage_entry}
+        )
+        if lineage_entry.get("lineage_diagnostics"):
+            problems.append(
+                "archive physical identity/path lineage is not explicit: "
+                f"{session_path}: {', '.join(str(item) for item in lineage_entry['lineage_diagnostics'])}"
+            )
+        archive_status = str(lineage_entry.get("archive_status") or "")
+        if archive_status not in {"indexed", "raw_unavailable", "raw_mirrored_index_deferred"}:
+            problems.append(
+                f"malformed archive manifest archive_status {archive_status or 'missing'}: {manifest_path}"
+            )
+        if archive_status in PRESERVED_PHYSICAL_ARCHIVE_STATUSES:
+            if not list((session_path / "incidents").glob("*__INCIDENT.md")):
+                problems.append(f"{archive_status} session missing incident markdown: {session_path}")
+            if not list((session_path / "incidents").glob("*__DIAGNOSTIC.json")):
+                problems.append(f"{archive_status} session missing diagnostic json: {session_path}")
+
+    physical_duplicate_count = 0
+    physical_lineage_report: list[dict[str, Any]] = []
+    for session_id, entries in sorted(physical_lineage_by_id.items()):
+        registry_item = logical_registry_by_id.get(session_id)
+        if registry_item is None:
+            for entry in entries:
+                problems.append(
+                    "unregistered physical archive: "
+                    f"{entry['path']} (session_id={session_id})"
+                )
+            continue
+        registry_path_value = str(registry_item.get("path") or "")
+        registry_path_key = path_identity_key(Path(registry_path_value)) if registry_path_value else ""
+        current_matches = [
+            entry for entry in entries if entry.get("path_key") == registry_path_key
+        ]
+        if len(current_matches) != 1:
+            if not current_matches:
+                problems.append(
+                    "logical registry current path is not an unambiguous physical archive: "
+                    f"{session_id} -> {registry_path_value or '<missing>'}"
+                )
+            else:
+                problems.append(
+                    "logical registry current path is ambiguous across physical archives: "
+                    f"{session_id} -> {registry_path_value}"
+                )
+        duplicate_problem_entries: list[dict[str, Any]] = []
+        if len(entries) > 1:
+            physical_duplicate_count += len(entries) - 1
+            duplicate_problem_entries = [
+                entry
+                for entry in entries
+                if not entry.get("lineage_explicit")
+                or str(entry.get("archive_status") or "")
+                not in PRESERVED_PHYSICAL_ARCHIVE_STATUSES
+            ]
+            if duplicate_problem_entries:
+                problems.append(
+                    "physical archive duplicate is not an explicitly preserved same-session lineage: "
+                    + ", ".join(str(entry["path"]) for entry in duplicate_problem_entries[:8])
+                )
+            else:
+                warnings.append(
+                    "preserved physical archive duplicates are reported separately from logical registry coverage: "
+                    f"{session_id} -> "
+                    + ", ".join(str(entry["path"]) for entry in entries[:8])
+                )
+        duplicate_is_accepted = (
+            len(entries) > 1
+            and len(current_matches) == 1
+            and not duplicate_problem_entries
+        )
+        physical_lineage_report.append(
+            {
+                "session_id": session_id,
+                "logical_registry_path": registry_path_value,
+                "physical_archive_count": len(entries),
+                "duplicate_count": max(0, len(entries) - 1),
+                "current_path_match_count": len(current_matches),
+                "lineage_status": (
+                    "preserved_duplicate_reported"
+                    if duplicate_is_accepted
+                    else "anomaly"
+                    if len(entries) > 1
+                    else "single_physical_archive"
+                ),
+                "physical_archives": [
+                    {
+                        key: entry.get(key)
+                        for key in (
+                            "path",
+                            "session_label",
+                            "archive_status",
+                            "relation",
+                            "identity_source",
+                            "path_source",
+                            "lineage_explicit",
+                            "lineage_diagnostics",
+                        )
+                    }
+                    for entry in entries
+                ],
+            }
+        )
+    for session_id, registry_item in sorted(logical_registry_by_id.items()):
+        if session_id not in physical_lineage_by_id:
+            problems.append(
+                "logical registry record has no physical archive lineage: "
+                f"{session_id} -> {registry_item.get('path') or '<missing>'}"
+            )
     name_index = read_json(root / SESSION_NAME_INDEX_JSON, {})
     if isinstance(sessions, list) and sessions:
         if not isinstance(name_index, dict) or name_index.get("artifact_type") != "session_name_index":
@@ -211080,6 +211737,14 @@ def command_doctor(args: argparse.Namespace) -> int:
         if not isinstance(manifest_payload, dict):
             problems.append(f"invalid manifest json: {manifest}")
             continue
+        manifest_session_id = str(manifest_payload.get("session_id") or "")
+        registry_session_id = str(item.get("session_id") or "")
+        if manifest_session_id != registry_session_id:
+            problems.append(
+                "logical registry path manifest session_id mismatch: "
+                f"{session_path} registry={registry_session_id or '<missing>'} "
+                f"manifest={manifest_session_id or '<missing>'}"
+            )
         if not session_agents.exists():
             problems.append(f"missing session AGENTS.md: {session_path}")
         if not index.exists() and item.get("archive_status") == "indexed":
@@ -211200,11 +211865,6 @@ def command_doctor(args: argparse.Namespace) -> int:
                     session_diagnostics
                 )
                 problems.extend(session_diagnostics)
-        elif archive_status == "raw_unavailable":
-            if not list((session_path / "incidents").glob("*__INCIDENT.md")):
-                problems.append(f"raw_unavailable session missing incident markdown: {session_path}")
-            if not list((session_path / "incidents").glob("*__DIAGNOSTIC.json")):
-                problems.append(f"raw_unavailable session missing diagnostic json: {session_path}")
         distillation_status = str(manifest_payload.get("distillation_status") or "")
         if distillation_status == "first_pass_distilled":
             distillation = manifest_payload.get("distillation") if isinstance(manifest_payload.get("distillation"), dict) else {}
@@ -211235,8 +211895,16 @@ def command_doctor(args: argparse.Namespace) -> int:
             else "doctor_full_filesystem_contract"
         ),
         "aoa_root": str(root),
-        "session_count": len(sessions) if isinstance(sessions, list) else 0,
+        "session_count": len(logical_registry_by_id),
+        "logical_registry_count": len(logical_registry_by_id),
         "archive_dir_count": len(archive_dirs),
+        "physical_archive_count": len(physical_lineage_entries),
+        "physical_archive_duplicate_count": physical_duplicate_count,
+        "physical_archive_lineage": physical_lineage_report[:80],
+        "physical_archive_lineage_omitted": max(
+            0,
+            len(physical_lineage_report) - 80,
+        ),
         "session_dir_count": len(session_dirs),
         "projection_stage_dir_count": len(projection_stage_dirs),
         "projection_work_dir_count": len(projection_work_dirs),
@@ -213962,7 +214630,30 @@ def build_parser() -> argparse.ArgumentParser:
     install.add_argument("--force", action="store_true", help="Overwrite portable files in a non-empty .aoa root.")
     install.add_argument("--write-user-hooks", help="Write generated user-level hooks to this hooks.json path.")
     install.add_argument("--no-hooks-backup", action="store_true", help="Do not back up an existing user hooks file.")
+    install.add_argument(
+        "--systemd-unit-dir",
+        help=(
+            "Explicit output directory for the capture-only and resource-gated "
+            "systemd units; no unit is enabled or started."
+        ),
+    )
     install.set_defaults(func=command_install)
+
+    render_systemd = sub.add_parser(
+        "render-systemd-units",
+        help=(
+            "Render capture-only fresh-capture units and a separate "
+            "resource-gated discovery/stable sweep lane."
+        ),
+    )
+    render_systemd.add_argument("--workspace-root", required=True)
+    render_systemd.add_argument("--aoa-root")
+    render_systemd.add_argument("--source-root", help="Codex sessions root; defaults to ~/.codex/sessions.")
+    render_systemd.add_argument("--python-bin", default="/usr/bin/python3")
+    render_systemd.add_argument("--resource-launcher", default="/usr/local/bin/abyss-machine")
+    render_systemd.add_argument("--output-dir", help="Write the four units to this explicit directory.")
+    render_systemd.add_argument("--force", action="store_true", help="Replace existing named unit files in --output-dir.")
+    render_systemd.set_defaults(func=command_render_systemd_units)
 
     install_user_skill = sub.add_parser("install-user-skill", help="Install an approved .aoa session-memory skill for the current Codex user.")
     install_user_skill.add_argument("--workspace-root")

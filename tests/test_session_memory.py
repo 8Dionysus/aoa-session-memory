@@ -916,6 +916,157 @@ def test_doctor_excludes_projection_stages_from_archive_health_counts(
     )
 
 
+def make_raw_unavailable_duplicate(
+    root: Path,
+    session_dir: Path,
+    *,
+    label: str,
+    session_id: str | None = None,
+) -> Path:
+    duplicate = session_dir.parent / label
+    shutil.copytree(session_dir, duplicate)
+    manifest = module.read_json(duplicate / "session.manifest.json", {})
+    manifest["session_id"] = session_id or manifest["session_id"]
+    manifest["session_label"] = label
+    manifest["archive_status"] = "raw_unavailable"
+    manifest["display"] = {
+        **(manifest.get("display") if isinstance(manifest.get("display"), dict) else {}),
+        "label": label,
+        "navigation_path": str(duplicate),
+    }
+    module.write_json(duplicate / "session.manifest.json", manifest)
+    incidents = duplicate / "incidents"
+    incidents.mkdir(parents=True, exist_ok=True)
+    (incidents / "20260822T000000Z__raw-session-unavailable__INCIDENT.md").write_text(
+        "# preserved test incident\n",
+        encoding="utf-8",
+    )
+    module.write_json(
+        incidents / "20260822T000000Z__raw-session-unavailable__DIAGNOSTIC.json",
+        {"session_id": manifest["session_id"], "incident_type": "raw_session_unavailable"},
+    )
+    return duplicate
+
+
+def test_doctor_separates_logical_registry_from_preserved_physical_duplicates(
+    tmp_path: Path,
+) -> None:
+    workspace, root = build_doctor_root_with_missing_generated_segment(
+        tmp_path,
+        recent_live=False,
+    )
+    session_dir, _index_path = complete_doctor_segment_fixture(root)
+    registry = module.read_json(root / module.REGISTRY_NAME, {})
+    registry["sessions"][0]["archive_status"] = "raw_unavailable"
+    module.write_json(root / module.REGISTRY_NAME, registry)
+    manifest = module.read_json(session_dir / "session.manifest.json", {})
+    manifest["archive_status"] = "raw_unavailable"
+    module.write_json(session_dir / "session.manifest.json", manifest)
+    incidents = session_dir / "incidents"
+    incidents.mkdir()
+    (incidents / "20260822T000000Z__raw-session-unavailable__INCIDENT.md").write_text(
+        "# preserved test incident\n",
+        encoding="utf-8",
+    )
+    module.write_json(
+        incidents / "20260822T000000Z__raw-session-unavailable__DIAGNOSTIC.json",
+        {"session_id": manifest["session_id"], "incident_type": "raw_session_unavailable"},
+    )
+    duplicate = make_raw_unavailable_duplicate(
+        root,
+        session_dir,
+        label="2026-06-11__007__doctor-duplicate",
+    )
+
+    code, payload = run_doctor_payload(workspace, root)
+
+    assert code == 0
+    assert payload["ok"] is True
+    assert payload["session_count"] == 1
+    assert payload["logical_registry_count"] == 1
+    assert payload["archive_dir_count"] == 2
+    assert payload["physical_archive_count"] == 2
+    assert payload["physical_archive_duplicate_count"] == 1
+    lineage = next(
+        item
+        for item in payload["physical_archive_lineage"]
+        if item["session_id"] == manifest["session_id"]
+    )
+    assert lineage["lineage_status"] == "preserved_duplicate_reported"
+    assert lineage["current_path_match_count"] == 1
+    assert str(duplicate) in payload["warnings"][0]
+
+
+@pytest.mark.parametrize("failure", ["unregistered", "mismatched", "malformed", "ambiguous"])
+def test_doctor_fails_closed_for_unresolved_physical_archive_lineage(
+    tmp_path: Path,
+    failure: str,
+) -> None:
+    workspace, root = build_doctor_root_with_missing_generated_segment(
+        tmp_path,
+        recent_live=False,
+    )
+    session_dir, _index_path = complete_doctor_segment_fixture(root)
+    if failure == "unregistered":
+        make_raw_unavailable_duplicate(
+            root,
+            session_dir,
+            label="2026-06-11__007__unregistered",
+            session_id="unregistered-session",
+        )
+    elif failure == "mismatched":
+        manifest = module.read_json(session_dir / "session.manifest.json", {})
+        manifest["session_id"] = "mismatched-session"
+        module.write_json(session_dir / "session.manifest.json", manifest)
+    elif failure == "malformed":
+        (session_dir / "session.manifest.json").write_text("{not-json\n", encoding="utf-8")
+    else:
+        registry = module.read_json(root / module.REGISTRY_NAME, {})
+        registry["sessions"][0]["path"] = str(session_dir.parent / "missing-current")
+        module.write_json(root / module.REGISTRY_NAME, registry)
+
+    code, payload = run_doctor_payload(workspace, root)
+
+    assert code == 1
+    assert payload["ok"] is False
+    if failure == "unregistered":
+        assert any("unregistered physical archive" in item for item in payload["problems"])
+    elif failure == "mismatched":
+        assert any("session_id mismatch" in item for item in payload["problems"])
+    elif failure == "malformed":
+        assert any("malformed archive manifest" in item for item in payload["problems"])
+    else:
+        assert any("not an unambiguous physical archive" in item for item in payload["problems"])
+
+
+def test_registry_rebuild_keeps_one_logical_record_and_explicit_physical_lineage(
+    tmp_path: Path,
+) -> None:
+    _workspace, root = build_doctor_root_with_missing_generated_segment(
+        tmp_path,
+        recent_live=False,
+    )
+    session_dir, _index_path = complete_doctor_segment_fixture(root)
+    duplicate = make_raw_unavailable_duplicate(
+        root,
+        session_dir,
+        label="2026-06-11__007__registry-duplicate",
+    )
+    manifest = module.read_json(session_dir / "session.manifest.json", {})
+    manifest["archive_status"] = "raw_unavailable"
+    module.write_json(session_dir / "session.manifest.json", manifest)
+
+    records = module.registry_records_from_manifests(root)
+    matching = [record for record in records if record["session_id"] == manifest["session_id"]]
+
+    assert len(matching) == 1
+    lineage = matching[0]["physical_archive_lineage"]
+    assert lineage["logical_session_id"] == manifest["session_id"]
+    assert lineage["physical_archive_count"] == 2
+    assert str(session_dir) in lineage["physical_paths"]
+    assert str(duplicate) in lineage["physical_paths"]
+
+
 def test_graph_compact_node_hydrates_refs_from_evidence_refs() -> None:
     compact = module.graph_compact_node_for_packet(
         {
@@ -60200,6 +60351,52 @@ def test_session_memory_timer_status_uses_unit_file_fallback_when_systemctl_prob
     assert payload["unit_contracts"][0]["status"] == "current"
 
 
+def test_rendered_capture_topology_is_capture_only_and_sweep_is_resource_gated(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    units = module.render_session_memory_systemd_units(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        source_root=tmp_path / "codex" / "sessions",
+    )
+
+    assert set(units) == {
+        module.SESSION_MEMORY_CAPTURE_SERVICE,
+        module.SESSION_MEMORY_CAPTURE_TIMER,
+        module.SESSION_MEMORY_RESOURCE_GATED_SWEEP_SERVICE,
+        module.SESSION_MEMORY_RESOURCE_GATED_SWEEP_TIMER,
+    }
+    capture = units[module.SESSION_MEMORY_CAPTURE_SERVICE]
+    sweep = units[module.SESSION_MEMORY_RESOURCE_GATED_SWEEP_SERVICE]
+    assert module.session_memory_capture_unit_contract(
+        module.SESSION_MEMORY_CAPTURE_SERVICE,
+        capture,
+    )["status"] == "current"
+    assert module.session_memory_capture_unit_contract(
+        module.SESSION_MEMORY_RESOURCE_GATED_SWEEP_SERVICE,
+        sweep,
+    )["status"] == "current"
+    assert len(module.systemd_unit_execstart_lines(capture)) == 1
+    assert "capture-watch" in capture
+    assert "sweep-codex-sessions" not in capture
+    assert module.SESSION_MEMORY_RESOURCE_GATED_SWEEP_SERVICE not in capture
+    assert "resource launch" in sweep
+    assert "sweep-codex-sessions" in sweep
+    assert "capture-watch" not in sweep
+
+    output_dir = tmp_path / "systemd-user"
+    write_payload = module.write_session_memory_systemd_units(
+        output_dir,
+        units,
+        overwrite=False,
+    )
+    assert write_payload["ok"] is True
+    assert sorted(path.name for path in output_dir.iterdir()) == sorted(units)
+    assert "activation" not in write_payload
+
+
 def test_graph_maintenance_compact_stdout_keeps_report_marker_in_bounded_tail(tmp_path: Path) -> None:
     aoa_root = tmp_path / ".aoa"
     diagnostics_dir = aoa_root / "diagnostics"
@@ -94415,6 +94612,7 @@ def test_hooks_config_builder_uses_supplied_roots(tmp_path: Path) -> None:
     assert config["hooks"]["SessionStart"][0]["matcher"] == "startup|resume"
     rendered = json.dumps(config, ensure_ascii=False)
     assert str(module.default_source_aoa_root()) not in rendered
+    assert "sweep-codex-sessions" not in rendered
     for event_name in config["hooks"]:
         command = config["hooks"][event_name][0]["hooks"][0]["command"]
         assert str(workspace) in command
@@ -95372,6 +95570,39 @@ def test_install_portable_bundle_creates_clean_target(tmp_path: Path) -> None:
 
     validation = module.validate_pipeline(workspace_root=workspace, aoa_root=aoa_root)
     assert validation["ok"] is True
+
+
+def test_install_upgrade_can_render_named_systemd_units_without_activation(
+    tmp_path: Path,
+) -> None:
+    source_aoa = SCRIPT.parents[1]
+    workspace = tmp_path / "TargetWorkspace"
+    aoa_root = workspace / ".aoa"
+    unit_dir = tmp_path / "systemd-user"
+
+    payload = module.install_portable_bundle(
+        source_aoa_root=source_aoa,
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        overwrite=True,
+        systemd_unit_dir=unit_dir,
+    )
+
+    assert payload["ok"] is True
+    assert payload["systemd_units"]["status"] == "rendered_and_written"
+    assert payload["install_profile"]["systemd_unit_dir"] == str(unit_dir.resolve())
+    assert sorted(path.name for path in unit_dir.iterdir()) == sorted(
+        {
+            module.SESSION_MEMORY_CAPTURE_SERVICE,
+            module.SESSION_MEMORY_CAPTURE_TIMER,
+            module.SESSION_MEMORY_RESOURCE_GATED_SWEEP_SERVICE,
+            module.SESSION_MEMORY_RESOURCE_GATED_SWEEP_TIMER,
+        }
+    )
+    capture_text = (unit_dir / module.SESSION_MEMORY_CAPTURE_SERVICE).read_text(encoding="utf-8")
+    assert "capture-watch" in capture_text
+    assert "sweep-codex-sessions" not in capture_text
+    assert "systemctl" not in json.dumps(payload, ensure_ascii=False)
 
 
 def test_portable_copy_ignores_atomic_publish_scratch_files(

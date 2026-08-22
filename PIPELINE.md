@@ -146,6 +146,25 @@ source. Catchup, deep, and audit remain the global reconciliation routes.
 capture-only operator or timer route. It never discovers the archive or starts
 stable projection work, so fresh evidence can advance ahead of historical debt.
 
+The session registry is logical: it admits one navigable record per
+`session_id`. The filesystem is physical: preserved incident archives can
+contain more than one directory for that identity. Doctor therefore checks
+logical registry coverage and physical archive lineage as separate axes. A
+same-session `raw_unavailable` duplicate is accepted only when its manifest
+identity, session label, physical directory, preserved incident evidence, and
+the registry's exact current path form an explicit lineage. The duplicate is
+still reported with its physical path and cardinality. An unregistered archive,
+manifest or id mismatch, malformed manifest, or missing/ambiguous current path
+remains a failure; directory-count equality is not a substitute for this
+lineage check.
+
+The rendered `aoa-session-memory-fresh-capture.service` contains exactly one
+capture-watch command. Discovery and stable projection belong to the separate
+resource-gated `aoa-session-memory-resource-gated-sweep.service` lane and its
+timer. Neither unit is enabled or started by the portable installer. This
+preserves D-0049's capture frontier and keeps resource-gated projection debt
+from becoming a capture dependency.
+
 Raw preservation is append-oriented. Repair may regenerate derived material,
 but ordinary cleanup never deletes raw session evidence.
 
@@ -1244,6 +1263,15 @@ Portable export copies authored kernel files and source fixtures while
 excluding runtime sessions by default. Installation renders workspace-local
 hook paths, preserves an existing archive, and keeps optional host providers as
 overlays rather than dependencies.
+
+An explicit `render-systemd-units --output-dir <target>` operation can render
+the capture-only fresh-capture service/timer and the separate resource-gated
+discovery/stable-sweep service/timer. `install --systemd-unit-dir <target>`
+performs the same named-file upgrade alongside a portable install, replacing
+only those four files when `--force` is supplied. Neither route enables,
+starts, reloads, or otherwise mutates systemd; unit activation and live proof
+remain a runtime-owner operation. A portable export does not include host
+systemd state.
 
 The standalone bundle and a workspace-local installation must validate from
 the same source contracts. Host-local proofs, generated databases, diagnostics,
