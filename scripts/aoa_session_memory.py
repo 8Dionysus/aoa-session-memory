@@ -46386,6 +46386,8 @@ def token_accounting_generated_diagnostics(record: dict[str, Any], manifest: dic
 def token_accounting_backfill_projection_only(
     aoa_root: Path,
     record: dict[str, Any],
+    *,
+    execution_id: str | None = None,
 ) -> dict[str, Any]:
     """Refresh token ledgers without regenerating segment content."""
     session_dir = session_dir_from_record(record)
@@ -46554,6 +46556,7 @@ def token_accounting_backfill_projection_only(
             stage_dir=stage_dir,
             session_dir=session_dir,
             publish_identity=publish_identity,
+            execution_id=execution_id,
         )
     except (OSError, ValueError) as exc:
         remove_projection_publish_path(stage_dir)
@@ -46774,6 +46777,7 @@ def token_accounting_backfill_candidate(
     apply: bool = False,
     max_raw_bytes: int | None = None,
     force: bool = False,
+    execution_id: str | None = None,
 ) -> dict[str, Any]:
     session_dir = session_dir_from_record(record)
     manifest_path = session_dir / "session.manifest.json"
@@ -46862,6 +46866,7 @@ def token_accounting_backfill_candidate(
         token_accounting_backfill_projection_only(
             aoa_root,
             record,
+            execution_id=execution_id,
         )
         if archive_status == "indexed"
         else {
@@ -46972,6 +46977,7 @@ def token_accounting_backfill(
     write_report: bool = False,
     selected_records: list[dict[str, Any]] | None = None,
     budget_seconds: float | None = None,
+    execution_id: str | None = None,
 ) -> dict[str, Any]:
     now = utc_now()
     started = time.monotonic()
@@ -47011,6 +47017,7 @@ def token_accounting_backfill(
             apply=apply,
             max_raw_bytes=max_raw_bytes,
             force=force,
+            execution_id=execution_id,
         )
         counts[str(result.get("status") or "unknown")] += 1
         results.append(result)
@@ -55642,6 +55649,7 @@ def maintain_indexes(
             max_raw_bytes=effective_token_max_raw_bytes,
             selected_records=records,
             budget_seconds=budget_remaining(),
+            execution_id=execution_id,
         )
     else:
         token_backfill_state = {
@@ -56766,6 +56774,7 @@ def maintain_indexes(
                     write_report=write_report,
                     selected_records=records,
                     budget_seconds=budget_remaining(),
+                    execution_id=execution_id,
                 )
                 token_action["status"] = (
                     "applied"

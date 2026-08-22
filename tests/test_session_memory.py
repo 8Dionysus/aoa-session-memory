@@ -85999,6 +85999,310 @@ def test_token_accounting_backfill_uses_token_only_atomic_projection(
     assert result["after_diagnostics"] == []
 
 
+def test_deep_fallback_maintenance_token_backfill_preserves_outer_execution_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    session_id = "deep-fallback-token-identity"
+    outer_execution_id = "deep-fallback-token-outer"
+    transcript = tmp_path / "deep-fallback-token-identity.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-08-22T00:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": session_id, "cwd": str(workspace)},
+            },
+            {
+                "timestamp": "2026-08-22T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "deep fallback token maintenance",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    receipt = module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": session_id,
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    session_dir = Path(str(receipt["session_dir"]))
+    record = module.resolve_session_record(aoa_root, session_id)
+    manifest_path = session_dir / "session.manifest.json"
+    manifest = module.read_json(manifest_path, {})
+    raw_blocks = manifest.get("raw_blocks") if isinstance(manifest.get("raw_blocks"), dict) else {}
+    raw_block_index_path = Path(str(raw_blocks.get("index") or ""))
+    raw_block_index = module.read_json(raw_block_index_path, {})
+    for key in ("token_accounting",):
+        manifest.pop(key, None)
+    for segment in manifest.get("segments", []) if isinstance(manifest.get("segments"), list) else []:
+        if not isinstance(segment, dict):
+            continue
+        segment.pop("token_accounting", None)
+        segment_index_path = Path(str(segment.get("index") or ""))
+        segment_index = module.read_json(segment_index_path, {})
+        if isinstance(segment_index, dict):
+            segment_index.pop("token_accounting", None)
+            write_json(segment_index_path, segment_index)
+    for block in raw_blocks.get("blocks", []) if isinstance(raw_blocks.get("blocks"), list) else []:
+        if isinstance(block, dict):
+            block.pop("token_accounting", None)
+    if isinstance(raw_block_index, dict):
+        for block in raw_block_index.get("blocks", []) if isinstance(raw_block_index.get("blocks"), list) else []:
+            if isinstance(block, dict):
+                block.pop("token_accounting", None)
+        write_json(raw_block_index_path, raw_block_index)
+    session_index_path = session_dir / "session.index.json"
+    session_index = module.read_json(session_index_path, {})
+    if isinstance(session_index, dict):
+        session_index.pop("token_accounting", None)
+        write_json(session_index_path, session_index)
+    write_json(manifest_path, manifest)
+
+    current_state = {
+        "status": "current",
+        "needs_refresh": False,
+        "needs_maintenance": False,
+        "dirty_session_ids": [],
+        "dirty_sessions": [],
+        "reasons": [],
+        "diagnostics": [],
+    }
+
+    def state_copy(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return dict(current_state)
+
+    monkeypatch.setattr(module, "route_index_drift_records", lambda _records: [])
+    monkeypatch.setattr(module, "search_projection_fingerprints_for_records", lambda _records: [])
+    monkeypatch.setattr(module, "sqlite_search_index_hot_state", state_copy)
+    monkeypatch.setattr(module, "atlas_index_hot_state", state_copy)
+    monkeypatch.setattr(module, "sqlite_search_index_state", state_copy)
+    monkeypatch.setattr(module, "atlas_index_state", state_copy)
+    monkeypatch.setattr(module, "episode_semantic_projection_state", state_copy)
+    monkeypatch.setattr(module, "episode_direct_relation_postings_cardinality", state_copy)
+    monkeypatch.setattr(module, "episode_dense_projection_state", state_copy)
+    monkeypatch.setattr(module, "entity_registry_maintenance_status", state_copy)
+    monkeypatch.setattr(module, "session_memory_search_shard_projection_summary", state_copy)
+    monkeypatch.setattr(module, "session_memory_operational_route_rollup_status", state_copy)
+    monkeypatch.setattr(module, "session_memory_operational_direct_event_rollup_status", state_copy)
+    monkeypatch.setattr(
+        module,
+        "search_index_sessions",
+        lambda **_kwargs: {
+            "ok": True,
+            "selected_count": 0,
+            "processed_count": 0,
+            "completed_session_ids": [],
+            "remaining_count": 0,
+            "budget_exhausted": False,
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "build_agent_atlas",
+        lambda **_kwargs: {
+            "ok": True,
+            "selected_count": 0,
+            "processed_count": 0,
+            "completed_session_ids": [],
+            "remaining_count": 0,
+            "budget_exhausted": False,
+            "diagnostics": [],
+        },
+    )
+
+    raw = manifest.get("raw") if isinstance(manifest.get("raw"), dict) else {}
+    capture_ledger = raw.get("capture_ledger") if isinstance(raw.get("capture_ledger"), dict) else {}
+    required_capture_bytes = int(raw.get("bytes") or 0) + 1
+    obligation_options = {
+        "persistent_obligation": True,
+        "obligation_kind": module.SESSION_PROJECTION_FRESHNESS_OBLIGATION_KIND,
+        "session_id": session_id,
+        "session_dir": str(session_dir),
+        "required_capture_epoch_id": str(capture_ledger.get("epoch_id") or "epoch-1"),
+        "required_capture_bytes": required_capture_bytes,
+        "required_capture_sha256": "b" * 64,
+        "required_stable_projection": False,
+        "required_search_consumer": False,
+    }
+
+    def schedule(queue_payload: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        return (
+            module.auto_maintenance_retry_upsert_item(
+                queue_payload,
+                profile="deep",
+                target=session_id,
+                reason="timer_deep_fallback_token_identity",
+                launch_status="freshness_obligation_enqueued",
+                options=obligation_options,
+                now_epoch=100.0,
+                initial_delay_seconds=0,
+            ),
+            True,
+        )
+
+    module.mutate_auto_maintenance_retry_queue(
+        aoa_root,
+        schedule,
+        now_epoch=100.0,
+    )
+
+    progress_root = aoa_root / module.SESSION_PROJECTION_PROGRESS_RECEIPTS_ROOT
+    baseline_receipt_paths = set(progress_root.rglob("*.json"))
+
+    fallback_child = [
+        "python3",
+        str(Path(module.__file__).resolve()),
+        "index-maintenance",
+        session_id,
+        "--workspace-root",
+        str(workspace),
+        "--aoa-root",
+        str(aoa_root),
+        "--apply",
+        "--skip-graph-repair",
+        "--reason",
+        "auto_maintenance_resource:deep:index_drip_on_block",
+        "--write-report",
+        "--execution-id",
+        outer_execution_id,
+    ]
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        child = command[command.index("--") + 1 :]
+        assert child == fallback_child
+        child_args = module.build_parser().parse_args(child[2:])
+        with contextlib.redirect_stdout(io.StringIO()):
+            child_returncode = module.command_index_maintenance(child_args)
+        assert child_returncode == 0
+        return subprocess.CompletedProcess(
+            command,
+            1,
+            stdout=json.dumps(
+                {
+                    "schema": "abyss_machine_resource_launch_v1",
+                    "ok": False,
+                    "blocked_reasons": [],
+                    "denied_reasons": [],
+                    "execution": {
+                        "ok": False,
+                        "returncode": 124,
+                        "stdout_tail": "",
+                        "stderr_tail": "hard timeout after token publication",
+                        "timeout_cleanup": {
+                            "unit": "bounded-maintenance.service",
+                            "kill": {"returncode": 0},
+                        },
+                    },
+                }
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    payload = module.auto_maintenance_resource_launch(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        profile="deep",
+        target=session_id,
+        apply=True,
+        reason="timer_deep_fallback_token_identity",
+        child_command_override=fallback_child,
+        index_drip_on_block=False,
+        graph_drip_on_block=False,
+        execution_id=outer_execution_id,
+    )
+
+    assert len(calls) == 1
+    assert payload["execution_id"] == outer_execution_id
+    assert payload["status"] == "resource_hard_timeout_progress_recovered"
+    assert payload["execution"]["returncode"] == 124
+    assert payload["child_result_verified"] is False
+    assert payload["persisted_progress_recovered"] is True
+    completion = payload["completion_semantics"]
+    assert completion["semantic_progress"]["proven"] is True
+    assert completion["semantic_progress"]["remaining_work_unknown"] is True
+    assert completion["global_semantic_completion"]["proven"] is False
+    assert completion["global_freshness"]["proven"] is False
+    assert payload["automatic_retry"]["retryable"] is True
+    assert payload["automatic_retry"]["status"] in {
+        "scheduled",
+        "already_scheduled_updated",
+    }
+
+    receipt_paths = sorted(
+        set(progress_root.rglob("*.json")) - baseline_receipt_paths
+    )
+    assert len(receipt_paths) == 1
+    assert receipt_paths[0].parent == progress_root / module.safe_slug(outer_execution_id)
+    assert receipt_paths[0].parent.name == outer_execution_id
+    new_receipt_dirs = {path.parent for path in receipt_paths}
+    assert not any(
+        path.name == "unbound" or path.name.startswith("projection-")
+        for path in new_receipt_dirs
+    )
+    published_receipt = module.read_json(receipt_paths[0], {})
+    assert published_receipt["execution_id"] == outer_execution_id
+
+    recovered = module.recover_session_projection_progress_evidence(
+        aoa_root=aoa_root,
+        execution_id=outer_execution_id,
+        target=session_id,
+    )
+    assert recovered["verified"] is True
+    assert recovered["authoritative_publication_verified"] is True
+    assert recovered["receipt_observed_count"] == 1
+    assert recovered["receipt_count"] == 1
+    assert recovered["receipts"][0]["path"] == str(receipt_paths[0])
+
+    before_watermark = module.session_projection_freshness_obligation_status(
+        aoa_root,
+        obligation_options,
+    )
+    assert before_watermark["ok"] is False
+    assert before_watermark["status"] == "remaining"
+    assert "capture" in before_watermark["remaining_axes"]
+
+    manifest = module.read_json(manifest_path, {})
+    raw = manifest["raw"]
+    new_raw_bytes = int(raw["bytes"]) + 1
+    new_raw_sha256 = "b" * 64
+    raw["bytes"] = new_raw_bytes
+    raw["sha256"] = new_raw_sha256
+    raw["capture_ledger"] = {
+        **(raw.get("capture_ledger") if isinstance(raw.get("capture_ledger"), dict) else {}),
+        "epoch_id": obligation_options["required_capture_epoch_id"],
+        "processed_watermark_bytes": new_raw_bytes,
+    }
+    write_json(manifest_path, manifest)
+    after_watermark = module.session_projection_freshness_obligation_status(
+        aoa_root,
+        obligation_options,
+    )
+    assert after_watermark["ok"] is True
+    assert after_watermark["status"] == "satisfied"
+
+
 def test_index_maintenance_reports_token_planning_budget_exhausted(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
