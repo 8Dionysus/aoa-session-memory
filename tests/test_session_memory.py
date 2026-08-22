@@ -85999,9 +85999,19 @@ def test_token_accounting_backfill_uses_token_only_atomic_projection(
     assert result["after_diagnostics"] == []
 
 
+@pytest.mark.parametrize(
+    ("archive_status", "expected_backfill_mode"),
+    [
+        ("indexed", "token_projection_only"),
+        ("raw_mirrored_index_deferred", "full_initial_materialization"),
+    ],
+    ids=["indexed-token-only", "deferred-initial-materialization"],
+)
 def test_deep_fallback_maintenance_token_backfill_preserves_outer_execution_identity(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    archive_status: str,
+    expected_backfill_mode: str,
 ) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
@@ -86032,6 +86042,11 @@ def test_deep_fallback_maintenance_token_backfill_preserves_outer_execution_iden
             },
         ],
     )
+    monkeypatch.delenv("AOA_SESSION_MEMORY_FULL_STOP_SYNC", raising=False)
+    if archive_status == "raw_mirrored_index_deferred":
+        monkeypatch.setenv("AOA_SESSION_MEMORY_STOP_SYNC_MAX_BYTES", "0")
+    else:
+        monkeypatch.delenv("AOA_SESSION_MEMORY_STOP_SYNC_MAX_BYTES", raising=False)
     receipt = module.handle_hook_event(
         "Stop",
         {
@@ -86047,34 +86062,38 @@ def test_deep_fallback_maintenance_token_backfill_preserves_outer_execution_iden
     record = module.resolve_session_record(aoa_root, session_id)
     manifest_path = session_dir / "session.manifest.json"
     manifest = module.read_json(manifest_path, {})
-    raw_blocks = manifest.get("raw_blocks") if isinstance(manifest.get("raw_blocks"), dict) else {}
-    raw_block_index_path = Path(str(raw_blocks.get("index") or ""))
-    raw_block_index = module.read_json(raw_block_index_path, {})
-    for key in ("token_accounting",):
-        manifest.pop(key, None)
-    for segment in manifest.get("segments", []) if isinstance(manifest.get("segments"), list) else []:
-        if not isinstance(segment, dict):
-            continue
-        segment.pop("token_accounting", None)
-        segment_index_path = Path(str(segment.get("index") or ""))
-        segment_index = module.read_json(segment_index_path, {})
-        if isinstance(segment_index, dict):
-            segment_index.pop("token_accounting", None)
-            write_json(segment_index_path, segment_index)
-    for block in raw_blocks.get("blocks", []) if isinstance(raw_blocks.get("blocks"), list) else []:
-        if isinstance(block, dict):
-            block.pop("token_accounting", None)
-    if isinstance(raw_block_index, dict):
-        for block in raw_block_index.get("blocks", []) if isinstance(raw_block_index.get("blocks"), list) else []:
+    if archive_status == "indexed":
+        raw_blocks = manifest.get("raw_blocks") if isinstance(manifest.get("raw_blocks"), dict) else {}
+        raw_block_index_path = Path(str(raw_blocks.get("index") or ""))
+        raw_block_index = module.read_json(raw_block_index_path, {})
+        for key in ("token_accounting",):
+            manifest.pop(key, None)
+        for segment in manifest.get("segments", []) if isinstance(manifest.get("segments"), list) else []:
+            if not isinstance(segment, dict):
+                continue
+            segment.pop("token_accounting", None)
+            segment_index_path = Path(str(segment.get("index") or ""))
+            segment_index = module.read_json(segment_index_path, {})
+            if isinstance(segment_index, dict):
+                segment_index.pop("token_accounting", None)
+                write_json(segment_index_path, segment_index)
+        for block in raw_blocks.get("blocks", []) if isinstance(raw_blocks.get("blocks"), list) else []:
             if isinstance(block, dict):
                 block.pop("token_accounting", None)
-        write_json(raw_block_index_path, raw_block_index)
-    session_index_path = session_dir / "session.index.json"
-    session_index = module.read_json(session_index_path, {})
-    if isinstance(session_index, dict):
-        session_index.pop("token_accounting", None)
-        write_json(session_index_path, session_index)
-    write_json(manifest_path, manifest)
+        if isinstance(raw_block_index, dict):
+            for block in raw_block_index.get("blocks", []) if isinstance(raw_block_index.get("blocks"), list) else []:
+                if isinstance(block, dict):
+                    block.pop("token_accounting", None)
+            write_json(raw_block_index_path, raw_block_index)
+        session_index_path = session_dir / "session.index.json"
+        session_index = module.read_json(session_index_path, {})
+        if isinstance(session_index, dict):
+            session_index.pop("token_accounting", None)
+            write_json(session_index_path, session_index)
+        write_json(manifest_path, manifest)
+    else:
+        assert manifest["archive_status"] == "raw_mirrored_index_deferred"
+        assert manifest.get("segments") == []
 
     current_state = {
         "status": "current",
@@ -86165,6 +86184,20 @@ def test_deep_fallback_maintenance_token_backfill_preserves_outer_execution_iden
         now_epoch=100.0,
     )
 
+    observed_candidates: list[dict[str, Any]] = []
+    original_candidate = module.token_accounting_backfill_candidate
+
+    def observe_candidate(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        result = original_candidate(*args, **kwargs)
+        observed_candidates.append(result)
+        return result
+
+    monkeypatch.setattr(
+        module,
+        "token_accounting_backfill_candidate",
+        observe_candidate,
+    )
+
     progress_root = aoa_root / module.SESSION_PROJECTION_PROGRESS_RECEIPTS_ROOT
     baseline_receipt_paths = set(progress_root.rglob("*.json"))
 
@@ -86250,6 +86283,33 @@ def test_deep_fallback_maintenance_token_backfill_preserves_outer_execution_iden
         "already_scheduled_updated",
     }
 
+    assert len(observed_candidates) == 2
+    expected_planned_action = (
+        "token_projection_only"
+        if archive_status == "indexed"
+        else "initial_materialization_from_preserved_raw"
+    )
+    assert all(
+        candidate["planned_actions"] == [expected_planned_action]
+        for candidate in observed_candidates
+    )
+    candidate_result = observed_candidates[-1]
+    assert candidate_result["backfill_mode"] == expected_backfill_mode
+    assert candidate_result["applied_mode"] == (
+        "full_reindex"
+        if archive_status == "raw_mirrored_index_deferred"
+        else expected_backfill_mode
+    )
+    assert candidate_result["reindex_result"]["status"] in {
+        "token_projection_backfilled",
+        "reindexed",
+    }
+    assert (
+        candidate_result["reindex_result"]["publish_result"]
+        ["progress_receipt"]["execution_id"]
+        == outer_execution_id
+    )
+
     receipt_paths = sorted(
         set(progress_root.rglob("*.json")) - baseline_receipt_paths
     )
@@ -86257,6 +86317,9 @@ def test_deep_fallback_maintenance_token_backfill_preserves_outer_execution_iden
     assert receipt_paths[0].parent == progress_root / module.safe_slug(outer_execution_id)
     assert receipt_paths[0].parent.name == outer_execution_id
     new_receipt_dirs = {path.parent for path in receipt_paths}
+    assert new_receipt_dirs == {
+        progress_root / module.safe_slug(outer_execution_id)
+    }
     assert not any(
         path.name == "unbound" or path.name.startswith("projection-")
         for path in new_receipt_dirs
@@ -86274,6 +86337,12 @@ def test_deep_fallback_maintenance_token_backfill_preserves_outer_execution_iden
     assert recovered["receipt_observed_count"] == 1
     assert recovered["receipt_count"] == 1
     assert recovered["receipts"][0]["path"] == str(receipt_paths[0])
+    authority = recovered["receipts"][0]["authority_validation"]
+    assert authority["verified"] is True
+    assert authority["outbox_path"] == published_receipt["outbox"]["path"]
+    assert authority["manifest_path"] == str(manifest_path)
+    assert authority["current_publish_id"] == published_receipt["publish_id"]
+    assert authority["diagnostics"] == []
 
     before_watermark = module.session_projection_freshness_obligation_status(
         aoa_root,

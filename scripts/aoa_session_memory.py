@@ -46880,6 +46880,7 @@ def token_accounting_backfill_candidate(
             record,
             dry_run=False,
             max_raw_bytes=max_raw_bytes,
+            execution_id=execution_id,
         )
     raw_sha_after = sha256_file(raw_path)
     status = (
