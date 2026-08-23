@@ -623,8 +623,12 @@ CAPTURE_WATCH_STATE_JSON = "capture-watch-state.json"
 CAPTURE_WATCH_STATE_LOCK = "capture-watch-state.lock"
 CAPTURE_WATCH_STATE_SCHEMA_VERSION = 1
 CAPTURE_WATCH_PROGRESS_JSON = "capture-watch-progress.json"
-CAPTURE_WATCH_PROGRESS_SCHEMA_VERSION = 1
+CAPTURE_WATCH_PROGRESS_LOCK = "capture-watch-progress.lock"
+CAPTURE_WATCH_PROGRESS_SCHEMA_VERSION = 2
+CAPTURE_WATCH_SELECTION_SCHEMA_VERSION = 1
 CAPTURE_WATCH_DEFAULT_BUDGET_SECONDS = 90.0
+CAPTURE_WATCH_SERVICE_TIMEOUT_SECONDS = 120.0
+CAPTURE_WATCH_CLEANUP_MARGIN_SECONDS = 30.0
 CAPTURE_WATCH_LOCK_POLL_SECONDS = 0.01
 RAW_BLOCKS_DIR = "blocks"
 RAW_BLOCK_INDEX_JSON = "blocks.index.json"
@@ -30707,6 +30711,29 @@ def raw_capture_state_for_session(session_dir: Path) -> dict[str, Any]:
     return state if isinstance(state, dict) else {}
 
 
+def raw_capture_state_receipt_valid(state: dict[str, Any]) -> bool:
+    receipt = (
+        state.get("state_receipt")
+        if isinstance(state.get("state_receipt"), dict)
+        else {}
+    )
+    if (
+        receipt.get("status") != "published"
+        or not str(receipt.get("state_digest") or "")
+    ):
+        return False
+    core = dict(state)
+    core.pop("state_receipt", None)
+    capture_execution = core.get("capture_execution")
+    if isinstance(capture_execution, dict):
+        capture_execution = dict(capture_execution)
+        capture_execution.pop("state_receipt", None)
+        core["capture_execution"] = capture_execution
+    return str(receipt.get("state_digest") or "") == capture_watch_progress_digest(
+        core
+    )
+
+
 def raw_capture_hooks_seen(
     session_dir: Path,
 ) -> list[str]:
@@ -30968,6 +30995,10 @@ def capture_watch_progress_path(aoa_root: Path) -> Path:
     return aoa_root / DIAGNOSTICS_ROOT / CAPTURE_WATCH_PROGRESS_JSON
 
 
+def capture_watch_progress_lock_path(aoa_root: Path) -> Path:
+    return aoa_root / DIAGNOSTICS_ROOT / CAPTURE_WATCH_PROGRESS_LOCK
+
+
 class CaptureWatchBudgetExceeded(RuntimeError):
     """Cooperative capture-watch exit that leaves the current item retryable."""
 
@@ -30982,6 +31013,331 @@ class CaptureWatchBudgetExceeded(RuntimeError):
         self.detail = detail
         self.lock_wait_ms = max(0, int(lock_wait_ms))
         super().__init__(f"{stage}:{detail}")
+
+
+class CaptureWatchProgressConflict(RuntimeError):
+    """A stale or cross-bound capture progress writer failed closed."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = str(reason)
+        super().__init__(self.reason)
+
+
+def capture_watch_progress_write_guard(
+    existing: dict[str, Any],
+    *,
+    binding_digest: str,
+    expected_generation: int,
+    next_index: int,
+    completed_count: int,
+) -> int:
+    """Validate one locked progress write and return its generation.
+
+    The caller must hold ``capture-watch-progress.lock`` while reading the
+    existing receipt and invoking this guard.  A terminal receipt may be
+    replaced by a new binding only from cursor zero; an active receipt or a
+    stale cursor fails closed.
+    """
+    if not isinstance(existing, dict) or not existing:
+        return max(1, int(expected_generation))
+    existing_binding = str(existing.get("binding_digest") or "")
+    existing_generation = int_value(existing.get("generation"), 0)
+    existing_status = str(existing.get("status") or "")
+    existing_next_index = int_value(existing.get("next_index"), 0)
+    existing_completed_count = int_value(
+        existing.get("completed_count"),
+        0,
+    )
+    if existing_binding != binding_digest:
+        if existing_status in {"started", "running"}:
+            raise CaptureWatchProgressConflict(
+                "capture_watch_progress_active_binding_collision"
+            )
+        if int(next_index) != 0 or int(completed_count) != 0:
+            raise CaptureWatchProgressConflict(
+                "capture_watch_progress_expected_binding_collision"
+            )
+        return max(
+            1,
+            int(expected_generation),
+            existing_generation + 1,
+        )
+    if existing_generation not in {0, int(expected_generation)}:
+        raise CaptureWatchProgressConflict(
+            "capture_watch_progress_generation_collision"
+        )
+    if int(next_index) < existing_next_index:
+        raise CaptureWatchProgressConflict(
+            "capture_watch_progress_cursor_regression"
+        )
+    if int(completed_count) < existing_completed_count:
+        raise CaptureWatchProgressConflict(
+            "capture_watch_progress_completed_regression"
+        )
+    return max(1, int(expected_generation))
+
+
+def capture_watch_progress_next_sequence(
+    existing: dict[str, Any],
+    local_sequence: int,
+) -> int:
+    """Advance the receipt sequence from the locked on-disk value."""
+    existing_sequence = int_value(
+        existing.get("progress_sequence")
+        if isinstance(existing, dict)
+        else 0,
+        0,
+    )
+    return max(0, int(local_sequence), existing_sequence) + 1
+
+
+def capture_watch_budget_contract(
+    requested_budget_seconds: float | None,
+) -> dict[str, Any]:
+    """Keep capture work inside the rendered service cleanup margin.
+
+    ``None`` remains an explicit unbounded library route.  The installed
+    capture-watch command always supplies the 90-second default, leaving the
+    30-second publication/cleanup margin before the 120-second service
+    timeout.  Larger callers are bounded to that same ceiling instead of
+    silently inheriting a service-incompatible deadline.
+    """
+    max_budget_seconds = max(
+        0.0,
+        CAPTURE_WATCH_SERVICE_TIMEOUT_SECONDS
+        - CAPTURE_WATCH_CLEANUP_MARGIN_SECONDS,
+    )
+    if requested_budget_seconds is None:
+        return {
+            "schema_version": 1,
+            "requested_budget_seconds": None,
+            "effective_budget_seconds": None,
+            "service_timeout_seconds": CAPTURE_WATCH_SERVICE_TIMEOUT_SECONDS,
+            "cleanup_margin_seconds": CAPTURE_WATCH_CLEANUP_MARGIN_SECONDS,
+            "max_budget_seconds": max_budget_seconds,
+            "within_cleanup_margin": False,
+            "cleanup_margin_proven": False,
+            "clamped": False,
+            "status": "unbounded_library_route",
+        }
+    requested = float(requested_budget_seconds)
+    if math.isnan(requested):
+        requested = 0.0
+    elif math.isinf(requested):
+        requested = max_budget_seconds if requested > 0 else 0.0
+    requested = max(0.0, requested)
+    effective = min(requested, max_budget_seconds)
+    return {
+        "schema_version": 1,
+        "requested_budget_seconds": requested,
+        "effective_budget_seconds": effective,
+        "service_timeout_seconds": CAPTURE_WATCH_SERVICE_TIMEOUT_SECONDS,
+        "cleanup_margin_seconds": CAPTURE_WATCH_CLEANUP_MARGIN_SECONDS,
+        "max_budget_seconds": max_budget_seconds,
+        "within_cleanup_margin": effective <= max_budget_seconds,
+        "cleanup_margin_proven": True,
+        "clamped": requested > max_budget_seconds,
+        "status": (
+            "clamped_to_cleanup_margin"
+            if requested > max_budget_seconds
+            else "within_cleanup_margin"
+        ),
+    }
+
+
+def capture_watch_progress_digest(payload: Any) -> str:
+    return "sha256:" + hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def capture_watch_file_identity(path: Path) -> dict[str, Any]:
+    identity: dict[str, Any] = {
+        "path": str(path),
+        "exists": False,
+        "snapshot": {
+            "path": str(path),
+            "size": -1,
+            "mtime_ns": -1,
+        },
+        "sha256": "",
+    }
+    if not path.is_file():
+        return identity
+    identity["exists"] = True
+    try:
+        identity["snapshot"] = file_snapshot(path)
+        identity["sha256"] = sha256_file_exact(path)
+    except OSError:
+        identity["exists"] = False
+    return identity
+
+
+def capture_watch_document_identity(
+    path: Path,
+    payload: Any,
+    *,
+    kind: str,
+) -> dict[str, Any]:
+    file_identity = capture_watch_file_identity(path)
+    document: dict[str, Any] = {
+        "kind": kind,
+        "file": file_identity,
+        "parsed": bool(file_identity.get("exists"))
+        and isinstance(payload, dict)
+        and bool(payload),
+        "session_id": "",
+    }
+    if isinstance(payload, dict):
+        document["session_id"] = str(payload.get("session_id") or "")
+        if kind == "manifest":
+            document.update(
+                {
+                    "session_label": str(
+                        payload.get("session_label")
+                        or payload.get("label")
+                        or ""
+                    ),
+                    "archive_status": str(
+                        payload.get("archive_status") or ""
+                    ),
+                    "raw_identity": (
+                        dict(payload.get("raw"))
+                        if isinstance(payload.get("raw"), dict)
+                        else {}
+                    ),
+                }
+            )
+        elif kind == "capture_state":
+            document.update(
+                {
+                    "status": str(payload.get("status") or ""),
+                    "capture_id": str(payload.get("capture_id") or ""),
+                    "capture_path": str(payload.get("capture_path") or ""),
+                    "source_path": str(payload.get("source_path") or ""),
+                    "source_snapshot_after": (
+                        dict(payload.get("source_snapshot_after"))
+                        if isinstance(
+                            payload.get("source_snapshot_after"),
+                            dict,
+                        )
+                        else {}
+                    ),
+                    "state_receipt_status": str(
+                        (
+                            payload.get("state_receipt")
+                            if isinstance(
+                                payload.get("state_receipt"),
+                                dict,
+                            )
+                            else {}
+                        ).get("status")
+                        or ""
+                    ),
+                }
+            )
+    return document
+
+
+def capture_watch_registry_identity(
+    records: Sequence[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "ordinal": ordinal,
+            "session_id": str(record.get("session_id") or ""),
+            "path": str(record.get("path") or ""),
+            "record_digest": capture_watch_progress_digest(record),
+        }
+        for ordinal, record in enumerate(records)
+        if isinstance(record, dict)
+    ]
+
+
+def capture_watch_lineage_snapshot(
+    watched: dict[str, Any],
+    *,
+    resolved_session_dir: Path,
+    registry_records: Sequence[dict[str, Any]],
+    resolved_registry_path: Path | None,
+    source_snapshot: dict[str, Any],
+    source_available: bool,
+) -> dict[str, Any]:
+    manifest_path = resolved_session_dir / "session.manifest.json"
+    capture_path = raw_capture_state_path(resolved_session_dir)
+    manifest = read_json(manifest_path, {})
+    capture_state = read_json(capture_path, {})
+    return {
+        "schema_version": CAPTURE_WATCH_SELECTION_SCHEMA_VERSION,
+        "session_id": str(watched.get("session_id") or ""),
+        "watch": {
+            "session_id": str(watched.get("session_id") or ""),
+            "session_dir": str(watched.get("session_dir") or ""),
+            "transcript_path": str(watched.get("transcript_path") or ""),
+            "observed_at": str(watched.get("observed_at") or ""),
+            "last_checked_at": str(watched.get("last_checked_at") or ""),
+            "observed_size": int_value(
+                watched.get("observed_size"),
+                -1,
+            ),
+            "observed_mtime_ns": int_value(
+                watched.get("observed_mtime_ns"),
+                -1,
+            ),
+            "source_available": bool(watched.get("source_available")),
+        },
+        "source": {
+            "available": bool(source_available),
+            "snapshot": dict(source_snapshot),
+        },
+        "registry": {
+            "records": capture_watch_registry_identity(registry_records),
+            "resolved_path": str(resolved_registry_path or ""),
+            "resolved_path_exists": bool(
+                resolved_registry_path is not None
+                and resolved_registry_path.exists()
+            ),
+        },
+        "physical": {
+            "session_dir": str(resolved_session_dir),
+            "session_dir_exists": resolved_session_dir.exists(),
+            "manifest": capture_watch_document_identity(
+                manifest_path,
+                manifest,
+                kind="manifest",
+            ),
+            "capture_state": capture_watch_document_identity(
+                capture_path,
+                capture_state,
+                kind="capture_state",
+            ),
+        },
+    }
+
+
+def capture_watch_selection_entry(
+    watched: dict[str, Any],
+    *,
+    selection_index: int,
+    lineage: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "selection_index": int(selection_index),
+        "session_id": str(watched.get("session_id") or ""),
+        "watch": {
+            "session_id": str(watched.get("session_id") or ""),
+            "session_dir": str(watched.get("session_dir") or ""),
+            "transcript_path": str(watched.get("transcript_path") or ""),
+            "observed_at": str(watched.get("observed_at") or ""),
+            "last_checked_at": str(watched.get("last_checked_at") or ""),
+        },
+        "lineage": dict(lineage),
+    }
 
 
 def capture_watch_deadline_check(
@@ -31023,10 +31379,38 @@ def capture_watch_selection_digest(
 ) -> str:
     identity = [
         {
-            "session_id": str(item.get("session_id") or ""),
-            "observed_at": str(item.get("observed_at") or ""),
-            "last_checked_at": str(item.get("last_checked_at") or ""),
-            "transcript_path": str(item.get("transcript_path") or ""),
+            "session_id": str(
+                (item.get("watch") if isinstance(item.get("watch"), dict) else item)
+                .get("session_id")
+                or item.get("session_id")
+                or ""
+            ),
+            "watch": (
+                dict(item.get("watch"))
+                if isinstance(item.get("watch"), dict)
+                else {
+                    "observed_at": str(item.get("observed_at") or ""),
+                    "last_checked_at": str(
+                        item.get("last_checked_at") or ""
+                    ),
+                    "transcript_path": str(
+                        item.get("transcript_path") or ""
+                    ),
+                    "session_dir": str(item.get("session_dir") or ""),
+                }
+            ),
+            "lineage": (
+                dict(item.get("lineage"))
+                if isinstance(item.get("lineage"), dict)
+                else (
+                    dict(item.get("_capture_watch_lineage"))
+                    if isinstance(
+                        item.get("_capture_watch_lineage"),
+                        dict,
+                    )
+                    else {}
+                )
+            ),
         }
         for item in selected
     ]
@@ -31037,6 +31421,41 @@ def capture_watch_selection_digest(
         separators=(",", ":"),
     ).encode("utf-8")
     return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+
+
+def capture_watch_completed_prefix_compatible(
+    prior_progress: dict[str, Any],
+    selection_snapshot: Sequence[dict[str, Any]],
+) -> bool:
+    """Require exact current lineage before trusting a completed prefix."""
+    if (
+        int_value(prior_progress.get("schema_version"), -1)
+        != CAPTURE_WATCH_PROGRESS_SCHEMA_VERSION
+    ):
+        return False
+    stored_snapshot = prior_progress.get("selection_snapshot")
+    if not isinstance(stored_snapshot, list):
+        return False
+    next_index = int_value(prior_progress.get("next_index"), -1)
+    if next_index < 0 or next_index > len(selection_snapshot):
+        return False
+    if stored_snapshot != list(selection_snapshot):
+        return False
+    completed_updates = prior_progress.get("completed_updates")
+    if not isinstance(completed_updates, dict):
+        return False
+    for item in selection_snapshot[:next_index]:
+        session_id = str(item.get("session_id") or "")
+        update = completed_updates.get(session_id)
+        if not isinstance(update, dict):
+            return False
+        if not bool(update.get("verified")):
+            return False
+        if str(update.get("lineage_digest") or "") != capture_watch_progress_digest(
+            item.get("lineage") if isinstance(item.get("lineage"), dict) else {}
+        ):
+            return False
+    return True
 
 
 def acquire_capture_watch_lock(
@@ -31154,11 +31573,10 @@ def reconcile_capture_watch(
     execution_started = time.monotonic()
     process_cpu_started = time.process_time()
     process_io_started = capture_watch_process_io()
-    effective_budget_seconds = (
-        None
-        if budget_seconds is None
-        else max(0.0, float(budget_seconds))
-    )
+    budget_contract = capture_watch_budget_contract(budget_seconds)
+    effective_budget_seconds = budget_contract[
+        "effective_budget_seconds"
+    ]
     deadline_monotonic = (
         None
         if effective_budget_seconds is None
@@ -31188,10 +31606,10 @@ def reconcile_capture_watch(
             str(item.get("observed_at") or ""),
             str(item.get("session_id") or ""),
         ),
-    )[: max(0, limit)]
-    selection_digest = capture_watch_selection_digest(selected)
+    )[: max(0, int(limit))]
     registry = read_json(aoa_root / REGISTRY_NAME, {"sessions": []})
     registry_paths: dict[str, Path] = {}
+    registry_records: dict[str, list[dict[str, Any]]] = defaultdict(list)
     registry_sessions = (
         registry.get("sessions")
         if isinstance(registry, dict)
@@ -31205,32 +31623,155 @@ def reconcile_capture_watch(
         path_value = str(registry_item.get("path") or "")
         if not session_id or not path_value:
             continue
+        registry_records[session_id].append(dict(registry_item))
         candidate = Path(path_value)
         if candidate.exists():
             registry_paths[session_id] = candidate
 
+    def resolve_watched_session_dir(
+        watched: dict[str, Any],
+        session_id: str,
+    ) -> Path:
+        registered = registry_paths.get(session_id)
+        stored_value = str(watched.get("session_dir") or "")
+        stored = Path(stored_value) if stored_value else None
+        if registered is not None:
+            return registered
+        if stored is not None:
+            return stored
+        return default_session_dir(aoa_root, session_id)
+
+    selected_with_lineage: list[dict[str, Any]] = []
+    selection_snapshot: list[dict[str, Any]] = []
+    for selection_index, watched in enumerate(selected):
+        session_id = str(watched.get("session_id") or "")
+        transcript_path = Path(
+            str(watched.get("transcript_path") or "")
+        )
+        source_available = bool(
+            session_id
+            and transcript_path.is_file()
+            and os.access(transcript_path, os.R_OK)
+        )
+        try:
+            source_snapshot = (
+                file_snapshot(transcript_path)
+                if source_available
+                else {
+                    "path": str(transcript_path),
+                    "size": -1,
+                    "mtime_ns": -1,
+                }
+            )
+        except OSError:
+            source_available = False
+            source_snapshot = {
+                "path": str(transcript_path),
+                "size": -1,
+                "mtime_ns": -1,
+            }
+        resolved_session_dir = resolve_watched_session_dir(
+            watched,
+            session_id,
+        )
+        resolved_registry_path = registry_paths.get(session_id)
+        lineage = capture_watch_lineage_snapshot(
+            watched,
+            resolved_session_dir=resolved_session_dir,
+            registry_records=registry_records.get(session_id, []),
+            resolved_registry_path=resolved_registry_path,
+            source_snapshot=source_snapshot,
+            source_available=source_available,
+        )
+        selected_item = dict(watched)
+        selected_item["lineage"] = lineage
+        selected_with_lineage.append(selected_item)
+        selection_snapshot.append(
+            capture_watch_selection_entry(
+                selected_item,
+                selection_index=selection_index,
+                lineage=lineage,
+            )
+        )
+    selected = selected_with_lineage
+    selection_digest = capture_watch_selection_digest(selection_snapshot)
+    selection_binding = {
+        "schema_version": CAPTURE_WATCH_SELECTION_SCHEMA_VERSION,
+        "target": target or "all",
+        "limit": max(0, int(limit)),
+        "apply": bool(apply),
+        "selection_rule": (
+            "sort(last_checked_at||empty, observed_at, session_id)[:limit]"
+        ),
+        "selection_digest": selection_digest,
+        "selection": selection_snapshot,
+    }
+    binding_digest = capture_watch_progress_digest(selection_binding)
+
     progress_path = capture_watch_progress_path(aoa_root)
     prior_progress = read_json(progress_path, {})
     resume_from_index = 0
+    resume_diagnostics: list[str] = []
+    prefix_compatible = False
     if (
         isinstance(prior_progress, dict)
         and prior_progress.get("status") == "budget_exhausted"
-        and str(prior_progress.get("selection_digest") or "")
-        == selection_digest
+        and str(prior_progress.get("binding_digest") or "")
+        == binding_digest
     ):
-        prior_next_index = int_value(
-            prior_progress.get("next_index"),
+        prefix_compatible = capture_watch_completed_prefix_compatible(
+            prior_progress,
+            selection_snapshot,
         )
-        if 0 < prior_next_index <= len(selected):
-            resume_from_index = prior_next_index
-    progress_sequence = 0
+        if prefix_compatible:
+            prior_next_index = int_value(
+                prior_progress.get("next_index"),
+            )
+            if 0 < prior_next_index <= len(selected):
+                resume_from_index = prior_next_index
+                resume_diagnostics.append(
+                    "resumed_from_matching_lineage_bound_progress"
+                )
+        else:
+            resume_diagnostics.append(
+                "incompatible_completed_prefix_restarted_from_zero"
+            )
+    elif (
+        isinstance(prior_progress, dict)
+        and prior_progress.get("status") == "budget_exhausted"
+    ):
+        resume_diagnostics.append(
+            "progress_binding_changed_restarted_from_zero"
+        )
+    prior_binding_digest = (
+        str(prior_progress.get("binding_digest") or "")
+        if isinstance(prior_progress, dict)
+        else ""
+    )
+    prior_generation = (
+        int_value(prior_progress.get("generation"), 0)
+        if isinstance(prior_progress, dict)
+        else 0
+    )
+    progress_generation = max(
+        1,
+        prior_generation
+        if prior_binding_digest == binding_digest
+        else prior_generation + 1,
+    )
+    progress_sequence = int_value(
+        prior_progress.get("progress_sequence")
+        if isinstance(prior_progress, dict)
+        else 0,
+        0,
+    )
     latest_progress: dict[str, Any] = {}
     stage_totals_ms: dict[str, int] = {}
     stage_counts: dict[str, int] = {}
     lock_wait_ms = 0
     results: list[dict[str, Any]] = []
     updates: dict[str, dict[str, Any]] = {}
-    if resume_from_index:
+    if prefix_compatible:
         prior_completed_updates = prior_progress.get(
             "completed_updates"
         )
@@ -31244,6 +31785,22 @@ def reconcile_capture_watch(
     budget_exhausted = False
     deferred_stage = ""
     state_update_deferred = False
+    progress_conflict = False
+    progress_conflict_reason = ""
+    already_complete = bool(
+        isinstance(prior_progress, dict)
+        and prior_progress.get("status") == "completed"
+        and prior_binding_digest == binding_digest
+        and capture_watch_completed_prefix_compatible(
+            prior_progress,
+            selection_snapshot,
+        )
+        and int_value(prior_progress.get("next_index"), -1)
+        == len(selected)
+    )
+    if already_complete:
+        resume_from_index = len(selected)
+        completed_count = len(selected)
 
     def publish_progress(
         *,
@@ -31254,83 +31811,141 @@ def reconcile_capture_watch(
         current: dict[str, Any] | None = None,
         diagnostics: list[str] | None = None,
     ) -> None:
-        nonlocal progress_sequence, latest_progress
-        progress_sequence += 1
-        current = current or {}
-        capture_execution = (
-            current.get("capture_execution")
-            if isinstance(current.get("capture_execution"), dict)
-            else {}
+        nonlocal progress_sequence, latest_progress, progress_generation
+        nonlocal lock_wait_ms
+        progress_lock_path = capture_watch_progress_lock_path(aoa_root)
+        progress_handle, waited_ms = acquire_capture_watch_lock(
+            progress_lock_path,
+            deadline_monotonic=deadline_monotonic,
+            stage="progress_lock_wait",
         )
-        latest_progress = {
-            "schema_version": CAPTURE_WATCH_PROGRESS_SCHEMA_VERSION,
-            "artifact_type": "session_memory_capture_watch_progress",
-            "execution_id": execution_id,
-            "updated_at": utc_now(),
-            "progress_sequence": progress_sequence,
-            "status": status,
-            "phase": phase,
-            "frontier_count": len(entries),
-            "eligible_count": len(eligible),
-            "selected_count": len(selected),
-            "selection_limit": max(0, int(limit)),
-            "selection_rule": (
-                "sort(last_checked_at||empty, observed_at, session_id)"
-                "[:limit]"
-            ),
-            "selection_digest": selection_digest,
-            "completed_count": max(0, int(completed)),
-            "next_index": max(0, int(next_index)),
-            "resume_from_index": resume_from_index,
-            "remaining_count": max(0, len(selected) - int(completed)),
-            "current_session_id": str(
-                current.get("session_id") or ""
-            ),
-            "current_stage": str(current.get("current_stage") or ""),
-            "last_result_status": str(current.get("status") or ""),
-            "last_source_snapshot": (
-                dict(current.get("source_snapshot"))
-                if isinstance(current.get("source_snapshot"), dict)
+        lock_wait_ms += waited_ms
+        try:
+            existing = read_json(progress_path, {})
+            existing = existing if isinstance(existing, dict) else {}
+            progress_generation = capture_watch_progress_write_guard(
+                existing,
+                binding_digest=binding_digest,
+                expected_generation=progress_generation,
+                next_index=next_index,
+                completed_count=completed,
+            )
+            progress_sequence = capture_watch_progress_next_sequence(
+                existing,
+                progress_sequence,
+            )
+            current = current or {}
+            capture_execution = (
+                current.get("capture_execution")
+                if isinstance(current.get("capture_execution"), dict)
                 else {}
-            ),
-            "capture_execution": capture_execution,
-            "completed_updates": {
-                str(session_id): dict(update)
-                for session_id, update in updates.items()
-                if isinstance(update, dict)
-            },
-            "budget_seconds": effective_budget_seconds,
-            "process_cpu_time_ms": int(
-                (time.process_time() - process_cpu_started) * 1000
-            ),
-            "process_io": capture_watch_process_io(),
-            "lock_wait_ms": lock_wait_ms,
-            "diagnostics": list(diagnostics or []),
-            "truth_status": (
-                "bounded_known_source_capture_progress_not_global_discovery"
-            ),
-        }
-        write_json_durable(progress_path, latest_progress)
+            )
+            latest_progress = {
+                "schema_version": CAPTURE_WATCH_PROGRESS_SCHEMA_VERSION,
+                "artifact_type": "session_memory_capture_watch_progress",
+                "execution_id": execution_id,
+                "generation": progress_generation,
+                "expected_generation": progress_generation,
+                "binding_digest": binding_digest,
+                "selection_binding": selection_binding,
+                "selection_snapshot": selection_snapshot,
+                "updated_at": utc_now(),
+                "progress_sequence": progress_sequence,
+                "status": status,
+                "phase": phase,
+                "frontier_count": len(entries),
+                "eligible_count": len(eligible),
+                "selected_count": len(selected),
+                "selection_limit": max(0, int(limit)),
+                "selection_rule": (
+                    "sort(last_checked_at||empty, observed_at, session_id)"
+                    "[:limit]"
+                ),
+                "selection_digest": selection_digest,
+                "completed_count": max(0, int(completed)),
+                "next_index": max(0, int(next_index)),
+                "resume_from_index": resume_from_index,
+                "remaining_count": max(
+                    0,
+                    len(selected) - int(completed),
+                ),
+                "current_session_id": str(
+                    current.get("session_id") or ""
+                ),
+                "current_stage": str(current.get("current_stage") or ""),
+                "last_result_status": str(current.get("status") or ""),
+                "last_source_snapshot": (
+                    dict(current.get("source_snapshot"))
+                    if isinstance(current.get("source_snapshot"), dict)
+                    else {}
+                ),
+                "capture_execution": capture_execution,
+                "completed_updates": {
+                    str(session_id): dict(update)
+                    for session_id, update in updates.items()
+                    if isinstance(update, dict)
+                },
+                "budget_seconds": effective_budget_seconds,
+                "budget_contract": budget_contract,
+                "process_cpu_time_ms": int(
+                    (time.process_time() - process_cpu_started) * 1000
+                ),
+                "process_io": capture_watch_process_io(),
+                "lock_wait_ms": lock_wait_ms,
+                "diagnostics": list(diagnostics or []),
+                "truth_status": (
+                    "bounded_known_source_capture_progress_not_global_discovery"
+                ),
+            }
+            write_json_durable(progress_path, latest_progress)
+        finally:
+            fcntl.flock(progress_handle, fcntl.LOCK_UN)
+            progress_handle.close()
+
+    def safe_publish_progress(**kwargs: Any) -> bool:
+        nonlocal progress_conflict, progress_conflict_reason
+        nonlocal budget_exhausted, deferred_stage, state_update_deferred
+        nonlocal lock_wait_ms
+        try:
+            publish_progress(**kwargs)
+            return True
+        except CaptureWatchProgressConflict as exc:
+            progress_conflict = True
+            progress_conflict_reason = exc.reason
+            state_update_deferred = True
+            deferred_stage = "progress_conflict"
+            return False
+        except CaptureWatchBudgetExceeded as exc:
+            budget_exhausted = True
+            deferred_stage = exc.stage
+            state_update_deferred = True
+            if exc.lock_wait_ms:
+                lock_wait_ms += exc.lock_wait_ms
+            return False
 
     execution_id = (
         f"capture-watch-{compact_stamp()}-{os.getpid()}-"
         f"{uuid.uuid4().hex[:10]}"
     )
-    publish_progress(
-        status="started",
-        phase=(
-            "selection_complete"
-            if resume_from_index == 0
-            else "resumed_from_progress"
-        ),
-        completed=resume_from_index,
-        next_index=resume_from_index,
-        diagnostics=(
-            ["resumed_from_prior_budget_progress"]
-            if resume_from_index
-            else []
-        ),
-    )
+    if not already_complete:
+        safe_publish_progress(
+            status="started",
+            phase=(
+                "selection_complete"
+                if resume_from_index == 0
+                else "resumed_from_progress"
+            ),
+            completed=resume_from_index,
+            next_index=resume_from_index,
+            diagnostics=(
+                resume_diagnostics
+                or (
+                    ["resumed_from_prior_budget_progress"]
+                    if resume_from_index
+                    else []
+                )
+            ),
+        )
 
     def run_stage(
         result: dict[str, Any],
@@ -31361,21 +31976,8 @@ def reconcile_capture_watch(
             )
             stage_counts[stage] = stage_counts.get(stage, 0) + 1
 
-    def resolve_watched_session_dir(
-        watched: dict[str, Any],
-        session_id: str,
-    ) -> Path:
-        registered = registry_paths.get(session_id)
-        stored_value = str(watched.get("session_dir") or "")
-        stored = Path(stored_value) if stored_value else None
-        if registered is not None:
-            return registered
-        if stored is not None:
-            return stored
-        return default_session_dir(aoa_root, session_id)
-
     for index, watched in enumerate(
-        selected[resume_from_index:],
+        [] if already_complete or progress_conflict else selected[resume_from_index:],
         start=resume_from_index,
     ):
         session_id = str(watched.get("session_id") or "")
@@ -31387,6 +31989,12 @@ def reconcile_capture_watch(
             "transcript_path": str(transcript_path),
             "status": "unchanged",
             "mutates": False,
+            "verified": False,
+            "lineage_digest": capture_watch_progress_digest(
+                watched.get("lineage")
+                if isinstance(watched.get("lineage"), dict)
+                else {}
+            ),
             "selection_index": index,
             "current_stage": "item_start",
             "stage_timings_ms": {},
@@ -31408,9 +32016,13 @@ def reconcile_capture_watch(
             )
             if not source_available:
                 result["status"] = "source_unavailable"
+                result["verified"] = True
                 updates[session_id] = {
                     "last_checked_at": checked_at,
                     "last_status": result["status"],
+                    "verified": True,
+                    "selection_index": index,
+                    "lineage_digest": result["lineage_digest"],
                 }
             else:
                 source_snapshot = run_stage(
@@ -31440,6 +32052,9 @@ def reconcile_capture_watch(
                         raw_capture_state_for_session(session_dir),
                     ),
                 )
+                state_receipt_published = raw_capture_state_receipt_valid(
+                    capture_state
+                )
                 captured_snapshot = (
                     capture_state.get("source_snapshot_after")
                     if isinstance(
@@ -31458,6 +32073,7 @@ def reconcile_capture_watch(
                         -1,
                     )
                     == int_value(source_snapshot.get("mtime_ns"), -2)
+                    and state_receipt_published
                 )
                 result["capture_current_before"] = capture_current
                 if not capture_current:
@@ -31473,6 +32089,7 @@ def reconcile_capture_watch(
                             result.setdefault("diagnostics", []).append(
                                 "capture_only_does_not_invoke_session_mirror"
                             )
+                            result["verified"] = True
                         else:
                             captured = run_stage(
                                 result,
@@ -31515,11 +32132,17 @@ def reconcile_capture_watch(
                                         )
                                         else {}
                                     ),
+                                    "verified": True,
                                 }
                             )
+                else:
+                    result["verified"] = True
                 updates[session_id] = {
                     "last_checked_at": checked_at,
                     "last_status": result["status"],
+                    "verified": bool(result.get("verified")),
+                    "selection_index": index,
+                    "lineage_digest": result["lineage_digest"],
                     "last_source_size": int_value(
                         source_snapshot.get("size"),
                         -1,
@@ -31530,15 +32153,37 @@ def reconcile_capture_watch(
                     ),
                 }
             result["current_stage"] = "item_complete"
+            if not bool(result.get("verified")):
+                result["retryable"] = True
+                result.setdefault("diagnostics", []).append(
+                    "capture_watch_item_verification_incomplete"
+                )
+                results.append(result)
+                state_update_deferred = True
+                deferred_stage = "item_verification"
+                safe_publish_progress(
+                    status="budget_exhausted",
+                    phase="item_verification",
+                    completed=completed_count,
+                    next_index=index,
+                    current=result,
+                    diagnostics=[
+                        "capture_watch_item_verification_incomplete"
+                    ],
+                )
+                break
             results.append(result)
             completed_count += 1
-            publish_progress(
+            if not safe_publish_progress(
                 status="running",
                 phase="item_complete",
                 completed=completed_count,
                 next_index=index + 1,
                 current=result,
-            )
+            ):
+                completed_count = max(0, completed_count - 1)
+                result["retryable"] = True
+                break
         except CaptureWatchBudgetExceeded as exc:
             result.update(
                 {
@@ -31557,7 +32202,7 @@ def reconcile_capture_watch(
             results.append(result)
             budget_exhausted = True
             deferred_stage = exc.stage
-            publish_progress(
+            safe_publish_progress(
                 status="budget_exhausted",
                 phase=exc.stage,
                 completed=completed_count,
@@ -31567,7 +32212,18 @@ def reconcile_capture_watch(
             )
             break
 
-    if apply and updates and not budget_exhausted:
+    all_selected_verified = all(
+        bool(updates.get(str(item.get("session_id") or ""), {}).get("verified"))
+        for item in selection_snapshot
+    )
+    if (
+        apply
+        and updates
+        and all_selected_verified
+        and not budget_exhausted
+        and not progress_conflict
+        and not already_complete
+    ):
         publication_result: dict[str, Any] = {
             "current_stage": "state_publication",
             "stage_timings_ms": {},
@@ -31636,7 +32292,7 @@ def reconcile_capture_watch(
             deferred_stage = exc.stage
             if exc.lock_wait_ms:
                 lock_wait_ms += exc.lock_wait_ms
-            publish_progress(
+            safe_publish_progress(
                 status="budget_exhausted",
                 phase=exc.stage,
                 completed=completed_count,
@@ -31645,9 +32301,11 @@ def reconcile_capture_watch(
                 diagnostics=[str(exc)],
             )
 
-    if budget_exhausted:
+    if progress_conflict:
+        final_status = "progress_conflict"
+    elif budget_exhausted:
         final_status = "budget_exhausted"
-        publish_progress(
+        safe_publish_progress(
             status="budget_exhausted",
             phase="budget_exit",
             completed=completed_count,
@@ -31659,9 +32317,21 @@ def reconcile_capture_watch(
                 else []
             ),
         )
+    elif apply and not all_selected_verified:
+        final_status = "incomplete_retryable"
+        state_update_deferred = True
+        deferred_stage = deferred_stage or "item_verification"
+        safe_publish_progress(
+            status="budget_exhausted",
+            phase="verification_exit",
+            completed=completed_count,
+            next_index=completed_count,
+            current=(results[-1] if results else None),
+            diagnostics=["capture_watch_item_verification_incomplete"],
+        )
     else:
         final_status = "applied" if apply else "planned"
-        publish_progress(
+        safe_publish_progress(
             status="completed",
             phase="complete",
             completed=completed_count,
@@ -31687,6 +32357,10 @@ def reconcile_capture_watch(
         "status": final_status,
         "apply": apply,
         "budget_seconds": effective_budget_seconds,
+        "requested_budget_seconds": budget_contract.get(
+            "requested_budget_seconds"
+        ),
+        "budget_contract": budget_contract,
         "watched_source_count": len(entries),
         "eligible_source_count": len(eligible),
         "selected_count": len(selected),
@@ -31696,6 +32370,9 @@ def reconcile_capture_watch(
             "sort(last_checked_at||empty, observed_at, session_id)[:limit]"
         ),
         "selection_digest": selection_digest,
+        "binding_digest": binding_digest,
+        "selection_snapshot": selection_snapshot,
+        "progress_generation": progress_generation,
         "resume_from_index": resume_from_index,
         "completed_count": completed_count,
         "remaining_count": max(0, len(selected) - completed_count),
@@ -31707,11 +32384,16 @@ def reconcile_capture_watch(
             bool(result.get("mutates")) for result in results
         ),
         "budget_exhausted": budget_exhausted,
+        "progress_conflict": progress_conflict,
+        "progress_conflict_reason": progress_conflict_reason,
+        "resume_diagnostics": resume_diagnostics,
         "deferred_stage": deferred_stage,
         "state_update_deferred": state_update_deferred,
         "progress_receipt": {
             "path": str(progress_path),
             "execution_id": execution_id,
+            "generation": latest_progress.get("generation"),
+            "binding_digest": latest_progress.get("binding_digest"),
             "progress_sequence": progress_sequence,
             "status": latest_progress.get("status"),
             "completed_count": latest_progress.get("completed_count"),
@@ -32974,6 +33656,7 @@ def raw_capture_epoch_boundary_current(
     epoch: dict[str, Any],
     source_path: Path,
     session_dir: Path,
+    cooperative_deadline_monotonic: float | None = None,
 ) -> tuple[bool, list[str]]:
     diagnostics: list[str] = []
     captured_bytes = int_value(epoch.get("captured_bytes"), 0)
@@ -32990,9 +33673,17 @@ def raw_capture_epoch_boundary_current(
     if byte_start < 0 or byte_count <= 0:
         return False, ["capture_ledger_last_block_range_invalid"]
     try:
+        capture_watch_deadline_check(
+            cooperative_deadline_monotonic,
+            stage="raw_boundary_source_read",
+        )
         with source_path.open("rb") as handle:
             handle.seek(byte_start)
             observed = handle.read(byte_count)
+        capture_watch_deadline_check(
+            cooperative_deadline_monotonic,
+            stage="raw_boundary_source_hash",
+        )
     except OSError as exc:
         return False, [f"capture_ledger_boundary_read_failed:{exc}"]
     if len(observed) != byte_count:
@@ -33012,11 +33703,24 @@ def raw_capture_epoch_boundary_current(
         if rebased_block_path.is_file():
             last["path"] = str(rebased_block_path)
             block_path = rebased_block_path
-    if not (
-        block_path.is_file()
-        and block_path.stat().st_size == byte_count
-        and sha256_file(block_path) == str(last.get("sha256") or "")
-    ):
+    block_digest_valid = False
+    try:
+        if block_path.is_file() and block_path.stat().st_size == byte_count:
+            capture_watch_deadline_check(
+                cooperative_deadline_monotonic,
+                stage="raw_boundary_block_hash",
+            )
+            observed_block_digest = sha256_file(block_path)
+            capture_watch_deadline_check(
+                cooperative_deadline_monotonic,
+                stage="raw_boundary_block_hash_complete",
+            )
+            block_digest_valid = (
+                observed_block_digest == str(last.get("sha256") or "")
+            )
+    except OSError:
+        block_digest_valid = False
+    if not block_digest_valid:
         diagnostics.append("capture_ledger_last_block_artifact_invalid")
     return not diagnostics, diagnostics
 
@@ -33601,6 +34305,9 @@ def append_raw_capture_ledger(
                 epoch=current_epoch,
                 source_path=transcript_path,
                 session_dir=session_dir,
+                cooperative_deadline_monotonic=(
+                    cooperative_deadline_monotonic
+                ),
             )
         )
     if not continue_epoch:
@@ -34030,6 +34737,10 @@ def append_raw_capture_ledger(
         "authority": "captured_raw_evidence_overlay",
         "projection_authority": False,
     }
+    capture_watch_deadline_check(
+        cooperative_deadline_monotonic,
+        stage="raw_overlay_publish",
+    )
     overlay_started = time.monotonic()
     write_json_durable(
         persistent_live_tail_index_path(session_dir), overlay
@@ -34037,6 +34748,10 @@ def append_raw_capture_ledger(
     execution_timings_ms["overlay_receipt"] = max(
         0,
         int((time.monotonic() - overlay_started) * 1000),
+    )
+    capture_watch_deadline_check(
+        cooperative_deadline_monotonic,
+        stage="raw_overlay_receipt",
     )
     execution_timings_ms["total"] = max(
         0,
@@ -34236,16 +34951,51 @@ def _preserve_unindexed_raw_capture_locked(
         if isinstance(capture.get("capture_execution"), dict)
         else {}
     )
+    state_core = dict(state)
+    state_core["capture_execution"] = dict(state["capture_execution"])
+    state_core["capture_execution"]["state_receipt_revision"] = 2
+    state_digest = capture_watch_progress_digest(state_core)
     capture_watch_deadline_check(
         cooperative_deadline_monotonic,
         stage="raw_capture_state_receipt",
     )
     state_receipt_started = time.monotonic()
+    state["state_receipt"] = {
+        "schema_version": 1,
+        "artifact_type": "raw_capture_state_publication_receipt",
+        "status": "pending",
+        "revision": 1,
+        "state_digest": state_digest,
+        "publication": "atomic_state_revision_with_receipt_followup",
+    }
     write_json_durable(raw_capture_state_path(session_dir), state)
-    state["capture_execution"]["state_receipt"] = max(
+    state_receipt_revision_ms = max(
         0,
         int((time.monotonic() - state_receipt_started) * 1000),
     )
+    capture_watch_deadline_check(
+        cooperative_deadline_monotonic,
+        stage="raw_capture_state_receipt_revision",
+    )
+    published_receipt = {
+        "schema_version": 1,
+        "artifact_type": "raw_capture_state_publication_receipt",
+        "status": "published",
+        "revision": 2,
+        "state_digest": state_digest,
+        "revision_one_duration_ms": state_receipt_revision_ms,
+        "publication": "atomic_state_revision_with_receipt_followup",
+    }
+    state["state_receipt"] = published_receipt
+    state["capture_execution"]["state_receipt"] = dict(
+        published_receipt
+    )
+    state["capture_execution"]["state_receipt_revision"] = 2
+    capture_watch_deadline_check(
+        cooperative_deadline_monotonic,
+        stage="raw_capture_state_receipt_publish",
+    )
+    write_json_durable(raw_capture_state_path(session_dir), state)
     return state
 
 

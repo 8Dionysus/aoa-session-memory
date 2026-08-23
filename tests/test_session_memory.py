@@ -76100,6 +76100,12 @@ def test_capture_watch_recovers_missed_hook_without_archive_scan(
     assert Path(str(capture["capture_path"])).read_bytes() == (
         initial + appended
     )
+    assert module.raw_capture_state_receipt_valid(capture) is True
+    assert capture["state_receipt"]["status"] == "published"
+    assert capture["state_receipt"]["state_digest"]
+    assert capture["capture_execution"]["state_receipt"] == (
+        capture["state_receipt"]
+    )
 
 
 def test_capture_watch_cli_routes_only_the_bounded_frontier(
@@ -76333,6 +76339,380 @@ def test_capture_watch_resumes_from_matching_progress_receipt(
         module.capture_watch_progress_path(aoa_root),
         {},
     )["status"] == "completed"
+
+
+def test_capture_watch_restarts_prefix_when_physical_lineage_grows_or_reorders(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    transcripts: dict[str, Path] = {}
+    stale_dirs: dict[str, Path] = {}
+    for ordinal, session_id in enumerate(("lineage-A", "lineage-B")):
+        transcript = tmp_path / f"{session_id}.jsonl"
+        transcript.write_text('{"row": 1}\n', encoding="utf-8")
+        transcripts[session_id] = transcript
+        stale_dir = tmp_path / f"stale-{session_id}"
+        stale_dirs[session_id] = stale_dir
+        module.register_capture_watch(
+            aoa_root=aoa_root,
+            session_id=session_id,
+            session_dir=stale_dir,
+            transcript_path=transcript,
+            observed_at=f"2026-08-10T00:0{ordinal}:01Z",
+        )
+
+    original_deadline_check = module.capture_watch_deadline_check
+    item_start_checks = 0
+
+    def expire_on_second_item(
+        deadline_monotonic: float | None,
+        *,
+        stage: str,
+    ) -> None:
+        nonlocal item_start_checks
+        if stage == "item_start":
+            item_start_checks += 1
+            if item_start_checks == 2:
+                raise module.CaptureWatchBudgetExceeded(
+                    stage=stage,
+                    detail="test_lineage_boundary",
+                )
+        original_deadline_check(None, stage=stage)
+
+    monkeypatch.setattr(
+        module,
+        "capture_watch_deadline_check",
+        expire_on_second_item,
+    )
+    first = module.reconcile_capture_watch(
+        aoa_root=aoa_root,
+        limit=2,
+        apply=True,
+        budget_seconds=5.0,
+        now="2026-08-10T00:02:00Z",
+    )
+    assert first["status"] == "budget_exhausted"
+    assert first["completed_count"] == 1
+    assert first["progress_receipt"]["next_index"] == 1
+
+    replacement_dir = tmp_path / "replacement-lineage-A"
+    alternate_dir = tmp_path / "alternate-lineage-A"
+    write_json(
+        replacement_dir / "session.manifest.json",
+        {"session_id": "lineage-A", "raw": {}},
+    )
+    write_json(
+        alternate_dir / "session.manifest.json",
+        {"session_id": "lineage-A", "raw": {}},
+    )
+    write_json(
+        aoa_root / module.REGISTRY_NAME,
+        {
+            "sessions": [
+                {
+                    "session_id": "lineage-A",
+                    "path": str(replacement_dir),
+                },
+                {
+                    "session_id": "lineage-A",
+                    "path": str(alternate_dir),
+                },
+                {
+                    "session_id": "lineage-B",
+                    "path": str(stale_dirs["lineage-B"]),
+                },
+            ]
+        },
+    )
+
+    monkeypatch.setattr(
+        module,
+        "capture_watch_deadline_check",
+        original_deadline_check,
+    )
+    resumed = module.reconcile_capture_watch(
+        aoa_root=aoa_root,
+        limit=2,
+        apply=True,
+        budget_seconds=5.0,
+        now="2026-08-10T00:03:00Z",
+    )
+
+    assert resumed["status"] == "applied"
+    assert resumed["resume_from_index"] == 0
+    assert "progress_binding_changed_restarted_from_zero" in resumed[
+        "resume_diagnostics"
+    ]
+    assert resumed["results"][0]["session_id"] == "lineage-A"
+    assert resumed["results"][0]["session_dir"] == str(alternate_dir)
+    assert resumed["results"][0]["status"] == (
+        "missed_hook_capture_recovered"
+    )
+    assert resumed["results"][1]["status"] == (
+        "capture_deferred_missing_manifest"
+    )
+    assert resumed["completed_count"] == 2
+    assert len(
+        resumed["selection_snapshot"][0]["lineage"]["registry"]["records"]
+    ) == 2
+    capture = module.raw_capture_state_for_session(alternate_dir)
+    assert module.raw_capture_state_receipt_valid(capture) is True
+    assert capture["state_receipt"]["status"] == "published"
+    assert capture["capture_execution"]["state_receipt"] == (
+        capture["state_receipt"]
+    )
+    assert Path(str(capture["capture_path"])).is_file()
+    assert not (replacement_dir / module.RAW_CAPTURE_STATE_JSON).exists()
+
+
+def test_capture_watch_progress_lock_rejects_concurrent_stale_writer(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    progress_path = module.capture_watch_progress_path(aoa_root)
+    lock_path = module.capture_watch_progress_lock_path(aoa_root)
+    binding_digest = "sha256:current-lineage"
+    write_json(
+        progress_path,
+        {
+            "schema_version": module.CAPTURE_WATCH_PROGRESS_SCHEMA_VERSION,
+            "status": "running",
+            "generation": 1,
+            "binding_digest": binding_digest,
+            "completed_count": 0,
+            "next_index": 0,
+            "progress_sequence": 7,
+        },
+    )
+
+    with pytest.raises(
+        module.CaptureWatchProgressConflict,
+        match="active_binding_collision",
+    ):
+        module.capture_watch_progress_write_guard(
+            {
+                "status": "started",
+                "generation": 1,
+                "binding_digest": "sha256:other-lineage",
+                "completed_count": 0,
+                "next_index": 0,
+            },
+            binding_digest=binding_digest,
+            expected_generation=1,
+            next_index=0,
+            completed_count=0,
+        )
+    with pytest.raises(
+        module.CaptureWatchProgressConflict,
+        match="generation_collision",
+    ):
+        module.capture_watch_progress_write_guard(
+            {
+                "status": "running",
+                "generation": 2,
+                "binding_digest": binding_digest,
+                "completed_count": 0,
+                "next_index": 0,
+            },
+            binding_digest=binding_digest,
+            expected_generation=1,
+            next_index=0,
+            completed_count=0,
+        )
+
+    release_first = threading.Event()
+    first_acquired = threading.Event()
+    outcomes: list[tuple[str, str]] = []
+
+    def writer(label: str, next_index: int) -> None:
+        handle = None
+        try:
+            handle, _waited_ms = module.acquire_capture_watch_lock(
+                lock_path,
+                deadline_monotonic=None,
+                stage="test_progress_lock_wait",
+            )
+            if label == "newer":
+                first_acquired.set()
+                release_first.wait(timeout=5)
+            existing = module.read_json(progress_path, {})
+            generation = module.capture_watch_progress_write_guard(
+                existing,
+                binding_digest=binding_digest,
+                expected_generation=1,
+                next_index=next_index,
+                completed_count=next_index,
+            )
+            sequence = module.capture_watch_progress_next_sequence(
+                existing,
+                0,
+            )
+            write_json(
+                progress_path,
+                {
+                    "schema_version": module.CAPTURE_WATCH_PROGRESS_SCHEMA_VERSION,
+                    "status": "running",
+                    "generation": generation,
+                    "binding_digest": binding_digest,
+                    "completed_count": next_index,
+                    "next_index": next_index,
+                    "progress_sequence": sequence,
+                },
+            )
+            outcomes.append((label, "written"))
+        except module.CaptureWatchProgressConflict as exc:
+            outcomes.append((label, exc.reason))
+        finally:
+            if handle is not None:
+                fcntl.flock(handle, fcntl.LOCK_UN)
+                handle.close()
+
+    newer = threading.Thread(target=writer, args=("newer", 1))
+    stale = threading.Thread(target=writer, args=("stale", 0))
+    newer.start()
+    assert first_acquired.wait(timeout=5) is True
+    stale.start()
+    time.sleep(0.02)
+    release_first.set()
+    newer.join(timeout=5)
+    stale.join(timeout=5)
+
+    assert not newer.is_alive()
+    assert not stale.is_alive()
+    assert ("newer", "written") in outcomes
+    assert (
+        "stale",
+        "capture_watch_progress_cursor_regression",
+    ) in outcomes
+    final_progress = module.read_json(progress_path, {})
+    assert final_progress["next_index"] == 1
+    assert final_progress["completed_count"] == 1
+    assert final_progress["progress_sequence"] == 8
+
+
+def test_capture_watch_cleanup_margin_and_deadline_boundaries_are_deterministic(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contract = module.capture_watch_budget_contract(999.0)
+    assert contract["effective_budget_seconds"] == 90.0
+    assert contract["service_timeout_seconds"] == 120.0
+    assert contract["cleanup_margin_seconds"] == 30.0
+    assert contract["effective_budget_seconds"] + contract[
+        "cleanup_margin_seconds"
+    ] == contract["service_timeout_seconds"]
+    assert contract["clamped"] is True
+    assert contract["cleanup_margin_proven"] is True
+    assert module.capture_watch_budget_contract(None)["status"] == (
+        "unbounded_library_route"
+    )
+
+    source = tmp_path / "boundary-source.jsonl"
+    source.write_bytes(b"abc")
+    block_path = tmp_path / "session" / "raw" / "blocks" / "001.json"
+    block_path.parent.mkdir(parents=True, exist_ok=True)
+    block_path.write_bytes(b"abc")
+    epoch = {
+        "captured_bytes": 3,
+        "blocks": [
+            {
+                "byte_start": 0,
+                "byte_count": 3,
+                "sha256": hashlib.sha256(b"abc").hexdigest(),
+                "path": str(block_path),
+            }
+        ],
+    }
+    original_deadline_check = module.capture_watch_deadline_check
+
+    def fail_at_block_hash(
+        deadline_monotonic: float | None,
+        *,
+        stage: str,
+    ) -> None:
+        if stage == "raw_boundary_block_hash":
+            raise module.CaptureWatchBudgetExceeded(stage=stage)
+        original_deadline_check(None, stage=stage)
+
+    monkeypatch.setattr(
+        module,
+        "capture_watch_deadline_check",
+        fail_at_block_hash,
+    )
+    with pytest.raises(
+        module.CaptureWatchBudgetExceeded,
+        match="raw_boundary_block_hash",
+    ):
+        module.raw_capture_epoch_boundary_current(
+            epoch=epoch,
+            source_path=source,
+            session_dir=tmp_path / "session",
+            cooperative_deadline_monotonic=None,
+        )
+
+    for ordinal, stage in enumerate(
+        (
+            "raw_postings_manifest",
+            "raw_overlay_publish",
+            "raw_capture_state_receipt",
+        )
+    ):
+        session_dir = tmp_path / f"deadline-{ordinal}"
+        transcript = tmp_path / f"deadline-{ordinal}.jsonl"
+        transcript.write_text('{"row": 1}\n', encoding="utf-8")
+
+        def fail_at_stage(
+            deadline_monotonic: float | None,
+            *,
+            stage_name: str,
+            target_stage: str = stage,
+        ) -> None:
+            if stage_name == target_stage:
+                raise module.CaptureWatchBudgetExceeded(stage=stage_name)
+            original_deadline_check(None, stage=stage_name)
+
+        monkeypatch.setattr(
+            module,
+            "capture_watch_deadline_check",
+            lambda deadline_monotonic, *, stage, target_stage=stage: (
+                fail_at_stage(
+                    deadline_monotonic,
+                    stage_name=stage,
+                    target_stage=target_stage,
+                )
+            ),
+        )
+        with pytest.raises(
+            module.CaptureWatchBudgetExceeded,
+            match=stage,
+        ):
+            module.preserve_unindexed_raw_capture(
+                session_dir=session_dir,
+                session_id=f"deadline-{ordinal}",
+                transcript_path=transcript,
+                manifest={"session_id": f"deadline-{ordinal}", "raw": {}},
+                hook_event_name="TimerWatchRecovery",
+                now="2026-08-10T00:04:00Z",
+                cooperative_deadline_monotonic=None,
+            )
+
+    lock_path = tmp_path / "held-progress.lock"
+    holder = lock_path.open("a+", encoding="utf-8")
+    fcntl.flock(holder, fcntl.LOCK_EX)
+    try:
+        with pytest.raises(
+            module.CaptureWatchBudgetExceeded,
+            match="test_lock_wait",
+        ):
+            module.acquire_capture_watch_lock(
+                lock_path,
+                deadline_monotonic=time.monotonic() + 0.02,
+                stage="test_lock_wait",
+            )
+    finally:
+        fcntl.flock(holder, fcntl.LOCK_UN)
+        holder.close()
 
 
 def test_hot_timer_recovers_missed_hook_without_archive_rediscovery(
