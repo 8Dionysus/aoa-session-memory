@@ -653,6 +653,7 @@ TASK_EPISODE_REPRESENTATION_LIMITS = {
     "reasoning": 12,
 }
 GOAL_LIFECYCLE_SCHEMA_VERSION = 3
+GOAL_CATALOG_SCHEMA_VERSION = "aoa_session_memory_goal_catalog_v1"
 WORK_CONTEXT_SCHEMA_VERSION = 4
 ROUTE_SIGNAL_SCHEMA_VERSION = 1
 ROUTE_SIGNAL_CLASSIFIER_VERSION = 48
@@ -127357,6 +127358,213 @@ def goal_lifecycle_route_search(
     }
 
 
+GOAL_CATALOG_HOST_PATH_RE = re.compile(
+    r"(?<![\w.-])/(?:home|srv|tmp|var|run|etc|opt|usr)(?:/[^\s`'\"<>]+)+"
+)
+GOAL_CATALOG_UUID_RE = re.compile(
+    r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
+    flags=re.IGNORECASE,
+)
+GOAL_CATALOG_DIGEST_RE = re.compile(r"\b(?:sha256:)?[0-9a-f]{40,64}\b", flags=re.IGNORECASE)
+GOAL_CATALOG_MACHINE_TEXT_RE = re.compile(
+    r"(?i)(?:\b(?:schema_version|artifact_type|thread_id|goal_instance_id|"
+    r"wake[-_ ]receipt|luna[-_ ]handoff|external luna return ready)\b|"
+    r"(?:^|\s)(?:\{|\[)\s*[\"']?[A-Za-z0-9_.-]+[\"']?\s*:|"
+    r"\.(?:jsonl?|toml|ya?ml|service|socket|target|md)(?:\b|$))"
+)
+
+
+def goal_catalog_human_title(value: Any) -> dict[str, Any]:
+    """Return one bounded human label without publishing the Goal objective.
+
+    This is intentionally stricter than the derived-text credential policy.
+    Host paths, machine packets, stable identifiers, and any redacted objective
+    are withheld instead of being converted into plausible presentation text.
+    """
+
+    projection = derived_text_privacy_projection(value, max_chars=512)
+    source = re.sub(r"\s+", " ", str(projection.get("text") or "")).strip()
+    if not source:
+        return {"title": None, "title_state": "missing", "reason": "objective_missing"}
+    if projection.get("status") == "redacted":
+        return {"title": None, "title_state": "withheld", "reason": "objective_redacted"}
+    if (
+        source.startswith(("/", "~/", "./", "../", "{", "["))
+        or GOAL_CATALOG_HOST_PATH_RE.search(source)
+        or GOAL_CATALOG_UUID_RE.search(source)
+        or GOAL_CATALOG_DIGEST_RE.search(source)
+        or GOAL_CATALOG_MACHINE_TEXT_RE.search(source)
+    ):
+        return {"title": None, "title_state": "withheld", "reason": "machine_shaped_objective"}
+    cleaned = strip_session_meta_instruction_prefixes(source)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" \t\r\n-:;,.\")")
+    if not cleaned:
+        return {"title": None, "title_state": "missing", "reason": "objective_empty_after_cleanup"}
+    title = concise_title_text(cleaned, max_words=12, max_chars=96).strip(" \t\r\n-:;,.\")")
+    if title == "Untitled session" or GOAL_CATALOG_MACHINE_TEXT_RE.search(title):
+        return {"title": None, "title_state": "withheld", "reason": "title_not_human_safe"}
+    return {"title": title, "title_state": "available", "reason": None}
+
+
+def goal_catalog_epoch_timestamp(value: Any) -> str | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        epoch = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(epoch) or epoch <= 0:
+        return None
+    try:
+        return datetime.fromtimestamp(epoch, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def goal_catalog_item_from_lifecycle(lifecycle: dict[str, Any]) -> dict[str, Any] | None:
+    goal_instance_id = str(lifecycle.get("goal_instance_id") or "").strip()
+    if not goal_instance_id:
+        return None
+    observed = lifecycle.get("observed_goal") if isinstance(lifecycle.get("observed_goal"), dict) else {}
+    thread_id = str(observed.get("threadId") or observed.get("thread_id") or "").strip()
+    title = goal_catalog_human_title(lifecycle.get("objective"))
+    events = [
+        item
+        for item in lifecycle.get("sample_events", [])
+        if isinstance(item, dict) and parse_utc_timestamp(str(item.get("timestamp") or "")) is not None
+    ]
+    event_times = [str(item.get("timestamp")) for item in events]
+    created_at = goal_catalog_epoch_timestamp(observed.get("createdAt") or observed.get("created_at"))
+    updated_at = goal_catalog_epoch_timestamp(observed.get("updatedAt") or observed.get("updated_at"))
+    first_observed_at = created_at or (min(event_times) if event_times else None)
+    last_observed_at = updated_at or (max(event_times) if event_times else first_observed_at)
+    return {
+        "goal_ref": thread_id or goal_instance_id,
+        "goal_instance_id": goal_instance_id,
+        "goal_id": str(lifecycle.get("goal_id") or "") or None,
+        "thread_id": thread_id or None,
+        **title,
+        "lifecycle_state": str(lifecycle.get("status") or "unknown"),
+        "first_observed_at": first_observed_at,
+        "last_observed_at": last_observed_at,
+        "evidence_ref": f"goal-lifecycle:{goal_instance_id}",
+        "ambiguity": bool(lifecycle.get("ambiguity_flags")),
+    }
+
+
+def goal_catalog_currentness(route: dict[str, Any]) -> str:
+    if not route.get("ok"):
+        return "invalid"
+    if route.get("incompatible_session_indexes") or route.get("diagnostics"):
+        return "stale"
+    provider = route.get("provider") if isinstance(route.get("provider"), dict) else {}
+    providers = provider.get("providers") if isinstance(provider.get("providers"), dict) else {}
+    selected_name = str(provider.get("selected_provider") or "portable_sqlite")
+    selected = providers.get(selected_name) if isinstance(providers.get(selected_name), dict) else {}
+    freshness = selected.get("freshness") if isinstance(selected.get("freshness"), dict) else {}
+    freshness_status = str(freshness.get("status") or selected.get("status") or "").casefold()
+    if any(marker in freshness_status for marker in ("invalid", "error", "incompatible")):
+        return "invalid"
+    if any(marker in freshness_status for marker in ("stale", "dirty", "outdated")):
+        return "stale"
+    if int_value(freshness.get("deferred_live_session_count")) > 0:
+        return "deferred"
+    if any(marker in freshness_status for marker in ("current", "ready", "fresh")):
+        return "current"
+    return "unknown"
+
+
+def goal_catalog_projection(
+    *,
+    aoa_root: Path,
+    target: str = "all",
+    limit: int = 100,
+    order: str = "recent",
+) -> dict[str, Any]:
+    """Publish a bounded Goal catalog for presentation consumers.
+
+    The catalog reuses the generated lifecycle route, publishes no raw/session
+    body, and carries source degradation without repairing owner evidence.
+    """
+
+    bounded_limit = min(max(1, int(limit)), 500)
+    route = goal_lifecycle_route_search(
+        aoa_root=aoa_root,
+        target=target,
+        limit=bounded_limit,
+        order=order,
+    )
+    currentness = goal_catalog_currentness(route)
+    candidates = [
+        item
+        for lifecycle in route.get("results", [])
+        if isinstance(lifecycle, dict)
+        for item in [goal_catalog_item_from_lifecycle(lifecycle)]
+        if item is not None
+    ]
+    items_by_ref: dict[str, dict[str, Any]] = {}
+    item_order: list[str] = []
+    for item in candidates:
+        goal_ref = str(item.get("goal_ref") or "")
+        existing = items_by_ref.get(goal_ref)
+        if existing is None:
+            item_order.append(goal_ref)
+        if existing is None or str(item.get("last_observed_at") or "") > str(existing.get("last_observed_at") or ""):
+            items_by_ref[goal_ref] = item
+    items = [items_by_ref[goal_ref] for goal_ref in item_order]
+    counts = dict(sorted(Counter(str(item.get("lifecycle_state") or "unknown") for item in items).items()))
+    route_diagnostics = [
+        str(item)
+        for item in route.get("diagnostics", [])
+        if str(item)
+    ]
+    if route.get("incompatible_session_indexes") and "goal_lifecycle_source_generation_incompatible" not in route_diagnostics:
+        route_diagnostics.append("goal_lifecycle_source_generation_incompatible")
+    generation = route.get("generation_identity") if isinstance(route.get("generation_identity"), dict) else {}
+    compact_generation = {
+        key: generation.get(key)
+        for key in (
+            "contract_version",
+            "generation_id",
+            "producer",
+            "producer_sha256",
+            "producer_contract_status",
+        )
+        if generation.get(key) is not None
+    }
+    return {
+        "schema_version": GOAL_CATALOG_SCHEMA_VERSION,
+        "artifact_type": "goal_catalog_projection",
+        "generated_at": str(route.get("generated_at") or utc_now()),
+        "ok": bool(route.get("ok")),
+        "state": currentness,
+        "currentness": currentness,
+        "source": {
+            "owner": "aoa-session-memory",
+            "ref": "aoa-session-memory:goal-lifecycles",
+            "goal_lifecycle_schema_version": GOAL_LIFECYCLE_SCHEMA_VERSION,
+            "generation_identity": compact_generation,
+            "currentness": currentness,
+        },
+        "source_item_count": len(candidates),
+        "item_count": len(items),
+        "items": items,
+        "counts_by_lifecycle_state": counts,
+        "diagnostics": route_diagnostics,
+        "omissions": {
+            "raw_session_body": True,
+            "objective": True,
+            "usage": True,
+            "work_chain": True,
+            "host_paths": True,
+        },
+        "claim_limit": (
+            "Scope: bounded generated Goal navigation. Runtime health, proof, review, "
+            "acceptance, and completion remain with their owners."
+        ),
+    }
+
+
 TRACE_ROUTE_KINDS = {
     "auto",
     "entity",
@@ -203316,6 +203524,21 @@ def command_goal_lifecycles(args: argparse.Namespace) -> int:
     return 0 if payload.get("ok") else 1
 
 
+def command_goal_catalog(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    payload = goal_catalog_projection(
+        aoa_root=root,
+        target=args.target,
+        limit=args.limit,
+        order=args.order,
+    )
+    if args.output:
+        write_json(Path(args.output).expanduser(), payload)
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
 def command_entity_registry(args: argparse.Namespace) -> int:
     explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
     root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
@@ -211985,6 +212208,30 @@ def add_search_shard_route_controls(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--max-shards", type=int, default=24, help="Maximum materialized shard DBs to query in one bounded fan-out.")
 
 
+def add_goal_catalog_parser(parser: argparse.ArgumentParser) -> None:
+    sub = next(
+        (
+            action
+            for action in parser._actions
+            if isinstance(action, argparse._SubParsersAction)
+        ),
+        None,
+    )
+    if sub is None:
+        raise RuntimeError("goal_catalog_subparser_owner_missing")
+    goal_catalog_parser = sub.add_parser(
+        "goal-catalog",
+        help="Publish a bounded human-safe Goal catalog without raw bodies, objectives, usage, or host paths.",
+    )
+    goal_catalog_parser.add_argument("target", nargs="?", default="all", help="Session label/id/title fragment or all.")
+    goal_catalog_parser.add_argument("--workspace-root")
+    goal_catalog_parser.add_argument("--aoa-root")
+    goal_catalog_parser.add_argument("--limit", type=int, default=100)
+    goal_catalog_parser.add_argument("--order", choices=["recent", "chronological"], default="recent")
+    goal_catalog_parser.add_argument("--output", help="Atomically write the published JSON snapshot to this explicit path.")
+    goal_catalog_parser.set_defaults(func=command_goal_catalog)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="AoA Codex session memory archive hooks.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -214733,6 +214980,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
+    add_goal_catalog_parser(parser)
     args = parser.parse_args(argv)
     return int(args.func(args))
 

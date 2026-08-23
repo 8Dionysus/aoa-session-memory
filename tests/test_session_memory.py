@@ -23224,6 +23224,26 @@ def test_goal_lifecycle_indexes_search_graph_and_usage_routes(tmp_path: Path) ->
     assert blocked_work_episode["closeout_refs"][0]["raw_ref"] == "raw:line:13"
     assert blocked_work_episode["closeout_refs"][0]["source_type"] == "response_item"
 
+    catalog = module.goal_catalog_projection(
+        aoa_root=aoa_root,
+        target="latest",
+        limit=5,
+        order="chronological",
+    )
+    assert catalog["schema_version"] == module.GOAL_CATALOG_SCHEMA_VERSION
+    assert catalog["source"]["owner"] == "aoa-session-memory"
+    assert catalog["item_count"] == 2
+    assert catalog["counts_by_lifecycle_state"] == {"blocked": 1, "complete": 1}
+    assert catalog["items"][0]["title"] == "ship first class goal lifecycle"
+    assert catalog["items"][0]["title_state"] == "available"
+    assert catalog["items"][0]["first_observed_at"] == "2026-06-18T00:00:02Z"
+    assert catalog["items"][0]["last_observed_at"] == "2026-06-18T00:00:06Z"
+    assert catalog["items"][1]["goal_ref"] == "goal-lifecycle"
+    assert catalog["items"][1]["first_observed_at"] == "2026-05-28T20:26:40Z"
+    assert "objective" not in catalog["items"][0]
+    assert "raw_refs" not in catalog["items"][0]
+    assert catalog["omissions"]["host_paths"] is True
+
     module.build_agent_atlas(aoa_root=aoa_root, target="all")
     by_goal = json.loads((aoa_root / "maps" / "by-goal" / "index.json").read_text(encoding="utf-8"))
     assert {"goal_completed", "goal_blocked"}.issubset({entry["route_key"] for entry in by_goal["entries"]})
@@ -23255,6 +23275,92 @@ def test_goal_lifecycle_indexes_search_graph_and_usage_routes(tmp_path: Path) ->
     assert usage_audit["usage_event_count"] >= 1
     assert usage_audit["quality"]["direct_usage_present"] is True
     assert usage_audit["usage_events"][0]["session_act"] == "goal_completed"
+
+
+def test_goal_catalog_withholds_machine_shaped_and_redacted_objectives() -> None:
+    machine = module.goal_catalog_human_title(
+        "External Luna return ready: /workspace/return.json"
+    )
+    redacted_title = module.goal_catalog_human_title(
+        "Ship catalog with "
+        + "api"
+        + "_key="
+        + "sk-"
+        + "proj-abcdefghijklmnopqrstuvwxyz0123456789"
+    )
+    human = module.goal_catalog_human_title(
+        "Собрать спокойный интерфейс выбора активных и завершённых целей"
+    )
+    assert machine == {
+        "title": None,
+        "title_state": "withheld",
+        "reason": "machine_shaped_objective",
+    }
+    assert redacted_title == {
+        "title": None,
+        "title_state": "withheld",
+        "reason": "objective_redacted",
+    }
+    assert human == {
+        "title": "Собрать спокойный интерфейс выбора активных и завершённых целей",
+        "title_state": "available",
+        "reason": None,
+    }
+
+    payload = module.goal_catalog_item_from_lifecycle(
+        {
+            "goal_instance_id": "session-1:goal-0001",
+            "goal_id": "goal-0001",
+            "status": "active",
+            "objective": "/workspace/private/goal.md",
+            "sample_events": [],
+            "observed_goal": {},
+            "raw_refs": ["raw:line:1"],
+        }
+    )
+    assert payload is not None
+    assert payload["title"] is None
+    assert payload["title_state"] == "withheld"
+    assert "raw_refs" not in payload
+
+
+def test_goal_catalog_consolidates_replayed_thread_lifecycles(monkeypatch: Any, tmp_path: Path) -> None:
+    def route(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "generated_at": "2026-08-23T00:00:00Z",
+            "results": [
+                {
+                    "goal_instance_id": "session-new:goal-0003",
+                    "goal_id": "goal-0003",
+                    "status": "active",
+                    "objective": "Продолжить развитие пространства целей",
+                    "observed_goal": {"threadId": "thread-1", "updatedAt": 1787446800},
+                    "sample_events": [],
+                },
+                {
+                    "goal_instance_id": "session-old:goal-0001",
+                    "goal_id": "goal-0001",
+                    "status": "complete",
+                    "objective": "Старое наблюдение той же цели",
+                    "observed_goal": {"threadId": "thread-1", "updatedAt": 1787000000},
+                    "sample_events": [],
+                },
+            ],
+            "provider": {},
+            "diagnostics": [],
+            "incompatible_session_indexes": [],
+            "generation_identity": {"generation_id": "generation-1", "producer": "aoa_session_memory.py"},
+        }
+
+    monkeypatch.setattr(module, "goal_lifecycle_route_search", route)
+    catalog = module.goal_catalog_projection(aoa_root=tmp_path, limit=10)
+    assert catalog["source_item_count"] == 2
+    assert catalog["item_count"] == 1
+    assert catalog["items"][0]["goal_ref"] == "thread-1"
+    assert catalog["items"][0]["lifecycle_state"] == "active"
+    assert catalog["items"][0]["title"] == "Продолжить развитие пространства целей"
+    assert set(catalog["source"]["generation_identity"]) == {"generation_id", "producer"}
 
 
 def test_failed_create_goal_is_an_attempt_with_recovery_not_a_created_goal(
