@@ -160,7 +160,7 @@ DECLARED_GRAPH_PROJECTION_GENERATION_TRANSITIONS: dict[
     # still conditional on reconstructing the exact predecessor identity from
     # its source and on the complete graph materialization proof performed by
     # graph-registry-rebind.
-    "a46a0da0ac1e20446586946183cb58d495449ac826c8dba72490e86139e64b82": (
+    "be57a55d41ef62b8e66c4ac8b1952a6b3b75bb9f821dcbed8df7f9925fb2268f": (
         {
             # AOA-SM-D-0092: the previous current graph is admitted only when
             # the exact source-line bytes reconstruct its prior identity.
@@ -554,6 +554,10 @@ SESSION_PROJECTION_PROGRESS_RECEIPTS_ROOT = (
     DIAGNOSTICS_ROOT / "session-projection-progress"
 )
 SESSION_PROJECTION_PROGRESS_RECEIPT_SCHEMA_VERSION = 1
+SEARCH_INDEX_PROGRESS_CHECKPOINT_ROOT = (
+    DIAGNOSTICS_ROOT / "search-index-progress"
+)
+SEARCH_INDEX_PROGRESS_CHECKPOINT_SCHEMA_VERSION = 1
 PROJECTION_OUTBOX_CONSUMERS = (
     "exact_and_lexical_search",
     "episode_semantic",
@@ -27185,6 +27189,329 @@ def write_session_projection_progress_receipt(
         "execution_id": str(execution_id or ""),
         "session_id": session_id,
         "publish_id": publish_id,
+    }
+
+
+def search_index_progress_scope_key(
+    *,
+    target: str,
+    rebuild: bool,
+    db_path: Path,
+) -> str:
+    scope_digest = hashlib.sha256(
+        json.dumps(
+            {
+                "target": target or "all",
+                "rebuild": bool(rebuild),
+                "db_path": str(db_path),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()[:16]
+    return f"{safe_slug(target or 'all', fallback='all')}-{scope_digest}"
+
+
+def search_index_progress_checkpoint_path(
+    aoa_root: Path,
+    *,
+    execution_id: str,
+    target: str,
+    rebuild: bool,
+    db_path: Path,
+) -> Path:
+    return (
+        aoa_root
+        / SEARCH_INDEX_PROGRESS_CHECKPOINT_ROOT
+        / safe_slug(execution_id, fallback="execution")
+        / f"{search_index_progress_scope_key(target=target, rebuild=rebuild, db_path=db_path)}.json"
+    )
+
+
+def search_index_progress_selection(
+    records: Sequence[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    selection: list[dict[str, Any]] = []
+    for record in records:
+        session_dir = session_dir_from_record(record)
+        manifest = read_json(session_dir / "session.manifest.json", {})
+        index_schema = (
+            manifest.get("index_schema")
+            if isinstance(manifest, dict)
+            and isinstance(manifest.get("index_schema"), dict)
+            else {}
+        )
+        session_id = str(
+            manifest.get("session_id")
+            if isinstance(manifest, dict)
+            else ""
+        ) or str(record.get("session_id") or session_dir.name)
+        selection.append(
+            {
+                "session_id": session_id,
+                "session_label": str(record.get("session_label") or session_id),
+                "stable_publish_id": projection_publish_id(index_schema),
+            }
+        )
+    return selection
+
+
+def search_index_progress_digest(payload: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def search_index_progress_binding(
+    *,
+    target: str,
+    rebuild: bool,
+    db_path: Path,
+    records: Sequence[dict[str, Any]],
+    generation_identities: dict[str, Any],
+    source_scope_complete: bool,
+    max_raw_bytes: int | None,
+    include_raw_event_text: bool,
+    store_raw_text: bool,
+    projection_storage_mode: str | None,
+    context_tail_omission_policy: str,
+    defer_global_derivatives: bool,
+) -> dict[str, Any]:
+    selection = search_index_progress_selection(records)
+    generation_digest = search_index_progress_digest(generation_identities)
+    selection_digest = search_index_progress_digest(selection)
+    options = {
+        "max_raw_bytes": max_raw_bytes,
+        "include_raw_event_text": bool(include_raw_event_text),
+        "store_raw_text": bool(store_raw_text),
+        "projection_storage_mode": projection_storage_mode or "",
+        "context_tail_omission_policy": context_tail_omission_policy,
+        "defer_global_derivatives": bool(defer_global_derivatives),
+    }
+    return {
+        "target": target or "all",
+        "rebuild": bool(rebuild),
+        "db_path": str(db_path),
+        "search_schema_version": SEARCH_SCHEMA_VERSION,
+        "source_scope_complete": bool(source_scope_complete),
+        "generation_digest": generation_digest,
+        "selection_digest": selection_digest,
+        "stable_publish_ids": [
+            str(item.get("stable_publish_id") or "")
+            for item in selection
+        ],
+        "options_digest": search_index_progress_digest(options),
+        "selection": selection,
+    }
+
+
+def load_search_index_progress_checkpoint(
+    *,
+    aoa_root: Path,
+    execution_id: str,
+    binding: dict[str, Any],
+) -> dict[str, Any]:
+    path = search_index_progress_checkpoint_path(
+        aoa_root,
+        execution_id=execution_id,
+        target=str(binding.get("target") or "all"),
+        rebuild=bool(binding.get("rebuild")),
+        db_path=Path(str(binding.get("db_path") or "")),
+    )
+    if not path.is_file():
+        return {
+            "status": "absent",
+            "path": str(path),
+            "execution_id": execution_id,
+        }
+    checkpoint = read_json(path, {})
+    if not isinstance(checkpoint, dict) or not checkpoint:
+        return {
+            "status": "incompatible",
+            "path": str(path),
+            "execution_id": execution_id,
+            "diagnostics": ["search_progress_checkpoint_invalid"],
+        }
+    diagnostics: list[str] = []
+    if checkpoint.get("schema_version") != SEARCH_INDEX_PROGRESS_CHECKPOINT_SCHEMA_VERSION:
+        diagnostics.append("search_progress_checkpoint_schema_incompatible")
+    if checkpoint.get("artifact_type") != "search_index_progress_checkpoint":
+        diagnostics.append("search_progress_checkpoint_artifact_incompatible")
+    if str(checkpoint.get("execution_id") or "") != str(execution_id):
+        diagnostics.append("search_progress_checkpoint_execution_incompatible")
+    stored_binding = (
+        checkpoint.get("binding")
+        if isinstance(checkpoint.get("binding"), dict)
+        else {}
+    )
+    if not stored_binding:
+        diagnostics.append("search_progress_checkpoint_binding_missing")
+    elif checkpoint.get("binding_digest") != search_index_progress_digest(
+        stored_binding
+    ):
+        diagnostics.append("search_progress_checkpoint_integrity_incompatible")
+    if stored_binding.get("generation_digest") != binding.get("generation_digest"):
+        diagnostics.append("search_progress_checkpoint_generation_incompatible")
+    if stored_binding.get("search_schema_version") != binding.get("search_schema_version"):
+        diagnostics.append("search_progress_checkpoint_schema_incompatible")
+    if stored_binding.get("stable_publish_ids") != binding.get("stable_publish_ids"):
+        diagnostics.append("search_progress_checkpoint_stable_publish_incompatible")
+    if stored_binding.get("selection_digest") != binding.get("selection_digest"):
+        diagnostics.append("search_progress_checkpoint_selection_incompatible")
+    for key in (
+        "target",
+        "rebuild",
+        "db_path",
+        "source_scope_complete",
+        "options_digest",
+    ):
+        if stored_binding.get(key) != binding.get(key):
+            diagnostics.append(f"search_progress_checkpoint_{key}_incompatible")
+    cursor = checkpoint.get("cursor") if isinstance(checkpoint.get("cursor"), dict) else {}
+    next_record_index = int_value(cursor.get("next_record_index"), -1)
+    selected_count = len(binding.get("selection", []))
+    if next_record_index < 0 or next_record_index > selected_count:
+        diagnostics.append("search_progress_checkpoint_cursor_invalid")
+    sequence = int_value(checkpoint.get("progress", {}).get("checkpoint_sequence"), -1) if isinstance(checkpoint.get("progress"), dict) else -1
+    if sequence < 1:
+        diagnostics.append("search_progress_checkpoint_sequence_invalid")
+    if str(checkpoint.get("status") or "") not in {
+        "in_progress",
+        "interrupted",
+        "complete",
+    }:
+        diagnostics.append("search_progress_checkpoint_status_invalid")
+    return {
+        "status": "compatible" if not diagnostics else "incompatible",
+        "path": str(path),
+        "execution_id": execution_id,
+        "checkpoint": checkpoint,
+        "cursor": cursor,
+        "next_record_index": max(0, next_record_index),
+        "sequence": max(0, sequence),
+        "diagnostics": diagnostics,
+    }
+
+
+def search_index_progress_checkpoint_for_target(
+    *,
+    aoa_root: Path,
+    execution_id: str | None,
+    target: str,
+) -> dict[str, Any]:
+    if not execution_id:
+        return {"status": "absent", "execution_id": ""}
+    path = search_index_progress_checkpoint_path(
+        aoa_root,
+        execution_id=str(execution_id),
+        target=target,
+        rebuild=False,
+        db_path=search_db_path(aoa_root),
+    )
+    checkpoint = read_json(path, {})
+    if not isinstance(checkpoint, dict) or not checkpoint:
+        return {
+            "status": "absent",
+            "path": str(path),
+            "execution_id": str(execution_id),
+        }
+    return {
+        "status": "present",
+        "path": str(path),
+        "execution_id": str(execution_id),
+        "checkpoint": checkpoint,
+    }
+
+
+def write_search_index_progress_checkpoint(
+    *,
+    path: Path,
+    execution_id: str,
+    binding: dict[str, Any],
+    sequence: int,
+    status: str,
+    phase: str,
+    next_record_index: int,
+    active_record_index: int | None,
+    active_session_id: str,
+    completed_sessions: Sequence[dict[str, Any]],
+    consumer_acknowledged: bool = False,
+) -> dict[str, Any]:
+    existing = read_json(path, {})
+    existing_sequence = 0
+    existing_cursor = 0
+    if isinstance(existing, dict) and existing:
+        if existing.get("binding_digest") != search_index_progress_digest(binding):
+            raise ValueError("search_progress_checkpoint_binding_collision")
+        existing_sequence = int_value(
+            (existing.get("progress") if isinstance(existing.get("progress"), dict) else {}).get(
+                "checkpoint_sequence"
+            ),
+            0,
+        )
+        existing_cursor = int_value(
+            (existing.get("cursor") if isinstance(existing.get("cursor"), dict) else {}).get(
+                "next_record_index"
+            ),
+            0,
+        )
+        if next_record_index < existing_cursor:
+            raise ValueError("search_progress_checkpoint_cursor_regression")
+    sequence = max(int(sequence), existing_sequence + 1)
+    payload = {
+        "schema_version": SEARCH_INDEX_PROGRESS_CHECKPOINT_SCHEMA_VERSION,
+        "artifact_type": "search_index_progress_checkpoint",
+        "status": status,
+        "execution_id": execution_id,
+        "binding": binding,
+        "binding_digest": search_index_progress_digest(binding),
+        "cursor": {
+            "next_record_index": max(0, int(next_record_index)),
+            "active_record_index": active_record_index,
+            "active_session_id": active_session_id,
+            "phase": phase,
+        },
+        "progress": {
+            "checkpoint_sequence": sequence,
+            "processed_count": max(0, int(next_record_index)),
+            "monotonic": True,
+        },
+        "completed_sessions": [
+            {
+                "session_id": str(item.get("session_id") or ""),
+                "source_fingerprint": str(item.get("source_fingerprint") or ""),
+                "episode_semantic_status": str(
+                    item.get("episode_semantic_status") or ""
+                ),
+            }
+            for item in completed_sessions
+            if isinstance(item, dict) and str(item.get("session_id") or "")
+        ],
+        "consumer_acknowledged": bool(consumer_acknowledged),
+        "semantic_completion": False,
+        "truth_status": (
+            "search_progress_checkpoint_not_consumer_ack_or_global_freshness"
+        ),
+    }
+    write_json_durable(path, payload)
+    return {
+        "status": "written",
+        "path": str(path),
+        "execution_id": execution_id,
+        "checkpoint_sequence": sequence,
+        "next_record_index": max(0, int(next_record_index)),
+        "active_record_index": active_record_index,
+        "active_session_id": active_session_id,
+        "phase": phase,
+        "consumer_acknowledged": bool(consumer_acknowledged),
+        "semantic_completion": False,
+        "truth_status": payload["truth_status"],
     }
 
 
@@ -57526,6 +57853,7 @@ def maintain_indexes(
                             else None
                         ),
                         defer_global_derivatives=global_derivatives_deferred,
+                        execution_id=execution_id,
                     )
                     note_dense_upstream_changes(result)
                     search_action["status"] = "applied" if result.get("ok") else ("deferred_budget_exhausted" if result.get("budget_exhausted") else "failed")
@@ -57553,6 +57881,12 @@ def maintain_indexes(
                             "source_set_tombstone_truth_status",
                             "search_catalog",
                             "global_derivatives",
+                            "execution_id",
+                            "resumed_from_checkpoint",
+                            "resume_cursor",
+                            "search_progress_checkpoint",
+                            "semantic_completion",
+                            "consumer_acknowledged",
                             "report_json",
                             "report_markdown",
                             "diagnostics",
@@ -57991,11 +58325,12 @@ def maintain_indexes(
                         selected_records=None if refreshed_search_rebuild_required else (refreshed_search_dirty_records or refreshed_records),
                         budget_seconds=budget_remaining(),
                         progress_every=progress_every,
-                            defer_global_derivatives=global_derivatives_deferred,
+                        defer_global_derivatives=global_derivatives_deferred,
+                        execution_id=execution_id,
                     )
                     note_dense_upstream_changes(result)
                     post_search_action["status"] = "applied" if result.get("ok") else ("deferred_budget_exhausted" if result.get("budget_exhausted") else "failed")
-                    post_search_action["result"] = {key: result.get(key) for key in ("ok", "selected_count", "processed_count", "completed_session_ids", "remaining_count", "budget_exhausted", "document_count", "removed_document_count", "search_catalog", "global_derivatives", "report_json", "report_markdown", "diagnostics")}
+                    post_search_action["result"] = {key: result.get(key) for key in ("ok", "selected_count", "processed_count", "completed_session_ids", "remaining_count", "budget_exhausted", "document_count", "removed_document_count", "search_catalog", "global_derivatives", "execution_id", "resumed_from_checkpoint", "resume_cursor", "search_progress_checkpoint", "semantic_completion", "consumer_acknowledged", "report_json", "report_markdown", "diagnostics")}
                     action_results.append(post_search_action)
                     post_index_ran = post_index_ran or bool(result.get("selected_count") or result.get("processed_count"))
                     budget_exhausted = budget_exhausted or bool(result.get("budget_exhausted"))
@@ -60342,6 +60677,93 @@ def targeted_projection_catchup(
         aoa_root=aoa_root,
         session_dir=session_dir,
     )
+    search_resume_state = search_index_progress_checkpoint_for_target(
+        aoa_root=aoa_root,
+        execution_id=execution_id,
+        target=session_id,
+    )
+    search_resume_checkpoint = (
+        search_resume_state.get("checkpoint")
+        if isinstance(search_resume_state.get("checkpoint"), dict)
+        else {}
+    )
+    search_resume_binding = (
+        search_resume_checkpoint.get("binding")
+        if isinstance(search_resume_checkpoint.get("binding"), dict)
+        else {}
+    )
+    search_resume_cursor = (
+        search_resume_checkpoint.get("cursor")
+        if isinstance(search_resume_checkpoint.get("cursor"), dict)
+        else {}
+    )
+    search_resume_selection = (
+        search_resume_binding.get("selection")
+        if isinstance(search_resume_binding.get("selection"), list)
+        else []
+    )
+    session_manifest = read_json(session_dir / "session.manifest.json", {})
+    current_stable_publish_id = projection_publish_id(
+        session_manifest.get("index_schema", {})
+        if isinstance(session_manifest, dict)
+        else {}
+    )
+    expected_generation_digest = search_index_progress_digest(
+        session_memory_expected_generation_identities(aoa_root)
+    )
+    stored_stable_publish_ids = [
+        str(item)
+        for item in (
+            search_resume_binding.get("stable_publish_ids")
+            if isinstance(search_resume_binding.get("stable_publish_ids"), list)
+            else []
+        )
+    ]
+    selected_resume_session_ids = {
+        str(item.get("session_id") or "")
+        for item in search_resume_selection
+        if isinstance(item, dict) and str(item.get("session_id") or "")
+    }
+    search_resume_checkpoint_is_compatible = bool(
+        search_resume_state.get("status") == "present"
+        and search_resume_checkpoint
+        and str(search_resume_checkpoint.get("execution_id") or "")
+        == str(execution_id or "")
+        and str(search_resume_binding.get("target") or "") == session_id
+        and search_resume_binding.get("rebuild") is False
+        and str(search_resume_binding.get("db_path") or "")
+        == str(search_db_path(aoa_root))
+        and search_resume_binding.get("search_schema_version")
+        == SEARCH_SCHEMA_VERSION
+        and str(search_resume_binding.get("generation_digest") or "")
+        == expected_generation_digest
+        and selected_resume_session_ids == {session_id}
+        and stored_stable_publish_ids == [current_stable_publish_id]
+        and current_stable_publish_id
+        and int_value(search_resume_cursor.get("next_record_index"), -1)
+        >= 0
+        and int_value(search_resume_cursor.get("next_record_index"), -1) <= 1
+        and str(search_resume_checkpoint.get("status") or "")
+        in {"interrupted", "in_progress", "complete"}
+    )
+    search_resume_attempted = bool(
+        search_resume_state.get("status") == "present"
+        and not targeted_projection_catchup_axis_current(
+            before,
+            "search",
+        )
+    )
+    search_only_resume = bool(
+        search_resume_attempted
+        and search_resume_checkpoint_is_compatible
+        and targeted_projection_catchup_axis_current(
+            before,
+            "stable_session_projection",
+        )
+    )
+    search_only_resume_blocked = bool(
+        search_resume_attempted and not search_only_resume
+    )
     current = before
     required_stale_before = [
         axis
@@ -60420,7 +60842,11 @@ def targeted_projection_catchup(
     # route performs.  If it cannot prove the source watermark, downstream
     # projection work is not admitted from a stale snapshot.
     reprobe()
-    if not targeted_projection_catchup_axis_current(current, "raw_capture"):
+    if (
+        not targeted_projection_catchup_axis_current(current, "raw_capture")
+        and not search_only_resume
+        and not search_only_resume_blocked
+    ):
         if apply:
             try:
                 capture_result = reconcile_capture_watch(
@@ -60455,16 +60881,43 @@ def targeted_projection_catchup(
                 status="planned",
                 detail="fresh_capture_watermark_required_before_projection_admission",
             )
+    if search_only_resume_blocked:
+        diagnostics.append(
+            "incompatible_search_progress_checkpoint_fails_closed"
+        )
+        record_action(
+            axis="search",
+            route="search_index_sessions_targeted",
+            status="error",
+            detail=(
+                "incompatible_search_progress_checkpoint_fails_closed"
+            ),
+        )
 
     # The required capture/stable/search chain is ordered.  A stale earlier
     # axis prevents admission of later work in this slice.
-    if targeted_projection_catchup_axis_current(current, "raw_capture"):
+    if (
+        not search_only_resume_blocked
+        and (
+            targeted_projection_catchup_axis_current(current, "raw_capture")
+            or search_only_resume
+        )
+    ):
         reprobe()
         if not targeted_projection_catchup_axis_current(
             current,
             "stable_session_projection",
         ):
-            if apply:
+            if search_only_resume:
+                record_action(
+                    axis="stable_session_projection",
+                    route="search_index_sessions_targeted",
+                    status="error",
+                    detail=(
+                        "search_only_resume_stable_publish_not_current"
+                    ),
+                )
+            elif apply:
                 try:
                     stable_result = reindex_sessions(
                         aoa_root=aoa_root,
@@ -60537,6 +60990,7 @@ def targeted_projection_catchup(
                         include_entity_registry=False,
                         source_scope_complete=False,
                         defer_global_derivatives=True,
+                        execution_id=execution_id,
                     )
                     record_action(
                         axis="search",
@@ -60743,6 +61197,19 @@ def targeted_projection_catchup(
         "target": target,
         "session_id": session_id,
         "execution_id": execution_id,
+        "search_only_resume": search_only_resume,
+        "search_only_resume_blocked": search_only_resume_blocked,
+        "search_resume_checkpoint": {
+            "status": search_resume_state.get("status"),
+            "path": search_resume_state.get("path"),
+            "execution_id": search_resume_state.get("execution_id"),
+            "checkpoint_status": search_resume_checkpoint.get("status"),
+            "next_record_index": int_value(
+                search_resume_cursor.get("next_record_index"),
+            ),
+            "stable_publish_id": current_stable_publish_id,
+            "compatible": search_resume_checkpoint_is_compatible,
+        },
         "session_dir": str(session_dir),
         "targeted": True,
         "bounded": True,
@@ -117781,6 +118248,7 @@ def search_index_sessions(
     context_tail_omission_policy: str = SEARCH_CONTEXT_TAIL_OMISSION_POLICY_AUTO,
     source_scope_complete: bool | None = None,
     defer_global_derivatives: bool = False,
+    execution_id: str | None = None,
 ) -> dict[str, Any]:
     now = utc_now()
     started = time.monotonic()
@@ -117963,10 +118431,117 @@ def search_index_sessions(
             "diagnostics": ["no sessions selected"],
             "sessions": [],
         }
-    conn = init_search_db(write_db_path, rebuild=rebuild, create_indexes=not rebuild, budget_deadline=deadline)
+    progress_execution_id = str(execution_id or "")
+    if not progress_execution_id and budget_seconds is not None and not rebuild:
+        progress_execution_id = (
+            f"search-{compact_stamp()}-{os.getpid()}-{uuid.uuid4().hex[:12]}"
+        )
+    progress_enabled = bool(progress_execution_id and not rebuild)
     generation_identities = session_memory_expected_generation_identities(
         aoa_root
     )
+    progress_binding = search_index_progress_binding(
+        target=target,
+        rebuild=rebuild,
+        db_path=db_path,
+        records=records,
+        generation_identities=generation_identities,
+        source_scope_complete=effective_source_scope_complete,
+        max_raw_bytes=effective_max_raw_bytes,
+        include_raw_event_text=include_raw_event_text,
+        store_raw_text=store_raw_text,
+        projection_storage_mode=projection_storage_mode,
+        context_tail_omission_policy=effective_context_tail_omission_policy,
+        defer_global_derivatives=defer_global_derivatives,
+    )
+    progress_state = (
+        load_search_index_progress_checkpoint(
+            aoa_root=aoa_root,
+            execution_id=progress_execution_id,
+            binding=progress_binding,
+        )
+        if progress_enabled
+        else {"status": "disabled", "path": ""}
+    )
+    if progress_state.get("status") == "incompatible":
+        checkpoint_diagnostics = [
+            str(item)
+            for item in progress_state.get("diagnostics", [])
+            if item
+        ]
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "artifact_type": "search_index",
+            "search_schema_version": SEARCH_SCHEMA_VERSION,
+            "generated_at": now,
+            "ok": False,
+            "status": "incompatible_search_progress_checkpoint",
+            "target": target,
+            "selected_count": len(records),
+            "processed_count": 0,
+            "remaining_count": len(records),
+            "budget_seconds": budget_seconds,
+            "budget_exhausted": False,
+            "partial": False,
+            "execution_id": progress_execution_id,
+            "db_path": str(db_path),
+            "search_progress_checkpoint": {
+                "status": "incompatible",
+                "path": progress_state.get("path"),
+                "execution_id": progress_execution_id,
+                "diagnostics": checkpoint_diagnostics,
+            },
+            "semantic_completion": False,
+            "truth_status": (
+                "incompatible_search_progress_fails_closed_without_consumer_ack"
+            ),
+            "diagnostics": checkpoint_diagnostics
+            or ["search_progress_checkpoint_incompatible"],
+            "sessions": [],
+        }
+    resume_cursor = int_value(
+        progress_state.get("next_record_index")
+        if progress_state.get("status") == "compatible"
+        else 0
+    )
+    resumed_checkpoint = (
+        progress_state.get("checkpoint")
+        if progress_state.get("status") == "compatible"
+        and isinstance(progress_state.get("checkpoint"), dict)
+        else {}
+    )
+    resumed_completed_sessions = {
+        str(item.get("session_id") or ""): dict(item)
+        for item in (
+            resumed_checkpoint.get("completed_sessions", [])
+            if isinstance(resumed_checkpoint.get("completed_sessions"), list)
+            else []
+        )
+        if isinstance(item, dict) and str(item.get("session_id") or "")
+    }
+    progress_checkpoint_path = (
+        Path(str(progress_state.get("path") or ""))
+        if progress_enabled
+        else Path()
+    )
+    checkpoint_sequence = int_value(progress_state.get("sequence"), 0)
+    last_search_progress_checkpoint: dict[str, Any] = {
+        "status": (
+            "resumed"
+            if progress_state.get("status") == "compatible"
+            else progress_state.get("status") or "disabled"
+        ),
+        "path": str(progress_checkpoint_path) if progress_enabled else "",
+        "execution_id": progress_execution_id,
+        "checkpoint_sequence": checkpoint_sequence,
+        "next_record_index": resume_cursor,
+        "resumed": bool(progress_state.get("status") == "compatible"),
+        "semantic_completion": False,
+        "truth_status": (
+            "search_progress_checkpoint_not_consumer_ack_or_global_freshness"
+        ),
+    }
+    conn = init_search_db(write_db_path, rebuild=rebuild, create_indexes=not rebuild, budget_deadline=deadline)
     if deadline is not None:
         conn.set_progress_handler(lambda: 1 if time.monotonic() >= deadline else 0, 10000)
     if rebuild:
@@ -117980,7 +118555,7 @@ def search_index_sessions(
     raw_text_status_counts: Counter[str] = Counter()
     phase_timings: list[dict[str, Any]] = []
     inline_optimize_count = 0
-    committed_count = 0
+    committed_count = resume_cursor
     removed_entity_registry_document_count = 0
     inserted_entity_registry_document_count = 0
     updated_entity_registry_document_count = 0
@@ -117996,6 +118571,9 @@ def search_index_sessions(
     active_session: dict[str, Any] | None = None
     active_session_started = 0.0
     active_phase_started = 0.0
+    completed_session_summaries: dict[str, dict[str, Any]] = dict(
+        resumed_completed_sessions
+    )
     progress_telemetry = BestEffortJsonProgressEmitter(
         enabled=progress_every > 0
     )
@@ -118053,6 +118631,48 @@ def search_index_sessions(
                 )
             )
         return rows
+
+    def persist_search_progress(
+        *,
+        status: str,
+        phase: str,
+        next_record_index: int,
+        active_record_index: int | None = None,
+        active_session_id: str = "",
+        consumer_acknowledged: bool = False,
+    ) -> dict[str, Any]:
+        nonlocal checkpoint_sequence, last_search_progress_checkpoint
+        if not progress_enabled:
+            return {"status": "disabled", "semantic_completion": False}
+        checkpoint_sequence += 1
+        try:
+            receipt = write_search_index_progress_checkpoint(
+                path=progress_checkpoint_path,
+                execution_id=progress_execution_id,
+                binding=progress_binding,
+                sequence=checkpoint_sequence,
+                status=status,
+                phase=phase,
+                next_record_index=next_record_index,
+                active_record_index=active_record_index,
+                active_session_id=active_session_id,
+                completed_sessions=list(completed_session_summaries.values()),
+                consumer_acknowledged=consumer_acknowledged,
+            )
+            last_search_progress_checkpoint = receipt
+            return receipt
+        except (OSError, ValueError) as exc:
+            diagnostics.append(
+                f"search_progress_checkpoint_write_failed:{exc.__class__.__name__}"
+            )
+            last_search_progress_checkpoint = {
+                "status": "error",
+                "path": str(progress_checkpoint_path),
+                "execution_id": progress_execution_id,
+                "semantic_completion": False,
+                "diagnostics": [str(exc)],
+            }
+            return last_search_progress_checkpoint
 
     try:
         conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", ("schema_version", str(SEARCH_SCHEMA_VERSION)))
@@ -118206,7 +118826,10 @@ def search_index_sessions(
         )
         conn.commit()
         bulk_started = time.monotonic()
-        for record_index, record in enumerate(records, start=1):
+        for record_index, record in enumerate(
+            records[resume_cursor:],
+            start=resume_cursor + 1,
+        ):
             if deadline is not None and record_index > 1 and time.monotonic() >= deadline:
                 budget_exhausted = True
                 break
@@ -118217,6 +118840,13 @@ def search_index_sessions(
                 record_index=record_index,
                 selected_count=len(records),
                 extra={"active_phase": "begin"},
+            )
+            persist_search_progress(
+                status="in_progress",
+                phase="session_begin",
+                next_record_index=committed_count,
+                active_record_index=record_index,
+                active_session_id=str(record.get("session_id") or ""),
             )
             conn.execute("BEGIN")
             set_active_phase("projection_fingerprint")
@@ -118359,6 +118989,25 @@ def search_index_sessions(
             counts.update(record_counts)
             removed_document_count += record_removed_document_count
             committed_count += 1
+            committed_session_id = str(
+                result.get("session_id")
+                or record.get("session_id")
+                or ""
+            )
+            completed_session_summaries[committed_session_id] = {
+                "session_id": committed_session_id,
+                "source_fingerprint": str(
+                    result.get("source_fingerprint") or ""
+                ),
+                "episode_semantic_status": episode_semantic_status,
+            }
+            persist_search_progress(
+                status="in_progress",
+                phase="session_committed",
+                next_record_index=committed_count,
+                active_record_index=None,
+                active_session_id="",
+            )
             record_elapsed_ms = int((time.monotonic() - record_started) * 1000)
             record_document_count = len(documents)
             record_elapsed_seconds = record_elapsed_ms / 1000.0 if record_elapsed_ms > 0 else 0.0
@@ -118397,6 +119046,22 @@ def search_index_sessions(
             processed_count=committed_count,
             inline_optimize_count=inline_optimize_count,
         )
+        if budget_exhausted:
+            persist_search_progress(
+                status="interrupted",
+                phase="budget_boundary",
+                next_record_index=committed_count,
+                active_record_index=(
+                    int_value(active_session.get("record_index"))
+                    if active_session
+                    else None
+                ),
+                active_session_id=(
+                    str(active_session.get("session_id") or "")
+                    if active_session
+                    else ""
+                ),
+            )
         if rebuild:
             index_started = time.monotonic()
             progress_event("search_index_phase_start", {"phase": "sqlite_index_build"})
@@ -118487,6 +119152,26 @@ def search_index_sessions(
             conn.close()
             if rebuild and temp_db_path is not None:
                 cleanup_search_rebuild_temp(temp_db_path)
+            checkpoint_receipt = persist_search_progress(
+                status="interrupted",
+                phase=(
+                    "interrupted:"
+                    + str(active_session.get("active_phase") or "unknown")
+                    if active_session
+                    else "interrupted:budget_boundary"
+                ),
+                next_record_index=committed_count,
+                active_record_index=(
+                    int_value(active_session.get("record_index"))
+                    if active_session
+                    else None
+                ),
+                active_session_id=(
+                    str(active_session.get("session_id") or "")
+                    if active_session
+                    else ""
+                ),
+            )
             return {
                 "schema_version": SCHEMA_VERSION,
                 "artifact_type": "search_index",
@@ -118547,8 +119232,16 @@ def search_index_sessions(
                 "inline_optimize_count": inline_optimize_count,
                 "db_path": str(db_path),
                 "build_db_path": str(write_db_path),
+                "execution_id": progress_execution_id,
+                "resumed_from_checkpoint": bool(resume_cursor),
+                "resume_cursor": resume_cursor,
+                "search_progress_checkpoint": checkpoint_receipt,
+                "semantic_completion": False,
+                "consumer_acknowledged": False,
                 "diagnostics": ["search_index_budget_exhausted"],
-                "sessions": session_results[:committed_count],
+                "sessions": session_results[
+                    : max(0, committed_count - resume_cursor)
+                ],
             }
         conn.rollback()
         conn.close()
@@ -118606,8 +119299,16 @@ def search_index_sessions(
             "inline_optimize_count": inline_optimize_count,
             "db_path": str(db_path),
             "build_db_path": str(write_db_path),
+            "execution_id": progress_execution_id,
+            "resumed_from_checkpoint": bool(resume_cursor),
+            "resume_cursor": resume_cursor,
+            "search_progress_checkpoint": last_search_progress_checkpoint,
+            "semantic_completion": False,
+            "consumer_acknowledged": False,
             "diagnostics": [f"sqlite_error:{exc}"],
-            "sessions": session_results,
+            "sessions": session_results[
+                : max(0, committed_count - resume_cursor)
+            ],
         }
     finally:
         try:
@@ -118617,8 +119318,15 @@ def search_index_sessions(
         conn.close()
     document_count = sum(counts.values())
     processed_count = committed_count
-    completed_session_ids = projection_completed_session_ids(
-        {"session_timings": session_timings}
+    completed_session_ids = list(
+        dict.fromkeys(
+            [
+                *resumed_completed_sessions.keys(),
+                *projection_completed_session_ids(
+                    {"session_timings": session_timings}
+                ),
+            ]
+        )
     )
     payload = {
         "schema_version": SCHEMA_VERSION,
@@ -118723,6 +119431,12 @@ def search_index_sessions(
         "budget_seconds": budget_seconds,
         "budget_exhausted": budget_exhausted,
         "partial": budget_exhausted,
+        "execution_id": progress_execution_id,
+        "resumed_from_checkpoint": bool(resume_cursor),
+        "resume_cursor": resume_cursor,
+        "search_progress_checkpoint": last_search_progress_checkpoint,
+        "semantic_completion": False,
+        "consumer_acknowledged": False,
         "document_count": document_count,
         "removed_document_count": removed_document_count,
         "removed_entity_registry_document_count": removed_entity_registry_document_count,
@@ -118795,10 +119509,24 @@ def search_index_sessions(
             "truth_status": "selected_search_projection_current_global_navigation_derivatives_unresolved",
         }
     outbox_completions: list[dict[str, Any]] = []
+    acknowledged_search_session_ids: set[str] = set()
     if payload["ok"]:
         result_by_session_id = {
             str(item.get("session_id") or ""): item
-            for item in session_results
+            for item in (
+                [
+                    {
+                        "session_id": session_id,
+                        "source_fingerprint": summary.get("source_fingerprint"),
+                        "episode_semantic_projection": {
+                            "status": summary.get("episode_semantic_status")
+                        },
+                    }
+                    for session_id, summary in resumed_completed_sessions.items()
+                    if isinstance(summary, dict)
+                ]
+                + session_results
+            )
             if isinstance(item, dict)
             and str(item.get("session_id") or "")
         }
@@ -118854,7 +119582,53 @@ def search_index_sessions(
             )
             if completion.get("completed_consumers"):
                 outbox_completions.append(completion)
+                if "exact_and_lexical_search" in completion.get(
+                    "completed_consumers", []
+                ):
+                    acknowledged_search_session_ids.add(session_id)
     payload["outbox_completions"] = outbox_completions
+    committed_search_session_ids = {
+        str(record.get("session_id") or "")
+        for record in records[:committed_count]
+        if str(record.get("session_id") or "")
+    }
+    consumer_acknowledged = bool(
+        committed_search_session_ids
+        and committed_search_session_ids.issubset(
+            acknowledged_search_session_ids
+        )
+    )
+    payload["consumer_acknowledged"] = consumer_acknowledged
+    payload["semantic_completion"] = bool(
+        payload.get("ok")
+        and consumer_acknowledged
+        and int_value(payload.get("processed_count"))
+        >= int_value(payload.get("selected_count"))
+        and not bool(payload.get("budget_exhausted"))
+    )
+    if progress_enabled:
+        payload["search_progress_checkpoint"] = persist_search_progress(
+            status=(
+                "interrupted"
+                if budget_exhausted
+                else "complete"
+                if committed_count >= len(records)
+                and not budget_exhausted
+                and consumer_acknowledged
+                else "in_progress"
+            ),
+            phase=(
+                "budget_boundary"
+                if budget_exhausted
+                else "consumer_ack"
+                if consumer_acknowledged
+                else "projection_committed"
+            ),
+            next_record_index=committed_count,
+            active_record_index=None,
+            active_session_id="",
+            consumer_acknowledged=consumer_acknowledged,
+        )
     if write_report:
         diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
         diagnostics_dir.mkdir(parents=True, exist_ok=True)
@@ -202463,6 +203237,7 @@ def command_search_index(args: argparse.Namespace) -> int:
             write_report=args.write_report,
             budget_seconds=args.budget_seconds,
             progress_every=args.progress_every,
+            execution_id=getattr(args, "execution_id", None),
             defer_global_derivatives=(
                 os.environ.get(
                     "AOA_SESSION_MEMORY_SEARCH_DEFER_GLOBAL_DERIVATIVES",
@@ -212743,6 +213518,7 @@ def build_parser() -> argparse.ArgumentParser:
     search_index.add_argument("--no-rebuild", action="store_true", help="Force append/update into the existing search DB instead of rebuilding it.")
     search_index.add_argument("--budget-seconds", type=float, help="Stop after the current session transaction when this wall-clock budget is exhausted.")
     search_index.add_argument("--progress-every", type=int, default=0, help="Emit JSON heartbeat progress to stderr every N indexed sessions.")
+    search_index.add_argument("--execution-id", help="Resume and correlate durable search progress checkpoints for this execution.")
     search_index.add_argument("--write-report", action="store_true", help="Write JSON and Markdown search-index reports under .aoa/diagnostics.")
     search_index.set_defaults(func=command_search_index)
 

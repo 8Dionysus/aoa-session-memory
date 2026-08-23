@@ -54391,8 +54391,142 @@ def test_search_index_partial_update_reports_budget_exhausted_on_sqlite_interrup
     assert result["active_session"]["session_id"] == "budgeted-search"
     assert result["active_session"]["active_phase"] == "delete_existing_documents"
     assert result["active_session"]["candidate_document_count"] > 0
+    assert result["sessions"] == []
     assert result["remaining_sessions"][0]["session_id"] == "budgeted-search"
     assert result["remaining_sessions"][0]["active_phase"] == "delete_existing_documents"
+    assert result["semantic_completion"] is False
+    assert result["consumer_acknowledged"] is False
+    checkpoint_receipt = result["search_progress_checkpoint"]
+    assert checkpoint_receipt["status"] == "written"
+    assert checkpoint_receipt["next_record_index"] == 0
+    assert checkpoint_receipt["active_session_id"] == "budgeted-search"
+    assert checkpoint_receipt["semantic_completion"] is False
+    checkpoint = module.read_json(Path(checkpoint_receipt["path"]), {})
+    assert checkpoint["status"] == "interrupted"
+    assert checkpoint["cursor"]["next_record_index"] == 0
+    assert checkpoint["cursor"]["active_session_id"] == "budgeted-search"
+    assert checkpoint["progress"]["checkpoint_sequence"] > 0
+    assert checkpoint["truth_status"] == (
+        "search_progress_checkpoint_not_consumer_ack_or_global_freshness"
+    )
+
+
+def test_search_index_same_execution_resumes_from_committed_session_cursor(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    sessions = [
+        ("resume-first", "2026-06-15T00:00:00Z"),
+        ("resume-second", "2026-06-16T00:00:00Z"),
+    ]
+    for session_id, timestamp in sessions:
+        transcript = tmp_path / f"rollout-{session_id}.jsonl"
+        write_jsonl(
+            transcript,
+            [
+                {
+                    "timestamp": timestamp,
+                    "type": "session_meta",
+                    "payload": {"id": session_id, "cwd": str(repo)},
+                },
+                {
+                    "timestamp": timestamp,
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": f"Index {session_id}.",
+                            }
+                        ],
+                    },
+                },
+                {
+                    "timestamp": timestamp,
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Indexed."}],
+                    },
+                },
+            ],
+        )
+        module.handle_hook_event(
+            "Stop",
+            {
+                "session_id": session_id,
+                "transcript_path": str(transcript),
+                "cwd": str(repo),
+                "hook_event_name": "Stop",
+            },
+            workspace_root=workspace,
+            aoa_root=aoa_root,
+        )
+
+    initial = module.search_index_sessions(aoa_root=aoa_root, target="all")
+    assert initial["ok"] is True
+    records = [module.resolve_session_record(aoa_root, session_id) for session_id, _ in sessions]
+    original_delete = module.delete_search_documents_for_session
+    delete_calls: list[str] = []
+
+    def budget_boundary_delete(*args: Any, **kwargs: Any) -> int:
+        session_id = str(kwargs.get("session_id") or "")
+        delete_calls.append(session_id)
+        return original_delete(*args, **kwargs)
+
+    monkeypatch.setattr(
+        module,
+        "delete_search_documents_for_session",
+        budget_boundary_delete,
+    )
+    execution_id = "same-execution-resume"
+    interrupted = module.search_index_sessions(
+        aoa_root=aoa_root,
+        target="all",
+        selected_records=records,
+        rebuild=False,
+        budget_seconds=1e-9,
+        execution_id=execution_id,
+    )
+    assert interrupted["budget_exhausted"] is True
+    assert interrupted["processed_count"] == 1
+    assert interrupted["remaining_count"] == 1
+    assert interrupted["search_progress_checkpoint"]["next_record_index"] == 1
+    assert interrupted["semantic_completion"] is False
+    durable_checkpoint = module.read_json(
+        Path(interrupted["search_progress_checkpoint"]["path"]),
+        {},
+    )
+    assert durable_checkpoint["status"] == "interrupted"
+    assert durable_checkpoint["cursor"]["next_record_index"] == 1
+    assert durable_checkpoint["completed_sessions"][0]["session_id"] == (
+        "resume-first"
+    )
+
+    resumed = module.search_index_sessions(
+        aoa_root=aoa_root,
+        target="all",
+        selected_records=records,
+        rebuild=False,
+        budget_seconds=30,
+        execution_id=execution_id,
+    )
+    assert resumed["ok"] is True
+    assert resumed["resumed_from_checkpoint"] is True
+    assert resumed["resume_cursor"] == 1
+    assert resumed["processed_count"] == 2
+    assert resumed["remaining_count"] == 0
+    assert resumed["semantic_completion"] is True
+    assert resumed["consumer_acknowledged"] is True
+    assert resumed["search_progress_checkpoint"]["next_record_index"] == 2
+    assert delete_calls == ["resume-first", "resume-second"]
 
 
 def test_index_maintenance_full_rebuild_receives_remaining_budget(
@@ -62762,6 +62896,244 @@ def test_targeted_projection_catchup_routes_only_stale_local_axes(
         item["status"] == "deferred_bounded_session_scope"
         for item in payload["deferred_global_derivatives"].values()
     )
+
+
+def test_targeted_search_resume_consumes_stable_snapshot_without_republish_for_live_tail(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    session_id = "targeted-search-only-resume"
+    session_dir = aoa_root / module.SESSION_ROOT / session_id
+    session_dir.mkdir(parents=True)
+    stable_publish_id = "stable-publish-before-live-tail"
+    module.write_json(
+        session_dir / "session.manifest.json",
+        {
+            "session_id": session_id,
+            "archive_status": "indexed",
+            "index_schema": {
+                "projection_publish": {"publish_id": stable_publish_id}
+            },
+        },
+    )
+    module.write_json(
+        aoa_root / module.REGISTRY_NAME,
+        {
+            "sessions": [
+                {
+                    "session_id": session_id,
+                    "session_label": session_id,
+                    "path": str(session_dir),
+                }
+            ]
+        },
+    )
+    execution_id = "targeted-search-only-execution"
+    expected_generation_digest = module.search_index_progress_digest(
+        module.session_memory_expected_generation_identities(aoa_root)
+    )
+    monkeypatch.setattr(
+        module,
+        "search_index_progress_checkpoint_for_target",
+        lambda **_kwargs: {
+            "status": "present",
+            "path": "checkpoint.json",
+            "execution_id": execution_id,
+            "checkpoint": {
+                "status": "interrupted",
+                "execution_id": execution_id,
+                "binding": {
+                    "target": session_id,
+                    "rebuild": False,
+                    "db_path": str(module.search_db_path(aoa_root)),
+                    "search_schema_version": module.SEARCH_SCHEMA_VERSION,
+                    "generation_digest": expected_generation_digest,
+                    "stable_publish_ids": [stable_publish_id],
+                    "selection": [{"session_id": session_id}],
+                },
+                "cursor": {"next_record_index": 0},
+            },
+        },
+    )
+    phases = {"search_done": False}
+
+    def vector(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "axes": {
+                "raw_capture": {"current": False},
+                "live_overlay": {"current": True},
+                "stable_session_projection": {"current": True},
+                "search": {"current": phases["search_done"]},
+                "episode_semantic": {"current": True},
+                "entity_registry": {"current": False},
+                "graph": {"current": False},
+            }
+        }
+
+    monkeypatch.setattr(module, "session_projection_freshness_vector", vector)
+    monkeypatch.setattr(
+        module,
+        "targeted_projection_catchup_search_gate",
+        lambda _aoa_root: {
+            "admitted": True,
+            "status": "incremental_search_admitted",
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "session_memory_search_shard_projection_summary",
+        lambda _aoa_root: {"status": "deferred"},
+    )
+    monkeypatch.setattr(
+        module,
+        "reconcile_capture_watch",
+        lambda **_kwargs: pytest.fail("live tail must remain a later overlay"),
+    )
+    monkeypatch.setattr(
+        module,
+        "reindex_sessions",
+        lambda **_kwargs: pytest.fail(
+            "search-only resume must not republish the stable projection"
+        ),
+    )
+    search_calls: list[dict[str, Any]] = []
+
+    def search_route(**kwargs: Any) -> dict[str, Any]:
+        search_calls.append(kwargs)
+        phases["search_done"] = True
+        return {
+            "ok": True,
+            "mutates": True,
+            "status": "applied",
+            "processed_count": 1,
+        }
+
+    monkeypatch.setattr(module, "search_index_sessions", search_route)
+    monkeypatch.setattr(
+        module,
+        "episode_semantic_index_sessions",
+        lambda **_kwargs: pytest.fail("episode semantic axis was current"),
+    )
+
+    payload = module.projection_catchup(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        target=session_id,
+        profile="catchup",
+        apply=True,
+        execution_id=execution_id,
+    )
+
+    assert payload["search_only_resume"] is True
+    assert payload["search_only_resume_blocked"] is False
+    assert payload["search_resume_checkpoint"]["compatible"] is True
+    assert search_calls and search_calls[0]["execution_id"] == execution_id
+    assert payload["routed_axes"] == ["search"]
+    assert payload["freshness_after"]["axes"]["raw_capture"]["current"] is False
+    assert payload["freshness_after"]["axes"]["stable_session_projection"]["current"] is True
+    assert payload["required_stale_axes_after"] == ["raw_capture"]
+
+
+def test_search_index_incompatible_generation_checkpoint_fails_closed(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    session_id = "incompatible-search-generation"
+    transcript = tmp_path / "rollout-incompatible-search-generation.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-06-17T00:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": session_id, "cwd": str(repo)},
+            },
+            {
+                "timestamp": "2026-06-17T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "Generation fence."}],
+                },
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": session_id,
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    initial = module.search_index_sessions(aoa_root=aoa_root, target="all")
+    assert initial["ok"] is True
+    record = module.resolve_session_record(aoa_root, session_id)
+    raw_policy = module.search_raw_lexical_policy(None, use_default_budget=True)
+    binding = module.search_index_progress_binding(
+        target=session_id,
+        rebuild=False,
+        db_path=module.search_db_path(aoa_root),
+        records=[record],
+        generation_identities=module.session_memory_expected_generation_identities(aoa_root),
+        source_scope_complete=False,
+        max_raw_bytes=raw_policy.get("effective_max_raw_bytes"),
+        include_raw_event_text=True,
+        store_raw_text=True,
+        projection_storage_mode=None,
+        context_tail_omission_policy=module.SEARCH_CONTEXT_TAIL_OMISSION_POLICY_KEEP_ALL,
+        defer_global_derivatives=False,
+    )
+    binding["generation_digest"] = "stale-generation-digest"
+    execution_id = "incompatible-generation-execution"
+    checkpoint_path = module.search_index_progress_checkpoint_path(
+        aoa_root,
+        execution_id=execution_id,
+        target=session_id,
+        rebuild=False,
+        db_path=module.search_db_path(aoa_root),
+    )
+    module.write_search_index_progress_checkpoint(
+        path=checkpoint_path,
+        execution_id=execution_id,
+        binding=binding,
+        sequence=1,
+        status="interrupted",
+        phase="budget_boundary",
+        next_record_index=0,
+        active_record_index=1,
+        active_session_id=session_id,
+        completed_sessions=[],
+    )
+    monkeypatch.setattr(
+        module,
+        "init_search_db",
+        lambda **_kwargs: pytest.fail("incompatible checkpoint must not mutate search DB"),
+    )
+
+    result = module.search_index_sessions(
+        aoa_root=aoa_root,
+        target=session_id,
+        selected_records=[record],
+        rebuild=False,
+        budget_seconds=30,
+        execution_id=execution_id,
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == "incompatible_search_progress_checkpoint"
+    assert "search_progress_checkpoint_generation_incompatible" in result["diagnostics"]
+    assert result["semantic_completion"] is False
 
 
 def test_deep_auto_maintenance_resource_defaults_to_graph_drip_fallback(tmp_path: Path, monkeypatch: Any) -> None:
