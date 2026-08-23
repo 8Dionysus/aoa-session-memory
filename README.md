@@ -155,6 +155,16 @@ improved performance. Those questions require live evidence and a separate eval.
 The complete skill-router integration suite uses a pinned `aoa-skills` checkout
 and runs in the optional ecosystem workflow; it is not a standalone dependency.
 
+## Public Goal catalog
+
+The owner-local `goal-catalog` read surface enumerates current and historical
+Goal lifecycles from the complete available session index. It returns
+public-safe correlation and lifecycle fields, source generation and watermark,
+opaque immutable pagination, and item/page digests. Missing, unknown, stale,
+deferred, and invalid source states fail closed instead of becoming a current
+dashboard snapshot. See [`docs/GOAL_CATALOG.md`](docs/GOAL_CATALOG.md) for the
+CLI contract and privacy boundary.
+
 ### Run the standalone MCP demo
 
 Build and install the read-only MCP package without writing build state into

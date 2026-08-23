@@ -1,0 +1,294 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "aoa-session-memory://schemas/goal.catalog.public.v1",
+  "title": "aoa-session-memory public Goal catalog page",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "publication_schema_version",
+    "artifact_type",
+    "generated_at",
+    "ok",
+    "state",
+    "currentness",
+    "publication_state",
+    "target",
+    "order",
+    "source",
+    "source_generation",
+    "source_watermark",
+    "snapshot",
+    "pagination",
+    "page",
+    "snapshot_digest",
+    "page_digest",
+    "source_item_count",
+    "item_count",
+    "total_item_count",
+    "lifecycle_group_count",
+    "counts_by_lifecycle_state",
+    "items",
+    "diagnostics",
+    "omissions",
+    "privacy",
+    "claim_limit"
+  ],
+  "properties": {
+    "schema_version": {"const": "aoa_session_memory_goal_catalog_v1"},
+    "publication_schema_version": {"const": "aoa_session_memory_goal_catalog_public_v1"},
+    "artifact_type": {"const": "goal_catalog_projection"},
+    "generated_at": {"type": "string", "minLength": 1},
+    "ok": {"type": "boolean"},
+    "state": {"$ref": "#/$defs/state"},
+    "currentness": {"$ref": "#/$defs/currentness"},
+    "publication_state": {"$ref": "#/$defs/publicationState"},
+    "target": {"type": "string"},
+    "order": {"enum": ["recent", "chronological"]},
+    "source": {"$ref": "#/$defs/source"},
+    "source_generation": {"$ref": "#/$defs/generation"},
+    "source_watermark": {"$ref": "#/$defs/watermark"},
+    "snapshot": {"$ref": "#/$defs/snapshot"},
+    "pagination": {"$ref": "#/$defs/pagination"},
+    "page": {"$ref": "#/$defs/page"},
+    "snapshot_digest": {"$ref": "#/$defs/digest"},
+    "page_digest": {"$ref": "#/$defs/digest"},
+    "source_item_count": {"type": "integer", "minimum": 0},
+    "item_count": {"type": "integer", "minimum": 0},
+    "total_item_count": {"type": "integer", "minimum": 0},
+    "lifecycle_group_count": {"type": "integer", "minimum": 0},
+    "counts_by_lifecycle_state": {
+      "type": "object",
+      "additionalProperties": {"type": "integer", "minimum": 0}
+    },
+    "items": {"type": "array", "items": {"$ref": "#/$defs/item"}},
+    "diagnostics": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "omissions": {
+      "type": "object",
+      "additionalProperties": {"const": true}
+    },
+    "privacy": {"$ref": "#/$defs/privacy"},
+    "claim_limit": {"type": "string", "minLength": 1}
+  },
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "state": {
+      "enum": ["current", "missing", "unknown", "stale", "deferred", "invalid"]
+    },
+    "currentness": {
+      "enum": ["current", "missing", "unknown", "stale", "deferred", "invalid", "not_applicable"]
+    },
+    "publicationState": {
+      "enum": ["bound", "missing", "unknown", "stale", "deferred", "invalid"]
+    },
+    "generation": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "watermark": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "kind",
+        "registry_digest",
+        "source_set_digest",
+        "session_count",
+        "goal_lifecycle_count",
+        "coverage",
+        "max_updated_at",
+        "max_raw_line_count"
+      ],
+      "properties": {
+        "schema_version": {"const": 1},
+        "kind": {"const": "complete_session_index_set_v1"},
+        "registry_digest": {"type": ["string", "null"]},
+        "source_set_digest": {"$ref": "#/$defs/digest"},
+        "session_count": {"type": "integer", "minimum": 0},
+        "goal_lifecycle_count": {"type": "integer", "minimum": 0},
+        "coverage": {"enum": ["complete", "incomplete"]},
+        "max_updated_at": {"type": "string"},
+        "max_raw_line_count": {"type": "integer", "minimum": 0}
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "owner",
+        "ref",
+        "goal_lifecycle_schema_version",
+        "generation_identity",
+        "goal_lifecycle_generation",
+        "watermark",
+        "currentness"
+      ],
+      "properties": {
+        "owner": {"const": "aoa-session-memory"},
+        "ref": {"const": "aoa-session-memory:goal-lifecycles"},
+        "goal_lifecycle_schema_version": {"type": "integer", "minimum": 1},
+        "generation_identity": {"$ref": "#/$defs/generation"},
+        "goal_lifecycle_generation": {"$ref": "#/$defs/generation"},
+        "watermark": {"$ref": "#/$defs/watermark"},
+        "currentness": {"$ref": "#/$defs/state"}
+      }
+    },
+    "snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "snapshot_ref",
+        "snapshot_digest",
+        "generated_at",
+        "source_watermark",
+        "source_freshness",
+        "projection_freshness",
+        "immutable"
+      ],
+      "properties": {
+        "snapshot_ref": {"$ref": "#/$defs/digest"},
+        "snapshot_digest": {"$ref": "#/$defs/digest"},
+        "generated_at": {"type": "string", "minLength": 1},
+        "source_watermark": {"$ref": "#/$defs/watermark"},
+        "source_freshness": {"$ref": "#/$defs/state"},
+        "projection_freshness": {"$ref": "#/$defs/state"},
+        "immutable": {"const": true}
+      }
+    },
+    "pagination": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "cursor",
+        "next_cursor",
+        "complete_for_query",
+        "page_size",
+        "supports_immutable_snapshot"
+      ],
+      "properties": {
+        "mode": {"const": "immutable_snapshot"},
+        "cursor": {"type": ["string", "null"]},
+        "next_cursor": {"type": ["string", "null"]},
+        "complete_for_query": {"type": "boolean"},
+        "page_size": {"type": "integer", "minimum": 1},
+        "supports_immutable_snapshot": {"const": true}
+      }
+    },
+    "page": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["offset", "item_count", "page_digest"],
+      "properties": {
+        "offset": {"type": "integer", "minimum": 0},
+        "item_count": {"type": "integer", "minimum": 0},
+        "page_digest": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "goal_ref",
+        "goal_ref_state",
+        "goal_instance_id",
+        "goal_instance_id_state",
+        "goal_id",
+        "goal_id_state",
+        "thread_id",
+        "thread_id_state",
+        "safe_title_state",
+        "safe_title_reason",
+        "title",
+        "title_state",
+        "reason",
+        "lifecycle_state",
+        "lifecycle_group",
+        "thread_metadata_state",
+        "relation_state",
+        "first_observed_at",
+        "last_observed_at",
+        "evidence_ref",
+        "ambiguity_state",
+        "ambiguity",
+        "redacted_fields",
+        "item_digest"
+      ],
+      "properties": {
+        "goal_ref": {"type": "string", "minLength": 1},
+        "goal_ref_state": {"enum": ["available", "opaque", "missing"]},
+        "goal_instance_id": {"type": "string", "minLength": 1},
+        "goal_instance_id_state": {"enum": ["available", "opaque", "missing"]},
+        "goal_id": {"type": ["string", "null"]},
+        "goal_id_state": {"enum": ["available", "opaque", "missing"]},
+        "thread_id": {"type": ["string", "null"]},
+        "thread_id_state": {"enum": ["available", "opaque", "missing"]},
+        "safe_title_state": {"enum": ["available", "missing", "withheld"]},
+        "safe_title_reason": {"enum": ["private_objective_omitted", "objective_missing"]},
+        "title": {"type": ["string", "null"]},
+        "title_state": {"enum": ["available", "missing", "withheld"]},
+        "reason": {"enum": ["private_objective_omitted", "objective_missing"]},
+        "lifecycle_state": {"type": "string", "minLength": 1},
+        "lifecycle_group": {"$ref": "#/$defs/lifecycleGroup"},
+        "thread_metadata_state": {"enum": ["available", "missing", "unknown", "invalid"]},
+        "relation_state": {"enum": ["complete", "deferred", "missing", "unknown", "invalid"]},
+        "first_observed_at": {"type": ["string", "null"]},
+        "last_observed_at": {"type": ["string", "null"]},
+        "evidence_ref": {"type": "string", "minLength": 1},
+        "ambiguity_state": {"enum": ["present", "none"]},
+        "ambiguity": {"type": "boolean"},
+        "redacted_fields": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "item_digest": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "lifecycleGroup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "group_ref",
+        "grouping_basis",
+        "member_count",
+        "current_member_count",
+        "historical_member_count",
+        "unknown_member_count",
+        "states",
+        "history_state"
+      ],
+      "properties": {
+        "group_ref": {"type": "string", "minLength": 1},
+        "grouping_basis": {"enum": ["thread_id", "goal_instance_id"]},
+        "member_count": {"type": "integer", "minimum": 1},
+        "current_member_count": {"type": "integer", "minimum": 0},
+        "historical_member_count": {"type": "integer", "minimum": 0},
+        "unknown_member_count": {"type": "integer", "minimum": 0},
+        "states": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "history_state": {"const": "complete"}
+      }
+    },
+    "privacy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scope",
+        "allowlisted_fields",
+        "withheld_fields",
+        "prohibited_join_keys",
+        "no_transcript_body",
+        "no_process_identity",
+        "no_actor_inference"
+      ],
+      "properties": {
+        "scope": {"const": "owner_bounded_public_safe"},
+        "allowlisted_fields": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "withheld_fields": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "prohibited_join_keys": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "no_transcript_body": {"const": true},
+        "no_process_identity": {"const": true},
+        "no_actor_inference": {"const": true}
+      }
+    }
+  }
+}

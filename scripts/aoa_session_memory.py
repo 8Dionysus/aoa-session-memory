@@ -5,6 +5,7 @@ import argparse
 import array
 import ast
 import base64
+import binascii
 import ctypes
 import ctypes.util
 import difflib
@@ -666,6 +667,23 @@ TASK_EPISODE_REPRESENTATION_LIMITS = {
 }
 GOAL_LIFECYCLE_SCHEMA_VERSION = 3
 GOAL_CATALOG_SCHEMA_VERSION = "aoa_session_memory_goal_catalog_v1"
+GOAL_CATALOG_PUBLICATION_SCHEMA_VERSION = (
+    "aoa_session_memory_goal_catalog_public_v1"
+)
+GOAL_CATALOG_CURSOR_VERSION = 1
+GOAL_CATALOG_DEFAULT_PAGE_SIZE = 100
+GOAL_CATALOG_MAX_PAGE_SIZE = 500
+GOAL_CATALOG_CURSOR_PREFIX = "gcat1."
+GOAL_CATALOG_CURSOR_MAX_CHARS = 4096
+GOAL_CATALOG_PUBLIC_STATES = frozenset(
+    {"current", "missing", "unknown", "stale", "deferred", "invalid"}
+)
+GOAL_CATALOG_CURRENT_LIFECYCLE_STATES = frozenset(
+    {"active", "create_requested", "inspected", "updated"}
+)
+GOAL_CATALOG_HISTORICAL_LIFECYCLE_STATES = frozenset(
+    {"complete", "blocked", "create_failed"}
+)
 WORK_CONTEXT_SCHEMA_VERSION = 4
 ROUTE_SIGNAL_SCHEMA_VERSION = 1
 ROUTE_SIGNAL_CLASSIFIER_VERSION = 48
@@ -129726,6 +129744,805 @@ def goal_catalog_projection(
     }
 
 
+def goal_catalog_public_digest(value: Any) -> str:
+    """Return the stable digest used by the public Goal catalog contract."""
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+
+
+def goal_catalog_public_read_json(path: Path) -> dict[str, Any]:
+    """Read one generated source file once and expose only safe read status."""
+    if not path.is_file():
+        return {
+            "state": "missing",
+            "value": None,
+            "digest": None,
+            "stable": True,
+            "diagnostic": "source_file_missing",
+        }
+    try:
+        before = file_signature(path)
+        raw = path.read_bytes()
+        after = file_signature(path)
+    except OSError as exc:
+        return {
+            "state": "invalid",
+            "value": None,
+            "digest": None,
+            "stable": False,
+            "diagnostic": f"source_file_unreadable:{type(exc).__name__}",
+        }
+    if before != after:
+        return {
+            "state": "deferred",
+            "value": None,
+            "digest": None,
+            "stable": False,
+            "diagnostic": "source_file_changed_during_read",
+        }
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return {
+            "state": "invalid",
+            "value": None,
+            "digest": f"sha256:{hashlib.sha256(raw).hexdigest()}",
+            "stable": True,
+            "diagnostic": "source_json_invalid",
+        }
+    return {
+        "state": "current",
+        "value": value,
+        "digest": f"sha256:{hashlib.sha256(raw).hexdigest()}",
+        "stable": True,
+        "diagnostic": None,
+    }
+
+
+def goal_catalog_public_safe_ref(value: Any) -> tuple[str | None, str]:
+    """Keep opaque IDs usable without leaking a path-shaped correlation key."""
+    text = str(value or "").strip()
+    if not text:
+        return None, "missing"
+    if (
+        len(text) > 256
+        or any(char.isspace() for char in text)
+        or GOAL_CATALOG_HOST_PATH_RE.search(text)
+        or text.startswith(("/", "~/", "./", "../"))
+    ):
+        return (
+            "opaque:" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:32],
+            "opaque",
+        )
+    return text, "available"
+
+
+def goal_catalog_public_generation(identity: Any) -> dict[str, Any]:
+    """Project generation identity without mutable paths or local diagnostics."""
+    if not isinstance(identity, dict):
+        return {}
+    allowed = {
+        "contract_version",
+        "generation_id",
+        "producer",
+        "producer_sha256",
+        "producer_contract_version",
+        "producer_contract_status",
+        "projection",
+        "schema_version",
+        "generation_dag_version",
+        "normalization",
+        "source_fingerprint_mode",
+        "dependency_generations",
+    }
+    return {
+        str(key): value
+        for key, value in identity.items()
+        if key in allowed and value is not None
+    }
+
+
+def goal_catalog_public_item_from_lifecycle(
+    lifecycle: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Build one public-safe lifecycle record without objective or event text."""
+    if not isinstance(lifecycle, dict):
+        return None
+    raw_instance_id = str(lifecycle.get("goal_instance_id") or "").strip()
+    instance_id, instance_state = goal_catalog_public_safe_ref(raw_instance_id)
+    if instance_id is None:
+        return None
+    observed = (
+        lifecycle.get("observed_goal")
+        if isinstance(lifecycle.get("observed_goal"), dict)
+        else {}
+    )
+    raw_thread_id = observed.get("threadId")
+    if raw_thread_id is None:
+        raw_thread_id = observed.get("thread_id")
+    thread_id, thread_state = goal_catalog_public_safe_ref(raw_thread_id)
+    raw_goal_id = str(lifecycle.get("goal_id") or "").strip()
+    goal_id, goal_id_state = goal_catalog_public_safe_ref(raw_goal_id)
+    goal_ref = thread_id or instance_id
+    goal_ref_state = "available" if thread_id else instance_state
+
+    event_values = (
+        lifecycle.get("sample_events")
+        if isinstance(lifecycle.get("sample_events"), list)
+        else lifecycle.get("events")
+        if isinstance(lifecycle.get("events"), list)
+        else []
+    )
+    event_times = sorted(
+        str(item.get("timestamp"))
+        for item in event_values
+        if isinstance(item, dict)
+        and parse_utc_timestamp(str(item.get("timestamp") or "")) is not None
+    )
+    created_at = goal_catalog_epoch_timestamp(
+        observed.get("createdAt") or observed.get("created_at")
+    )
+    updated_at = goal_catalog_epoch_timestamp(
+        observed.get("updatedAt") or observed.get("updated_at")
+    )
+    first_observed_at = created_at or (event_times[0] if event_times else None)
+    last_observed_at = updated_at or (event_times[-1] if event_times else first_observed_at)
+    objective_present = bool(str(lifecycle.get("objective") or "").strip())
+    lifecycle_state = str(lifecycle.get("status") or "unknown").strip().lower() or "unknown"
+    safe_title_state = "withheld" if objective_present else "missing"
+    safe_title_reason = (
+        "private_objective_omitted"
+        if objective_present
+        else "objective_missing"
+    )
+    return {
+        "goal_ref": goal_ref,
+        "goal_ref_state": goal_ref_state,
+        "goal_instance_id": instance_id,
+        "goal_instance_id_state": instance_state,
+        "goal_id": goal_id,
+        "goal_id_state": goal_id_state,
+        "thread_id": thread_id,
+        "thread_id_state": thread_state,
+        "safe_title_state": safe_title_state,
+        "safe_title_reason": safe_title_reason,
+        # Preserve the established projection keys as explicit non-text
+        # compatibility aliases. The publisher never fills title text.
+        "title": None,
+        "title_state": safe_title_state,
+        "reason": safe_title_reason,
+        "lifecycle_state": lifecycle_state,
+        "lifecycle_group": {
+            "group_ref": goal_ref,
+            "grouping_basis": "thread_id" if thread_id else "goal_instance_id",
+            "history_state": "pending",
+        },
+        "thread_metadata_state": "available" if thread_id else "missing",
+        "relation_state": "missing",
+        "first_observed_at": first_observed_at,
+        "last_observed_at": last_observed_at,
+        "evidence_ref": f"goal-lifecycle:{instance_id}",
+        "ambiguity_state": (
+            "present"
+            if isinstance(lifecycle.get("ambiguity_flags"), list)
+            and lifecycle.get("ambiguity_flags")
+            else "none"
+        ),
+        "ambiguity": bool(lifecycle.get("ambiguity_flags")),
+        "redacted_fields": [
+            "objective",
+            "transcript_body",
+            "prompt",
+            "raw_session_path",
+            "usage",
+            "work_chain",
+            "actor_identity",
+            "model_provider",
+        ],
+    }
+
+
+def goal_catalog_public_apply_lifecycle_groups(
+    items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for item in items:
+        group = item.get("lifecycle_group")
+        group_ref = str(group.get("group_ref") or "") if isinstance(group, dict) else ""
+        groups[group_ref].append(item)
+    current_states = GOAL_CATALOG_CURRENT_LIFECYCLE_STATES
+    for group_ref, members in groups.items():
+        member_count = len(members)
+        current_count = sum(
+            str(member.get("lifecycle_state") or "unknown") in current_states
+            for member in members
+        )
+        historical_count = sum(
+            str(member.get("lifecycle_state") or "unknown")
+            in GOAL_CATALOG_HISTORICAL_LIFECYCLE_STATES
+            for member in members
+        )
+        states = sorted(
+            {str(member.get("lifecycle_state") or "unknown") for member in members}
+        )
+        for member in members:
+            group = member.get("lifecycle_group")
+            if isinstance(group, dict):
+                group.update(
+                    {
+                        "member_count": member_count,
+                        "current_member_count": current_count,
+                        "historical_member_count": historical_count,
+                        "unknown_member_count": member_count
+                        - current_count
+                        - historical_count,
+                        "states": states,
+                        "history_state": "complete",
+                    }
+                )
+    return items
+
+
+def goal_catalog_public_encode_cursor(payload: dict[str, Any]) -> str:
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return GOAL_CATALOG_CURSOR_PREFIX + base64.urlsafe_b64encode(encoded).decode("ascii").rstrip("=")
+
+
+def goal_catalog_public_decode_cursor(cursor: str) -> dict[str, Any] | None:
+    if not cursor or len(cursor) > GOAL_CATALOG_CURSOR_MAX_CHARS:
+        return None
+    if not cursor.startswith(GOAL_CATALOG_CURSOR_PREFIX):
+        return None
+    encoded = cursor[len(GOAL_CATALOG_CURSOR_PREFIX) :]
+    try:
+        padded = encoded + "=" * (-len(encoded) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")))
+    except (binascii.Error, ValueError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if set(payload) != {
+        "version",
+        "snapshot_digest",
+        "target",
+        "order",
+        "offset",
+        "page_size",
+    }:
+        return None
+    if (
+        isinstance(payload.get("version"), bool)
+        or not isinstance(payload.get("version"), int)
+        or payload.get("version") != GOAL_CATALOG_CURSOR_VERSION
+    ):
+        return None
+    if not isinstance(payload.get("snapshot_digest"), str):
+        return None
+    if not isinstance(payload.get("target"), str) or not isinstance(payload.get("order"), str):
+        return None
+    if (
+        isinstance(payload.get("offset"), bool)
+        or not isinstance(payload.get("offset"), int)
+        or payload.get("offset") < 0
+        or isinstance(payload.get("page_size"), bool)
+        or not isinstance(payload.get("page_size"), int)
+        or payload.get("page_size") <= 0
+    ):
+        return None
+    return payload
+
+
+def goal_catalog_public_state_for_issues(
+    issues: list[tuple[str, str]],
+    *,
+    default: str = "current",
+) -> str:
+    if not issues:
+        return default
+    priority = {"invalid": 5, "deferred": 4, "stale": 3, "unknown": 2, "missing": 1}
+    return max(
+        (state for state, _diagnostic in issues),
+        key=lambda state: priority.get(state, 0),
+    )
+
+
+def goal_catalog_public_issue_state_for_stale_reasons(
+    reasons: Iterable[str],
+) -> str:
+    normalized = [str(reason).casefold() for reason in reasons]
+    if any(
+        "in_progress" in reason
+        or "deferred" in reason
+        or "live_tail" in reason
+        for reason in normalized
+    ):
+        return "deferred"
+    return "stale"
+
+
+def goal_catalog_public_source_snapshot(
+    *,
+    aoa_root: Path,
+    target: str,
+) -> dict[str, Any]:
+    registry_path = aoa_root / REGISTRY_NAME
+    registry_read = goal_catalog_public_read_json(registry_path)
+    if registry_read["state"] != "current":
+        state = str(registry_read.get("state") or "unknown")
+        return {
+            "state": state if state in GOAL_CATALOG_PUBLIC_STATES else "unknown",
+            "registry_digest": registry_read.get("digest"),
+            "source_entries": [],
+            "items": [],
+            "diagnostics": [str(registry_read.get("diagnostic") or "registry_unavailable")],
+            "generation_identity": goal_catalog_public_generation(
+                session_index_generation_identity()
+            ),
+            "goal_lifecycle_generation": goal_catalog_public_generation(
+                goal_lifecycle_generation_identity()
+            ),
+            "producer_source_state": session_memory_loaded_producer_source_state(),
+        }
+    registry = registry_read.get("value")
+    if not isinstance(registry, dict) or not isinstance(registry.get("sessions"), list):
+        return {
+            "state": "invalid",
+            "registry_digest": registry_read.get("digest"),
+            "source_entries": [],
+            "items": [],
+            "diagnostics": ["session_registry_shape_invalid"],
+            "generation_identity": goal_catalog_public_generation(
+                session_index_generation_identity()
+            ),
+            "goal_lifecycle_generation": goal_catalog_public_generation(
+                goal_lifecycle_generation_identity()
+            ),
+            "producer_source_state": session_memory_loaded_producer_source_state(),
+        }
+
+    records = [item for item in registry["sessions"] if isinstance(item, dict)]
+    issues: list[tuple[str, str]] = []
+    diagnostics: list[str] = []
+    if len(records) != len(registry["sessions"]):
+        issues.append(("invalid", "session_registry_entry_invalid"))
+        diagnostics.append("session_registry_entry_invalid")
+    if target and target != "all":
+        try:
+            selected = resolve_session_record(aoa_root, target)
+        except ValueError:
+            return {
+                "state": "invalid",
+                "registry_digest": registry_read.get("digest"),
+                "source_entries": [],
+                "items": [],
+                "diagnostics": ["goal_catalog_target_unresolved"],
+                "generation_identity": goal_catalog_public_generation(
+                    session_index_generation_identity()
+                ),
+                "goal_lifecycle_generation": goal_catalog_public_generation(
+                    goal_lifecycle_generation_identity()
+                ),
+                "producer_source_state": session_memory_loaded_producer_source_state(),
+            }
+        selected_id = str(selected.get("session_id") or "")
+        records = [
+            item
+            for item in records
+            if str(item.get("session_id") or "") == selected_id
+        ]
+
+    expected_generation = session_index_generation_identity()
+    expected_goal_generation = goal_lifecycle_generation_identity()
+    producer_source_state = session_memory_loaded_producer_source_state()
+    if producer_source_state.get("status") == "changed":
+        issues.append(("stale", "producer_source_changed_during_process"))
+        diagnostics.append("producer_source_changed_during_process")
+    elif producer_source_state.get("status") != "current":
+        issues.append(("unknown", "producer_source_generation_unresolved"))
+        diagnostics.append("producer_source_generation_unresolved")
+
+    source_entries: list[dict[str, Any]] = []
+    items: list[dict[str, Any]] = []
+    for ordinal, record in enumerate(records):
+        session_id = str(record.get("session_id") or "").strip()
+        if not session_id:
+            issues.append(("invalid", "session_registry_session_id_missing"))
+            diagnostics.append(f"session_registry_session_id_missing:{ordinal}")
+            continue
+        raw_path = record.get("path") or record.get("navigation_path")
+        if not raw_path:
+            issues.append(("invalid", "session_path_missing"))
+            diagnostics.append(f"session_path_missing:{session_id}")
+            continue
+        session_dir = Path(str(raw_path))
+        if not session_dir.is_absolute():
+            session_dir = aoa_root / session_dir
+        manifest_read = goal_catalog_public_read_json(session_dir / "session.manifest.json")
+        index_read = goal_catalog_public_read_json(session_dir / SESSION_INDEX_JSON)
+        for source_read, source_name in (
+            (manifest_read, "session_manifest"),
+            (index_read, "session_index"),
+        ):
+            if source_read["state"] != "current":
+                source_state = str(source_read.get("state") or "unknown")
+                if source_state not in GOAL_CATALOG_PUBLIC_STATES:
+                    source_state = "unknown"
+                issues.append((source_state, f"{source_name}_{source_read.get('diagnostic') or 'unavailable'}"))
+                diagnostics.append(f"{source_name}_{source_read.get('diagnostic') or 'unavailable'}:{session_id}")
+        manifest = manifest_read.get("value") if isinstance(manifest_read.get("value"), dict) else {}
+        index = index_read.get("value") if isinstance(index_read.get("value"), dict) else {}
+        if manifest_read["state"] != "current" or index_read["state"] != "current":
+            continue
+        if str(index.get("session_id") or session_id) != session_id:
+            issues.append(("invalid", "session_index_session_id_mismatch"))
+            diagnostics.append(f"session_index_session_id_mismatch:{session_id}")
+            continue
+        if str(manifest.get("session_id") or session_id) != session_id:
+            issues.append(("invalid", "session_manifest_session_id_mismatch"))
+            diagnostics.append(f"session_manifest_session_id_mismatch:{session_id}")
+            continue
+        stale_reasons = generated_session_index_stale_reasons_for_session(
+            session_dir,
+            index,
+        )
+        if stale_reasons:
+            stale_state = goal_catalog_public_issue_state_for_stale_reasons(stale_reasons)
+            issues.append((stale_state, "session_index_generation_or_freshness_incompatible"))
+            diagnostics.append(
+                f"session_index_{stale_state}:{session_id}:" + ",".join(stale_reasons[:8])
+            )
+        stored_generation = index.get("generation_identity")
+        if not isinstance(stored_generation, dict):
+            issues.append(("stale", "session_index_generation_identity_missing"))
+            diagnostics.append(f"session_index_generation_identity_missing:{session_id}")
+        elif stored_generation != expected_generation:
+            issues.append(("stale", "session_index_generation_identity_mismatch"))
+            diagnostics.append(f"session_index_generation_identity_mismatch:{session_id}")
+        lifecycles = index.get("goal_lifecycles")
+        if not isinstance(lifecycles, list):
+            issues.append(("invalid", "goal_lifecycle_source_shape_invalid"))
+            diagnostics.append(f"goal_lifecycle_source_shape_invalid:{session_id}")
+            continue
+        for lifecycle_ordinal, lifecycle in enumerate(lifecycles):
+            public_item = goal_catalog_public_item_from_lifecycle(lifecycle)
+            if public_item is None:
+                issues.append(("invalid", "goal_lifecycle_identity_invalid"))
+                diagnostics.append(
+                    f"goal_lifecycle_identity_invalid:{session_id}:{lifecycle_ordinal}"
+                )
+                continue
+            items.append(public_item)
+        raw = manifest.get("raw") if isinstance(manifest.get("raw"), dict) else {}
+        projection_publish = (
+            index.get("projection_publish")
+            if isinstance(index.get("projection_publish"), dict)
+            else {}
+        )
+        source_entries.append(
+            {
+                "session_id": session_id,
+                "index_digest": index_read.get("digest"),
+                "manifest_digest": manifest_read.get("digest"),
+                "generation_id": str(index.get("generation_id") or ""),
+                "publish_id": str(projection_publish.get("publish_id") or ""),
+                "updated_at": str(index.get("updated_at") or ""),
+                "raw_watermark": {
+                    "sha256": str(raw.get("sha256") or raw.get("raw_sha256") or ""),
+                    "bytes": int_value(raw.get("bytes") or raw.get("raw_bytes"), 0),
+                    "lines": int_value(raw.get("line_count") or raw.get("raw_line_count"), 0),
+                },
+            }
+        )
+
+    source_entries.sort(key=lambda item: str(item.get("session_id") or ""))
+    state = goal_catalog_public_state_for_issues(issues)
+    if not source_entries and records and state == "current":
+        state = "unknown"
+        diagnostics.append("goal_catalog_source_set_unresolved")
+    return {
+        "state": state,
+        "registry_digest": registry_read.get("digest"),
+        "source_entries": source_entries,
+        "items": goal_catalog_public_apply_lifecycle_groups(items),
+        "diagnostics": list(dict.fromkeys(diagnostics)),
+        "generation_identity": goal_catalog_public_generation(expected_generation),
+        "goal_lifecycle_generation": goal_catalog_public_generation(expected_goal_generation),
+        "producer_source_state": producer_source_state,
+    }
+
+
+def goal_catalog_publication(
+    *,
+    aoa_root: Path,
+    target: str = "all",
+    limit: int | None = None,
+    order: str = "recent",
+    cursor: str | None = None,
+    page_size: int | None = None,
+) -> dict[str, Any]:
+    """Read the canonical public-safe Goal catalog with immutable cursor pages."""
+    requested_size = page_size if page_size is not None else limit
+    if requested_size is None:
+        requested_size = GOAL_CATALOG_DEFAULT_PAGE_SIZE
+    try:
+        effective_page_size = int(requested_size)
+    except (TypeError, ValueError):
+        effective_page_size = 0
+    diagnostics: list[str] = []
+    input_contract_invalid = False
+    if effective_page_size <= 0:
+        effective_page_size = GOAL_CATALOG_DEFAULT_PAGE_SIZE
+        diagnostics.append("goal_catalog_page_size_invalid")
+        input_contract_invalid = True
+    effective_page_size = min(effective_page_size, GOAL_CATALOG_MAX_PAGE_SIZE)
+    normalized_order = str(order or "recent").strip().lower()
+    if normalized_order not in {"recent", "chronological"}:
+        normalized_order = "recent"
+        diagnostics.append("goal_catalog_order_invalid")
+        input_contract_invalid = True
+    normalized_target = str(target or "all")
+    source = goal_catalog_public_source_snapshot(
+        aoa_root=aoa_root,
+        target=normalized_target,
+    )
+    source_state = str(source.get("state") or "unknown")
+    source_items = [
+        item for item in source.get("items", []) if isinstance(item, dict)
+    ]
+    if normalized_order == "chronological":
+        source_items.sort(
+            key=lambda item: (
+                str(item.get("first_observed_at") or ""),
+                str(item.get("last_observed_at") or ""),
+                str(item.get("goal_instance_id") or ""),
+            )
+        )
+    else:
+        source_items.sort(
+            key=lambda item: (
+                str(item.get("last_observed_at") or ""),
+                str(item.get("first_observed_at") or ""),
+                str(item.get("goal_instance_id") or ""),
+            ),
+            reverse=True,
+        )
+    digested_items: list[dict[str, Any]] = []
+    for item in source_items:
+        item_without_digest = dict(item)
+        item_digest = goal_catalog_public_digest(item_without_digest)
+        digested_items.append({**item_without_digest, "item_digest": item_digest})
+
+    source_entries = source.get("source_entries", []) if isinstance(source.get("source_entries"), list) else []
+    source_watermark = {
+        "schema_version": 1,
+        "kind": "complete_session_index_set_v1",
+        "registry_digest": source.get("registry_digest"),
+        "source_set_digest": goal_catalog_public_digest(source_entries),
+        "session_count": len(source_entries),
+        "goal_lifecycle_count": len(digested_items),
+        "coverage": "complete" if source_state == "current" else "incomplete",
+        "max_updated_at": max(
+            (str(item.get("updated_at") or "") for item in source_entries),
+            default="",
+        ),
+        "max_raw_line_count": max(
+            (
+                int_value(
+                    (item.get("raw_watermark") or {}).get("lines"),
+                    0,
+                )
+                for item in source_entries
+                if isinstance(item.get("raw_watermark"), dict)
+            ),
+            default=0,
+        ),
+    }
+    snapshot_basis = {
+        "publication_schema_version": GOAL_CATALOG_PUBLICATION_SCHEMA_VERSION,
+        "target": normalized_target,
+        "order": normalized_order,
+        "source_generation": source.get("generation_identity", {}),
+        "goal_lifecycle_generation": source.get("goal_lifecycle_generation", {}),
+        "source_watermark": source_watermark,
+        "items": digested_items,
+    }
+    snapshot_digest = goal_catalog_public_digest(snapshot_basis)
+    input_cursor = str(cursor or "") or None
+    start = 0
+    query_state = "invalid" if input_contract_invalid else source_state
+    decoded_cursor: dict[str, Any] | None = None
+    if input_cursor is not None:
+        decoded_cursor = goal_catalog_public_decode_cursor(input_cursor)
+        if decoded_cursor is None:
+            query_state = "invalid"
+            diagnostics.append("goal_catalog_cursor_invalid")
+        elif str(decoded_cursor.get("target")) != normalized_target or str(decoded_cursor.get("order")) != normalized_order:
+            query_state = "invalid"
+            diagnostics.append("goal_catalog_cursor_query_mismatch")
+        elif int_value(decoded_cursor.get("page_size"), 0) != effective_page_size:
+            query_state = "invalid"
+            diagnostics.append("goal_catalog_cursor_page_size_mismatch")
+        elif str(decoded_cursor.get("snapshot_digest") or "") != snapshot_digest:
+            query_state = "stale"
+            diagnostics.append("goal_catalog_cursor_source_watermark_changed")
+        else:
+            start = int_value(decoded_cursor.get("offset"), 0)
+            if start > len(digested_items):
+                query_state = "invalid"
+                diagnostics.append("goal_catalog_cursor_offset_invalid")
+    admitted_items = digested_items if query_state == "current" else []
+    page_items = admitted_items[start : start + effective_page_size]
+    next_cursor: str | None = None
+    if query_state == "current" and start + len(page_items) < len(admitted_items):
+        next_cursor = goal_catalog_public_encode_cursor(
+            {
+                "version": GOAL_CATALOG_CURSOR_VERSION,
+                "snapshot_digest": snapshot_digest,
+                "target": normalized_target,
+                "order": normalized_order,
+                "offset": start + len(page_items),
+                "page_size": effective_page_size,
+            }
+        )
+    page_digest = goal_catalog_public_digest(
+        {
+            "snapshot_digest": snapshot_digest,
+            "cursor": input_cursor,
+            "offset": start,
+            "items": page_items,
+        }
+    )
+    counts = dict(
+        sorted(
+            Counter(
+                str(item.get("lifecycle_state") or "unknown")
+                for item in digested_items
+            ).items()
+        )
+    )
+    final_state = query_state if query_state in GOAL_CATALOG_PUBLIC_STATES else "unknown"
+    source_generation = source.get("generation_identity", {})
+    generated_at = utc_now()
+    output = {
+        "schema_version": GOAL_CATALOG_SCHEMA_VERSION,
+        "publication_schema_version": GOAL_CATALOG_PUBLICATION_SCHEMA_VERSION,
+        "artifact_type": "goal_catalog_projection",
+        "generated_at": generated_at,
+        "ok": final_state == "current",
+        "state": final_state,
+        "currentness": final_state,
+        "publication_state": "bound" if final_state == "current" else final_state,
+        "target": normalized_target,
+        "order": normalized_order,
+        "source": {
+            "owner": "aoa-session-memory",
+            "ref": "aoa-session-memory:goal-lifecycles",
+            "goal_lifecycle_schema_version": GOAL_LIFECYCLE_SCHEMA_VERSION,
+            "generation_identity": source_generation,
+            "goal_lifecycle_generation": source.get("goal_lifecycle_generation", {}),
+            "watermark": source_watermark,
+            "currentness": source_state,
+        },
+        "source_generation": source_generation,
+        "source_watermark": source_watermark,
+        "snapshot": {
+            "snapshot_ref": snapshot_digest,
+            "snapshot_digest": snapshot_digest,
+            "generated_at": generated_at,
+            "source_watermark": source_watermark,
+            "source_freshness": source_state,
+            "projection_freshness": final_state,
+            "immutable": True,
+        },
+        "pagination": {
+            "mode": "immutable_snapshot",
+            "cursor": input_cursor,
+            "next_cursor": next_cursor,
+            "complete_for_query": final_state == "current" and next_cursor is None,
+            "page_size": effective_page_size,
+            "supports_immutable_snapshot": True,
+        },
+        "page": {
+            "offset": start,
+            "item_count": len(page_items),
+            "page_digest": page_digest,
+        },
+        "snapshot_digest": snapshot_digest,
+        "page_digest": page_digest,
+        "source_item_count": len(digested_items) if source_state == "current" else 0,
+        "item_count": len(page_items),
+        "total_item_count": len(digested_items) if source_state == "current" else 0,
+        "lifecycle_group_count": (
+            len(
+                {
+                    str(
+                        (item.get("lifecycle_group") or {}).get("group_ref")
+                        if isinstance(item.get("lifecycle_group"), dict)
+                        else ""
+                    )
+                    for item in digested_items
+                }
+            )
+            if source_state == "current"
+            else 0
+        ),
+        "counts_by_lifecycle_state": counts if source_state == "current" else {},
+        "items": page_items,
+        "diagnostics": list(dict.fromkeys([*source.get("diagnostics", []), *diagnostics])),
+        "omissions": {
+            "transcript_body": True,
+            "prompt": True,
+            "private_objective": True,
+            "raw_session_path": True,
+            "cwd": True,
+            "usage": True,
+            "work_chain": True,
+            "actor_identity": True,
+            "model_provider": True,
+        },
+        "privacy": {
+            "scope": "owner_bounded_public_safe",
+            "allowlisted_fields": [
+                "goal_ref",
+                "goal_instance_id",
+                "goal_id",
+                "thread_id",
+                "safe_title_state",
+                "title",
+                "title_state",
+                "reason",
+                "lifecycle_state",
+                "lifecycle_group",
+                "thread_metadata_state",
+                "relation_state",
+                "first_observed_at",
+                "last_observed_at",
+                "evidence_ref",
+                "ambiguity",
+                "item_digest",
+            ],
+            "withheld_fields": [
+                "transcript_body",
+                "prompt",
+                "private_objective",
+                "raw_session_path",
+                "cwd",
+                "usage",
+                "work_chain",
+                "actor_identity",
+                "model_provider",
+            ],
+            "prohibited_join_keys": [
+                "raw_session_path",
+                "cwd",
+                "pid",
+                "unit",
+                "actor_identity",
+                "model_provider",
+            ],
+            "no_transcript_body": True,
+            "no_process_identity": True,
+            "no_actor_inference": True,
+        },
+        "claim_limit": (
+            "This is a public-safe generated Goal lifecycle navigation page. "
+            "It does not establish transcript truth, private objectives, branch "
+            "relations, participants, runtime health, proof, acceptance, or completion."
+        ),
+    }
+    return output
+
+
 TRACE_ROUTE_KINDS = {
     "auto",
     "entity",
@@ -205696,11 +206513,13 @@ def command_goal_lifecycles(args: argparse.Namespace) -> int:
 def command_goal_catalog(args: argparse.Namespace) -> int:
     explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
     root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
-    payload = goal_catalog_projection(
+    payload = goal_catalog_publication(
         aoa_root=root,
         target=args.target,
         limit=args.limit,
         order=args.order,
+        cursor=args.cursor,
+        page_size=args.page_size,
     )
     if args.output:
         write_json(Path(args.output).expanduser(), payload)
@@ -214395,7 +215214,9 @@ def add_goal_catalog_parser(parser: argparse.ArgumentParser) -> None:
     goal_catalog_parser.add_argument("target", nargs="?", default="all", help="Session label/id/title fragment or all.")
     goal_catalog_parser.add_argument("--workspace-root")
     goal_catalog_parser.add_argument("--aoa-root")
-    goal_catalog_parser.add_argument("--limit", type=int, default=100)
+    goal_catalog_parser.add_argument("--limit", type=int, default=None, help="Compatibility alias for --page-size.")
+    goal_catalog_parser.add_argument("--page-size", type=int, help="Number of public-safe Goal records in one immutable page.")
+    goal_catalog_parser.add_argument("--cursor", help="Opaque cursor returned by the previous immutable page.")
     goal_catalog_parser.add_argument("--order", choices=["recent", "chronological"], default="recent")
     goal_catalog_parser.add_argument("--output", help="Atomically write the published JSON snapshot to this explicit path.")
     goal_catalog_parser.set_defaults(func=command_goal_catalog)
