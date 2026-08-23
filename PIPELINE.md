@@ -1017,6 +1017,18 @@ matches only the exact execution-correlated progress receipts for its target.
 It reports `progress_recovered` alongside the unverified process result and
 retains the retry item until a later run proves the required watermark.
 
+Incremental search uses the same D-0092 publication-progress boundary at the
+session commit: an execution-correlated checkpoint records a monotonic cursor,
+phase, selected stable-publish identities, generation binding, and completed
+session summaries through an atomic write. A resumed execution skips only the
+committed prefix; an incompatible checkpoint or generation fails closed. The
+checkpoint is progress evidence, never semantic completion; the exact search
+consumer acknowledgement remains a separate outbox receipt. A targeted
+search-only resume may consume an already published stable snapshot while a
+new raw transcript tail remains a live overlay; it does not recapture or
+republish that stable snapshot inside the bounded search route. Global catalog,
+entity, graph, and other derivatives remain deferred to their owner routes.
+
 Interrupted projection stages are removable only after a stronger raw authority
 is verified again at deletion time. A content-addressed owner capture qualifies
 when its declared and actual SHA-256 both exactly match the staged raw; the
