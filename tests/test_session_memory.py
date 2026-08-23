@@ -76130,6 +76130,211 @@ def test_capture_watch_cli_routes_only_the_bounded_frontier(
     assert payload["raw_payload_read_for_unchanged_sources"] is False
 
 
+def test_capture_watch_time_budget_persists_retryable_progress(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    transcripts = []
+    for ordinal in range(2):
+        transcript = tmp_path / f"budget-{ordinal}.jsonl"
+        transcript.write_text(
+            json.dumps(
+                {
+                    "timestamp": f"2026-08-10T00:0{ordinal}:00Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": f"budget {ordinal}",
+                            }
+                        ],
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        transcripts.append(transcript)
+        module.register_capture_watch(
+            aoa_root=aoa_root,
+            session_id=f"budget-{ordinal}",
+            session_dir=aoa_root / "sessions" / f"budget-{ordinal}",
+            transcript_path=transcript,
+            observed_at=f"2026-08-10T00:0{ordinal}:01Z",
+        )
+
+    payload = module.reconcile_capture_watch(
+        aoa_root=aoa_root,
+        limit=2,
+        apply=True,
+        budget_seconds=0.0,
+        now="2026-08-10T00:02:00Z",
+    )
+
+    assert payload["ok"] is True
+    assert payload["status"] == "budget_exhausted"
+    assert payload["budget_exhausted"] is True
+    assert payload["completed_count"] == 0
+    assert payload["remaining_count"] == 2
+    assert payload["discovery_invoked"] is False
+    assert payload["projection_invoked"] is False
+    progress = module.read_json(
+        module.capture_watch_progress_path(aoa_root),
+        {},
+    )
+    assert progress["status"] == "budget_exhausted"
+    assert progress["completed_count"] == 0
+    assert progress["next_index"] == 0
+    assert progress["progress_sequence"] >= 3
+    state = module.read_json(
+        module.capture_watch_state_path(aoa_root),
+        {},
+    )
+    assert all(
+        "last_checked_at" not in item
+        for item in state["entries"].values()
+    )
+
+
+def test_capture_watch_preloads_registry_once_and_keeps_missing_manifest_local(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    for ordinal in range(3):
+        transcript = tmp_path / f"registry-{ordinal}.jsonl"
+        transcript.write_text("{\"row\": 1}\n", encoding="utf-8")
+        module.register_capture_watch(
+            aoa_root=aoa_root,
+            session_id=f"registry-{ordinal}",
+            session_dir=aoa_root / "sessions" / f"registry-{ordinal}",
+            transcript_path=transcript,
+            observed_at=f"2026-08-10T00:0{ordinal}:01Z",
+        )
+
+    original_read_json = module.read_json
+    registry_reads = 0
+    registry_path = aoa_root / module.REGISTRY_NAME
+
+    def counted_read_json(path: Path, default: Any) -> Any:
+        nonlocal registry_reads
+        if path == registry_path:
+            registry_reads += 1
+        return original_read_json(path, default)
+
+    monkeypatch.setattr(module, "read_json", counted_read_json)
+    payload = module.reconcile_capture_watch(
+        aoa_root=aoa_root,
+        limit=3,
+        apply=True,
+        budget_seconds=5.0,
+        now="2026-08-10T00:02:00Z",
+    )
+
+    assert payload["selected_count"] == 3
+    assert registry_reads == 1
+    assert payload["discovery_invoked"] is False
+    assert payload["projection_invoked"] is False
+    assert {
+        result["status"] for result in payload["results"]
+    } == {"capture_deferred_missing_manifest"}
+    assert all(
+        result.get("mutates") is False
+        for result in payload["results"]
+    )
+
+
+def test_capture_watch_resumes_from_matching_progress_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    for ordinal in range(2):
+        transcript = tmp_path / f"resume-{ordinal}.jsonl"
+        transcript.write_text("{\"row\": 1}\n", encoding="utf-8")
+        module.register_capture_watch(
+            aoa_root=aoa_root,
+            session_id=f"resume-{ordinal}",
+            session_dir=aoa_root / "sessions" / f"resume-{ordinal}",
+            transcript_path=transcript,
+            observed_at=f"2026-08-10T00:0{ordinal}:01Z",
+        )
+
+    original_deadline_check = module.capture_watch_deadline_check
+    item_start_checks = 0
+
+    def expire_on_second_item(
+        deadline_monotonic: float | None,
+        *,
+        stage: str,
+    ) -> None:
+        nonlocal item_start_checks
+        if stage == "item_start":
+            item_start_checks += 1
+            if item_start_checks == 2:
+                raise module.CaptureWatchBudgetExceeded(
+                    stage=stage,
+                    detail="test_budget_boundary",
+                )
+        original_deadline_check(None, stage=stage)
+
+    monkeypatch.setattr(
+        module,
+        "capture_watch_deadline_check",
+        expire_on_second_item,
+    )
+    first = module.reconcile_capture_watch(
+        aoa_root=aoa_root,
+        limit=2,
+        apply=True,
+        budget_seconds=5.0,
+        now="2026-08-10T00:02:00Z",
+    )
+
+    assert first["status"] == "budget_exhausted"
+    assert first["completed_count"] == 1
+    assert first["remaining_count"] == 1
+    assert first["progress_receipt"]["next_index"] == 1
+
+    monkeypatch.setattr(
+        module,
+        "capture_watch_deadline_check",
+        original_deadline_check,
+    )
+    resumed = module.reconcile_capture_watch(
+        aoa_root=aoa_root,
+        limit=2,
+        apply=True,
+        budget_seconds=5.0,
+        now="2026-08-10T00:03:00Z",
+    )
+
+    assert resumed["status"] == "applied"
+    assert resumed["resume_from_index"] == 1
+    assert resumed["completed_count"] == 2
+    assert resumed["remaining_count"] == 0
+    assert len(resumed["results"]) == 1
+    resumed_state = module.read_json(
+        module.capture_watch_state_path(aoa_root),
+        {},
+    )
+    assert (
+        resumed_state["entries"]["resume-0"]["last_checked_at"]
+        == "2026-08-10T00:02:00Z"
+    )
+    assert (
+        resumed_state["entries"]["resume-1"]["last_checked_at"]
+        == "2026-08-10T00:03:00Z"
+    )
+    assert module.read_json(
+        module.capture_watch_progress_path(aoa_root),
+        {},
+    )["status"] == "completed"
+
+
 def test_hot_timer_recovers_missed_hook_without_archive_rediscovery(
     tmp_path: Path,
 ) -> None:
@@ -96079,6 +96284,10 @@ def test_install_upgrade_can_render_named_systemd_units_without_activation(
     )
     capture_text = (unit_dir / module.SESSION_MEMORY_CAPTURE_SERVICE).read_text(encoding="utf-8")
     assert "capture-watch" in capture_text
+    assert (
+        f"--budget-seconds {int(module.CAPTURE_WATCH_DEFAULT_BUDGET_SECONDS)}"
+        in capture_text
+    )
     assert "sweep-codex-sessions" not in capture_text
     assert "systemctl" not in json.dumps(payload, ensure_ascii=False)
 

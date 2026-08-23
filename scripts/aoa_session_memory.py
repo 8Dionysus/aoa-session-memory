@@ -160,7 +160,7 @@ DECLARED_GRAPH_PROJECTION_GENERATION_TRANSITIONS: dict[
     # still conditional on reconstructing the exact predecessor identity from
     # its source and on the complete graph materialization proof performed by
     # graph-registry-rebind.
-    "be57a55d41ef62b8e66c4ac8b1952a6b3b75bb9f821dcbed8df7f9925fb2268f": (
+    "bd77b499869a016f1914298f5e49eb696e29fe90633cb95253b312575c298d6e": (
         {
             # AOA-SM-D-0092: the previous current graph is admitted only when
             # the exact source-line bytes reconstruct its prior identity.
@@ -622,6 +622,10 @@ PERSISTENT_LIVE_TAIL_POSTINGS_PREDECESSOR_GENERATION_IDS = frozenset(
 CAPTURE_WATCH_STATE_JSON = "capture-watch-state.json"
 CAPTURE_WATCH_STATE_LOCK = "capture-watch-state.lock"
 CAPTURE_WATCH_STATE_SCHEMA_VERSION = 1
+CAPTURE_WATCH_PROGRESS_JSON = "capture-watch-progress.json"
+CAPTURE_WATCH_PROGRESS_SCHEMA_VERSION = 1
+CAPTURE_WATCH_DEFAULT_BUDGET_SECONDS = 90.0
+CAPTURE_WATCH_LOCK_POLL_SECONDS = 0.01
 RAW_BLOCKS_DIR = "blocks"
 RAW_BLOCK_INDEX_JSON = "blocks.index.json"
 RAW_COMPACTION_EVENTS_JSONL = "compaction-events.jsonl"
@@ -30960,6 +30964,121 @@ def capture_watch_state_lock_path(aoa_root: Path) -> Path:
     return aoa_root / DIAGNOSTICS_ROOT / CAPTURE_WATCH_STATE_LOCK
 
 
+def capture_watch_progress_path(aoa_root: Path) -> Path:
+    return aoa_root / DIAGNOSTICS_ROOT / CAPTURE_WATCH_PROGRESS_JSON
+
+
+class CaptureWatchBudgetExceeded(RuntimeError):
+    """Cooperative capture-watch exit that leaves the current item retryable."""
+
+    def __init__(
+        self,
+        *,
+        stage: str,
+        detail: str = "cooperative_time_budget_reached",
+        lock_wait_ms: int = 0,
+    ) -> None:
+        self.stage = stage
+        self.detail = detail
+        self.lock_wait_ms = max(0, int(lock_wait_ms))
+        super().__init__(f"{stage}:{detail}")
+
+
+def capture_watch_deadline_check(
+    deadline_monotonic: float | None,
+    *,
+    stage: str,
+) -> None:
+    if (
+        deadline_monotonic is not None
+        and time.monotonic() >= deadline_monotonic
+    ):
+        raise CaptureWatchBudgetExceeded(stage=stage)
+
+
+def capture_watch_process_io() -> dict[str, int]:
+    """Read process-local Linux I/O counters without touching session data."""
+    counters = {
+        "read_bytes": 0,
+        "write_bytes": 0,
+        "rchar": 0,
+        "wchar": 0,
+        "syscr": 0,
+        "syscw": 0,
+    }
+    try:
+        for line in Path("/proc/self/io").read_text(
+            encoding="utf-8"
+        ).splitlines():
+            key, separator, value = line.partition(":")
+            if separator and key.strip() in counters:
+                counters[key.strip()] = int_value(value.strip(), 0)
+    except (OSError, ValueError):
+        pass
+    return counters
+
+
+def capture_watch_selection_digest(
+    selected: Sequence[dict[str, Any]],
+) -> str:
+    identity = [
+        {
+            "session_id": str(item.get("session_id") or ""),
+            "observed_at": str(item.get("observed_at") or ""),
+            "last_checked_at": str(item.get("last_checked_at") or ""),
+            "transcript_path": str(item.get("transcript_path") or ""),
+        }
+        for item in selected
+    ]
+    encoded = json.dumps(
+        identity,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+
+
+def acquire_capture_watch_lock(
+    lock_path: Path,
+    *,
+    deadline_monotonic: float | None,
+    stage: str,
+) -> tuple[Any, int]:
+    """Acquire a capture lock without blocking beyond the cooperative budget."""
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_path.open("a+", encoding="utf-8")
+    started = time.monotonic()
+    try:
+        while True:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return handle, int((time.monotonic() - started) * 1000)
+            except BlockingIOError:
+                now = time.monotonic()
+                if (
+                    deadline_monotonic is not None
+                    and now >= deadline_monotonic
+                ):
+                    raise CaptureWatchBudgetExceeded(
+                        stage=stage,
+                        detail="capture_lock_wait_budget_exhausted",
+                        lock_wait_ms=int((now - started) * 1000),
+                    )
+                sleep_seconds = CAPTURE_WATCH_LOCK_POLL_SECONDS
+                if deadline_monotonic is not None:
+                    sleep_seconds = min(
+                        sleep_seconds,
+                        max(0.0, deadline_monotonic - now),
+                    )
+                if sleep_seconds <= 0:
+                    continue
+                time.sleep(sleep_seconds)
+    except Exception:
+        handle.close()
+        raise
+
+
 def register_capture_watch(
     *,
     aoa_root: Path,
@@ -31028,9 +31147,23 @@ def reconcile_capture_watch(
     apply: bool,
     target: str = "all",
     now: str | None = None,
+    budget_seconds: float | None = CAPTURE_WATCH_DEFAULT_BUDGET_SECONDS,
 ) -> dict[str, Any]:
     """Recover missed capture hooks from a bounded watched-source frontier."""
     checked_at = now or utc_now()
+    execution_started = time.monotonic()
+    process_cpu_started = time.process_time()
+    process_io_started = capture_watch_process_io()
+    effective_budget_seconds = (
+        None
+        if budget_seconds is None
+        else max(0.0, float(budget_seconds))
+    )
+    deadline_monotonic = (
+        None
+        if effective_budget_seconds is None
+        else execution_started + effective_budget_seconds
+    )
     path = capture_watch_state_path(aoa_root)
     state = read_json(path, {})
     entries = (
@@ -31039,25 +31172,212 @@ def reconcile_capture_watch(
         and isinstance(state.get("entries"), dict)
         else {}
     )
+    eligible = [
+        dict(item)
+        for item in entries.values()
+        if isinstance(item, dict)
+        and (
+            target == "all"
+            or str(item.get("session_id") or "") == target
+        )
+    ]
     selected = sorted(
-        (
-            dict(item)
-            for item in entries.values()
-            if isinstance(item, dict)
-            and (
-                target == "all"
-                or str(item.get("session_id") or "") == target
-            )
-        ),
+        eligible,
         key=lambda item: (
             str(item.get("last_checked_at") or ""),
             str(item.get("observed_at") or ""),
             str(item.get("session_id") or ""),
         ),
     )[: max(0, limit)]
+    selection_digest = capture_watch_selection_digest(selected)
+    registry = read_json(aoa_root / REGISTRY_NAME, {"sessions": []})
+    registry_paths: dict[str, Path] = {}
+    registry_sessions = (
+        registry.get("sessions")
+        if isinstance(registry, dict)
+        and isinstance(registry.get("sessions"), list)
+        else []
+    )
+    for registry_item in registry_sessions:
+        if not isinstance(registry_item, dict):
+            continue
+        session_id = str(registry_item.get("session_id") or "")
+        path_value = str(registry_item.get("path") or "")
+        if not session_id or not path_value:
+            continue
+        candidate = Path(path_value)
+        if candidate.exists():
+            registry_paths[session_id] = candidate
+
+    progress_path = capture_watch_progress_path(aoa_root)
+    prior_progress = read_json(progress_path, {})
+    resume_from_index = 0
+    if (
+        isinstance(prior_progress, dict)
+        and prior_progress.get("status") == "budget_exhausted"
+        and str(prior_progress.get("selection_digest") or "")
+        == selection_digest
+    ):
+        prior_next_index = int_value(
+            prior_progress.get("next_index"),
+        )
+        if 0 < prior_next_index <= len(selected):
+            resume_from_index = prior_next_index
+    progress_sequence = 0
+    latest_progress: dict[str, Any] = {}
+    stage_totals_ms: dict[str, int] = {}
+    stage_counts: dict[str, int] = {}
+    lock_wait_ms = 0
     results: list[dict[str, Any]] = []
     updates: dict[str, dict[str, Any]] = {}
-    for watched in selected:
+    if resume_from_index:
+        prior_completed_updates = prior_progress.get(
+            "completed_updates"
+        )
+        if isinstance(prior_completed_updates, dict):
+            updates = {
+                str(session_id): dict(update)
+                for session_id, update in prior_completed_updates.items()
+                if isinstance(update, dict)
+            }
+    completed_count = resume_from_index
+    budget_exhausted = False
+    deferred_stage = ""
+    state_update_deferred = False
+
+    def publish_progress(
+        *,
+        status: str,
+        phase: str,
+        completed: int,
+        next_index: int,
+        current: dict[str, Any] | None = None,
+        diagnostics: list[str] | None = None,
+    ) -> None:
+        nonlocal progress_sequence, latest_progress
+        progress_sequence += 1
+        current = current or {}
+        capture_execution = (
+            current.get("capture_execution")
+            if isinstance(current.get("capture_execution"), dict)
+            else {}
+        )
+        latest_progress = {
+            "schema_version": CAPTURE_WATCH_PROGRESS_SCHEMA_VERSION,
+            "artifact_type": "session_memory_capture_watch_progress",
+            "execution_id": execution_id,
+            "updated_at": utc_now(),
+            "progress_sequence": progress_sequence,
+            "status": status,
+            "phase": phase,
+            "frontier_count": len(entries),
+            "eligible_count": len(eligible),
+            "selected_count": len(selected),
+            "selection_limit": max(0, int(limit)),
+            "selection_rule": (
+                "sort(last_checked_at||empty, observed_at, session_id)"
+                "[:limit]"
+            ),
+            "selection_digest": selection_digest,
+            "completed_count": max(0, int(completed)),
+            "next_index": max(0, int(next_index)),
+            "resume_from_index": resume_from_index,
+            "remaining_count": max(0, len(selected) - int(completed)),
+            "current_session_id": str(
+                current.get("session_id") or ""
+            ),
+            "current_stage": str(current.get("current_stage") or ""),
+            "last_result_status": str(current.get("status") or ""),
+            "last_source_snapshot": (
+                dict(current.get("source_snapshot"))
+                if isinstance(current.get("source_snapshot"), dict)
+                else {}
+            ),
+            "capture_execution": capture_execution,
+            "completed_updates": {
+                str(session_id): dict(update)
+                for session_id, update in updates.items()
+                if isinstance(update, dict)
+            },
+            "budget_seconds": effective_budget_seconds,
+            "process_cpu_time_ms": int(
+                (time.process_time() - process_cpu_started) * 1000
+            ),
+            "process_io": capture_watch_process_io(),
+            "lock_wait_ms": lock_wait_ms,
+            "diagnostics": list(diagnostics or []),
+            "truth_status": (
+                "bounded_known_source_capture_progress_not_global_discovery"
+            ),
+        }
+        write_json_durable(progress_path, latest_progress)
+
+    execution_id = (
+        f"capture-watch-{compact_stamp()}-{os.getpid()}-"
+        f"{uuid.uuid4().hex[:10]}"
+    )
+    publish_progress(
+        status="started",
+        phase=(
+            "selection_complete"
+            if resume_from_index == 0
+            else "resumed_from_progress"
+        ),
+        completed=resume_from_index,
+        next_index=resume_from_index,
+        diagnostics=(
+            ["resumed_from_prior_budget_progress"]
+            if resume_from_index
+            else []
+        ),
+    )
+
+    def run_stage(
+        result: dict[str, Any],
+        stage: str,
+        operation: Callable[[], Any],
+    ) -> Any:
+        stage_started_at = utc_now()
+        stage_started = time.monotonic()
+        result["current_stage"] = stage
+        try:
+            capture_watch_deadline_check(
+                deadline_monotonic,
+                stage=stage,
+            )
+            return operation()
+        finally:
+            elapsed_ms = max(
+                0,
+                int((time.monotonic() - stage_started) * 1000),
+            )
+            result.setdefault("stage_timings_ms", {})[stage] = elapsed_ms
+            result.setdefault("stage_timestamps", {})[stage] = {
+                "started_at": stage_started_at,
+                "finished_at": utc_now(),
+            }
+            stage_totals_ms[stage] = (
+                stage_totals_ms.get(stage, 0) + elapsed_ms
+            )
+            stage_counts[stage] = stage_counts.get(stage, 0) + 1
+
+    def resolve_watched_session_dir(
+        watched: dict[str, Any],
+        session_id: str,
+    ) -> Path:
+        registered = registry_paths.get(session_id)
+        stored_value = str(watched.get("session_dir") or "")
+        stored = Path(stored_value) if stored_value else None
+        if registered is not None:
+            return registered
+        if stored is not None:
+            return stored
+        return default_session_dir(aoa_root, session_id)
+
+    for index, watched in enumerate(
+        selected[resume_from_index:],
+        start=resume_from_index,
+    ):
         session_id = str(watched.get("session_id") or "")
         transcript_path = Path(
             str(watched.get("transcript_path") or "")
@@ -31067,167 +31387,318 @@ def reconcile_capture_watch(
             "transcript_path": str(transcript_path),
             "status": "unchanged",
             "mutates": False,
+            "selection_index": index,
+            "current_stage": "item_start",
+            "stage_timings_ms": {},
+            "stage_timestamps": {},
         }
-        if (
-            not session_id
-            or not transcript_path.is_file()
-            or not os.access(transcript_path, os.R_OK)
-        ):
-            result["status"] = "source_unavailable"
-            results.append(result)
-            updates[session_id] = {
-                "last_checked_at": checked_at,
-                "last_status": result["status"],
-            }
-            continue
-        source_snapshot = file_snapshot(transcript_path)
-        resolved_session_dir = session_dir_for_id(
-            aoa_root, session_id
-        )
-        stored_session_dir = Path(
-            str(watched.get("session_dir") or resolved_session_dir)
-        )
-        session_dir = (
-            resolved_session_dir
-            if resolved_session_dir.exists()
-            else stored_session_dir
-        )
-        manifest = read_json(
-            session_dir / "session.manifest.json", {}
-        )
-        capture_state = raw_capture_state_for_session(session_dir)
-        captured_snapshot = (
-            capture_state.get("source_snapshot_after")
-            if isinstance(
-                capture_state.get("source_snapshot_after"), dict
+        try:
+            capture_watch_deadline_check(
+                deadline_monotonic,
+                stage="item_start",
             )
-            else {}
-        )
-        capture_current = bool(
-            str(capture_state.get("source_path") or "")
-            == str(transcript_path)
-            and int_value(captured_snapshot.get("size"), -1)
-            == int_value(source_snapshot.get("size"), -2)
-            and int_value(captured_snapshot.get("mtime_ns"), -1)
-            == int_value(source_snapshot.get("mtime_ns"), -2)
-        )
-        result["source_snapshot"] = source_snapshot
-        result["capture_current_before"] = capture_current
-        if not capture_current:
-            result["status"] = "capture_change_detected"
-            if apply:
-                if isinstance(manifest, dict) and manifest.get(
-                    "session_id"
-                ):
-                    captured = preserve_unindexed_raw_capture(
-                        session_dir=session_dir,
-                        session_id=session_id,
-                        transcript_path=transcript_path,
-                        manifest=manifest,
-                        hook_event_name="TimerWatchRecovery",
-                        now=checked_at,
-                    )
-                    result.update(
-                        {
-                            "status": "missed_hook_capture_recovered",
-                            "mutates": True,
-                            "session_dir": str(session_dir),
-                            "appended_bytes": int_value(
-                                captured.get("appended_bytes")
-                            ),
-                            "capture_ref": str(
-                                captured.get("capture_ref") or ""
-                            ),
-                        }
-                    )
-                else:
-                    mirrored = mirror_transcript_without_indexing(
-                        aoa_root=aoa_root,
-                        event={
-                            "session_id": session_id,
-                            "transcript_path": str(transcript_path),
-                        },
-                        transcript_path=transcript_path,
-                        hook_event_name="TimerWatchRecovery",
-                        now=checked_at,
-                    )
-                    result.update(
-                        {
-                            "status": "missed_hook_session_recovered",
-                            "mutates": True,
-                            "session_dir": str(
-                                mirrored.get("session_dir") or ""
-                            ),
-                            "appended_bytes": int_value(
-                                mirrored.get("capture", {}).get(
-                                    "appended_bytes"
-                                )
-                                if isinstance(
-                                    mirrored.get("capture"), dict
-                                )
-                                else 0
-                            ),
-                        }
-                    )
-        results.append(result)
-        updates[session_id] = {
-            "last_checked_at": checked_at,
-            "last_status": result["status"],
-            "last_source_size": int_value(
-                source_snapshot.get("size"), -1
-            ),
-            "last_source_mtime_ns": int_value(
-                source_snapshot.get("mtime_ns"), -1
-            ),
-        }
-    if apply and updates:
-        lock_path = capture_watch_state_lock_path(aoa_root)
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-        with lock_path.open("w", encoding="utf-8") as lock_handle:
-            fcntl.flock(lock_handle, fcntl.LOCK_EX)
-            current = read_json(path, {})
-            current_entries = (
-                dict(current.get("entries"))
-                if isinstance(current, dict)
-                and isinstance(current.get("entries"), dict)
-                else {}
+            source_available = run_stage(
+                result,
+                "source_stat",
+                lambda: bool(
+                    session_id
+                    and transcript_path.is_file()
+                    and os.access(transcript_path, os.R_OK)
+                ),
             )
-            for session_id, update in updates.items():
-                if not session_id:
-                    continue
-                prior = (
-                    dict(current_entries.get(session_id))
+            if not source_available:
+                result["status"] = "source_unavailable"
+                updates[session_id] = {
+                    "last_checked_at": checked_at,
+                    "last_status": result["status"],
+                }
+            else:
+                source_snapshot = run_stage(
+                    result,
+                    "source_snapshot",
+                    lambda: file_snapshot(transcript_path),
+                )
+                result["source_snapshot"] = source_snapshot
+                resolved_session_dir = run_stage(
+                    result,
+                    "session_resolution",
+                    lambda: resolve_watched_session_dir(
+                        watched,
+                        session_id,
+                    ),
+                )
+                session_dir = Path(resolved_session_dir)
+                result["session_dir"] = str(session_dir)
+                manifest, capture_state = run_stage(
+                    result,
+                    "metadata",
+                    lambda: (
+                        read_json(
+                            session_dir / "session.manifest.json",
+                            {},
+                        ),
+                        raw_capture_state_for_session(session_dir),
+                    ),
+                )
+                captured_snapshot = (
+                    capture_state.get("source_snapshot_after")
                     if isinstance(
-                        current_entries.get(session_id), dict
+                        capture_state.get("source_snapshot_after"),
+                        dict,
                     )
                     else {}
                 )
-                current_entries[session_id] = {**prior, **update}
-            write_json(
-                path,
-                {
-                    "schema_version": (
-                        CAPTURE_WATCH_STATE_SCHEMA_VERSION
+                capture_current = bool(
+                    str(capture_state.get("source_path") or "")
+                    == str(transcript_path)
+                    and int_value(captured_snapshot.get("size"), -1)
+                    == int_value(source_snapshot.get("size"), -2)
+                    and int_value(
+                        captured_snapshot.get("mtime_ns"),
+                        -1,
+                    )
+                    == int_value(source_snapshot.get("mtime_ns"), -2)
+                )
+                result["capture_current_before"] = capture_current
+                if not capture_current:
+                    result["status"] = "capture_change_detected"
+                    if apply:
+                        if not (
+                            isinstance(manifest, dict)
+                            and manifest.get("session_id")
+                        ):
+                            result["status"] = (
+                                "capture_deferred_missing_manifest"
+                            )
+                            result.setdefault("diagnostics", []).append(
+                                "capture_only_does_not_invoke_session_mirror"
+                            )
+                        else:
+                            captured = run_stage(
+                                result,
+                                "capture",
+                                lambda: preserve_unindexed_raw_capture(
+                                    session_dir=session_dir,
+                                    session_id=session_id,
+                                    transcript_path=transcript_path,
+                                    manifest=manifest,
+                                    hook_event_name="TimerWatchRecovery",
+                                    now=checked_at,
+                                    cooperative_deadline_monotonic=(
+                                        deadline_monotonic
+                                    ),
+                                ),
+                            )
+                            result.update(
+                                {
+                                    "status": (
+                                        "missed_hook_capture_recovered"
+                                    ),
+                                    "mutates": True,
+                                    "appended_bytes": int_value(
+                                        captured.get("appended_bytes")
+                                    ),
+                                    "capture_ref": str(
+                                        captured.get("capture_ref") or ""
+                                    ),
+                                    "capture_execution": (
+                                        dict(
+                                            captured.get(
+                                                "capture_execution"
+                                            )
+                                        )
+                                        if isinstance(
+                                            captured.get(
+                                                "capture_execution"
+                                            ),
+                                            dict,
+                                        )
+                                        else {}
+                                    ),
+                                }
+                            )
+                updates[session_id] = {
+                    "last_checked_at": checked_at,
+                    "last_status": result["status"],
+                    "last_source_size": int_value(
+                        source_snapshot.get("size"),
+                        -1,
                     ),
-                    "artifact_type": (
-                        "session_memory_capture_watch_state"
+                    "last_source_mtime_ns": int_value(
+                        source_snapshot.get("mtime_ns"),
+                        -1,
                     ),
-                    "updated_at": checked_at,
-                    "entries": current_entries,
-                    "authority": (
-                        "operational_source_watch_only_raw_capture_is_authority"
-                    ),
-                },
+                }
+            result["current_stage"] = "item_complete"
+            results.append(result)
+            completed_count += 1
+            publish_progress(
+                status="running",
+                phase="item_complete",
+                completed=completed_count,
+                next_index=index + 1,
+                current=result,
             )
+        except CaptureWatchBudgetExceeded as exc:
+            result.update(
+                {
+                    "status": "deferred_time_budget",
+                    "mutates": False,
+                    "budget_exhausted": True,
+                    "deferred_stage": exc.stage,
+                    "deferred_reason": exc.detail,
+                    "retryable": True,
+                    "partial_artifacts_possible": True,
+                }
+            )
+            if exc.lock_wait_ms:
+                lock_wait_ms += exc.lock_wait_ms
+            result.setdefault("diagnostics", []).append(str(exc))
+            results.append(result)
+            budget_exhausted = True
+            deferred_stage = exc.stage
+            publish_progress(
+                status="budget_exhausted",
+                phase=exc.stage,
+                completed=completed_count,
+                next_index=index,
+                current=result,
+                diagnostics=[str(exc)],
+            )
+            break
+
+    if apply and updates and not budget_exhausted:
+        publication_result: dict[str, Any] = {
+            "current_stage": "state_publication",
+            "stage_timings_ms": {},
+            "stage_timestamps": {},
+        }
+
+        def publish_state() -> int:
+            nonlocal lock_wait_ms
+            lock_path = capture_watch_state_lock_path(aoa_root)
+            lock_handle, waited_ms = acquire_capture_watch_lock(
+                lock_path,
+                deadline_monotonic=deadline_monotonic,
+                stage="state_lock_wait",
+            )
+            lock_wait_ms += waited_ms
+            try:
+                current = read_json(path, {})
+                current_entries = (
+                    dict(current.get("entries"))
+                    if isinstance(current, dict)
+                    and isinstance(current.get("entries"), dict)
+                    else {}
+                )
+                for session_id, update in updates.items():
+                    if not session_id:
+                        continue
+                    prior = (
+                        dict(current_entries.get(session_id))
+                        if isinstance(
+                            current_entries.get(session_id),
+                            dict,
+                        )
+                        else {}
+                    )
+                    current_entries[session_id] = {**prior, **update}
+                write_json_durable(
+                    path,
+                    {
+                        "schema_version": (
+                            CAPTURE_WATCH_STATE_SCHEMA_VERSION
+                        ),
+                        "artifact_type": (
+                            "session_memory_capture_watch_state"
+                        ),
+                        "updated_at": checked_at,
+                        "entries": current_entries,
+                        "authority": (
+                            "operational_source_watch_only_raw_capture_is_authority"
+                        ),
+                    },
+                )
+                return waited_ms
+            finally:
+                fcntl.flock(lock_handle, fcntl.LOCK_UN)
+                lock_handle.close()
+
+        try:
+            run_stage(
+                publication_result,
+                "state_publication",
+                publish_state,
+            )
+        except CaptureWatchBudgetExceeded as exc:
+            budget_exhausted = True
+            state_update_deferred = True
+            deferred_stage = exc.stage
+            if exc.lock_wait_ms:
+                lock_wait_ms += exc.lock_wait_ms
+            publish_progress(
+                status="budget_exhausted",
+                phase=exc.stage,
+                completed=completed_count,
+                next_index=completed_count,
+                current=publication_result,
+                diagnostics=[str(exc)],
+            )
+
+    if budget_exhausted:
+        final_status = "budget_exhausted"
+        publish_progress(
+            status="budget_exhausted",
+            phase="budget_exit",
+            completed=completed_count,
+            next_index=completed_count,
+            current=(results[-1] if results else None),
+            diagnostics=(
+                [f"deferred_stage:{deferred_stage}"]
+                if deferred_stage
+                else []
+            ),
+        )
+    else:
+        final_status = "applied" if apply else "planned"
+        publish_progress(
+            status="completed",
+            phase="complete",
+            completed=completed_count,
+            next_index=len(selected),
+            current=(results[-1] if results else None),
+        )
+
+    process_io_finished = capture_watch_process_io()
+    process_io_delta = {
+        key: max(
+            0,
+            int(process_io_finished.get(key, 0))
+            - int(process_io_started.get(key, 0)),
+        )
+        for key in process_io_finished
+    }
     return {
         "schema_version": CAPTURE_WATCH_STATE_SCHEMA_VERSION,
         "artifact_type": "session_memory_capture_watch_reconciliation",
         "generated_at": checked_at,
+        "execution_id": execution_id,
         "ok": True,
-        "status": "applied" if apply else "planned",
+        "status": final_status,
         "apply": apply,
+        "budget_seconds": effective_budget_seconds,
         "watched_source_count": len(entries),
+        "eligible_source_count": len(eligible),
         "selected_count": len(selected),
+        "frontier_count": len(entries),
+        "selection_limit": max(0, int(limit)),
+        "selection_rule": (
+            "sort(last_checked_at||empty, observed_at, session_id)[:limit]"
+        ),
+        "selection_digest": selection_digest,
+        "resume_from_index": resume_from_index,
+        "completed_count": completed_count,
+        "remaining_count": max(0, len(selected) - completed_count),
         "changed_count": sum(
             result.get("capture_current_before") is False
             for result in results
@@ -31235,8 +31706,33 @@ def reconcile_capture_watch(
         "recovered_count": sum(
             bool(result.get("mutates")) for result in results
         ),
+        "budget_exhausted": budget_exhausted,
+        "deferred_stage": deferred_stage,
+        "state_update_deferred": state_update_deferred,
+        "progress_receipt": {
+            "path": str(progress_path),
+            "execution_id": execution_id,
+            "progress_sequence": progress_sequence,
+            "status": latest_progress.get("status"),
+            "completed_count": latest_progress.get("completed_count"),
+            "next_index": latest_progress.get("next_index"),
+        },
+        "process_cpu_time_ms": int(
+            (time.process_time() - process_cpu_started) * 1000
+        ),
+        "process_io": {
+            "before": process_io_started,
+            "after": process_io_finished,
+            "delta": process_io_delta,
+        },
+        "lock_wait_ms": lock_wait_ms,
+        "stage_timings_ms": stage_totals_ms,
+        "stage_counts": stage_counts,
         "archive_manifest_scan_performed": False,
         "raw_payload_read_for_unchanged_sources": False,
+        "discovery_invoked": False,
+        "projection_invoked": False,
+        "global_maintenance_invoked": False,
         "results": results,
         "truth_status": (
             "bounded_known_source_reconciliation_not_global_source_discovery"
@@ -31391,6 +31887,7 @@ def persistent_live_tail_postings_complete_end(
     path: Path,
     *,
     start_offset: int,
+    cooperative_deadline_monotonic: float | None = None,
 ) -> int:
     """Return the captured offset through the last complete JSONL line."""
     size = path.stat().st_size
@@ -31402,6 +31899,10 @@ def persistent_live_tail_postings_complete_end(
             return size
         cursor = size
         while cursor > start_offset:
+            capture_watch_deadline_check(
+                cooperative_deadline_monotonic,
+                stage="postings_frontier_scan",
+            )
             chunk_start = max(start_offset, cursor - 65536)
             handle.seek(chunk_start)
             payload = handle.read(cursor - chunk_start)
@@ -31417,10 +31918,15 @@ def iter_persistent_live_tail_complete_lines(
     *,
     start_offset: int,
     end_offset: int,
+    cooperative_deadline_monotonic: float | None = None,
 ) -> Iterator[tuple[int, bytes, str]]:
     with path.open("rb") as handle:
         handle.seek(start_offset)
         while handle.tell() < end_offset:
+            capture_watch_deadline_check(
+                cooperative_deadline_monotonic,
+                stage="postings_line_scan",
+            )
             byte_offset = handle.tell()
             raw_line = handle.readline(end_offset - byte_offset)
             if not raw_line or not raw_line.endswith(b"\n"):
@@ -31481,9 +31987,14 @@ def persistent_live_tail_bootstrap_frontier(
     projection_raw_bytes: int,
     projection_raw_line_count: int,
     complete_end: int,
+    cooperative_deadline_monotonic: float | None = None,
 ) -> dict[str, Any]:
     """Choose a recent complete-line window without scanning old raw history."""
     available_bytes = max(0, complete_end - projection_raw_bytes)
+    capture_watch_deadline_check(
+        cooperative_deadline_monotonic,
+        stage="postings_bootstrap",
+    )
     if available_bytes <= PERSISTENT_LIVE_TAIL_POSTINGS_BOOTSTRAP_MAX_BYTES:
         return {
             "start_byte": projection_raw_bytes,
@@ -31856,8 +32367,13 @@ def update_persistent_live_tail_postings(
     projection_raw_bytes: int,
     projection_raw_line_count: int,
     now: str,
+    cooperative_deadline_monotonic: float | None = None,
 ) -> dict[str, Any]:
     """Index new complete lines into bounded shards and a compact manifest."""
+    capture_watch_deadline_check(
+        cooperative_deadline_monotonic,
+        stage="postings_start",
+    )
     path = persistent_live_tail_postings_path(session_dir)
     generation_identity = (
         persistent_live_tail_postings_generation_identity()
@@ -31994,6 +32510,7 @@ def update_persistent_live_tail_postings(
     complete_end = persistent_live_tail_postings_complete_end(
         materialization_path,
         start_offset=processed_bytes,
+        cooperative_deadline_monotonic=cooperative_deadline_monotonic,
     )
     bootstrap = {
         "start_byte": int_value(
@@ -32029,6 +32546,7 @@ def update_persistent_live_tail_postings(
             projection_raw_bytes=processed_bytes,
             projection_raw_line_count=processed_line_count,
             complete_end=complete_end,
+            cooperative_deadline_monotonic=cooperative_deadline_monotonic,
         )
         processed_bytes = int_value(bootstrap.get("start_byte"))
         processed_line_count = int_value(
@@ -32104,6 +32622,9 @@ def update_persistent_live_tail_postings(
                 materialization_path,
                 start_offset=processed_bytes,
                 end_offset=complete_end,
+                cooperative_deadline_monotonic=(
+                    cooperative_deadline_monotonic
+                ),
             )
         )
     )
@@ -32119,6 +32640,10 @@ def update_persistent_live_tail_postings(
         descriptor: dict[str, Any],
     ) -> list[dict[str, Any]]:
         nonlocal shards_read_for_update
+        capture_watch_deadline_check(
+            cooperative_deadline_monotonic,
+            stage="postings_descriptor_read",
+        )
         payload = read_persistent_live_tail_postings_descriptor(
             session_dir=session_dir,
             session_id=session_id,
@@ -32141,8 +32666,15 @@ def update_persistent_live_tail_postings(
                 materialization_path,
                 start_offset=processed_bytes,
                 end_offset=complete_end,
+                cooperative_deadline_monotonic=(
+                    cooperative_deadline_monotonic
+                ),
             )
         ):
+            capture_watch_deadline_check(
+                cooperative_deadline_monotonic,
+                stage="postings_entry_build",
+            )
             yield persistent_live_tail_posting_entry(
                 raw_line=raw_line,
                 raw_text=raw_text,
@@ -32198,6 +32730,10 @@ def update_persistent_live_tail_postings(
         nonlocal shard_buffer, next_ordinal
         if not shard_buffer:
             return
+        capture_watch_deadline_check(
+            cooperative_deadline_monotonic,
+            stage="postings_shard_write",
+        )
         written_descriptors.append(
             write_persistent_live_tail_postings_shard(
                 session_dir=session_dir,
@@ -32214,6 +32750,10 @@ def update_persistent_live_tail_postings(
 
     if full_reshard:
         for descriptor in descriptors:
+            capture_watch_deadline_check(
+                cooperative_deadline_monotonic,
+                stage="postings_reshard",
+            )
             descriptor_paths_to_unlink.append(
                 persistent_live_tail_postings_descriptor_path(
                     session_dir,
@@ -32221,6 +32761,10 @@ def update_persistent_live_tail_postings(
                 )
             )
             for entry in descriptor_entries(descriptor):
+                capture_watch_deadline_check(
+                    cooperative_deadline_monotonic,
+                    stage="postings_reshard_entry",
+                )
                 if int_value(entry.get("line")) <= (
                     projection_raw_line_count
                 ):
@@ -32248,6 +32792,10 @@ def update_persistent_live_tail_postings(
         flush_shard_buffer()
         descriptors = written_descriptors
     else:
+        capture_watch_deadline_check(
+            cooperative_deadline_monotonic,
+            stage="postings_incremental",
+        )
         descriptors.sort(key=lambda item: int_value(item.get("ordinal")))
         next_ordinal = (
             max(
@@ -32284,6 +32832,10 @@ def update_persistent_live_tail_postings(
 
     processed_line_count += new_entry_count
     processed_bytes = complete_end
+    capture_watch_deadline_check(
+        cooperative_deadline_monotonic,
+        stage="postings_manifest_publish",
+    )
     entry_count = sum(
         int_value(item.get("entry_count"))
         for item in descriptors
@@ -32985,8 +33537,16 @@ def append_raw_capture_ledger(
     projection_raw_bytes: int,
     projection_raw_sha256: str,
     projection_raw_line_count: int = 0,
+    cooperative_deadline_monotonic: float | None = None,
 ) -> dict[str, Any]:
     """Persist only new source bytes into immutable chained capture blocks."""
+    capture_watch_deadline_check(
+        cooperative_deadline_monotonic,
+        stage="raw_capture_start",
+    )
+    execution_started = time.monotonic()
+    execution_timings_ms: dict[str, int] = {}
+    raw_copy_started = time.monotonic()
     ledger_path = raw_capture_ledger_path(session_dir)
     ledger = read_json(ledger_path, {})
     if (
@@ -33194,6 +33754,10 @@ def append_raw_capture_ledger(
             persistable_digest = PersistableSha256()
             with materialization_path.open("rb") as prior_materialization:
                 while True:
+                    capture_watch_deadline_check(
+                        cooperative_deadline_monotonic,
+                        stage="raw_hash_bootstrap",
+                    )
                     prior_chunk = prior_materialization.read(
                         RAW_CAPTURE_BLOCK_TARGET_BYTES
                     )
@@ -33232,6 +33796,10 @@ def append_raw_capture_ledger(
             source_handle.seek(captured_bytes)
             offset = captured_bytes
             while offset < snapshot_end:
+                capture_watch_deadline_check(
+                    cooperative_deadline_monotonic,
+                    stage="raw_copy_hash",
+                )
                 payload = source_handle.read(
                     min(
                         RAW_CAPTURE_BLOCK_TARGET_BYTES,
@@ -33294,8 +33862,20 @@ def append_raw_capture_ledger(
                 offset += len(payload)
                 appended_bytes += len(payload)
                 newline_count += block_newlines
+                capture_watch_deadline_check(
+                    cooperative_deadline_monotonic,
+                    stage="raw_copy_hash",
+                )
             materialized.flush()
             os.fsync(materialized.fileno())
+    execution_timings_ms["raw_copy_hash"] = max(
+        0,
+        int((time.monotonic() - raw_copy_started) * 1000),
+    )
+    capture_watch_deadline_check(
+        cooperative_deadline_monotonic,
+        stage="raw_capture_post_copy",
+    )
     try:
         source_stat_after = transcript_path.stat()
     except OSError as exc:
@@ -33385,6 +33965,10 @@ def append_raw_capture_ledger(
             "observed_at": now,
         }
     epoch["archive_prefixes"] = archive_prefixes
+    capture_watch_deadline_check(
+        cooperative_deadline_monotonic,
+        stage="raw_ledger_publish",
+    )
     ledger.update(
         {
             "updated_at": now,
@@ -33392,7 +33976,17 @@ def append_raw_capture_ledger(
             "epochs": epochs,
         }
     )
+    ledger_started = time.monotonic()
     write_json_durable(ledger_path, ledger)
+    execution_timings_ms["ledger_receipt"] = max(
+        0,
+        int((time.monotonic() - ledger_started) * 1000),
+    )
+    capture_watch_deadline_check(
+        cooperative_deadline_monotonic,
+        stage="raw_postings_manifest",
+    )
+    postings_started = time.monotonic()
     postings = update_persistent_live_tail_postings(
         session_dir=session_dir,
         session_id=session_id,
@@ -33400,6 +33994,11 @@ def append_raw_capture_ledger(
         projection_raw_bytes=projection_raw_bytes,
         projection_raw_line_count=projection_raw_line_count,
         now=now,
+        cooperative_deadline_monotonic=cooperative_deadline_monotonic,
+    )
+    execution_timings_ms["postings_manifest"] = max(
+        0,
+        int((time.monotonic() - postings_started) * 1000),
     )
     overlay = {
         "schema_version": PERSISTENT_LIVE_TAIL_INDEX_SCHEMA_VERSION,
@@ -33431,8 +34030,17 @@ def append_raw_capture_ledger(
         "authority": "captured_raw_evidence_overlay",
         "projection_authority": False,
     }
+    overlay_started = time.monotonic()
     write_json_durable(
         persistent_live_tail_index_path(session_dir), overlay
+    )
+    execution_timings_ms["overlay_receipt"] = max(
+        0,
+        int((time.monotonic() - overlay_started) * 1000),
+    )
+    execution_timings_ms["total"] = max(
+        0,
+        int((time.monotonic() - execution_started) * 1000),
     )
     return {
         "ledger": ledger,
@@ -33463,6 +34071,7 @@ def append_raw_capture_ledger(
             "mtime_ns": int(source_stat_after.st_mtime_ns),
         },
         "source_stable": source_stable,
+        "capture_execution": execution_timings_ms,
         "full_raw_sha256": (
             str(epoch.get("full_raw_sha256") or "")
             if int_value(epoch.get("full_raw_sha256_bytes"), -1)
@@ -33480,6 +34089,7 @@ def _preserve_unindexed_raw_capture_locked(
     manifest: dict[str, Any],
     hook_event_name: str,
     now: str,
+    cooperative_deadline_monotonic: float | None = None,
 ) -> dict[str, Any]:
     raw = (
         manifest.get("raw")
@@ -33499,6 +34109,7 @@ def _preserve_unindexed_raw_capture_locked(
             raw.get("line_count"),
             int_value(manifest.get("latest_event_count")),
         ),
+        cooperative_deadline_monotonic=cooperative_deadline_monotonic,
     )
     epoch = capture["epoch"]
     overlay = capture["overlay"]
@@ -33620,7 +34231,21 @@ def _preserve_unindexed_raw_capture_locked(
             "capture or its still-readable owner transcript"
         ),
     }
+    state["capture_execution"] = dict(
+        capture.get("capture_execution")
+        if isinstance(capture.get("capture_execution"), dict)
+        else {}
+    )
+    capture_watch_deadline_check(
+        cooperative_deadline_monotonic,
+        stage="raw_capture_state_receipt",
+    )
+    state_receipt_started = time.monotonic()
     write_json_durable(raw_capture_state_path(session_dir), state)
+    state["capture_execution"]["state_receipt"] = max(
+        0,
+        int((time.monotonic() - state_receipt_started) * 1000),
+    )
     return state
 
 
@@ -33632,19 +34257,31 @@ def preserve_unindexed_raw_capture(
     manifest: dict[str, Any],
     hook_event_name: str,
     now: str,
+    cooperative_deadline_monotonic: float | None = None,
 ) -> dict[str, Any]:
     lock_path = session_dir / "raw" / ".capture.lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("w", encoding="utf-8") as lock_handle:
-        fcntl.flock(lock_handle, fcntl.LOCK_EX)
-        return _preserve_unindexed_raw_capture_locked(
+    lock_handle, lock_wait_ms = acquire_capture_watch_lock(
+        lock_path,
+        deadline_monotonic=cooperative_deadline_monotonic,
+        stage="capture_lock_wait",
+    )
+    try:
+        state = _preserve_unindexed_raw_capture_locked(
             session_dir=session_dir,
             session_id=session_id,
             transcript_path=transcript_path,
             manifest=manifest,
             hook_event_name=hook_event_name,
             now=now,
+            cooperative_deadline_monotonic=cooperative_deadline_monotonic,
         )
+        execution = state.get("capture_execution")
+        if isinstance(execution, dict):
+            execution["capture_lock_wait_ms"] = lock_wait_ms
+        return state
+    finally:
+        fcntl.flock(lock_handle, fcntl.LOCK_UN)
+        lock_handle.close()
 
 
 def indexed_raw_capture_state(
@@ -168186,6 +168823,8 @@ def render_session_memory_systemd_units(
             quote(str(root)),
             "--limit",
             "64",
+            "--budget-seconds",
+            str(int(CAPTURE_WATCH_DEFAULT_BUDGET_SECONDS)),
             "--apply",
         ]
     )
@@ -202954,6 +203593,11 @@ def command_capture_watch(args: argparse.Namespace) -> int:
         limit=max(1, int(args.limit)),
         apply=bool(args.apply),
         target=str(args.session or "all"),
+        budget_seconds=(
+            None
+            if args.budget_seconds is None
+            else max(0.0, float(args.budget_seconds))
+        ),
     )
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0 if payload.get("ok") else 1
@@ -213350,6 +213994,15 @@ def build_parser() -> argparse.ArgumentParser:
     capture_watch.add_argument("--workspace-root")
     capture_watch.add_argument("--aoa-root")
     capture_watch.add_argument("--limit", type=int, default=64, help="Maximum watched sources to stat in one bounded pass.")
+    capture_watch.add_argument(
+        "--budget-seconds",
+        type=float,
+        default=CAPTURE_WATCH_DEFAULT_BUDGET_SECONDS,
+        help=(
+            "Cooperative wall-time budget; progress is persisted and the "
+            "current source remains retryable when it expires."
+        ),
+    )
     capture_watch.add_argument("--apply", action="store_true", help="Append changed source bytes to the preserved raw capture.")
     capture_watch.set_defaults(func=command_capture_watch)
 
