@@ -165,6 +165,15 @@ deferred, and invalid source states fail closed instead of becoming a current
 dashboard snapshot. See [`docs/GOAL_CATALOG.md`](docs/GOAL_CATALOG.md) for the
 CLI contract and privacy boundary.
 
+The owner-local `goal-thread-board` read surface publishes a real board for
+one exact Goal/master-thread binding. It combines allowlisted lifecycle
+markers from current owner indexes with safe immutable item markers and direct
+parent/fork observations from typed Codex app-server reads, while withholding
+all prompt/transcript bodies, raw paths, and private metadata. Branch lifecycle
+and replayable event ordering remain explicitly missing when their owner does
+not publish them. See [`docs/GOAL_THREAD_BOARD.md`](docs/GOAL_THREAD_BOARD.md)
+for the exact query, pagination, currentness, and privacy contract.
+
 ### Run the standalone MCP demo
 
 Build and install the read-only MCP package without writing build state into

@@ -673,6 +673,7 @@ GOAL_CATALOG_PUBLICATION_SCHEMA_VERSION = (
 GOAL_CATALOG_CURSOR_VERSION = 1
 GOAL_CATALOG_DEFAULT_PAGE_SIZE = 100
 GOAL_CATALOG_MAX_PAGE_SIZE = 500
+GOAL_CATALOG_SOURCE_SNAPSHOT_MAX_ATTEMPTS = 3
 GOAL_CATALOG_CURSOR_PREFIX = "gcat1."
 GOAL_CATALOG_CURSOR_MAX_CHARS = 4096
 GOAL_CATALOG_PUBLIC_STATES = frozenset(
@@ -683,6 +684,59 @@ GOAL_CATALOG_CURRENT_LIFECYCLE_STATES = frozenset(
 )
 GOAL_CATALOG_HISTORICAL_LIFECYCLE_STATES = frozenset(
     {"complete", "blocked", "create_failed"}
+)
+GOAL_THREAD_BOARD_SCHEMA_VERSION = "aoa_session_memory_goal_thread_board_v1"
+GOAL_THREAD_BOARD_PUBLICATION_SCHEMA_VERSION = (
+    "aoa_session_memory_goal_thread_board_public_v1"
+)
+GOAL_THREAD_BOARD_CURSOR_VERSION = 1
+GOAL_THREAD_BOARD_DEFAULT_PAGE_SIZE = 50
+GOAL_THREAD_BOARD_MAX_PAGE_SIZE = 200
+GOAL_THREAD_BOARD_CURSOR_PREFIX = "gtb1."
+GOAL_THREAD_BOARD_CURSOR_MAX_CHARS = 4096
+GOAL_THREAD_BOARD_STATES = frozenset(
+    {"current", "missing", "unknown", "stale", "deferred", "invalid"}
+)
+GOAL_THREAD_BOARD_OWNER_STATES = frozenset(
+    {"bound", "missing", "unknown", "stale", "deferred", "invalid"}
+)
+GOAL_THREAD_BOARD_OWNER_CURRENTNESS = frozenset(
+    {"current_at_read", "current", "missing", "unknown", "stale", "deferred", "invalid"}
+)
+GOAL_THREAD_BOARD_OWNER_METHODS = frozenset(
+    {
+        "thread/goal/get",
+        "thread/read",
+        "thread/items/list",
+        "thread/list",
+        "thread/list(parentThreadId)",
+        "thread/list(ancestorThreadId)",
+    }
+)
+GOAL_THREAD_BOARD_ITEM_TYPES = frozenset(
+    {
+        "agentMessage",
+        "commandExecution",
+        "collabAgentToolCall",
+        "dynamicToolCall",
+        "fileChange",
+        "hookPrompt",
+        "mcpToolCall",
+        "plan",
+        "reasoning",
+        "userMessage",
+    }
+)
+GOAL_THREAD_BOARD_INDEX_EVENT_KINDS = frozenset(
+    {
+        "goal_blocked",
+        "goal_completed",
+        "goal_create_failed",
+        "goal_create_requested",
+        "goal_created",
+        "goal_inspected",
+        "goal_updated",
+    }
 )
 WORK_CONTEXT_SCHEMA_VERSION = 4
 ROUTE_SIGNAL_SCHEMA_VERSION = 1
@@ -30864,8 +30918,14 @@ def record_operational_hook_observation(
 def raw_capture_state_semantic_stale_reasons(
     session_dir: Path,
     manifest: dict[str, Any],
+    *,
+    state_override: dict[str, Any] | None = None,
 ) -> list[str]:
-    state = raw_capture_state_for_session(session_dir)
+    state = (
+        state_override
+        if isinstance(state_override, dict)
+        else raw_capture_state_for_session(session_dir)
+    )
     if not state:
         return []
     reasons: list[str] = []
@@ -129755,6 +129815,22 @@ def goal_catalog_public_digest(value: Any) -> str:
     return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
 
 
+def goal_catalog_public_file_watermark(
+    path: Path,
+) -> tuple[int, int, int, int] | None:
+    """Return an identity-bearing stat watermark for one catalog source file."""
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (
+        int(stat.st_dev),
+        int(stat.st_ino),
+        int(stat.st_size),
+        int(stat.st_mtime_ns),
+    )
+
+
 def goal_catalog_public_read_json(path: Path) -> dict[str, Any]:
     """Read one generated source file once and expose only safe read status."""
     if not path.is_file():
@@ -129762,18 +129838,20 @@ def goal_catalog_public_read_json(path: Path) -> dict[str, Any]:
             "state": "missing",
             "value": None,
             "digest": None,
+            "watermark": None,
             "stable": True,
             "diagnostic": "source_file_missing",
         }
     try:
-        before = file_signature(path)
+        before = goal_catalog_public_file_watermark(path)
         raw = path.read_bytes()
-        after = file_signature(path)
+        after = goal_catalog_public_file_watermark(path)
     except OSError as exc:
         return {
-            "state": "invalid",
+            "state": "deferred",
             "value": None,
             "digest": None,
+            "watermark": goal_catalog_public_file_watermark(path),
             "stable": False,
             "diagnostic": f"source_file_unreadable:{type(exc).__name__}",
         }
@@ -129782,6 +129860,7 @@ def goal_catalog_public_read_json(path: Path) -> dict[str, Any]:
             "state": "deferred",
             "value": None,
             "digest": None,
+            "watermark": after,
             "stable": False,
             "diagnostic": "source_file_changed_during_read",
         }
@@ -129792,6 +129871,7 @@ def goal_catalog_public_read_json(path: Path) -> dict[str, Any]:
             "state": "invalid",
             "value": None,
             "digest": f"sha256:{hashlib.sha256(raw).hexdigest()}",
+            "watermark": after,
             "stable": True,
             "diagnostic": "source_json_invalid",
         }
@@ -129799,6 +129879,7 @@ def goal_catalog_public_read_json(path: Path) -> dict[str, Any]:
         "state": "current",
         "value": value,
         "digest": f"sha256:{hashlib.sha256(raw).hexdigest()}",
+        "watermark": after,
         "stable": True,
         "diagnostic": None,
     }
@@ -130064,18 +130145,158 @@ def goal_catalog_public_issue_state_for_stale_reasons(
         "in_progress" in reason
         or "deferred" in reason
         or "live_tail" in reason
+        or "preserved_raw_capture_ahead" in reason
+        or "raw_capture_source_changed" in reason
+        or "capture_state_" in reason
         for reason in normalized
     ):
         return "deferred"
     return "stale"
 
 
-def goal_catalog_public_source_snapshot(
+def goal_thread_board_index_items_from_lifecycle(
+    lifecycle: dict[str, Any],
+    public_item: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Project only allowlisted lifecycle index observations for the board.
+
+    The generated lifecycle index is a navigation source, not a transcript
+    view.  This helper intentionally keeps event ordering as source order and
+    never carries objective, refs, correlation ids, line numbers, or payloads.
+    """
+
+    if not isinstance(lifecycle, dict) or not isinstance(public_item, dict):
+        return []
+    goal_ref = str(public_item.get("goal_ref") or "").strip()
+    thread_id = str(public_item.get("thread_id") or "").strip()
+    if not goal_ref:
+        return []
+    events = lifecycle.get("events")
+    if not isinstance(events, list):
+        return []
+    output: list[dict[str, Any]] = []
+    for ordinal, event in enumerate(events):
+        if not isinstance(event, dict):
+            continue
+        kind = str(event.get("kind") or "").strip()
+        if kind not in GOAL_THREAD_BOARD_INDEX_EVENT_KINDS:
+            continue
+        raw_event_id = str(event.get("event_id") or "").strip()
+        if not raw_event_id:
+            continue
+        event_id, event_id_state = goal_catalog_public_safe_ref(raw_event_id)
+        if event_id is None:
+            continue
+        timestamp = str(event.get("timestamp") or "").strip()
+        if timestamp and parse_utc_timestamp(timestamp) is None:
+            timestamp = ""
+        item = {
+            "item_ref": f"goal-lifecycle-item:{event_id}",
+            "item_id": event_id,
+            "item_id_state": event_id_state,
+            "item_kind": "goal_lifecycle_observation",
+            "owner_event_kind": kind,
+            "owner_item_type": None,
+            "review_state": "reviewed_public_safe",
+            "body_state": "withheld",
+            "order": ordinal,
+            "order_state": "owner_index_order",
+            "goal_ref": goal_ref,
+            "thread_id": thread_id or None,
+            "observed_at": timestamp or None,
+            "source_ref": "aoa-session-memory:goal-lifecycles",
+            "evidence_ref": f"goal-lifecycle-item:{event_id}",
+            "redacted_fields": [
+                "objective",
+                "prompt",
+                "transcript_body",
+                "raw_ref",
+                "segment_ref",
+                "graph_ref",
+                "correlation_id",
+                "task_episode_id",
+                "line",
+            ],
+        }
+        item["item_digest"] = goal_catalog_public_digest(item)
+        output.append(item)
+    return output
+
+
+
+def goal_catalog_public_target_records(
+    records: list[dict[str, Any]],
+    target: str,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Resolve a catalog target from the already-read registry snapshot."""
+    if not target or target == "all":
+        return records, None
+    target_text = str(target).strip()
+    if target_text == "latest":
+        selected = sorted(
+            records,
+            key=lambda item: (
+                str(item.get("updated_at") or ""),
+                str(item.get("session_label") or ""),
+                str(item.get("session_id") or ""),
+            ),
+            reverse=True,
+        )
+        return (selected[:1], None) if selected else ([], "goal_catalog_target_unresolved")
+
+    def candidates_for(record: dict[str, Any]) -> list[str]:
+        candidates = [
+            str(record.get("session_id") or ""),
+            str(record.get("session_label") or ""),
+            Path(str(record.get("path") or "")).name,
+        ]
+        display = record.get("display") if isinstance(record.get("display"), dict) else {}
+        candidates.extend(
+            [str(display.get("label") or ""), str(display.get("title") or "")]
+        )
+        semantic_names = (
+            record.get("semantic_names")
+            if isinstance(record.get("semantic_names"), dict)
+            else {}
+        )
+        candidates.extend(
+            [
+                str(semantic_names.get("active") or ""),
+                str(semantic_names.get("active_session") or ""),
+            ]
+        )
+        for semantic in (
+            semantic_names.get("names", [])
+            if isinstance(semantic_names.get("names"), list)
+            else []
+        ):
+            if isinstance(semantic, dict):
+                candidates.extend(
+                    [str(semantic.get("slug") or ""), str(semantic.get("name") or "")]
+                )
+        return candidates
+
+    exact = [record for record in records if target_text in candidates_for(record)]
+    if exact:
+        return exact[:1], None
+    lowered = target_text.lower()
+    fuzzy = [
+        record
+        for record in records
+        if any(lowered in candidate.lower() for candidate in candidates_for(record))
+    ]
+    if len(fuzzy) == 1:
+        return fuzzy, None
+    return [], "goal_catalog_target_unresolved"
+
+
+def goal_catalog_public_source_snapshot_once(
     *,
     aoa_root: Path,
     target: str,
 ) -> dict[str, Any]:
     registry_path = aoa_root / REGISTRY_NAME
+    stability_paths: list[tuple[Path, tuple[int, int, int, int] | None]] = []
     registry_read = goal_catalog_public_read_json(registry_path)
     if registry_read["state"] != "current":
         state = str(registry_read.get("state") or "unknown")
@@ -130084,6 +130305,7 @@ def goal_catalog_public_source_snapshot(
             "registry_digest": registry_read.get("digest"),
             "source_entries": [],
             "items": [],
+            "board_items": [],
             "diagnostics": [str(registry_read.get("diagnostic") or "registry_unavailable")],
             "generation_identity": goal_catalog_public_generation(
                 session_index_generation_identity()
@@ -130092,7 +130314,10 @@ def goal_catalog_public_source_snapshot(
                 goal_lifecycle_generation_identity()
             ),
             "producer_source_state": session_memory_loaded_producer_source_state(),
+            "stability_paths": stability_paths,
+            "retryable": registry_read["state"] == "deferred",
         }
+    stability_paths.append((registry_path, registry_read.get("watermark")))
     registry = registry_read.get("value")
     if not isinstance(registry, dict) or not isinstance(registry.get("sessions"), list):
         return {
@@ -130100,6 +130325,7 @@ def goal_catalog_public_source_snapshot(
             "registry_digest": registry_read.get("digest"),
             "source_entries": [],
             "items": [],
+            "board_items": [],
             "diagnostics": ["session_registry_shape_invalid"],
             "generation_identity": goal_catalog_public_generation(
                 session_index_generation_identity()
@@ -130108,6 +130334,8 @@ def goal_catalog_public_source_snapshot(
                 goal_lifecycle_generation_identity()
             ),
             "producer_source_state": session_memory_loaded_producer_source_state(),
+            "stability_paths": stability_paths,
+            "retryable": False,
         }
 
     records = [item for item in registry["sessions"] if isinstance(item, dict)]
@@ -130117,14 +130345,17 @@ def goal_catalog_public_source_snapshot(
         issues.append(("invalid", "session_registry_entry_invalid"))
         diagnostics.append("session_registry_entry_invalid")
     if target and target != "all":
-        try:
-            selected = resolve_session_record(aoa_root, target)
-        except ValueError:
+        records, target_error = goal_catalog_public_target_records(
+            records,
+            target,
+        )
+        if target_error:
             return {
                 "state": "invalid",
                 "registry_digest": registry_read.get("digest"),
                 "source_entries": [],
                 "items": [],
+                "board_items": [],
                 "diagnostics": ["goal_catalog_target_unresolved"],
                 "generation_identity": goal_catalog_public_generation(
                     session_index_generation_identity()
@@ -130133,13 +130364,9 @@ def goal_catalog_public_source_snapshot(
                     goal_lifecycle_generation_identity()
                 ),
                 "producer_source_state": session_memory_loaded_producer_source_state(),
+                "stability_paths": stability_paths,
+                "retryable": False,
             }
-        selected_id = str(selected.get("session_id") or "")
-        records = [
-            item
-            for item in records
-            if str(item.get("session_id") or "") == selected_id
-        ]
 
     expected_generation = session_index_generation_identity()
     expected_goal_generation = goal_lifecycle_generation_identity()
@@ -130153,6 +130380,8 @@ def goal_catalog_public_source_snapshot(
 
     source_entries: list[dict[str, Any]] = []
     items: list[dict[str, Any]] = []
+    board_items: list[dict[str, Any]] = []
+    capture_state_observed = False
     for ordinal, record in enumerate(records):
         session_id = str(record.get("session_id") or "").strip()
         if not session_id:
@@ -130167,8 +130396,34 @@ def goal_catalog_public_source_snapshot(
         session_dir = Path(str(raw_path))
         if not session_dir.is_absolute():
             session_dir = aoa_root / session_dir
-        manifest_read = goal_catalog_public_read_json(session_dir / "session.manifest.json")
-        index_read = goal_catalog_public_read_json(session_dir / SESSION_INDEX_JSON)
+        manifest_path = session_dir / "session.manifest.json"
+        index_path = session_dir / SESSION_INDEX_JSON
+        capture_state_path = session_dir / "raw" / RAW_CAPTURE_STATE_JSON
+        publish_journal_path = session_projection_publish_journal_path(session_dir)
+        manifest_read = goal_catalog_public_read_json(manifest_path)
+        index_read = goal_catalog_public_read_json(index_path)
+        stability_paths.extend(
+            [
+                (manifest_path, manifest_read.get("watermark")),
+                (index_path, index_read.get("watermark")),
+            ]
+        )
+        capture_read = (
+            goal_catalog_public_read_json(capture_state_path)
+            if capture_state_path.is_file()
+            else None
+        )
+        if capture_read is not None:
+            stability_paths.append(
+                (capture_state_path, capture_read.get("watermark"))
+            )
+        else:
+            stability_paths.append(
+                (capture_state_path, goal_catalog_public_file_watermark(capture_state_path))
+            )
+        stability_paths.append(
+            (publish_journal_path, goal_catalog_public_file_watermark(publish_journal_path))
+        )
         for source_read, source_name in (
             (manifest_read, "session_manifest"),
             (index_read, "session_index"),
@@ -130179,8 +130434,62 @@ def goal_catalog_public_source_snapshot(
                     source_state = "unknown"
                 issues.append((source_state, f"{source_name}_{source_read.get('diagnostic') or 'unavailable'}"))
                 diagnostics.append(f"{source_name}_{source_read.get('diagnostic') or 'unavailable'}:{session_id}")
+        if capture_read is not None and capture_read["state"] != "current":
+            capture_state = str(capture_read.get("state") or "unknown")
+            if capture_state not in GOAL_CATALOG_PUBLIC_STATES:
+                capture_state = "unknown"
+            capture_diagnostic = (
+                f"raw_capture_state_{capture_read.get('diagnostic') or 'unavailable'}"
+            )
+            issues.append((capture_state, capture_diagnostic))
+            diagnostics.append(f"{capture_diagnostic}:{session_id}")
+        elif capture_read is not None:
+            capture_state_observed = True
+        if publish_journal_path.is_file():
+            issues.append(("deferred", "session_projection_publish_in_progress"))
+            diagnostics.append(f"session_projection_publish_in_progress:{session_id}")
         manifest = manifest_read.get("value") if isinstance(manifest_read.get("value"), dict) else {}
         index = index_read.get("value") if isinstance(index_read.get("value"), dict) else {}
+        manifest_raw = (
+            manifest.get("raw")
+            if isinstance(manifest.get("raw"), dict)
+            else {}
+        )
+        manifest_raw_path = manifest_raw.get("path")
+        if manifest_raw_path:
+            manifest_raw_source_path = projection_path_from_ref(
+                manifest_raw_path,
+                base=session_dir,
+            )
+            stability_paths.append(
+                (
+                    manifest_raw_source_path,
+                    goal_catalog_public_file_watermark(
+                        manifest_raw_source_path
+                    ),
+                )
+            )
+        capture_value = (
+            capture_read.get("value")
+            if isinstance(capture_read, dict)
+            and capture_read.get("state") == "current"
+            and isinstance(capture_read.get("value"), dict)
+            else {}
+        )
+        for capture_ref_key in (
+            "capture_path",
+            "ledger_path",
+            "persistent_live_tail_index",
+        ):
+            capture_ref = capture_value.get(capture_ref_key)
+            if capture_ref:
+                capture_ref_path = Path(str(capture_ref))
+                stability_paths.append(
+                    (
+                        capture_ref_path,
+                        goal_catalog_public_file_watermark(capture_ref_path),
+                    )
+                )
         if manifest_read["state"] != "current" or index_read["state"] != "current":
             continue
         if str(index.get("session_id") or session_id) != session_id:
@@ -130191,10 +130500,42 @@ def goal_catalog_public_source_snapshot(
             issues.append(("invalid", "session_manifest_session_id_mismatch"))
             diagnostics.append(f"session_manifest_session_id_mismatch:{session_id}")
             continue
-        stale_reasons = generated_session_index_stale_reasons_for_session(
-            session_dir,
-            index,
+        expected_publish_id, expected_raw_sha256 = (
+            session_manifest_projection_expectations(manifest)
         )
+        stale_reasons = generated_session_index_stale_reasons(
+            index,
+            expected_publish_id=expected_publish_id,
+            expected_raw_sha256=expected_raw_sha256,
+        )
+        stale_reasons.extend(
+            generated_session_metadata_stale_reasons(index, manifest)
+        )
+        if capture_read is not None and capture_read["state"] == "current":
+            stale_reasons.extend(
+                raw_capture_state_semantic_stale_reasons(
+                    session_dir,
+                    manifest,
+                    state_override=capture_value,
+                )
+            )
+        manifest_index_schema = (
+            manifest.get("index_schema")
+            if isinstance(manifest.get("index_schema"), dict)
+            else {}
+        )
+        manifest_projection_publish = (
+            manifest_index_schema.get("projection_publish")
+            if isinstance(manifest_index_schema.get("projection_publish"), dict)
+            else {}
+        )
+        index_projection_publish = (
+            index.get("projection_publish")
+            if isinstance(index.get("projection_publish"), dict)
+            else {}
+        )
+        if manifest_projection_publish != index_projection_publish:
+            stale_reasons.append("session_projection_publish_identity_torn")
         if stale_reasons:
             stale_state = goal_catalog_public_issue_state_for_stale_reasons(stale_reasons)
             issues.append((stale_state, "session_index_generation_or_freshness_incompatible"))
@@ -130222,6 +130563,12 @@ def goal_catalog_public_source_snapshot(
                 )
                 continue
             items.append(public_item)
+            board_items.extend(
+                goal_thread_board_index_items_from_lifecycle(
+                    lifecycle,
+                    public_item,
+                )
+            )
         raw = manifest.get("raw") if isinstance(manifest.get("raw"), dict) else {}
         projection_publish = (
             index.get("projection_publish")
@@ -130244,21 +130591,152 @@ def goal_catalog_public_source_snapshot(
             }
         )
 
+    unstable_paths = [
+        path
+        for path, expected_watermark in stability_paths
+        if goal_catalog_public_file_watermark(path) != expected_watermark
+    ]
+    retryable = any(
+        marker in diagnostic
+        for diagnostic in diagnostics
+        for marker in (
+            "source_file_changed_during_read",
+            "source_file_unreadable",
+            "session_projection_publish_in_progress",
+            "session_projection_publish_identity_torn",
+            "preserved_raw_capture_ahead",
+            "raw_capture_source_changed",
+        )
+    )
+    if unstable_paths:
+        issues.append(("deferred", "goal_catalog_source_watermark_changed_during_capture"))
+        diagnostics.append("goal_catalog_source_watermark_changed_during_capture")
+        retryable = True
     source_entries.sort(key=lambda item: str(item.get("session_id") or ""))
     state = goal_catalog_public_state_for_issues(issues)
     if not source_entries and records and state == "current":
         state = "unknown"
         diagnostics.append("goal_catalog_source_set_unresolved")
+    live_tail_diagnostics = [
+        diagnostic
+        for diagnostic in diagnostics
+        if any(
+            marker in diagnostic
+            for marker in (
+                "preserved_raw_capture_ahead",
+                "raw_capture_source_changed",
+                "raw_capture_state_",
+                "persistent_live_tail",
+            )
+        )
+    ]
+    if any("raw_capture_source_changed" in item for item in live_tail_diagnostics):
+        live_tail_state = "unstable"
+    elif any("preserved_raw_capture_ahead" in item for item in live_tail_diagnostics):
+        live_tail_state = "ahead"
+    elif live_tail_diagnostics:
+        live_tail_state = "unknown"
+    elif capture_state_observed:
+        live_tail_state = "current"
+    else:
+        live_tail_state = "not_observed"
+    admitted_source_entries = source_entries if state == "current" else []
+    admitted_items = items if state == "current" else []
     return {
         "state": state,
         "registry_digest": registry_read.get("digest"),
-        "source_entries": source_entries,
-        "items": goal_catalog_public_apply_lifecycle_groups(items),
+        "source_entries": admitted_source_entries,
+        "items": goal_catalog_public_apply_lifecycle_groups(admitted_items),
+        "board_items": board_items if state == "current" else [],
         "diagnostics": list(dict.fromkeys(diagnostics)),
         "generation_identity": goal_catalog_public_generation(expected_generation),
         "goal_lifecycle_generation": goal_catalog_public_generation(expected_goal_generation),
         "producer_source_state": producer_source_state,
+        "live_tail": {
+            "state": live_tail_state,
+            "coverage": "stable_projection_watermark",
+            "diagnostics": list(dict.fromkeys(live_tail_diagnostics)),
+        },
+        "stability_paths": stability_paths,
+        "retryable": retryable,
     }
+
+
+def goal_catalog_public_source_snapshot(
+    *,
+    aoa_root: Path,
+    target: str,
+    max_attempts: int | None = None,
+) -> dict[str, Any]:
+    """Read one stable owner source set with bounded retry on physical drift."""
+    try:
+        requested_attempts = int(max_attempts)
+    except (TypeError, ValueError):
+        requested_attempts = GOAL_CATALOG_SOURCE_SNAPSHOT_MAX_ATTEMPTS
+    if requested_attempts <= 0:
+        requested_attempts = GOAL_CATALOG_SOURCE_SNAPSHOT_MAX_ATTEMPTS
+    effective_attempts = min(
+        requested_attempts,
+        GOAL_CATALOG_SOURCE_SNAPSHOT_MAX_ATTEMPTS,
+    )
+    last: dict[str, Any] | None = None
+    for attempt in range(1, effective_attempts + 1):
+        result = goal_catalog_public_source_snapshot_once(
+            aoa_root=aoa_root,
+            target=target,
+        )
+        result["snapshot_read"] = {
+            "attempt": attempt,
+            "max_attempts": effective_attempts,
+            "retry_exhausted": False,
+            "stable_source": result.get("state") == "current",
+        }
+        last = result
+        if result.get("state") == "current" or not result.get("retryable"):
+            return result
+    if last is None:
+        last = {
+            "state": "deferred",
+            "registry_digest": None,
+            "source_entries": [],
+            "items": [],
+            "diagnostics": [],
+            "generation_identity": {},
+            "goal_lifecycle_generation": {},
+            "producer_source_state": {},
+            "live_tail": {
+                "state": "unknown",
+                "coverage": "stable_projection_watermark",
+                "diagnostics": [],
+            },
+            "stability_paths": [],
+            "retryable": True,
+        }
+    diagnostics = [
+        str(item)
+        for item in last.get("diagnostics", [])
+        if str(item)
+    ]
+    if "goal_catalog_source_snapshot_retry_exhausted" not in diagnostics:
+        diagnostics.append("goal_catalog_source_snapshot_retry_exhausted")
+    last["state"] = "deferred"
+    last["source_entries"] = []
+    last["items"] = []
+    last["diagnostics"] = list(dict.fromkeys(diagnostics))
+    last["retryable"] = False
+    snapshot_read = last.get("snapshot_read")
+    if not isinstance(snapshot_read, dict):
+        snapshot_read = {}
+    snapshot_read.update(
+        {
+            "attempt": effective_attempts,
+            "max_attempts": effective_attempts,
+            "retry_exhausted": True,
+            "stable_source": False,
+        }
+    )
+    last["snapshot_read"] = snapshot_read
+    return last
 
 
 def goal_catalog_publication(
@@ -130323,6 +130801,13 @@ def goal_catalog_publication(
         digested_items.append({**item_without_digest, "item_digest": item_digest})
 
     source_entries = source.get("source_entries", []) if isinstance(source.get("source_entries"), list) else []
+    live_tail = source.get("live_tail")
+    if not isinstance(live_tail, dict):
+        live_tail = {
+            "state": "not_observed",
+            "coverage": "stable_projection_watermark",
+            "diagnostics": [],
+        }
     source_watermark = {
         "schema_version": 1,
         "kind": "complete_session_index_set_v1",
@@ -130346,6 +130831,7 @@ def goal_catalog_publication(
             ),
             default=0,
         ),
+        "live_tail": live_tail,
     }
     snapshot_basis = {
         "publication_schema_version": GOAL_CATALOG_PUBLICATION_SCHEMA_VERSION,
@@ -130413,6 +130899,31 @@ def goal_catalog_publication(
     final_state = query_state if query_state in GOAL_CATALOG_PUBLIC_STATES else "unknown"
     source_generation = source.get("generation_identity", {})
     generated_at = utc_now()
+    snapshot_read = source.get("snapshot_read")
+    if not isinstance(snapshot_read, dict):
+        snapshot_read = {
+            "attempt": 1,
+            "max_attempts": 1,
+            "retry_exhausted": False,
+            "stable_source": source_state == "current",
+        }
+    live_tail_state = str(live_tail.get("state") or "not_observed")
+    claim_limit = (
+        "This is a public-safe generated Goal lifecycle navigation page. "
+        "It does not establish transcript truth, private objectives, branch "
+        "relations, participants, runtime health, proof, acceptance, or completion."
+    )
+    if live_tail_state not in {"current", "not_observed"}:
+        claim_limit += (
+            " Currentness is bounded by the stable session-index publication "
+            "watermark; preserved live capture is "
+            f"{live_tail_state}, so no absence claim is admitted beyond that watermark."
+        )
+    if source_state != "current":
+        claim_limit += (
+            " The source snapshot is incomplete or unstable; zero admitted "
+            "records does not establish Goal absence."
+        )
     output = {
         "schema_version": GOAL_CATALOG_SCHEMA_VERSION,
         "publication_schema_version": GOAL_CATALOG_PUBLICATION_SCHEMA_VERSION,
@@ -130443,6 +130954,10 @@ def goal_catalog_publication(
             "source_freshness": source_state,
             "projection_freshness": final_state,
             "immutable": True,
+            "read_attempts": int_value(snapshot_read.get("attempt"), 1),
+            "max_read_attempts": int_value(snapshot_read.get("max_attempts"), 1),
+            "retry_exhausted": bool(snapshot_read.get("retry_exhausted")),
+            "stable_source": bool(snapshot_read.get("stable_source")),
         },
         "pagination": {
             "mode": "immutable_snapshot",
@@ -130534,11 +131049,953 @@ def goal_catalog_publication(
             "no_process_identity": True,
             "no_actor_inference": True,
         },
-        "claim_limit": (
-            "This is a public-safe generated Goal lifecycle navigation page. "
-            "It does not establish transcript truth, private objectives, branch "
-            "relations, participants, runtime health, proof, acceptance, or completion."
+        "claim_limit": claim_limit,
+    }
+    return output
+
+
+def goal_thread_board_public_safe_exact_ref(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if not text or len(text) > 256 or any(char.isspace() for char in text):
+        return None
+    safe, _state = goal_catalog_public_safe_ref(text)
+    return safe
+
+
+def goal_thread_board_public_safe_cursor(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if not text or len(text) > GOAL_THREAD_BOARD_CURSOR_MAX_CHARS:
+        return None
+    if any(char.isspace() for char in text):
+        return None
+    return text
+
+
+def goal_thread_board_public_source_diagnostic(value: Any) -> str | None:
+    """Keep source degradation codes while dropping session/path suffixes."""
+
+    text = str(value or "").strip()
+    if not text:
+        return None
+    prefix = text.split(":", 1)[0].strip()
+    if not re.fullmatch(r"[a-z0-9_]{1,96}", prefix):
+        return "source_diagnostic_present"
+    return prefix
+
+
+def goal_thread_board_public_source_diagnostics(values: Any) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    output: list[str] = []
+    for value in values:
+        diagnostic = goal_thread_board_public_source_diagnostic(value)
+        if diagnostic and diagnostic not in output:
+            output.append(diagnostic)
+    return output
+
+
+def goal_thread_board_public_encode_cursor(payload: dict[str, Any]) -> str:
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return GOAL_THREAD_BOARD_CURSOR_PREFIX + base64.urlsafe_b64encode(encoded).decode(
+        "ascii"
+    ).rstrip("=")
+
+
+def goal_thread_board_public_decode_cursor(cursor: str) -> dict[str, Any] | None:
+    if not cursor or len(cursor) > GOAL_THREAD_BOARD_CURSOR_MAX_CHARS:
+        return None
+    if not cursor.startswith(GOAL_THREAD_BOARD_CURSOR_PREFIX):
+        return None
+    encoded = cursor[len(GOAL_THREAD_BOARD_CURSOR_PREFIX) :]
+    try:
+        padded = encoded + "=" * (-len(encoded) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")))
+    except (binascii.Error, ValueError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if set(payload) != {
+        "version",
+        "snapshot_digest",
+        "goal_ref",
+        "master_thread_id",
+        "offset",
+        "page_size",
+    }:
+        return None
+    if (
+        isinstance(payload.get("version"), bool)
+        or not isinstance(payload.get("version"), int)
+        or payload.get("version") != GOAL_THREAD_BOARD_CURSOR_VERSION
+    ):
+        return None
+    if not all(
+        isinstance(payload.get(key), str) and payload.get(key)
+        for key in ("snapshot_digest", "goal_ref", "master_thread_id")
+    ):
+        return None
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", str(payload["snapshot_digest"])):
+        return None
+    if (
+        isinstance(payload.get("offset"), bool)
+        or not isinstance(payload.get("offset"), int)
+        or payload.get("offset") < 0
+        or isinstance(payload.get("page_size"), bool)
+        or not isinstance(payload.get("page_size"), int)
+        or payload.get("page_size") <= 0
+    ):
+        return None
+    return payload
+
+
+def goal_thread_board_public_item_from_owner_item(
+    raw_item: dict[str, Any],
+    *,
+    goal_ref: str,
+    master_thread_id: str,
+    order: int,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Admit only typed item identity and kind; discard every item body."""
+
+    if not isinstance(raw_item, dict):
+        return None, "owner_item_shape_invalid"
+    raw_id = str(raw_item.get("id") or "").strip()
+    item_id, item_id_state = goal_catalog_public_safe_ref(raw_id)
+    if item_id is None:
+        return None, "owner_item_identity_missing"
+    item_type = str(raw_item.get("type") or "").strip()
+    if item_type not in GOAL_THREAD_BOARD_ITEM_TYPES:
+        return None, "owner_item_type_unsupported"
+    item = {
+        "item_ref": f"codex-thread-item:{item_id}",
+        "item_id": item_id,
+        "item_id_state": item_id_state,
+        "item_kind": "codex_thread_item_observation",
+        "owner_event_kind": None,
+        "owner_item_type": item_type,
+        "review_state": "reviewed_public_safe",
+        "body_state": "withheld",
+        "order": max(0, int(order)),
+        "order_state": "owner_page_order",
+        "goal_ref": goal_ref,
+        "thread_id": master_thread_id,
+        "observed_at": None,
+        "source_ref": "codex-app-server:thread/items/list",
+        "evidence_ref": f"codex-thread-item:{item_id}",
+        "redacted_fields": [
+            "content",
+            "text",
+            "summary",
+            "command",
+            "aggregatedOutput",
+            "cwd",
+            "path",
+            "prompt",
+            "arguments",
+            "result",
+            "error",
+            "model",
+            "processId",
+        ],
+    }
+    item["item_digest"] = goal_catalog_public_digest(item)
+    return item, None
+
+
+def goal_thread_board_public_relation_from_owner_thread(
+    raw_thread: dict[str, Any],
+    *,
+    goal_ref: str,
+    master_thread_id: str,
+    order: int,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Project only direct parent/fork edges from an owner Thread object."""
+
+    if not isinstance(raw_thread, dict):
+        return None, "owner_relation_shape_invalid"
+    child_raw = raw_thread.get("id") or raw_thread.get("threadId")
+    child_id, child_state = goal_catalog_public_safe_ref(child_raw)
+    if child_id is None:
+        return None, "owner_relation_child_identity_missing"
+    candidates = (
+        ("spawn_parent", raw_thread.get("parentThreadId")),
+        ("history_fork", raw_thread.get("forkedFromId")),
+    )
+    for relation_kind, parent_raw in candidates:
+        if parent_raw in (None, ""):
+            continue
+        parent_id, parent_state = goal_catalog_public_safe_ref(parent_raw)
+        if parent_id is None:
+            return None, "owner_relation_parent_identity_invalid"
+        if parent_id != master_thread_id:
+            continue
+        relation = {
+            "relation_ref": f"{relation_kind}:{parent_id}:{child_id}",
+            "relation_kind": relation_kind,
+            "from_thread_id": parent_id,
+            "to_thread_id": child_id,
+            "from_thread_id_state": "available",
+            "to_thread_id_state": child_state,
+            "relation_state": "available",
+            "semantic_branch_state": "missing",
+            "order": max(0, int(order)),
+            "source_ref": "codex-app-server:thread/read",
+            "goal_ref": goal_ref,
+            "evidence_ref": f"codex-thread-relation:{relation_kind}:{child_id}",
+            "redacted_fields": ["cwd", "path", "preview", "name", "modelProvider"],
+        }
+        relation["relation_digest"] = goal_catalog_public_digest(relation)
+        return relation, None
+    return None, None
+
+
+def goal_thread_board_public_owner_projection(
+    owner_observation: Any,
+    *,
+    goal_ref: str,
+    master_thread_id: str,
+) -> dict[str, Any]:
+    """Validate a normalized, read-only Codex owner observation.
+
+    The caller may provide responses from ``thread/goal/get``, ``thread/read``,
+    ``thread/items/list`` and ``thread/list`` under their corresponding keys.
+    No raw response field is copied into the public projection.
+    """
+
+    empty = {
+        "state": "missing",
+        "currentness": "missing",
+        "goal": None,
+        "thread": None,
+        "items": [],
+        "relations": [],
+        "diagnostics": ["codex_owner_observation_missing"],
+        "pagination": {
+            "cursor": None,
+            "next_cursor": None,
+            "sort_direction": "asc",
+            "complete_for_query": False,
+        },
+        "source": {
+            "owner": "codex-app-server",
+            "methods": [],
+            "currentness": "missing",
+        },
+    }
+    if owner_observation is None:
+        return empty
+    if not isinstance(owner_observation, dict):
+        empty.update(
+            state="invalid",
+            currentness="invalid",
+            diagnostics=["codex_owner_observation_shape_invalid"],
+        )
+        empty["source"]["currentness"] = "invalid"
+        return empty
+    diagnostics: list[str] = []
+    owner = str(owner_observation.get("owner") or "codex-app-server")
+    if owner != "codex-app-server":
+        diagnostics.append("codex_owner_name_invalid")
+    raw_currentness = str(owner_observation.get("currentness") or "unknown")
+    if raw_currentness not in GOAL_THREAD_BOARD_OWNER_CURRENTNESS:
+        diagnostics.append("codex_owner_currentness_invalid")
+        raw_currentness = "invalid"
+    currentness = "current" if raw_currentness == "current_at_read" else raw_currentness
+    raw_source_methods = [
+        str(item)
+        for item in owner_observation.get("methods", [])
+        if isinstance(item, str) and item
+    ]
+    source_methods = [
+        item for item in dict.fromkeys(raw_source_methods)
+        if item in GOAL_THREAD_BOARD_OWNER_METHODS
+    ]
+    if len(source_methods) != len(raw_source_methods):
+        diagnostics.append("codex_owner_method_invalid")
+    source = {
+        "owner": "codex-app-server",
+        "methods": source_methods,
+        "currentness": raw_currentness,
+    }
+    goal_response = owner_observation.get("goal")
+    if isinstance(goal_response, dict) and isinstance(goal_response.get("goal"), dict):
+        goal_response = goal_response.get("goal")
+    goal_projection: dict[str, Any] | None = None
+    if goal_response is None:
+        if "goal" in owner_observation:
+            diagnostics.append("codex_owner_goal_missing")
+    elif isinstance(goal_response, dict):
+        observed_thread_raw = goal_response.get("threadId") or goal_response.get("thread_id")
+        observed_thread, _observed_thread_state = goal_catalog_public_safe_ref(
+            observed_thread_raw
+        )
+        if observed_thread != master_thread_id:
+            diagnostics.append("codex_owner_goal_identity_mismatch")
+        status = goal_response.get("status")
+        allowed_statuses = {
+            "active",
+            "paused",
+            "blocked",
+            "usageLimited",
+            "budgetLimited",
+            "complete",
+            "usage_limited",
+        }
+        if status not in allowed_statuses:
+            diagnostics.append("codex_owner_goal_status_invalid")
+        values: dict[str, Any] = {
+            "thread_id": master_thread_id,
+            "status": status if status in allowed_statuses else None,
+        }
+        for source_key, target_key in (
+            ("createdAt", "created_at"),
+            ("created_at", "created_at"),
+            ("updatedAt", "updated_at"),
+            ("updated_at", "updated_at"),
+        ):
+            if target_key in values:
+                continue
+            raw_value = goal_response.get(source_key)
+            if isinstance(raw_value, int) and not isinstance(raw_value, bool) and raw_value >= 0:
+                values[target_key] = raw_value
+        values.setdefault("created_at", None)
+        values.setdefault("updated_at", None)
+        goal_projection = values
+    else:
+        diagnostics.append("codex_owner_goal_shape_invalid")
+
+    thread_response = owner_observation.get("thread")
+    if isinstance(thread_response, dict) and isinstance(thread_response.get("thread"), dict):
+        thread_response = thread_response.get("thread")
+    thread_projection: dict[str, Any] | None = None
+    if thread_response is not None and not isinstance(thread_response, dict):
+        diagnostics.append("codex_owner_thread_shape_invalid")
+    elif isinstance(thread_response, dict):
+        observed_thread_raw = thread_response.get("id") or thread_response.get("threadId")
+        observed_thread, _observed_thread_state = goal_catalog_public_safe_ref(
+            observed_thread_raw
+        )
+        if observed_thread != master_thread_id:
+            diagnostics.append("codex_owner_thread_identity_mismatch")
+        raw_status = thread_response.get("status")
+        status_type = raw_status.get("type") if isinstance(raw_status, dict) else None
+        if status_type not in {"notLoaded", "idle", "systemError", "active"}:
+            diagnostics.append("codex_owner_thread_status_invalid")
+            status_type = None
+        thread_projection = {
+            "thread_id": master_thread_id,
+            "status": status_type,
+        }
+        for relation_key in ("parentThreadId", "forkedFromId"):
+            if relation_key in thread_response:
+                relation_id, relation_state = goal_catalog_public_safe_ref(
+                    thread_response.get(relation_key)
+                )
+                if relation_id is not None:
+                    thread_projection[relation_key] = relation_id
+                    thread_projection[f"{relation_key}_state"] = relation_state
+                elif thread_response.get(relation_key) not in (None, ""):
+                    diagnostics.append(f"codex_owner_{relation_key}_invalid")
+
+    raw_items_value = owner_observation.get("items")
+    items_state = "current"
+    if "items" not in owner_observation or raw_items_value is None:
+        items_state = "missing"
+        items_response = {}
+        raw_items = []
+    elif isinstance(raw_items_value, dict):
+        items_response = raw_items_value
+        raw_items = items_response.get("data")
+        raw_items_state = str(
+            items_response.get("state")
+            or items_response.get("currentness")
+            or "current"
+        )
+        if raw_items_state not in GOAL_THREAD_BOARD_OWNER_CURRENTNESS:
+            items_state = "invalid"
+            diagnostics.append("codex_owner_items_state_invalid")
+        else:
+            items_state = (
+                "current" if raw_items_state == "current_at_read" else raw_items_state
+            )
+    elif isinstance(raw_items_value, list):
+        items_response = {}
+        raw_items = raw_items_value
+    else:
+        items_response = {}
+        raw_items = []
+        items_state = "invalid"
+        diagnostics.append("codex_owner_items_shape_invalid")
+    if raw_items is None:
+        raw_items = []
+    if not isinstance(raw_items, list):
+        diagnostics.append("codex_owner_items_shape_invalid")
+        raw_items = []
+        items_state = "invalid"
+    if items_state != "current":
+        diagnostics.append(f"codex_owner_items_{items_state}")
+    items: list[dict[str, Any]] = []
+    for ordinal, raw_item in enumerate(raw_items):
+        item, diagnostic = goal_thread_board_public_item_from_owner_item(
+            raw_item,
+            goal_ref=goal_ref,
+            master_thread_id=master_thread_id,
+            order=ordinal,
+        )
+        if item is not None:
+            items.append(item)
+        if diagnostic:
+            diagnostics.append(diagnostic)
+
+    raw_relations = owner_observation.get("relations")
+    if isinstance(raw_relations, dict):
+        relations_response = raw_relations
+        raw_relations = relations_response.get("data")
+    else:
+        relations_response = {}
+    if raw_relations is None:
+        raw_relations = []
+    if not isinstance(raw_relations, list):
+        diagnostics.append("codex_owner_relations_shape_invalid")
+        raw_relations = []
+    relations: list[dict[str, Any]] = []
+    for ordinal, raw_relation in enumerate(raw_relations):
+        relation, diagnostic = goal_thread_board_public_relation_from_owner_thread(
+            raw_relation,
+            goal_ref=goal_ref,
+            master_thread_id=master_thread_id,
+            order=ordinal,
+        )
+        if relation is not None:
+            relations.append(relation)
+        if diagnostic:
+            diagnostics.append(diagnostic)
+    if isinstance(thread_projection, dict):
+        relation, diagnostic = goal_thread_board_public_relation_from_owner_thread(
+            thread_projection,
+            goal_ref=goal_ref,
+            master_thread_id=master_thread_id,
+            order=len(relations),
+        )
+        if relation is not None and not any(
+            item.get("relation_ref") == relation.get("relation_ref") for item in relations
+        ):
+            relations.append(relation)
+        if diagnostic:
+            diagnostics.append(diagnostic)
+
+    owner_cursor = items_response.get("cursor")
+    if owner_cursor is None:
+        owner_cursor = owner_observation.get("cursor")
+    next_cursor = items_response.get("nextCursor")
+    if next_cursor is None:
+        next_cursor = items_response.get("next_cursor")
+    if next_cursor is None:
+        next_cursor = owner_observation.get("next_cursor")
+    safe_cursor = goal_thread_board_public_safe_cursor(owner_cursor)
+    safe_next_cursor = goal_thread_board_public_safe_cursor(next_cursor)
+    if owner_cursor not in (None, "") and safe_cursor is None:
+        diagnostics.append("codex_owner_cursor_invalid")
+    if next_cursor not in (None, "") and safe_next_cursor is None:
+        diagnostics.append("codex_owner_next_cursor_invalid")
+    sort_direction = str(
+        items_response.get("sortDirection")
+        or items_response.get("sort_direction")
+        or owner_observation.get("sort_direction")
+        or "asc"
+    )
+    if sort_direction not in {"asc", "desc"}:
+        diagnostics.append("codex_owner_sort_direction_invalid")
+        sort_direction = "asc"
+    complete_for_query = items_state == "current" and safe_next_cursor is None and not any(
+        diagnostic.startswith("codex_owner_next_cursor_invalid") for diagnostic in diagnostics
+    )
+    if owner_observation.get("relations_complete") is False:
+        complete_for_query = False
+    if owner_observation.get("relations_next_cursor") not in (None, ""):
+        complete_for_query = False
+    if diagnostics:
+        diagnostic_state = "invalid" if items_state == "invalid" or any(
+            item.endswith("invalid") or "shape_invalid" in item or "mismatch" in item
+            for item in diagnostics
+        ) else items_state if items_state != "current" else currentness
+    else:
+        diagnostic_state = currentness
+    if diagnostic_state == "current" and goal_projection is None and thread_projection is None:
+        diagnostic_state = "missing"
+    if goal_projection is None and "codex_owner_goal_missing" in diagnostics:
+        diagnostic_state = "missing" if diagnostic_state == "current" else diagnostic_state
+    return {
+        "state": "bound" if diagnostic_state == "current" else diagnostic_state,
+        "currentness": diagnostic_state,
+        "goal": goal_projection,
+        "thread": thread_projection,
+        "items": items,
+        "relations": relations,
+        "diagnostics": list(dict.fromkeys(diagnostics)),
+        "pagination": {
+            "cursor": safe_cursor,
+            "next_cursor": safe_next_cursor,
+            "sort_direction": sort_direction,
+            "complete_for_query": complete_for_query,
+        },
+        "source": source,
+    }
+
+
+def goal_thread_board_public_state_for_sources(
+    *,
+    input_invalid: bool,
+    catalog_state: str,
+    catalog_match: bool,
+    owner_state: str,
+    supported_item_count: int,
+) -> str:
+    if input_invalid:
+        return "invalid"
+    if owner_state == "bound" or (
+        catalog_state == "current" and (catalog_match or supported_item_count > 0)
+    ):
+        return "current"
+    priority = {"invalid": 6, "stale": 5, "deferred": 4, "unknown": 3, "missing": 2, "current": 1}
+    candidates = [catalog_state, owner_state]
+    return max(candidates, key=lambda value: priority.get(value, 0))
+
+
+def goal_thread_board_publication(
+    *,
+    aoa_root: Path,
+    goal_ref: str,
+    master_thread_id: str,
+    limit: int | None = None,
+    page_size: int | None = None,
+    cursor: str | None = None,
+    owner_observation: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Publish a public-safe board for one exact Goal and master thread.
+
+    ``owner_observation`` is a normalized read-only envelope assembled from
+    typed Codex app-server methods.  The session-memory index contributes only
+    allowlisted lifecycle markers; neither source is used to invent branch
+    lifecycle or event ordering.
+    """
+
+    requested_size = page_size if page_size is not None else limit
+    if requested_size is None:
+        requested_size = GOAL_THREAD_BOARD_DEFAULT_PAGE_SIZE
+    diagnostics: list[str] = []
+    input_invalid = False
+    try:
+        effective_page_size = int(requested_size)
+    except (TypeError, ValueError):
+        effective_page_size = 0
+    if effective_page_size <= 0:
+        effective_page_size = GOAL_THREAD_BOARD_DEFAULT_PAGE_SIZE
+        diagnostics.append("goal_thread_board_page_size_invalid")
+        input_invalid = True
+    effective_page_size = min(effective_page_size, GOAL_THREAD_BOARD_MAX_PAGE_SIZE)
+    exact_goal_ref = goal_thread_board_public_safe_exact_ref(goal_ref)
+    exact_master_thread_id = goal_thread_board_public_safe_exact_ref(master_thread_id)
+    if exact_goal_ref is None:
+        diagnostics.append("goal_thread_board_goal_ref_invalid")
+        input_invalid = True
+        exact_goal_ref = "invalid"
+    if exact_master_thread_id is None:
+        diagnostics.append("goal_thread_board_master_thread_id_invalid")
+        input_invalid = True
+        exact_master_thread_id = "invalid"
+    if not input_invalid and exact_goal_ref != exact_master_thread_id:
+        diagnostics.append("goal_thread_board_exact_binding_mismatch")
+        input_invalid = True
+
+    source = goal_catalog_public_source_snapshot(aoa_root=aoa_root, target="all")
+    catalog_state = str(source.get("state") or "unknown")
+    catalog_matches: list[dict[str, Any]] = []
+    if not input_invalid:
+        catalog_matches = [
+            item
+            for item in source.get("items", [])
+            if isinstance(item, dict)
+            and item.get("goal_ref") == exact_goal_ref
+            and item.get("thread_id") == exact_master_thread_id
+        ]
+    index_items: list[dict[str, Any]] = []
+    for item in source.get("board_items", []) if catalog_state == "current" and isinstance(source.get("board_items"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        if (
+            not input_invalid
+            and item.get("goal_ref") == exact_goal_ref
+            and item.get("thread_id") == exact_master_thread_id
+        ):
+            index_items.append(dict(item))
+    owner = goal_thread_board_public_owner_projection(
+        owner_observation,
+        goal_ref=exact_goal_ref,
+        master_thread_id=exact_master_thread_id,
+    )
+    owner_items = (
+        [dict(item) for item in owner.get("items", []) if isinstance(item, dict)]
+        if owner.get("state") == "bound"
+        else []
+    )
+    owner_relations = (
+        [dict(item) for item in owner.get("relations", []) if isinstance(item, dict)]
+        if owner.get("state") == "bound"
+        else []
+    )
+    if owner.get("state") == "missing" and owner_observation is not None:
+        diagnostics.append("codex_owner_goal_missing")
+    diagnostics.extend(
+        goal_thread_board_public_source_diagnostics(source.get("diagnostics"))
+    )
+    source_live_tail = source.get("live_tail")
+    if not isinstance(source_live_tail, dict):
+        source_live_tail = {
+            "state": "not_observed",
+            "coverage": "stable_projection_watermark",
+            "diagnostics": [],
+        }
+    diagnostics.extend(
+        goal_thread_board_public_source_diagnostics(
+            source_live_tail.get("diagnostics")
+        )
+    )
+    diagnostics.extend(
+        str(item) for item in owner.get("diagnostics", []) if str(item)
+    )
+    all_items: list[dict[str, Any]] = []
+    seen_refs: set[str] = set()
+    for item in [*owner_items, *index_items]:
+        item_ref = str(item.get("item_ref") or "")
+        if not item_ref or item_ref in seen_refs:
+            continue
+        seen_refs.add(item_ref)
+        all_items.append(item)
+    catalog_match = bool(catalog_matches)
+    board_state = goal_thread_board_public_state_for_sources(
+        input_invalid=input_invalid,
+        catalog_state=catalog_state,
+        catalog_match=catalog_match,
+        owner_state=str(owner.get("state") or "unknown"),
+        supported_item_count=len(all_items),
+    )
+    if input_invalid:
+        all_items = []
+        owner_relations = []
+
+    source_entries = source.get("source_entries") if isinstance(source.get("source_entries"), list) else []
+    catalog_watermark = {
+        "schema_version": 1,
+        "kind": "complete_session_index_set_v1",
+        "registry_digest": source.get("registry_digest"),
+        "source_set_digest": goal_catalog_public_digest(source_entries),
+        "session_count": len(source_entries),
+        "goal_lifecycle_count": len(catalog_matches),
+        "coverage": "complete" if catalog_state == "current" else "incomplete",
+        "live_tail": source_live_tail,
+        "max_updated_at": max(
+            (str(item.get("updated_at") or "") for item in source_entries),
+            default="",
         ),
+        "max_raw_line_count": max(
+            (
+                int_value((item.get("raw_watermark") or {}).get("lines"), 0)
+                for item in source_entries
+                if isinstance(item.get("raw_watermark"), dict)
+            ),
+            default=0,
+        ),
+    }
+    owner_safe_basis = {
+        "state": owner.get("state"),
+        "currentness": owner.get("currentness"),
+        "goal": owner.get("goal"),
+        "thread": owner.get("thread"),
+        "items": owner_items,
+        "relations": owner_relations,
+        "pagination": owner.get("pagination"),
+    }
+    owner_observation_digest = goal_catalog_public_digest(owner_safe_basis)
+    source_watermark = {
+        "schema_version": 1,
+        "kind": "goal_thread_board_source_watermark_v1",
+        "catalog": catalog_watermark,
+        "owner_observation_digest": owner_observation_digest,
+        "owner_currentness": owner.get("currentness"),
+        "item_count": len(all_items),
+        "relation_count": len(owner_relations),
+        "coverage": "complete"
+        if catalog_state == "current"
+        and owner.get("state") == "bound"
+        and owner.get("pagination", {}).get("complete_for_query", False)
+        else "incomplete",
+    }
+    snapshot_basis = {
+        "publication_schema_version": GOAL_THREAD_BOARD_PUBLICATION_SCHEMA_VERSION,
+        "goal_ref": exact_goal_ref,
+        "master_thread_id": exact_master_thread_id,
+        "source_watermark": source_watermark,
+        "items": all_items,
+        "relations": owner_relations,
+    }
+    snapshot_digest = goal_catalog_public_digest(snapshot_basis)
+    input_cursor = str(cursor or "") or None
+    start = 0
+    decoded_cursor: dict[str, Any] | None = None
+    if input_cursor is not None:
+        decoded_cursor = goal_thread_board_public_decode_cursor(input_cursor)
+        if decoded_cursor is None:
+            diagnostics.append("goal_thread_board_cursor_invalid")
+            board_state = "invalid"
+        elif (
+            decoded_cursor.get("goal_ref") != exact_goal_ref
+            or decoded_cursor.get("master_thread_id") != exact_master_thread_id
+        ):
+            diagnostics.append("goal_thread_board_cursor_binding_mismatch")
+            board_state = "invalid"
+        elif decoded_cursor.get("page_size") != effective_page_size:
+            diagnostics.append("goal_thread_board_cursor_page_size_mismatch")
+            board_state = "invalid"
+        elif decoded_cursor.get("snapshot_digest") != snapshot_digest:
+            diagnostics.append("goal_thread_board_cursor_source_watermark_changed")
+            board_state = "stale"
+        else:
+            start = int(decoded_cursor.get("offset") or 0)
+            if start > len(all_items):
+                diagnostics.append("goal_thread_board_cursor_offset_invalid")
+                board_state = "invalid"
+    admitted_items = all_items if board_state == "current" else []
+    page_items = admitted_items[start : start + effective_page_size]
+    next_board_cursor: str | None = None
+    if board_state == "current" and start + len(page_items) < len(admitted_items):
+        next_board_cursor = goal_thread_board_public_encode_cursor(
+            {
+                "version": GOAL_THREAD_BOARD_CURSOR_VERSION,
+                "snapshot_digest": snapshot_digest,
+                "goal_ref": exact_goal_ref,
+                "master_thread_id": exact_master_thread_id,
+                "offset": start + len(page_items),
+                "page_size": effective_page_size,
+            }
+        )
+    owner_next_cursor = owner.get("pagination", {}).get("next_cursor")
+    owner_page_complete = owner.get("state") == "bound" and bool(
+        owner.get("pagination", {}).get("complete_for_query", False)
+    )
+    if owner_next_cursor:
+        owner_page_complete = False
+    if board_state == "current" and not owner_page_complete:
+        diagnostics.append("codex_owner_items_page_deferred")
+    relation_state = "missing"
+    if owner_observation is not None:
+        relation_state = "complete" if owner_page_complete else "deferred"
+        if owner.get("state") == "invalid":
+            relation_state = "invalid"
+        elif owner.get("state") in {"unknown", "stale", "missing"}:
+            relation_state = str(owner.get("state"))
+    page_digest = goal_catalog_public_digest(
+        {
+            "snapshot_digest": snapshot_digest,
+            "cursor": input_cursor,
+            "offset": start,
+            "items": page_items,
+        }
+    )
+    generated_at = utc_now()
+    final_state = board_state if board_state in GOAL_THREAD_BOARD_STATES else "unknown"
+    source_generation = source.get("generation_identity", {})
+    snapshot_read = source.get("snapshot_read")
+    if not isinstance(snapshot_read, dict):
+        snapshot_read = {
+            "attempt": 1,
+            "max_attempts": 1,
+            "retry_exhausted": False,
+            "stable_source": catalog_state == "current",
+        }
+    read_attempts = int_value(snapshot_read.get("attempt"), 1)
+    max_read_attempts = int_value(snapshot_read.get("max_attempts"), 1)
+    retry_exhausted = bool(snapshot_read.get("retry_exhausted"))
+    stable_source = bool(snapshot_read.get("stable_source"))
+    claim_limit = (
+        "This is an exact Goal/thread public-safe board projection. Item identity "
+        "and structural parent/fork observations come only from owner indexes or "
+        "typed Codex app-server reads. Item order is source-page order, not semantic "
+        "event order. Branch lifecycle, authors, participants, acceptance, runtime "
+        "health and completion remain unavailable unless their owners publish them."
+    )
+    if catalog_state != "current":
+        claim_limit += (
+            " The session-memory catalog source is not current, so the board is "
+            "not complete for that owner-index dimension and no absence claim is "
+            "admitted beyond its last stable watermark."
+        )
+    if owner_observation is None or owner.get("state") != "bound":
+        claim_limit += (
+            " The Codex owner page is not bound and complete; rendered lifecycle "
+            "markers do not establish that the owner page is exhaustive."
+        )
+    output = {
+        "schema_version": GOAL_THREAD_BOARD_SCHEMA_VERSION,
+        "publication_schema_version": GOAL_THREAD_BOARD_PUBLICATION_SCHEMA_VERSION,
+        "artifact_type": "goal_thread_board_projection",
+        "generated_at": generated_at,
+        "ok": final_state == "current",
+        "state": final_state,
+        "currentness": final_state,
+        "publication_state": "bound" if final_state == "current" else final_state,
+        "goal_ref": exact_goal_ref,
+        "master_thread_id": exact_master_thread_id,
+        "exact_binding": {
+            "goal_ref": exact_goal_ref,
+            "master_thread_id": exact_master_thread_id,
+            "equal": not input_invalid and exact_goal_ref == exact_master_thread_id,
+            "query_mode": "exact_only",
+        },
+        "source": {
+            "owner": "aoa-session-memory",
+            "ref": "aoa-session-memory:goal-thread-board",
+            "catalog_ref": "aoa-session-memory:goal-lifecycles",
+            "generation_identity": source_generation,
+            "watermark": source_watermark,
+            "currentness": final_state,
+        },
+        "owner_read": {
+            "owner": "codex-app-server",
+            "state": owner.get("state"),
+            "currentness": owner.get("currentness"),
+            "source": owner.get("source"),
+            "goal": owner.get("goal"),
+            "thread": owner.get("thread"),
+            "observation_digest": owner_observation_digest,
+            "diagnostics": owner.get("diagnostics", []),
+        },
+        "snapshot": {
+            "snapshot_ref": snapshot_digest,
+            "snapshot_digest": snapshot_digest,
+            "generated_at": generated_at,
+            "source_watermark": source_watermark,
+            "source_freshness": catalog_state,
+            "projection_freshness": final_state,
+            "immutable": True,
+            "read_attempts": read_attempts,
+            "max_read_attempts": max_read_attempts,
+            "retry_exhausted": retry_exhausted,
+            "stable_source": stable_source,
+        },
+        "pagination": {
+            "mode": "immutable_snapshot",
+            "cursor": input_cursor,
+            "next_cursor": next_board_cursor,
+            "owner_next_cursor": owner_next_cursor,
+            "complete_for_query": final_state == "current"
+            and catalog_state == "current"
+            and next_board_cursor is None
+            and owner_page_complete,
+            "page_size": effective_page_size,
+            "supports_immutable_snapshot": True,
+            "owner_page_complete": owner_page_complete,
+        },
+        "ordering": {
+            "kind": "source_page_order",
+            "item_order_is_semantic": False,
+            "event_ordering": {
+                "state": "missing",
+                "kind": "unavailable",
+                "reason": "codex_app_server_has_no_replayable_event_sequence",
+            },
+            "watermark": source_watermark,
+        },
+        "page": {
+            "offset": start,
+            "item_count": len(page_items),
+            "page_digest": page_digest,
+        },
+        "snapshot_digest": snapshot_digest,
+        "page_digest": page_digest,
+        "source_item_count": len(all_items),
+        "item_count": len(page_items),
+        "total_item_count": len(all_items) if final_state == "current" else 0,
+        "relation_state": relation_state,
+        "relations": owner_relations if final_state == "current" else [],
+        "branch": {
+            "state": "missing",
+            "branch_ref": None,
+            "lifecycle_state": None,
+            "reason": "no_canonical_goal_branch_publisher",
+        },
+        "items": page_items,
+        "diagnostics": list(dict.fromkeys(diagnostics)),
+        "omissions": {
+            "prompt": True,
+            "transcript_body": True,
+            "objective": True,
+            "raw_paths": True,
+            "private_metadata": True,
+            "command_text": True,
+            "tool_arguments": True,
+            "tool_results": True,
+            "process_identity": True,
+            "actor_identity": True,
+            "model_identity": True,
+        },
+        "privacy": {
+            "scope": "owner_bounded_public_safe",
+            "allowlisted_fields": [
+                "goal_ref",
+                "master_thread_id",
+                "item_ref",
+                "item_id",
+                "item_kind",
+                "owner_event_kind",
+                "owner_item_type",
+                "review_state",
+                "body_state",
+                "order",
+                "order_state",
+                "observed_at",
+                "relation_kind",
+                "from_thread_id",
+                "to_thread_id",
+                "state",
+                "currentness",
+                "snapshot_digest",
+                "page_digest",
+            ],
+            "withheld_fields": [
+                "prompt",
+                "transcript_body",
+                "objective",
+                "raw_paths",
+                "private_metadata",
+                "command_text",
+                "tool_arguments",
+                "tool_results",
+                "process_identity",
+                "actor_identity",
+                "model_identity",
+            ],
+            "prohibited_join_keys": [
+                "cwd",
+                "path",
+                "pid",
+                "unit",
+                "task_dag_position",
+                "filename",
+                "title",
+                "timestamp_only",
+            ],
+            "no_transcript_body": True,
+            "no_raw_paths": True,
+            "no_private_metadata": True,
+            "no_actor_inference": True,
+        },
+        "claim_limit": claim_limit,
     }
     return output
 
@@ -206527,6 +207984,39 @@ def command_goal_catalog(args: argparse.Namespace) -> int:
     return 0 if payload.get("ok") else 1
 
 
+def command_goal_thread_board(args: argparse.Namespace) -> int:
+    explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
+    root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    owner_observation: dict[str, Any] | None = None
+    if args.owner_observation:
+        owner_read = goal_catalog_public_read_json(Path(args.owner_observation).expanduser())
+        if owner_read.get("state") == "current" and isinstance(owner_read.get("value"), dict):
+            owner_observation = owner_read["value"]
+        elif owner_read.get("state") == "missing":
+            owner_observation = None
+        else:
+            owner_observation = {
+                "owner": "codex-app-server",
+                "currentness": "invalid",
+                "methods": [],
+                "diagnostics": [
+                    str(owner_read.get("diagnostic") or "owner_observation_unavailable")
+                ],
+            }
+    payload = goal_thread_board_publication(
+        aoa_root=root,
+        goal_ref=args.goal_ref,
+        master_thread_id=args.master_thread_id,
+        page_size=args.page_size,
+        cursor=args.cursor,
+        owner_observation=owner_observation,
+    )
+    if args.output:
+        write_json(Path(args.output).expanduser(), payload)
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
 def command_entity_registry(args: argparse.Namespace) -> int:
     explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
     root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
@@ -215222,6 +216712,35 @@ def add_goal_catalog_parser(parser: argparse.ArgumentParser) -> None:
     goal_catalog_parser.set_defaults(func=command_goal_catalog)
 
 
+def add_goal_thread_board_parser(parser: argparse.ArgumentParser) -> None:
+    sub = next(
+        (
+            action
+            for action in parser._actions
+            if isinstance(action, argparse._SubParsersAction)
+        ),
+        None,
+    )
+    if sub is None:
+        raise RuntimeError("goal_thread_board_subparser_owner_missing")
+    board_parser = sub.add_parser(
+        "goal-thread-board",
+        help="Publish one exact public-safe Goal/thread board without private item bodies.",
+    )
+    board_parser.add_argument("--goal-ref", required=True)
+    board_parser.add_argument("--master-thread-id", required=True)
+    board_parser.add_argument("--workspace-root")
+    board_parser.add_argument("--aoa-root")
+    board_parser.add_argument("--page-size", type=int)
+    board_parser.add_argument("--cursor", help="Opaque immutable board cursor.")
+    board_parser.add_argument(
+        "--owner-observation",
+        help="JSON envelope assembled from typed read-only Codex app-server responses.",
+    )
+    board_parser.add_argument("--output", help="Write the public board JSON to this explicit path.")
+    board_parser.set_defaults(func=command_goal_thread_board)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="AoA Codex session memory archive hooks.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -217981,6 +219500,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     add_goal_catalog_parser(parser)
+    add_goal_thread_board_parser(parser)
     args = parser.parse_args(argv)
     return int(args.func(args))
 

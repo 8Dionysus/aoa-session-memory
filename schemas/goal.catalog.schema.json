@@ -111,7 +111,18 @@
         "goal_lifecycle_count": {"type": "integer", "minimum": 0},
         "coverage": {"enum": ["complete", "incomplete"]},
         "max_updated_at": {"type": "string"},
-        "max_raw_line_count": {"type": "integer", "minimum": 0}
+        "max_raw_line_count": {"type": "integer", "minimum": 0},
+        "live_tail": {"$ref": "#/$defs/liveTail"}
+      }
+    },
+    "liveTail": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "coverage", "diagnostics"],
+      "properties": {
+        "state": {"enum": ["current", "ahead", "unstable", "unknown", "not_observed"]},
+        "coverage": {"const": "stable_projection_watermark"},
+        "diagnostics": {"type": "array", "items": {"type": "string", "minLength": 1}}
       }
     },
     "source": {
@@ -146,7 +157,11 @@
         "source_watermark",
         "source_freshness",
         "projection_freshness",
-        "immutable"
+        "immutable",
+        "read_attempts",
+        "max_read_attempts",
+        "retry_exhausted",
+        "stable_source"
       ],
       "properties": {
         "snapshot_ref": {"$ref": "#/$defs/digest"},
@@ -155,7 +170,11 @@
         "source_watermark": {"$ref": "#/$defs/watermark"},
         "source_freshness": {"$ref": "#/$defs/state"},
         "projection_freshness": {"$ref": "#/$defs/state"},
-        "immutable": {"const": true}
+        "immutable": {"const": true},
+        "read_attempts": {"type": "integer", "minimum": 1},
+        "max_read_attempts": {"type": "integer", "minimum": 1},
+        "retry_exhausted": {"type": "boolean"},
+        "stable_source": {"type": "boolean"}
       }
     },
     "pagination": {

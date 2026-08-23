@@ -1,0 +1,22 @@
+{
+  "owner": "codex-app-server",
+  "currentness": "current_at_read",
+  "methods": ["thread/goal/get"],
+  "goal": {
+    "threadId": "thread:foreign",
+    "status": "active",
+    "createdAt": 1720000000,
+    "updatedAt": 1720000010
+  },
+  "thread": {
+    "id": "thread:foreign",
+    "status": {"type": "idle"}
+  },
+  "items": [
+    {
+      "id": "item:foreign",
+      "type": "agentMessage",
+      "text": "PRIVATE_FOREIGN_BODY"
+    }
+  ]
+}

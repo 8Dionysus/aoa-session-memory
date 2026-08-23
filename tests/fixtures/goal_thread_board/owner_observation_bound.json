@@ -1,0 +1,66 @@
+{
+  "owner": "codex-app-server",
+  "currentness": "current_at_read",
+  "methods": [
+    "thread/goal/get",
+    "thread/read",
+    "thread/items/list",
+    "thread/list"
+  ],
+  "goal": {
+    "threadId": "thread:fixture-master",
+    "objective": "PRIVATE_OBJECTIVE_MUST_NOT_APPEAR",
+    "status": "active",
+    "tokenBudget": 9000,
+    "tokensUsed": 12,
+    "timeUsedSeconds": 4,
+    "createdAt": 1720000000,
+    "updatedAt": 1720000010
+  },
+  "thread": {
+    "id": "thread:fixture-master",
+    "sessionId": "PRIVATE_SESSION_ID",
+    "preview": "PRIVATE_PREVIEW_MUST_NOT_APPEAR",
+    "cwd": "/private/fixture/worktree",
+    "status": {"type": "idle"},
+    "parentThreadId": null,
+    "forkedFromId": null
+  },
+  "items": {
+    "cursor": null,
+    "nextCursor": null,
+    "sortDirection": "asc",
+    "data": [
+      {
+        "id": "item:fixture-user",
+        "type": "userMessage",
+        "content": [{"type": "text", "text": "PRIVATE_PROMPT_MUST_NOT_APPEAR"}]
+      },
+      {
+        "id": "item:fixture-agent",
+        "type": "agentMessage",
+        "text": "PRIVATE_TRANSCRIPT_MUST_NOT_APPEAR",
+        "memoryCitation": {"path": "/private/raw/path"}
+      },
+      {
+        "id": "item:fixture-command",
+        "type": "commandExecution",
+        "command": "PRIVATE_COMMAND_MUST_NOT_APPEAR",
+        "cwd": "/private/fixture/worktree",
+        "aggregatedOutput": "PRIVATE_OUTPUT_MUST_NOT_APPEAR",
+        "processId": "private-pid"
+      }
+    ]
+  },
+  "relations": {
+    "data": [
+      {
+        "id": "thread:fixture-child",
+        "parentThreadId": "thread:fixture-master",
+        "forkedFromId": null,
+        "status": {"type": "notLoaded"},
+        "preview": "PRIVATE_CHILD_PREVIEW"
+      }
+    ]
+  }
+}

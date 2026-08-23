@@ -292,3 +292,195 @@ def test_public_catalog_fails_closed_for_malformed_and_incompatible_sources(
     assert stale["state"] == "stale"
     assert stale["items"] == []
     Draft202012Validator(public_catalog_schema()).validate(stale)
+
+
+def test_public_catalog_retries_source_movement_during_capture(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = create_real_goal_session(
+        tmp_path,
+        "goal-moving-source",
+        "private objective",
+    )
+    original_read = MODULE.goal_catalog_public_read_json
+    calls = {"index": 0}
+
+    def moving_read(path: Path) -> dict[str, Any]:
+        result = original_read(path)
+        if path.name == MODULE.SESSION_INDEX_JSON and calls["index"] == 0:
+            calls["index"] += 1
+            return {
+                **result,
+                "state": "deferred",
+                "value": None,
+                "digest": None,
+                "stable": False,
+                "diagnostic": "source_file_changed_during_read",
+            }
+        return result
+
+    monkeypatch.setattr(MODULE, "goal_catalog_public_read_json", moving_read)
+    publication = MODULE.goal_catalog_publication(aoa_root=aoa_root)
+
+    assert publication["ok"] is True
+    assert publication["state"] == "current"
+    assert calls["index"] == 1
+    assert publication["snapshot"]["read_attempts"] == 2
+    assert publication["snapshot"]["retry_exhausted"] is False
+    assert publication["snapshot"]["stable_source"] is True
+    Draft202012Validator(public_catalog_schema()).validate(publication)
+
+
+def test_public_catalog_retries_when_raw_capture_source_moves(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = create_real_goal_session(
+        tmp_path,
+        "goal-moving-raw-source",
+        "private objective",
+    )
+    original_read = MODULE.goal_catalog_public_read_json
+    calls = {"capture": 0}
+
+    def moving_capture_read(path: Path) -> dict[str, Any]:
+        result = original_read(path)
+        if path.name == MODULE.RAW_CAPTURE_STATE_JSON and calls["capture"] == 0:
+            calls["capture"] += 1
+            return {
+                **result,
+                "state": "deferred",
+                "value": None,
+                "digest": None,
+                "stable": False,
+                "diagnostic": "source_file_changed_during_read",
+            }
+        return result
+
+    monkeypatch.setattr(MODULE, "goal_catalog_public_read_json", moving_capture_read)
+    publication = MODULE.goal_catalog_publication(aoa_root=aoa_root)
+
+    assert publication["ok"] is True
+    assert publication["state"] == "current"
+    assert calls["capture"] == 1
+    assert publication["snapshot"]["read_attempts"] == 2
+    assert publication["snapshot"]["retry_exhausted"] is False
+    Draft202012Validator(public_catalog_schema()).validate(publication)
+
+
+def test_public_catalog_defers_torn_projection_indexes_without_records(
+    tmp_path: Path,
+) -> None:
+    aoa_root = create_real_goal_session(
+        tmp_path,
+        "goal-torn-index",
+        "private objective",
+    )
+    registry = json.loads((aoa_root / MODULE.REGISTRY_NAME).read_text(encoding="utf-8"))
+    session_dir = Path(str(registry["sessions"][0]["path"]))
+    index_path = session_dir / MODULE.SESSION_INDEX_JSON
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    projection_publish = index.get("projection_publish")
+    assert isinstance(projection_publish, dict)
+    projection_publish = dict(projection_publish)
+    projection_publish["publish_id"] = "torn-projection-publish"
+    index["projection_publish"] = projection_publish
+    index_path.write_text(json.dumps(index, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    publication = MODULE.goal_catalog_publication(aoa_root=aoa_root)
+
+    assert publication["ok"] is False
+    assert publication["state"] == "deferred"
+    assert publication["items"] == []
+    assert "session_projection_publish_identity_torn" in " ".join(publication["diagnostics"])
+    assert publication["snapshot"]["retry_exhausted"] is True
+    Draft202012Validator(public_catalog_schema()).validate(publication)
+
+
+def test_public_catalog_defers_when_preserved_raw_is_ahead_of_projection(
+    tmp_path: Path,
+) -> None:
+    aoa_root = create_real_goal_session(
+        tmp_path,
+        "goal-raw-ahead",
+        "private objective",
+    )
+    registry = json.loads((aoa_root / MODULE.REGISTRY_NAME).read_text(encoding="utf-8"))
+    session_dir = Path(str(registry["sessions"][0]["path"]))
+    capture_path = session_dir / "raw" / MODULE.RAW_CAPTURE_STATE_JSON
+    capture = json.loads(capture_path.read_text(encoding="utf-8"))
+    capture["status"] = "preserved_unindexed"
+    capture["raw_sha256"] = "capture-ahead-of-projection"
+    capture["source_stable_during_capture"] = True
+    capture_path.write_text(json.dumps(capture, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    publication = MODULE.goal_catalog_publication(aoa_root=aoa_root)
+
+    assert publication["ok"] is False
+    assert publication["state"] == "deferred"
+    assert publication["items"] == []
+    assert publication["source_watermark"]["live_tail"]["state"] == "ahead"
+    assert "preserved_raw_capture_ahead_of_session_projection" in " ".join(publication["diagnostics"])
+    assert "zero admitted records does not establish Goal absence" in publication["claim_limit"]
+    Draft202012Validator(public_catalog_schema()).validate(publication)
+
+
+def test_public_catalog_exposes_bounded_retry_exhaustion(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = create_real_goal_session(
+        tmp_path,
+        "goal-retry-exhausted",
+        "private objective",
+    )
+    original_read = MODULE.goal_catalog_public_read_json
+    calls = {"index": 0}
+
+    def always_moving(path: Path) -> dict[str, Any]:
+        result = original_read(path)
+        if path.name == MODULE.SESSION_INDEX_JSON:
+            calls["index"] += 1
+            return {
+                **result,
+                "state": "deferred",
+                "value": None,
+                "digest": None,
+                "stable": False,
+                "diagnostic": "source_file_changed_during_read",
+            }
+        return result
+
+    monkeypatch.setattr(MODULE, "goal_catalog_public_read_json", always_moving)
+    publication = MODULE.goal_catalog_publication(aoa_root=aoa_root)
+
+    assert publication["ok"] is False
+    assert publication["state"] == "deferred"
+    assert publication["items"] == []
+    assert calls["index"] == MODULE.GOAL_CATALOG_SOURCE_SNAPSHOT_MAX_ATTEMPTS
+    assert publication["snapshot"]["retry_exhausted"] is True
+    assert publication["snapshot"]["read_attempts"] == MODULE.GOAL_CATALOG_SOURCE_SNAPSHOT_MAX_ATTEMPTS
+    assert "goal_catalog_source_snapshot_retry_exhausted" in publication["diagnostics"]
+    Draft202012Validator(public_catalog_schema()).validate(publication)
+
+
+def test_public_catalog_stable_snapshot_reports_watermark_and_read_budget(
+    tmp_path: Path,
+) -> None:
+    aoa_root = create_real_goal_session(
+        tmp_path,
+        "goal-stable-snapshot",
+        "private objective",
+    )
+
+    publication = MODULE.goal_catalog_publication(aoa_root=aoa_root)
+
+    assert publication["ok"] is True
+    assert publication["state"] == "current"
+    assert publication["source_watermark"]["coverage"] == "complete"
+    assert publication["source_watermark"]["live_tail"]["state"] == "current"
+    assert publication["snapshot"]["read_attempts"] == 1
+    assert publication["snapshot"]["retry_exhausted"] is False
+    assert publication["snapshot"]["stable_source"] is True
+    Draft202012Validator(public_catalog_schema()).validate(publication)

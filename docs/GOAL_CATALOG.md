@@ -27,7 +27,9 @@ The cursor binds the query, page size, source generation, source watermark,
 and complete snapshot digest. A changed registry or session index makes the
 cursor `stale` and returns no records; it never silently mixes pages from two
 source generations. A malformed cursor is `invalid` and also returns no
-records.
+records. Source reads use a bounded retry budget and expose the attempts and
+whether retry was exhausted in `snapshot`; an unstable or torn source is
+`deferred` and admits no records.
 
 Each admitted record contains only stable Goal/thread correlation, lifecycle
 state, lifecycle grouping, bounded observation timestamps, an owner evidence
@@ -40,14 +42,18 @@ objective text.
 `state` and `currentness` are explicit: `current` admits a page, while
 `missing`, `unknown`, `stale`, `deferred`, and `invalid` are negative states.
 The latter states set `ok` to `false`, preserve diagnostics, and do not expose
-stale source records as current catalog items. `source.generation_identity`,
-`source.goal_lifecycle_generation`, `source_watermark`, `snapshot_digest`,
-`item_digest`, and `page_digest` let a non-sovereign dashboard verify that it
-is rendering one owner publication. Selection remains dashboard state and is
-not encoded in this catalog.
+stale source records as current catalog items. A preserved raw capture ahead
+of its last-good session projection is reported through
+`source_watermark.live_tail` and makes the catalog `deferred`; the stable
+projection watermark is not silently promoted to an exhaustive live claim.
+`source.generation_identity`, `source.goal_lifecycle_generation`,
+`source_watermark`, `snapshot_digest`, `item_digest`, and `page_digest` let a
+non-sovereign dashboard verify that it is rendering one owner publication.
+Selection remains dashboard state and is not encoded in this catalog.
 
 The source is the complete available session registry plus every referenced
-`session.index.json`; no Goal id, task-root path, Codex version, source
-generation, or fixture is embedded in the publisher. Generated source is
-navigation, not reviewed truth. Follow `evidence_ref` through the owner’s
-normal evidence route before making a claim about what happened.
+manifest, `session.index.json`, and observed raw-capture/projection watermark;
+no Goal id, task-root path, Codex version, source generation, or fixture is
+embedded in the publisher. Generated source is navigation, not reviewed
+truth. Follow `evidence_ref` through the owner’s normal evidence route before
+making a claim about what happened.

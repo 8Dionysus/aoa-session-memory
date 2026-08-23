@@ -1,0 +1,26 @@
+{
+  "owner": "codex-app-server",
+  "currentness": "current_at_read",
+  "methods": ["thread/items/list"],
+  "goal": {
+    "threadId": "thread:fixture-master",
+    "status": "active",
+    "createdAt": 1720000000,
+    "updatedAt": 1720000010
+  },
+  "thread": {
+    "id": "thread:fixture-master",
+    "status": {"type": "notLoaded"},
+    "parentThreadId": null,
+    "forkedFromId": null
+  },
+  "items": {
+    "cursor": "owner-cursor-1",
+    "nextCursor": "owner-cursor-2",
+    "sortDirection": "asc",
+    "data": [
+      {"id": "item:fixture-page-one", "type": "plan", "text": "PRIVATE_PLAN"}
+    ]
+  },
+  "relations": {"data": []}
+}
