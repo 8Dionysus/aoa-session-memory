@@ -461,3 +461,124 @@ def test_deep_admission_refuses_unresolved_capture_identity_without_attempt(
     assert item["attempts_started"] == 0
     assert item["in_flight"] is False
     assert item["next_attempt_epoch"] == 0.0
+
+
+@pytest.mark.parametrize(
+    ("index_case", "expected_relation"),
+    (("wrong", "conflict"), ("missing", "unresolved"), ("invalid", "unresolved")),
+    ids=("wrong-nonnegative", "missing", "invalid"),
+)
+def test_same_epoch_epoch_index_mismatch_preserves_obligation_and_refuses_deep_admission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    index_case: str,
+    expected_relation: str,
+) -> None:
+    fixture = _fixture(tmp_path, monkeypatch, session_id=f"same-epoch-{index_case}")
+    initial_options = dict(_queue_item(fixture)["options"])
+    current_result = module._capture_identity_current(
+        aoa_root=fixture["aoa_root"],
+        session_id=fixture["session_id"],
+        configured_session_dir=fixture["session_dir"],
+    )
+    assert current_result["ok"] is True
+    assert current_result["identity"]["epoch_index"] == 0
+
+    def corrupt_index(payload: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        item = payload["items"][f"deep:{fixture['session_id']}"]
+        options = item["options"]
+        if index_case == "missing":
+            options.pop("required_capture_epoch_index", None)
+        elif index_case == "invalid":
+            options["required_capture_epoch_index"] = "not-an-index"
+        else:
+            options["required_capture_epoch_index"] = 999
+        return {"status": "corrupted_same_epoch_index"}, True
+
+    module.mutate_auto_maintenance_retry_queue(
+        fixture["aoa_root"],
+        corrupt_index,
+        now_epoch=113.0,
+    )
+    corrupted_options = dict(_queue_item(fixture)["options"])
+    for key in (
+        "required_capture_epoch_id",
+        "required_capture_bytes",
+        "required_capture_sha256",
+        "required_capture_chain_sha256",
+        "required_capture_ref",
+    ):
+        assert corrupted_options[key] == initial_options[key]
+
+    reconciled = module.reconcile_session_projection_freshness_obligation(
+        aoa_root=fixture["aoa_root"],
+        session_id=fixture["session_id"],
+        session_dir=fixture["session_dir"],
+        transcript_path=fixture["transcript"],
+        freshness_reason="same_epoch_index_mismatch",
+        now_epoch=114.0,
+        create_if_missing=False,
+    )
+    assert reconciled["status"] == "identity_reconciliation_unresolved"
+    assert reconciled["diagnostic"] == (
+        "capture_retry_queue_identity_reconciliation_unresolved"
+    )
+    assert reconciled["reason"] == f"current_identity_relation:{expected_relation}"
+    after_reconcile = _queue_item(fixture)
+    after_reconcile_options = after_reconcile["options"]
+    for key in (
+        "required_capture_epoch_id",
+        "required_capture_bytes",
+        "required_capture_sha256",
+        "required_capture_chain_sha256",
+        "required_capture_ref",
+    ):
+        assert after_reconcile_options[key] == initial_options[key]
+    if index_case == "missing":
+        assert "required_capture_epoch_index" not in after_reconcile_options
+    elif index_case == "invalid":
+        assert after_reconcile_options["required_capture_epoch_index"] == "not-an-index"
+    else:
+        assert after_reconcile_options["required_capture_epoch_index"] == 999
+
+    def make_due(payload: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        item = payload["items"][f"deep:{fixture['session_id']}"]
+        item["next_attempt_epoch"] = 0.0
+        item["next_attempt_at"] = module.auto_maintenance_retry_iso(0.0)
+        return {"status": "due"}, True
+
+    module.mutate_auto_maintenance_retry_queue(
+        fixture["aoa_root"],
+        make_due,
+        now_epoch=115.0,
+    )
+    launch_called = False
+
+    def forbidden_launch(**_kwargs: Any) -> dict[str, Any]:
+        nonlocal launch_called
+        launch_called = True
+        raise AssertionError("same-epoch index mismatch must not launch deep work")
+
+    monkeypatch.setattr(module, "auto_maintenance_resource_launch", forbidden_launch)
+    dispatched = module.auto_maintenance_retry_dispatch(
+        workspace_root=fixture["workspace"],
+        aoa_root=fixture["aoa_root"],
+        apply=True,
+        limit=1,
+        now_epoch=115.0,
+    )
+    result = dispatched["results"][0]
+    assert launch_called is False
+    assert result["launch_status"] == (
+        "deep_admission_refused_capture_retry_queue_identity_"
+        "reconciliation_unresolved"
+    )
+    assert result["disposition"] == "admission_refused"
+    assert result["diagnostics"] == [
+        "capture_retry_queue_identity_reconciliation_unresolved"
+    ]
+    item = _queue_item(fixture)
+    assert item["attempts_started"] == 0
+    assert item["in_flight"] is False
+    assert item["status"] == "pending"
+    assert item["options"] == after_reconcile_options

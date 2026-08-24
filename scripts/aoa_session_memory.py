@@ -18325,6 +18325,12 @@ def _capture_identity_relation(
     if candidate_bytes < 0 or baseline_bytes < 0:
         return "unresolved"
     if candidate_epoch == baseline_epoch:
+        candidate_index = int_value(candidate.get("epoch_index"), -1)
+        baseline_index = int_value(baseline.get("epoch_index"), -1)
+        if candidate_index < 0 or baseline_index < 0:
+            return "unresolved"
+        if candidate_index != baseline_index:
+            return "conflict"
         if candidate_bytes < baseline_bytes:
             return "older"
         if candidate_bytes > baseline_bytes:
@@ -66556,19 +66562,6 @@ def _reconcile_session_projection_freshness_obligation_in_payload(
             changed = True
 
     baseline_identity = _capture_identity_from_options(existing_options)
-    if int_value(baseline_identity.get("epoch_index"), -1) < 0:
-        ledger = read_json(Path(str(identity.get("ledger_path") or "")), {})
-        epochs = ledger.get("epochs") if isinstance(ledger, dict) and isinstance(ledger.get("epochs"), list) else []
-        baseline_identity["epoch_index"] = next(
-            (
-                index
-                for index, epoch in enumerate(epochs)
-                if isinstance(epoch, dict)
-                and str(epoch.get("epoch_id") or "")
-                == str(baseline_identity.get("epoch_id") or "")
-            ),
-            -1,
-        )
     relation = (
         "newer"
         if not _capture_identity_is_strict(existing_options)
