@@ -226,6 +226,33 @@ def test_owner_page_cursor_and_missing_branch_are_preserved(tmp_path: Path) -> N
     assert_public_safe(payload)
 
 
+def test_app_server_item_envelope_is_unwrapped_without_leaking_turn_or_body() -> None:
+    owner = owner_fixture("owner_observation_bound.json")
+    direct_item = owner["items"]["data"][0]
+    owner["items"]["data"] = [
+        {
+            "turnId": "turn:private-correlation",
+            "item": direct_item,
+        }
+    ]
+
+    projection = MODULE.goal_thread_board_public_owner_projection(
+        owner,
+        goal_ref=GOAL_REF,
+        master_thread_id=MASTER_THREAD_ID,
+    )
+
+    assert projection["state"] == "bound"
+    assert projection["pagination"]["complete_for_query"] is True
+    assert [item["item_id"] for item in projection["items"]] == ["item:fixture-user"]
+    assert projection["items"][0]["owner_item_type"] == "userMessage"
+    assert projection["items"][0]["body_state"] == "withheld"
+    assert "owner_item_identity_missing" not in projection["diagnostics"]
+    assert "owner_relation_child_identity_missing" not in projection["diagnostics"]
+    assert "turn:private-correlation" not in json.dumps(projection)
+    assert_public_safe(projection)
+
+
 def test_exact_binding_mismatch_is_invalid_and_does_not_leak_foreign_data(tmp_path: Path) -> None:
     aoa_root = create_goal_source(tmp_path)
     payload = MODULE.goal_thread_board_publication(

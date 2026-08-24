@@ -135253,6 +135253,30 @@ def goal_thread_board_public_item_from_owner_item(
     return item, None
 
 
+def goal_thread_board_public_owner_item_payload(raw_entry: Any) -> Any:
+    """Unwrap the typed item envelope returned by ``thread/items/list``.
+
+    Codex app-server pages carry the public item under ``item`` alongside a
+    turn correlation field.  Keep the envelope itself out of the projection:
+    only a nested object that already has its own typed ``id`` and ``type`` is
+    admitted, and direct owner-item shapes retain precedence.
+    """
+
+    if not isinstance(raw_entry, dict):
+        return raw_entry
+    direct_id = str(raw_entry.get("id") or "").strip()
+    direct_type = str(raw_entry.get("type") or "").strip()
+    if direct_id and direct_type:
+        return raw_entry
+    nested = raw_entry.get("item")
+    if isinstance(nested, dict):
+        nested_id = str(nested.get("id") or "").strip()
+        nested_type = str(nested.get("type") or "").strip()
+        if nested_id and nested_type:
+            return nested
+    return raw_entry
+
+
 def goal_thread_board_public_relation_from_owner_thread(
     raw_thread: dict[str, Any],
     *,
@@ -135264,7 +135288,11 @@ def goal_thread_board_public_relation_from_owner_thread(
 
     if not isinstance(raw_thread, dict):
         return None, "owner_relation_shape_invalid"
-    child_raw = raw_thread.get("id") or raw_thread.get("threadId")
+    child_raw = (
+        raw_thread.get("id")
+        or raw_thread.get("threadId")
+        or raw_thread.get("thread_id")
+    )
     child_id, child_state = goal_catalog_public_safe_ref(child_raw)
     if child_id is None:
         return None, "owner_relation_child_identity_missing"
@@ -135486,7 +135514,8 @@ def goal_thread_board_public_owner_projection(
     if items_state != "current":
         diagnostics.append(f"codex_owner_items_{items_state}")
     items: list[dict[str, Any]] = []
-    for ordinal, raw_item in enumerate(raw_items):
+    for ordinal, raw_entry in enumerate(raw_items):
+        raw_item = goal_thread_board_public_owner_item_payload(raw_entry)
         item, diagnostic = goal_thread_board_public_item_from_owner_item(
             raw_item,
             goal_ref=goal_ref,
