@@ -93839,6 +93839,25 @@ def test_auto_maintenance_catchup_defers_heavy_tail_without_starving_fresh_scope
     assert payload["selection_scope"]["selected_count"] == 1
     assert payload["status"] == "nothing_to_do"
 
+    controlled_elapsed_before_heavy = 0.25
+    real_time = module.time
+
+    class ControlledClock:
+        def __init__(self) -> None:
+            self._reads = 0
+
+        def monotonic(self) -> float:
+            self._reads += 1
+            return (
+                1000.0
+                if self._reads == 1
+                else 1000.0 + controlled_elapsed_before_heavy
+            )
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(real_time, name)
+
+    monkeypatch.setattr(module, "time", ControlledClock())
     backlog = module.auto_maintenance(
         workspace_root=workspace,
         aoa_root=aoa_root,
@@ -93849,7 +93868,10 @@ def test_auto_maintenance_catchup_defers_heavy_tail_without_starving_fresh_scope
     )
     assert heavy_calls == [["auto-heavy"]]
     assert len(heavy_budgets) == 1
-    assert heavy_budgets[0] == pytest.approx(900.0, abs=0.1)
+    assert heavy_budgets[0] == pytest.approx(
+        900.0 - controlled_elapsed_before_heavy,
+        abs=1e-12,
+    )
     assert backlog["selection_scope"]["heavy_projection_lane"][
         "status"
     ] == "checkpointed"
