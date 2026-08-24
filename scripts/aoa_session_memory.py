@@ -18648,14 +18648,24 @@ def session_projection_freshness_obligation_status(
         projected_capture_ref = (
             f"raw-ledger:{projected_epoch}:{projected_chain_sha256}"
         )
+    strict_epoch_identity_satisfied = bool(
+        required_chain_sha256
+        and required_capture_ref
+        and projected_chain_sha256 == required_chain_sha256
+        and projected_capture_ref == required_capture_ref
+    )
+    strict_legacy_monolithic_digest_satisfied = bool(
+        strict_capture_identity
+        and not projected_epoch
+        and required_bytes >= 0
+        and required_sha256
+        and projected_bytes == required_bytes
+        and projected_sha256 == required_sha256
+    )
     capture_identity_satisfied = bool(
         not strict_capture_identity
-        or (
-            required_chain_sha256
-            and required_capture_ref
-            and projected_chain_sha256 == required_chain_sha256
-            and projected_capture_ref == required_capture_ref
-        )
+        or strict_epoch_identity_satisfied
+        or strict_legacy_monolithic_digest_satisfied
     )
     published = bool(
         isinstance(manifest, dict)
@@ -32512,7 +32522,7 @@ def reconcile_capture_watch(
                                 f"capture_watch:{result.get('status')}"
                             ),
                             now_epoch=checked_epoch,
-                            create_if_missing=False,
+                            create_if_missing=True,
                         )
                     )
                     result["queue_reconciliation"] = queue_reconciliation
@@ -66483,7 +66493,7 @@ def _reconcile_session_projection_freshness_obligation_in_payload(
             False,
         )
     if not matching:
-        options = {
+        prospective_options = {
             "persistent_obligation": True,
             "obligation_kind": SESSION_PROJECTION_FRESHNESS_OBLIGATION_KIND,
             "session_id": session_id,
@@ -66493,6 +66503,25 @@ def _reconcile_session_projection_freshness_obligation_in_payload(
             "required_search_consumer": True,
             "freshness_reason": freshness_reason,
             **current_options,
+        }
+        freshness_status = session_projection_freshness_obligation_status(
+            aoa_root,
+            prospective_options,
+        )
+        if freshness_status.get("ok") is True:
+            return (
+                {
+                    "status": "freshness_obligation_already_satisfied",
+                    "session_id": session_id,
+                    "capture_identity": identity,
+                    "freshness_obligation": freshness_status,
+                    "changed": False,
+                    "persistent_obligation": False,
+                },
+                False,
+            )
+        options = {
+            **prospective_options,
         }
         scheduled = auto_maintenance_retry_upsert_item(
             queue_payload,
@@ -66671,13 +66700,17 @@ def reconcile_session_projection_freshness_obligation(
         "queue_path": queue_status.get("path"),
         "queued_count": queue_status.get("queued_count"),
         "truth_status": (
-            "capture_identity_reconciled_under_persistent_queue_lock"
-            if result.get("status") in {
-                "identity_reconciled_updated",
-                "identity_already_current",
-                "scheduled",
-            }
-            else "capture_identity_reconciliation_not_admitted"
+            "capture_identity_satisfied_without_persistent_freshness_obligation"
+            if result.get("status") == "freshness_obligation_already_satisfied"
+            else (
+                "capture_identity_reconciled_under_persistent_queue_lock"
+                if result.get("status") in {
+                    "identity_reconciled_updated",
+                    "identity_already_current",
+                    "scheduled",
+                }
+                else "capture_identity_reconciliation_not_admitted"
+            )
         ),
     }
 

@@ -46,6 +46,7 @@ def _fixture(
     monkeypatch: pytest.MonkeyPatch,
     *,
     session_id: str = "capture-retry-identity",
+    schedule: bool = True,
 ) -> dict[str, Any]:
     monkeypatch.setattr(
         module,
@@ -77,16 +78,17 @@ def _fixture(
         hook_event_name="PostToolUse",
         now="2026-08-24T00:00:01Z",
     )
-    scheduled = module.reconcile_session_projection_freshness_obligation(
-        aoa_root=aoa_root,
-        session_id=session_id,
-        session_dir=session_dir,
-        transcript_path=transcript,
-        freshness_reason="fixture_initial",
-        now_epoch=100.0,
-        create_if_missing=True,
-    )
-    assert scheduled["status"] == "scheduled"
+    if schedule:
+        scheduled = module.reconcile_session_projection_freshness_obligation(
+            aoa_root=aoa_root,
+            session_id=session_id,
+            session_dir=session_dir,
+            transcript_path=transcript,
+            freshness_reason="fixture_initial",
+            now_epoch=100.0,
+            create_if_missing=True,
+        )
+        assert scheduled["status"] == "scheduled"
     return {
         "workspace": workspace,
         "aoa_root": aoa_root,
@@ -128,6 +130,233 @@ def _append_capture(fixture: dict[str, Any], marker: str, now: str) -> dict[str,
         hook_event_name="TimerWatchRecovery",
         now=now,
     )
+
+
+def _publish_current_projection(fixture: dict[str, Any]) -> None:
+    capture = module.raw_capture_state_for_session(fixture["session_dir"])
+    manifest_path = fixture["session_dir"] / "session.manifest.json"
+    manifest = module.read_json(manifest_path, {})
+    raw = manifest["raw"]
+    raw.update(
+        {
+            "bytes": capture["raw_bytes"],
+            "sha256": capture["raw_sha256"],
+            "indexing_status": "indexed",
+            "capture_ref": capture["capture_ref"],
+            "capture_ledger": {
+                "epoch_id": capture["ledger_epoch_id"],
+                "processed_watermark_bytes": capture["raw_bytes"],
+                "chain_sha256": capture["ledger_chain_sha256"],
+            },
+        }
+    )
+    module.write_json(manifest_path, manifest)
+
+
+def test_capture_watch_creates_missing_current_epoch_zero_obligation_idempotently(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _fixture(
+        tmp_path,
+        monkeypatch,
+        session_id="capture-watch-missing-obligation",
+        schedule=False,
+    )
+    module.register_capture_watch(
+        aoa_root=fixture["aoa_root"],
+        session_id=fixture["session_id"],
+        session_dir=fixture["session_dir"],
+        transcript_path=fixture["transcript"],
+        observed_at="2026-08-24T00:00:02Z",
+    )
+
+    first = module.reconcile_capture_watch(
+        aoa_root=fixture["aoa_root"],
+        limit=1,
+        apply=True,
+        now="2026-08-24T00:00:03Z",
+    )
+    queue = module.auto_maintenance_retry_queue_status(
+        fixture["aoa_root"],
+        now_epoch=100.0,
+    )
+    item = queue["items"][f"deep:{fixture['session_id']}"]
+    options = item["options"]
+    current = module._capture_identity_current(
+        aoa_root=fixture["aoa_root"],
+        session_id=fixture["session_id"],
+        configured_session_dir=fixture["session_dir"],
+    )
+    assert current["ok"] is True
+    identity = current["identity"]
+    assert first["results"][0]["queue_reconciliation"]["status"] == (
+        "scheduled"
+    )
+    assert item["queue_key"] == f"deep:{fixture['session_id']}"
+    assert options["required_capture_epoch_id"] == identity["epoch_id"]
+    assert options["required_capture_epoch_index"] == 0
+    assert options["required_capture_bytes"] == identity["bytes"]
+    assert options["required_capture_sha256"] == identity["sha256"]
+    assert options["required_capture_chain_sha256"] == identity["chain_sha256"]
+    assert options["required_capture_ref"] == identity["capture_ref"]
+    assert options["required_capture_stable"] is True
+    assert queue["freshness_obligation_count"] == 1
+
+    before_repeat = dict(item)
+    repeated = module.reconcile_capture_watch(
+        aoa_root=fixture["aoa_root"],
+        limit=1,
+        apply=True,
+        now="2026-08-24T00:00:04Z",
+    )
+    after_repeat = module.auto_maintenance_retry_queue_status(
+        fixture["aoa_root"],
+        now_epoch=100.0,
+    )["items"][f"deep:{fixture['session_id']}"]
+    assert repeated["results"][0]["queue_reconciliation"]["status"] == (
+        "identity_already_current"
+    )
+    assert after_repeat == before_repeat
+
+
+def test_satisfied_unchanged_capture_stays_absent_from_retry_queue(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _fixture(
+        tmp_path,
+        monkeypatch,
+        session_id="capture-watch-satisfied",
+        schedule=False,
+    )
+    _publish_current_projection(fixture)
+    monkeypatch.setattr(
+        module,
+        "session_projection_freshness_vector",
+        lambda **_kwargs: {
+            "axes": {
+                "stable_session_projection": {"current": True},
+                "search": {"current": True},
+            }
+        },
+    )
+
+    first = module.reconcile_session_projection_freshness_obligation(
+        aoa_root=fixture["aoa_root"],
+        session_id=fixture["session_id"],
+        session_dir=fixture["session_dir"],
+        transcript_path=fixture["transcript"],
+        freshness_reason="satisfied_unchanged",
+        now_epoch=120.0,
+        create_if_missing=True,
+    )
+    second = module.reconcile_session_projection_freshness_obligation(
+        aoa_root=fixture["aoa_root"],
+        session_id=fixture["session_id"],
+        session_dir=fixture["session_dir"],
+        transcript_path=fixture["transcript"],
+        freshness_reason="satisfied_unchanged_replay",
+        now_epoch=121.0,
+        create_if_missing=True,
+    )
+    queue = module.auto_maintenance_retry_queue_status(
+        fixture["aoa_root"],
+        now_epoch=121.0,
+    )
+    assert first["status"] == "freshness_obligation_already_satisfied"
+    assert second["status"] == "freshness_obligation_already_satisfied"
+    assert first["changed"] is False
+    assert second["changed"] is False
+    assert queue["items"] == {}
+    assert queue["freshness_obligation_count"] == 0
+
+
+def test_strict_obligation_accepts_exact_legacy_monolithic_projection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _fixture(
+        tmp_path,
+        monkeypatch,
+        session_id="capture-watch-legacy-monolithic",
+        schedule=False,
+    )
+    capture = module.raw_capture_state_for_session(fixture["session_dir"])
+    manifest_path = fixture["session_dir"] / "session.manifest.json"
+    manifest = module.read_json(manifest_path, {})
+    raw = manifest["raw"]
+    raw.update(
+        {
+            "bytes": capture["raw_bytes"],
+            "sha256": capture["raw_sha256"],
+            "indexing_status": "indexed",
+            "storage_mode": "monolithic_snapshot_v1",
+        }
+    )
+    raw.pop("capture_ref", None)
+    raw.pop("capture_ledger", None)
+    module.write_json(manifest_path, manifest)
+    options = {
+        "persistent_obligation": True,
+        "obligation_kind": module.SESSION_PROJECTION_FRESHNESS_OBLIGATION_KIND,
+        "session_id": fixture["session_id"],
+        "session_dir": str(fixture["session_dir"]),
+        "required_capture_epoch_id": capture["ledger_epoch_id"],
+        "required_capture_epoch_index": 0,
+        "required_capture_bytes": capture["raw_bytes"],
+        "required_capture_sha256": capture["raw_sha256"],
+        "required_capture_chain_sha256": capture["ledger_chain_sha256"],
+        "required_capture_ref": capture["capture_ref"],
+        "required_capture_stable": True,
+        "capture_identity_contract": module.SESSION_CAPTURE_RETRY_IDENTITY_CONTRACT,
+        "required_stable_projection": False,
+        "required_search_consumer": False,
+    }
+
+    status = module.session_projection_freshness_obligation_status(
+        fixture["aoa_root"],
+        options,
+    )
+    assert status["ok"] is True
+    assert status["proof_mode"] == (
+        "exact_monolithic_capture_digest_fallback"
+    )
+    assert status["capture_identity_satisfied"] is True
+
+
+def test_missing_obligation_unresolved_identity_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _fixture(
+        tmp_path,
+        monkeypatch,
+        session_id="capture-watch-unresolved-missing",
+        schedule=False,
+    )
+    (fixture["session_dir"] / "raw" / module.RAW_CAPTURE_STATE_JSON).unlink()
+
+    result = module.reconcile_session_projection_freshness_obligation(
+        aoa_root=fixture["aoa_root"],
+        session_id=fixture["session_id"],
+        session_dir=fixture["session_dir"],
+        transcript_path=fixture["transcript"],
+        freshness_reason="unresolved_identity",
+        now_epoch=130.0,
+        create_if_missing=True,
+    )
+    queue = module.auto_maintenance_retry_queue_status(
+        fixture["aoa_root"],
+        now_epoch=130.0,
+    )
+    assert result["status"] == "identity_reconciliation_unresolved"
+    assert result["diagnostic"] == (
+        "capture_retry_queue_identity_reconciliation_unresolved"
+    )
+    assert result["persistent_obligation"] is False
+    assert result["changed"] is False
+    assert queue["items"] == {}
 
 
 def test_same_epoch_append_capture_watch_reconciles_exact_queue_identity(
