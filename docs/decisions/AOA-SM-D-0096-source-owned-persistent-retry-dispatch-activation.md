@@ -53,9 +53,13 @@ timer in addition to the capture-only and resource-gated sweep pairs. The
 retry service invokes only `auto-maintenance-retry --apply --limit 4
 --write-report`; the dispatcher remains the sole queue worker and launches
 each child through the existing resource-gated owner route. The timer is a
-bounded `Type=oneshot` cadence with `OnUnitInactiveSec=1min`, jitter, and
-`Persistent=true`. Rendering and portable installation still write named unit
-files only; they do not enable, start, reload, or trust systemd.
+bounded `Type=oneshot` cadence with `OnActiveSec=2min` for the initial arm,
+`OnUnitInactiveSec=1min` for the post-attempt rearm, jitter, and
+`Persistent=true`. Using `OnActiveSec` is necessary when an already-running
+user manager enables the timer after the boot-relative point has elapsed;
+`OnUnitInactiveSec` alone cannot arm a service that has never run. Rendering
+and portable installation still write named unit files only; they do not
+enable, start, reload, or trust systemd.
 
 Capture-watch may mark a freshness obligation with
 `current_epoch_priority=true` as a persisted scheduling hint. The selector

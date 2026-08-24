@@ -173259,7 +173259,7 @@ def render_session_memory_systemd_units(
                 f"Documentation={documentation}",
                 "",
                 "[Timer]",
-                "OnBootSec=2min",
+                "OnActiveSec=2min",
                 "OnUnitInactiveSec=1min",
                 "RandomizedDelaySec=15s",
                 "AccuracySec=15s",
@@ -173399,7 +173399,7 @@ def session_memory_retry_dispatch_timer_contract(
     lines = {line.strip() for line in str(unit_text or "").splitlines()}
     diagnostics: list[str] = []
     required = {
-        "OnBootSec=2min",
+        "OnActiveSec=2min",
         "OnUnitInactiveSec=1min",
         "RandomizedDelaySec=15s",
         "AccuracySec=15s",
@@ -173411,6 +173411,9 @@ def session_memory_retry_dispatch_timer_contract(
         f"retry_dispatch_timer_missing:{line}"
         for line in sorted(required - lines)
     )
+    for forbidden in ("OnBootSec=2min", "OnUnitActiveSec=1min"):
+        if forbidden in lines:
+            diagnostics.append(f"retry_dispatch_timer_uses_non_rearming_initial:{forbidden}")
     return {
         "timer": timer,
         "service": SESSION_MEMORY_RETRY_DISPATCH_SERVICE,

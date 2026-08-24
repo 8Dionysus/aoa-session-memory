@@ -60637,6 +60637,9 @@ def test_rendered_capture_topology_is_capture_only_and_sweep_is_resource_gated(
         module.SESSION_MEMORY_RETRY_DISPATCH_TIMER,
         retry_timer,
     )["status"] == "current"
+    assert "OnActiveSec=2min" in retry_timer
+    assert "OnBootSec=2min" not in retry_timer
+    assert "OnUnitInactiveSec=1min" in retry_timer
     assert "capture-watch" not in retry
     assert "sweep-codex-sessions" not in retry
     assert "projection-catchup" not in retry
