@@ -189,6 +189,7 @@ def test_bound_board_is_exact_public_safe_and_paginated(tmp_path: Path) -> None:
     assert first["ordering"]["event_ordering"]["state"] == "missing"
     assert any(item["item_kind"] == "codex_thread_item_observation" for item in first["items"])
     assert first["relations"][0]["relation_kind"] == "spawn_parent"
+    assert all(item["observed_at"] is None for item in first["items"])
     validate(first)
     assert_public_safe(first)
 
@@ -253,6 +254,116 @@ def test_app_server_item_envelope_is_unwrapped_without_leaking_turn_or_body() ->
     assert_public_safe(projection)
 
 
+def test_direct_item_shape_keeps_precedence_over_nested_payload() -> None:
+    owner = owner_fixture("owner_observation_bound.json")
+    owner["items"]["data"] = [
+        {
+            "id": "item:direct-precedence",
+            "type": "plan",
+            "item": {
+                "id": "item:private-nested",
+                "type": "userMessage",
+                "text": "PRIVATE_NESTED_BODY",
+            },
+        }
+    ]
+
+    projection = MODULE.goal_thread_board_public_owner_projection(
+        owner,
+        goal_ref=GOAL_REF,
+        master_thread_id=MASTER_THREAD_ID,
+    )
+
+    assert projection["state"] == "bound"
+    assert projection["pagination"]["complete_for_query"] is True
+    assert [item["item_id"] for item in projection["items"]] == [
+        "item:direct-precedence"
+    ]
+    assert projection["items"][0]["owner_item_type"] == "plan"
+    assert "item:private-nested" not in json.dumps(projection)
+    assert "PRIVATE_NESTED_BODY" not in json.dumps(projection)
+    assert_public_safe(projection)
+
+
+def test_malformed_nested_owner_items_fail_closed_without_private_leakage(
+    tmp_path: Path,
+) -> None:
+    cases = {
+        "missing_id": {
+            "turnId": "turn:private-missing-id",
+            "item": {"type": "userMessage", "text": "PRIVATE_MISSING_ID"},
+        },
+        "unsupported_type": {
+            "turnId": "turn:private-unsupported",
+            "item": {
+                "id": "item:unsupported",
+                "type": "futureItem",
+                "text": "PRIVATE_UNSUPPORTED_TYPE",
+            },
+        },
+        "wrong_thread": {
+            "threadId": "thread:foreign",
+            "turnId": "turn:private-wrong-thread",
+            "item": {
+                "id": "item:wrong-thread",
+                "type": "userMessage",
+                "text": "PRIVATE_WRONG_THREAD",
+            },
+        },
+        "wrong_wrapper": {
+            "thread": "PRIVATE_WRONG_WRAPPER",
+            "turnId": "turn:private-wrong-wrapper",
+            "item": {
+                "id": "item:wrong-wrapper",
+                "type": "userMessage",
+                "text": "PRIVATE_WRONG_WRAPPER_BODY",
+            },
+        },
+        "non_object_nested": {
+            "turnId": "turn:private-non-object",
+            "item": ["PRIVATE_NON_OBJECT"],
+        },
+        "non_object_entry": "PRIVATE_NON_OBJECT_ENTRY",
+    }
+
+    for name, entry in cases.items():
+        owner = owner_fixture("owner_observation_bound.json")
+        owner["items"]["data"] = [entry]
+        projection = MODULE.goal_thread_board_public_owner_projection(
+            owner,
+            goal_ref=GOAL_REF,
+            master_thread_id=MASTER_THREAD_ID,
+        )
+
+        assert projection["state"] == "invalid", name
+        assert projection["currentness"] == "invalid", name
+        assert projection["items"] == [], name
+        assert projection["pagination"]["complete_for_query"] is False, name
+        assert any(
+            diagnostic.startswith("owner_item_")
+            for diagnostic in projection["diagnostics"]
+        ), (name, projection["diagnostics"])
+        assert "PRIVATE_" not in json.dumps(projection), name
+
+        publication = MODULE.goal_thread_board_publication(
+            aoa_root=tmp_path / name,
+            goal_ref=GOAL_REF,
+            master_thread_id=MASTER_THREAD_ID,
+            owner_observation=owner,
+        )
+        assert publication["ok"] is False, name
+        assert publication["state"] == "invalid", name
+        assert publication["currentness"] == "invalid", name
+        assert publication["publication_state"] == "invalid", name
+        assert publication["items"] == [], name
+        assert publication["pagination"]["complete_for_query"] is False, name
+        assert publication["pagination"]["owner_page_complete"] is False, name
+        assert publication["source"]["watermark"]["coverage"] == "incomplete", name
+        assert "codex_owner_items_invalid" in publication["diagnostics"], name
+        assert_public_safe(publication)
+        validate(publication)
+
+
 def test_exact_binding_mismatch_is_invalid_and_does_not_leak_foreign_data(tmp_path: Path) -> None:
     aoa_root = create_goal_source(tmp_path)
     payload = MODULE.goal_thread_board_publication(
@@ -271,11 +382,13 @@ def test_exact_binding_mismatch_is_invalid_and_does_not_leak_foreign_data(tmp_pa
 
 def test_invalid_owner_status_is_kept_separate_from_safe_index_items(tmp_path: Path) -> None:
     aoa_root = create_goal_source(tmp_path)
+    owner = owner_fixture("owner_observation_invalid.json")
+    owner["items"] = []
     payload = MODULE.goal_thread_board_publication(
         aoa_root=aoa_root,
         goal_ref=GOAL_REF,
         master_thread_id=MASTER_THREAD_ID,
-        owner_observation=owner_fixture("owner_observation_invalid.json"),
+        owner_observation=owner,
     )
     assert payload["ok"] is True
     assert payload["owner_read"]["state"] == "invalid"

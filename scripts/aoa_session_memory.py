@@ -135253,7 +135253,11 @@ def goal_thread_board_public_item_from_owner_item(
     return item, None
 
 
-def goal_thread_board_public_owner_item_payload(raw_entry: Any) -> Any:
+def goal_thread_board_public_owner_item_payload(
+    raw_entry: Any,
+    *,
+    master_thread_id: str,
+) -> tuple[Any, str | None]:
     """Unwrap the typed item envelope returned by ``thread/items/list``.
 
     Codex app-server pages carry the public item under ``item`` alongside a
@@ -135263,18 +135267,43 @@ def goal_thread_board_public_owner_item_payload(raw_entry: Any) -> Any:
     """
 
     if not isinstance(raw_entry, dict):
-        return raw_entry
+        return raw_entry, None
     direct_id = str(raw_entry.get("id") or "").strip()
     direct_type = str(raw_entry.get("type") or "").strip()
     if direct_id and direct_type:
-        return raw_entry
+        return raw_entry, None
+    if "item" not in raw_entry:
+        return raw_entry, None
+
     nested = raw_entry.get("item")
-    if isinstance(nested, dict):
-        nested_id = str(nested.get("id") or "").strip()
-        nested_type = str(nested.get("type") or "").strip()
-        if nested_id and nested_type:
-            return nested
-    return raw_entry
+    if not isinstance(nested, dict):
+        return raw_entry, "owner_item_envelope_shape_invalid"
+
+    wrapper_thread_ids: list[Any] = []
+    for key in ("threadId", "thread_id"):
+        if key in raw_entry and raw_entry.get(key) not in (None, ""):
+            wrapper_thread_ids.append(raw_entry.get(key))
+    thread_wrapper = raw_entry.get("thread")
+    if thread_wrapper is not None:
+        if not isinstance(thread_wrapper, dict):
+            return raw_entry, "owner_item_wrapper_shape_invalid"
+        for key in ("id", "threadId", "thread_id"):
+            if key in thread_wrapper and thread_wrapper.get(key) not in (None, ""):
+                wrapper_thread_ids.append(thread_wrapper.get(key))
+        if not any(
+            key in thread_wrapper for key in ("id", "threadId", "thread_id")
+        ):
+            return raw_entry, "owner_item_wrapper_shape_invalid"
+    for raw_thread_id in wrapper_thread_ids:
+        thread_id, _thread_id_state = goal_catalog_public_safe_ref(raw_thread_id)
+        if thread_id != master_thread_id:
+            return raw_entry, "owner_item_thread_mismatch"
+
+    nested_id = str(nested.get("id") or "").strip()
+    nested_type = str(nested.get("type") or "").strip()
+    if nested_id and nested_type:
+        return nested, None
+    return raw_entry, None
 
 
 def goal_thread_board_public_relation_from_owner_thread(
@@ -135515,13 +135544,19 @@ def goal_thread_board_public_owner_projection(
         diagnostics.append(f"codex_owner_items_{items_state}")
     items: list[dict[str, Any]] = []
     for ordinal, raw_entry in enumerate(raw_items):
-        raw_item = goal_thread_board_public_owner_item_payload(raw_entry)
-        item, diagnostic = goal_thread_board_public_item_from_owner_item(
-            raw_item,
-            goal_ref=goal_ref,
+        raw_item, envelope_diagnostic = goal_thread_board_public_owner_item_payload(
+            raw_entry,
             master_thread_id=master_thread_id,
-            order=ordinal,
         )
+        if envelope_diagnostic:
+            item, diagnostic = None, envelope_diagnostic
+        else:
+            item, diagnostic = goal_thread_board_public_item_from_owner_item(
+                raw_item,
+                goal_ref=goal_ref,
+                master_thread_id=master_thread_id,
+                order=ordinal,
+            )
         if item is not None:
             items.append(item)
         if diagnostic:
@@ -135587,17 +135622,32 @@ def goal_thread_board_public_owner_projection(
     if sort_direction not in {"asc", "desc"}:
         diagnostics.append("codex_owner_sort_direction_invalid")
         sort_direction = "asc"
-    complete_for_query = items_state == "current" and safe_next_cursor is None and not any(
-        diagnostic.startswith("codex_owner_next_cursor_invalid") for diagnostic in diagnostics
+    owner_items_invalid = any(
+        diagnostic.startswith("owner_item_") for diagnostic in diagnostics
+    )
+    complete_for_query = (
+        items_state == "current"
+        and safe_next_cursor is None
+        and not owner_items_invalid
+        and not any(
+            diagnostic.startswith("codex_owner_next_cursor_invalid")
+            for diagnostic in diagnostics
+        )
     )
     if owner_observation.get("relations_complete") is False:
         complete_for_query = False
     if owner_observation.get("relations_next_cursor") not in (None, ""):
         complete_for_query = False
     if diagnostics:
-        diagnostic_state = "invalid" if items_state == "invalid" or any(
-            item.endswith("invalid") or "shape_invalid" in item or "mismatch" in item
-            for item in diagnostics
+        diagnostic_state = "invalid" if (
+            items_state == "invalid"
+            or owner_items_invalid
+            or any(
+                item.endswith("invalid")
+                or "shape_invalid" in item
+                or "mismatch" in item
+                for item in diagnostics
+            )
         ) else items_state if items_state != "current" else currentness
     else:
         diagnostic_state = currentness
@@ -135630,8 +135680,11 @@ def goal_thread_board_public_state_for_sources(
     catalog_match: bool,
     owner_state: str,
     supported_item_count: int,
+    owner_items_invalid: bool = False,
 ) -> str:
     if input_invalid:
+        return "invalid"
+    if owner_items_invalid:
         return "invalid"
     if owner_state == "bound" or (
         catalog_state == "current" and (catalog_match or supported_item_count > 0)
@@ -135753,12 +135806,19 @@ def goal_thread_board_publication(
         seen_refs.add(item_ref)
         all_items.append(item)
     catalog_match = bool(catalog_matches)
+    owner_items_invalid = any(
+        str(diagnostic).startswith("owner_item_")
+        for diagnostic in owner.get("diagnostics", [])
+    )
+    if owner_items_invalid:
+        diagnostics.append("codex_owner_items_invalid")
     board_state = goal_thread_board_public_state_for_sources(
         input_invalid=input_invalid,
         catalog_state=catalog_state,
         catalog_match=catalog_match,
         owner_state=str(owner.get("state") or "unknown"),
         supported_item_count=len(all_items),
+        owner_items_invalid=owner_items_invalid,
     )
     if input_invalid:
         all_items = []
