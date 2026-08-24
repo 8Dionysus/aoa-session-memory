@@ -631,6 +631,11 @@ CAPTURE_WATCH_DEFAULT_BUDGET_SECONDS = 90.0
 CAPTURE_WATCH_SERVICE_TIMEOUT_SECONDS = 120.0
 CAPTURE_WATCH_CLEANUP_MARGIN_SECONDS = 30.0
 CAPTURE_WATCH_LOCK_POLL_SECONDS = 0.01
+# This is the source-owned capture-watch frontier.  It bounds both the
+# installed CLI and library callers; a caller may not turn a timer pass into
+# an unbounded source walk by supplying a larger limit.
+CAPTURE_WATCH_MAX_FRONTIER = 64
+CAPTURE_WATCH_MAX_OUTBOX_RECORDS = 256
 RAW_BLOCKS_DIR = "blocks"
 RAW_BLOCK_INDEX_JSON = "blocks.index.json"
 RAW_COMPACTION_EVENTS_JSONL = "compaction-events.jsonl"
@@ -18592,6 +18597,8 @@ def session_projection_freshness_obligation_options(
 def session_projection_freshness_obligation_status(
     aoa_root: Path,
     options: dict[str, Any],
+    *,
+    outbox_record_override: tuple[Path | None, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Prove that the published projection covers an exact capture watermark."""
     session_id = str(options.get("session_id") or "")
@@ -18648,8 +18655,11 @@ def session_projection_freshness_obligation_status(
         projected_capture_ref = (
             f"raw-ledger:{projected_epoch}:{projected_chain_sha256}"
         )
+    projected_capture_ledger_present = "capture_ledger" in raw
     strict_epoch_identity_satisfied = bool(
-        required_chain_sha256
+        required_epoch
+        and projected_epoch == required_epoch
+        and required_chain_sha256
         and required_capture_ref
         and projected_chain_sha256 == required_chain_sha256
         and projected_capture_ref == required_capture_ref
@@ -18657,6 +18667,9 @@ def session_projection_freshness_obligation_status(
     strict_legacy_monolithic_digest_satisfied = bool(
         strict_capture_identity
         and not projected_epoch
+        and not projected_chain_sha256
+        and not projected_capture_ref
+        and not projected_capture_ledger_present
         and required_bytes >= 0
         and required_sha256
         and projected_bytes == required_bytes
@@ -18708,10 +18721,17 @@ def session_projection_freshness_obligation_status(
     stable_projection_satisfied = True
     search_consumer_satisfied = True
     if required_stable_projection or required_search_consumer:
-        freshness_vector = session_projection_freshness_vector(
-            aoa_root=aoa_root,
-            session_dir=session_dir,
-        )
+        if outbox_record_override is None:
+            freshness_vector = session_projection_freshness_vector(
+                aoa_root=aoa_root,
+                session_dir=session_dir,
+            )
+        else:
+            freshness_vector = session_projection_freshness_vector(
+                aoa_root=aoa_root,
+                session_dir=session_dir,
+                outbox_record_override=outbox_record_override,
+            )
         vector_axes = (
             freshness_vector.get("axes")
             if isinstance(freshness_vector.get("axes"), dict)
@@ -18772,6 +18792,11 @@ def session_projection_freshness_obligation_status(
         "projected_capture_chain_sha256": projected_chain_sha256,
         "projected_capture_ref": projected_capture_ref,
         "strict_capture_identity": strict_capture_identity,
+        "strict_epoch_identity_satisfied": strict_epoch_identity_satisfied,
+        "strict_legacy_monolithic_digest_satisfied": (
+            strict_legacy_monolithic_digest_satisfied
+        ),
+        "projected_capture_ledger_present": projected_capture_ledger_present,
         "capture_identity_satisfied": capture_identity_satisfied,
         "published_projection": published,
         "required_axes": required_axes,
@@ -28067,6 +28092,49 @@ def session_projection_outbox_record_for_publish(
     return path, record
 
 
+def session_projection_outbox_record_index_for_sessions(
+    aoa_root: Path,
+    *,
+    session_ids: Iterable[str],
+    max_records: int = CAPTURE_WATCH_MAX_OUTBOX_RECORDS,
+    cooperative_deadline_monotonic: float | None = None,
+) -> dict[tuple[str, str], tuple[Path | None, dict[str, Any]]]:
+    """Read one bounded outbox frontier for a whole capture-watch pass."""
+    wanted = {
+        str(session_id or "")
+        for session_id in session_ids
+        if str(session_id or "")
+    }
+    if not wanted:
+        return {}
+    records_dir = aoa_root / PROJECTION_OUTBOX_RECORDS_DIR
+    indexed: dict[tuple[str, str], tuple[Path | None, dict[str, Any]]] = {}
+    record_limit = max(0, int(max_records))
+    if record_limit == 0:
+        return indexed
+    for ordinal, path in enumerate(sorted(records_dir.glob("*.json"))):
+        if ordinal >= record_limit:
+            break
+        capture_watch_deadline_check(
+            cooperative_deadline_monotonic,
+            stage="capture_watch_outbox_index",
+        )
+        record = read_json(path, {})
+        if not isinstance(record, dict):
+            continue
+        session_id = str(record.get("session_id") or "")
+        publish_id = str(record.get("new_publish_id") or "")
+        if session_id not in wanted or not publish_id:
+            continue
+        key = (session_id, publish_id)
+        prior = indexed.get(key)
+        if prior is None or str(record.get("created_at") or "") >= str(
+            prior[1].get("created_at") or ""
+        ):
+            indexed[key] = (path, record)
+    return indexed
+
+
 def projection_outbox_ready_sessions(
     aoa_root: Path,
     *,
@@ -28489,6 +28557,7 @@ def session_projection_freshness_vector(
     aoa_root: Path,
     session_dir: Path,
     returned_evidence: dict[str, Any] | None = None,
+    outbox_record_override: tuple[Path | None, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     manifest = read_json(session_dir / "session.manifest.json", {})
     session_index = read_json(
@@ -28585,13 +28654,16 @@ def session_projection_freshness_vector(
         and isinstance(manifest.get("index_schema"), dict)
         else {}
     )
-    outbox_path, outbox_record = (
-        session_projection_outbox_record_for_publish(
-            aoa_root,
-            session_id=session_id,
-            publish_id=publish_id,
+    if outbox_record_override is None:
+        outbox_path, outbox_record = (
+            session_projection_outbox_record_for_publish(
+                aoa_root,
+                session_id=session_id,
+                publish_id=publish_id,
+            )
         )
-    )
+    else:
+        outbox_path, outbox_record = outbox_record_override
     downstream: dict[str, Any] = {}
     for consumer in PROJECTION_OUTBOX_CONSUMERS:
         state_path: Path | None = (
@@ -31933,6 +32005,8 @@ def reconcile_capture_watch(
     budget_seconds: float | None = CAPTURE_WATCH_DEFAULT_BUDGET_SECONDS,
 ) -> dict[str, Any]:
     """Recover missed capture hooks from a bounded watched-source frontier."""
+    requested_limit = max(0, int(limit))
+    effective_limit = min(requested_limit, CAPTURE_WATCH_MAX_FRONTIER)
     checked_at = now or utc_now()
     try:
         checked_epoch = datetime.fromisoformat(
@@ -31976,7 +32050,7 @@ def reconcile_capture_watch(
             str(item.get("observed_at") or ""),
             str(item.get("session_id") or ""),
         ),
-    )[: max(0, int(limit))]
+    )[:effective_limit]
     registry = read_json(aoa_root / REGISTRY_NAME, {"sessions": []})
     registry_paths: dict[str, Path] = {}
     registry_records: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -32068,7 +32142,10 @@ def reconcile_capture_watch(
     selection_binding = {
         "schema_version": CAPTURE_WATCH_SELECTION_SCHEMA_VERSION,
         "target": target or "all",
-        "limit": max(0, int(limit)),
+        "limit": effective_limit,
+        "requested_limit": requested_limit,
+        "frontier_ceiling": CAPTURE_WATCH_MAX_FRONTIER,
+        "frontier_clamped": requested_limit != effective_limit,
         "apply": bool(apply),
         "selection_rule": (
             "sort(last_checked_at||empty, observed_at, session_id)[:limit]"
@@ -32226,7 +32303,7 @@ def reconcile_capture_watch(
                 "frontier_count": len(entries),
                 "eligible_count": len(eligible),
                 "selected_count": len(selected),
-                "selection_limit": max(0, int(limit)),
+                "selection_limit": effective_limit,
                 "selection_rule": (
                     "sort(last_checked_at||empty, observed_at, session_id)"
                     "[:limit]"
@@ -32345,6 +32422,40 @@ def reconcile_capture_watch(
                 stage_totals_ms.get(stage, 0) + elapsed_ms
             )
             stage_counts[stage] = stage_counts.get(stage, 0) + 1
+
+    capture_watch_outbox_index: dict[
+        tuple[str, str], tuple[Path | None, dict[str, Any]]
+    ] | None = None
+
+    def prospective_outbox_record(
+        session_id: str,
+        publish_id: str,
+    ) -> tuple[Path | None, dict[str, Any]]:
+        nonlocal capture_watch_outbox_index
+        if capture_watch_outbox_index is None:
+            capture_watch_deadline_check(
+                deadline_monotonic,
+                stage="capture_watch_outbox_index_start",
+            )
+            capture_watch_outbox_index = (
+                session_projection_outbox_record_index_for_sessions(
+                    aoa_root,
+                    session_ids=(
+                        str(item.get("session_id") or "")
+                        for item in selected
+                    ),
+                    max_records=CAPTURE_WATCH_MAX_OUTBOX_RECORDS,
+                    cooperative_deadline_monotonic=deadline_monotonic,
+                )
+            )
+            capture_watch_deadline_check(
+                deadline_monotonic,
+                stage="capture_watch_outbox_index_complete",
+            )
+        return capture_watch_outbox_index.get(
+            (str(session_id or ""), str(publish_id or "")),
+            (None, {}),
+        )
 
     for index, watched in enumerate(
         [] if already_complete or progress_conflict else selected[resume_from_index:],
@@ -32512,6 +32623,22 @@ def reconcile_capture_watch(
                     and isinstance(manifest, dict)
                     and bool(manifest.get("session_id"))
                 ):
+                    publish_id = projection_publish_id(
+                        manifest.get("index_schema")
+                        if isinstance(
+                            manifest.get("index_schema"),
+                            dict,
+                        )
+                        else {}
+                    )
+                    outbox_record = run_stage(
+                        result,
+                        "freshness_outbox_index",
+                        lambda: prospective_outbox_record(
+                            session_id,
+                            publish_id,
+                        ),
+                    )
                     queue_reconciliation = (
                         reconcile_session_projection_freshness_obligation(
                             aoa_root=aoa_root,
@@ -32523,6 +32650,10 @@ def reconcile_capture_watch(
                             ),
                             now_epoch=checked_epoch,
                             create_if_missing=True,
+                            cooperative_deadline_monotonic=(
+                                deadline_monotonic
+                            ),
+                            prospective_outbox_record=outbox_record,
                         )
                     )
                     result["queue_reconciliation"] = queue_reconciliation
@@ -32763,7 +32894,10 @@ def reconcile_capture_watch(
         "eligible_source_count": len(eligible),
         "selected_count": len(selected),
         "frontier_count": len(entries),
-        "selection_limit": max(0, int(limit)),
+        "requested_limit": requested_limit,
+        "selection_limit": effective_limit,
+        "frontier_ceiling": CAPTURE_WATCH_MAX_FRONTIER,
+        "frontier_clamped": requested_limit != effective_limit,
         "selection_rule": (
             "sort(last_checked_at||empty, observed_at, session_id)[:limit]"
         ),
@@ -66145,18 +66279,74 @@ def mutate_auto_maintenance_retry_queue(
     mutator: Callable[[dict[str, Any]], tuple[Any, bool]],
     *,
     now_epoch: float | None = None,
+    cooperative_deadline_monotonic: float | None = None,
 ) -> tuple[Any, dict[str, Any]]:
     paths = auto_maintenance_retry_paths(aoa_root)
     paths["queue_lock"].parent.mkdir(parents=True, exist_ok=True)
     with paths["queue_lock"].open("a+", encoding="utf-8") as lock_handle:
-        fcntl.flock(lock_handle, fcntl.LOCK_EX)
-        payload = auto_maintenance_retry_queue_payload(aoa_root)
-        result, changed = mutator(payload)
-        if changed:
-            write_auto_maintenance_retry_queue(aoa_root, payload, now_epoch=now_epoch)
-        status = auto_maintenance_retry_queue_status_from_payload(aoa_root, payload, now_epoch=now_epoch)
-        fcntl.flock(lock_handle, fcntl.LOCK_UN)
-    return result, status
+        locked = False
+        try:
+            if cooperative_deadline_monotonic is None:
+                fcntl.flock(lock_handle, fcntl.LOCK_EX)
+                locked = True
+            else:
+                lock_started = time.monotonic()
+                while True:
+                    capture_watch_deadline_check(
+                        cooperative_deadline_monotonic,
+                        stage="retry_queue_lock_wait",
+                    )
+                    try:
+                        fcntl.flock(
+                            lock_handle,
+                            fcntl.LOCK_EX | fcntl.LOCK_NB,
+                        )
+                        locked = True
+                        break
+                    except BlockingIOError:
+                        now = time.monotonic()
+                        if now >= cooperative_deadline_monotonic:
+                            raise CaptureWatchBudgetExceeded(
+                                stage="retry_queue_lock_wait",
+                                detail="retry_queue_lock_wait_budget_exhausted",
+                                lock_wait_ms=int(
+                                    (now - lock_started) * 1000
+                                ),
+                            )
+                        time.sleep(
+                            min(
+                                CAPTURE_WATCH_LOCK_POLL_SECONDS,
+                                max(
+                                    0.0,
+                                    cooperative_deadline_monotonic - now,
+                                ),
+                            )
+                        )
+            capture_watch_deadline_check(
+                cooperative_deadline_monotonic,
+                stage="retry_queue_mutation_start",
+            )
+            payload = auto_maintenance_retry_queue_payload(aoa_root)
+            result, changed = mutator(payload)
+            capture_watch_deadline_check(
+                cooperative_deadline_monotonic,
+                stage="retry_queue_before_write",
+            )
+            if changed:
+                write_auto_maintenance_retry_queue(
+                    aoa_root,
+                    payload,
+                    now_epoch=now_epoch,
+                )
+            status = auto_maintenance_retry_queue_status_from_payload(
+                aoa_root,
+                payload,
+                now_epoch=now_epoch,
+            )
+            return result, status
+        finally:
+            if locked:
+                fcntl.flock(lock_handle, fcntl.LOCK_UN)
 
 
 def auto_maintenance_resource_status_retryable(status: str) -> bool:
@@ -66398,6 +66588,28 @@ def auto_maintenance_retry_upsert_item(
     }
 
 
+def _session_projection_freshness_options_for_identity(
+    *,
+    session_id: str,
+    session_dir: Path,
+    transcript_path: Path,
+    freshness_reason: str,
+    identity: dict[str, Any],
+) -> dict[str, Any]:
+    """Build prospective options from one already-read capture identity."""
+    return {
+        "persistent_obligation": True,
+        "obligation_kind": SESSION_PROJECTION_FRESHNESS_OBLIGATION_KIND,
+        "session_id": session_id,
+        "session_dir": str(identity.get("session_dir") or session_dir),
+        "transcript_path": str(transcript_path),
+        "required_stable_projection": True,
+        "required_search_consumer": True,
+        "freshness_reason": freshness_reason,
+        **_capture_identity_to_options(identity),
+    }
+
+
 def _reconcile_session_projection_freshness_obligation_in_payload(
     *,
     aoa_root: Path,
@@ -66408,8 +66620,16 @@ def _reconcile_session_projection_freshness_obligation_in_payload(
     freshness_reason: str,
     now_epoch: float,
     create_if_missing: bool,
+    prospective_freshness_status: dict[str, Any] | None = None,
+    prospective_capture_identity: dict[str, Any] | None = None,
+    defer_freshness_to_dispatcher: bool = False,
+    cooperative_deadline_monotonic: float | None = None,
 ) -> tuple[dict[str, Any], bool]:
     """Reconcile one session under the already-held queue lock."""
+    capture_watch_deadline_check(
+        cooperative_deadline_monotonic,
+        stage="retry_queue_reconciliation_start",
+    )
     items = (
         queue_payload.get("items")
         if isinstance(queue_payload.get("items"), dict)
@@ -66444,6 +66664,10 @@ def _reconcile_session_projection_freshness_obligation_in_payload(
         aoa_root=aoa_root,
         session_id=session_id,
         configured_session_dir=session_dir,
+    )
+    capture_watch_deadline_check(
+        cooperative_deadline_monotonic,
+        stage="retry_queue_identity_revalidated",
     )
     if current_result.get("ok") is not True:
         diagnostic = str(
@@ -66493,21 +66717,62 @@ def _reconcile_session_projection_freshness_obligation_in_payload(
             False,
         )
     if not matching:
-        prospective_options = {
-            "persistent_obligation": True,
-            "obligation_kind": SESSION_PROJECTION_FRESHNESS_OBLIGATION_KIND,
-            "session_id": session_id,
-            "session_dir": str(identity.get("session_dir") or session_dir),
-            "transcript_path": str(transcript_path),
-            "required_stable_projection": True,
-            "required_search_consumer": True,
-            "freshness_reason": freshness_reason,
-            **current_options,
-        }
-        freshness_status = session_projection_freshness_obligation_status(
-            aoa_root,
-            prospective_options,
+        prospective_options = _session_projection_freshness_options_for_identity(
+            session_id=session_id,
+            session_dir=session_dir,
+            transcript_path=transcript_path,
+            freshness_reason=freshness_reason,
+            identity=identity,
         )
+        preflight_identity_relation = (
+            _capture_identity_relation(
+                identity,
+                prospective_capture_identity,
+            )
+            if isinstance(prospective_capture_identity, dict)
+            else "unresolved"
+        )
+        if defer_freshness_to_dispatcher:
+            freshness_status = {
+                "schema_version": 1,
+                "artifact_type": (
+                    "session_projection_freshness_obligation_admission"
+                ),
+                "ok": False,
+                "status": "deferred_to_bounded_dispatcher",
+                "session_id": session_id,
+                "capture_identity_bound": False,
+                "global_outbox_scan_performed": False,
+                "truth_status": (
+                    "capture_watch_enqueues_idempotently_and_bounded_"
+                    "dispatcher_retires_satisfied_obligation"
+                ),
+            }
+        elif (
+            isinstance(prospective_freshness_status, dict)
+            and preflight_identity_relation == "equal"
+        ):
+            freshness_status = prospective_freshness_status
+        else:
+            # A missing or stale outside-lock preflight can never suppress a
+            # current obligation.  Revalidated identity is still enqueued;
+            # the dispatcher will perform the authoritative freshness proof.
+            freshness_status = {
+                "schema_version": 1,
+                "artifact_type": (
+                    "session_projection_freshness_obligation_admission"
+                ),
+                "ok": False,
+                "status": "preflight_not_bound",
+                "session_id": session_id,
+                "capture_identity_bound": False,
+                "preflight_identity_relation": preflight_identity_relation,
+                "global_outbox_scan_performed": False,
+                "truth_status": (
+                    "freshness_suppression_requires_exact_current_"
+                    "capture_identity_preflight"
+                ),
+            }
         if freshness_status.get("ok") is True:
             return (
                 {
@@ -66515,6 +66780,10 @@ def _reconcile_session_projection_freshness_obligation_in_payload(
                     "session_id": session_id,
                     "capture_identity": identity,
                     "freshness_obligation": freshness_status,
+                    "freshness_admission": {
+                        "mode": "precomputed_outside_queue_lock",
+                        "capture_identity_bound": True,
+                    },
                     "changed": False,
                     "persistent_obligation": False,
                 },
@@ -66539,6 +66808,19 @@ def _reconcile_session_projection_freshness_obligation_in_payload(
                 "status": "scheduled",
                 "session_id": session_id,
                 "capture_identity": identity,
+                "freshness_admission": {
+                    "mode": (
+                        "deferred_to_bounded_dispatcher"
+                        if defer_freshness_to_dispatcher
+                        else "precomputed_outside_queue_lock"
+                    ),
+                    "capture_identity_bound": (
+                        preflight_identity_relation == "equal"
+                    ),
+                    "global_outbox_scan_performed": False
+                    if defer_freshness_to_dispatcher
+                    else None,
+                },
                 "changed": True,
                 "persistent_obligation": True,
             },
@@ -66679,8 +66961,66 @@ def reconcile_session_projection_freshness_obligation(
     freshness_reason: str,
     now_epoch: float,
     create_if_missing: bool,
+    defer_freshness_to_dispatcher: bool = False,
+    cooperative_deadline_monotonic: float | None = None,
+    prospective_outbox_record: tuple[Path | None, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Reconcile capture publication and retry intent through the queue owner."""
+    """Reconcile capture publication and retry intent through the queue owner.
+
+    A normal prospective suppression proof is intentionally computed before
+    entering the persistent queue lock.  Capture-watch supplies one bounded
+    outbox index for its whole selected frontier, so it can preserve exact
+    satisfied-absence semantics without repeating a global scan per watched
+    source; the dispatcher remains the authoritative final freshness proof.
+    """
+    prospective_freshness_status: dict[str, Any] | None = None
+    prospective_capture_identity: dict[str, Any] | None = None
+    capture_watch_deadline_check(
+        cooperative_deadline_monotonic,
+        stage="prospective_freshness_preflight_start",
+    )
+    if create_if_missing and not defer_freshness_to_dispatcher:
+        prospective_capture = _capture_identity_current(
+            aoa_root=aoa_root,
+            session_id=session_id,
+            configured_session_dir=session_dir,
+        )
+        if prospective_capture.get("ok") is True:
+            prospective_capture_identity = dict(
+                prospective_capture.get("identity") or {}
+            )
+            prospective_options = (
+                _session_projection_freshness_options_for_identity(
+                    session_id=session_id,
+                    session_dir=session_dir,
+                    transcript_path=transcript_path,
+                    freshness_reason=freshness_reason,
+                    identity=prospective_capture_identity,
+                )
+            )
+            capture_watch_deadline_check(
+                cooperative_deadline_monotonic,
+                stage="prospective_freshness_before_vector",
+            )
+            if prospective_outbox_record is None:
+                prospective_freshness_status = (
+                    session_projection_freshness_obligation_status(
+                        aoa_root,
+                        prospective_options,
+                    )
+                )
+            else:
+                prospective_freshness_status = (
+                    session_projection_freshness_obligation_status(
+                        aoa_root,
+                        prospective_options,
+                        outbox_record_override=prospective_outbox_record,
+                    )
+                )
+            capture_watch_deadline_check(
+                cooperative_deadline_monotonic,
+                stage="prospective_freshness_after_vector",
+            )
     result, queue_status = mutate_auto_maintenance_retry_queue(
         aoa_root,
         lambda payload: _reconcile_session_projection_freshness_obligation_in_payload(
@@ -66692,8 +67032,13 @@ def reconcile_session_projection_freshness_obligation(
             freshness_reason=freshness_reason,
             now_epoch=now_epoch,
             create_if_missing=create_if_missing,
+            prospective_freshness_status=prospective_freshness_status,
+            prospective_capture_identity=prospective_capture_identity,
+            defer_freshness_to_dispatcher=defer_freshness_to_dispatcher,
+            cooperative_deadline_monotonic=cooperative_deadline_monotonic,
         ),
         now_epoch=now_epoch,
+        cooperative_deadline_monotonic=cooperative_deadline_monotonic,
     )
     return {
         **result,
@@ -66703,13 +67048,19 @@ def reconcile_session_projection_freshness_obligation(
             "capture_identity_satisfied_without_persistent_freshness_obligation"
             if result.get("status") == "freshness_obligation_already_satisfied"
             else (
-                "capture_identity_reconciled_under_persistent_queue_lock"
-                if result.get("status") in {
-                    "identity_reconciled_updated",
-                    "identity_already_current",
-                    "scheduled",
-                }
-                else "capture_identity_reconciliation_not_admitted"
+                "capture_watch_identity_enqueued_for_bounded_dispatcher_"
+                "freshness_retirement"
+                if result.get("freshness_admission", {}).get("mode")
+                == "deferred_to_bounded_dispatcher"
+                else (
+                    "capture_identity_reconciled_under_persistent_queue_lock"
+                    if result.get("status") in {
+                        "identity_reconciled_updated",
+                        "identity_already_current",
+                        "scheduled",
+                    }
+                    else "capture_identity_reconciliation_not_admitted"
+                )
             )
         ),
     }
@@ -207437,7 +207788,10 @@ def command_capture_watch(args: argparse.Namespace) -> int:
     )
     payload = reconcile_capture_watch(
         aoa_root=root,
-        limit=max(1, int(args.limit)),
+        limit=min(
+            CAPTURE_WATCH_MAX_FRONTIER,
+            max(1, int(args.limit)),
+        ),
         apply=bool(args.apply),
         target=str(args.session or "all"),
         budget_seconds=(

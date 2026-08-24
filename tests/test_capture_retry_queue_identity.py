@@ -153,6 +153,392 @@ def _publish_current_projection(fixture: dict[str, Any]) -> None:
     module.write_json(manifest_path, manifest)
 
 
+def test_capture_identity_lineage_matrix_is_strict_and_legacy_is_exact_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _fixture(
+        tmp_path,
+        monkeypatch,
+        session_id="capture-lineage-matrix",
+        schedule=False,
+    )
+    capture = module.raw_capture_state_for_session(fixture["session_dir"])
+    manifest_path = fixture["session_dir"] / "session.manifest.json"
+    required = {
+        "persistent_obligation": True,
+        "obligation_kind": module.SESSION_PROJECTION_FRESHNESS_OBLIGATION_KIND,
+        "session_id": fixture["session_id"],
+        "session_dir": str(fixture["session_dir"]),
+        "required_capture_epoch_id": capture["ledger_epoch_id"],
+        "required_capture_epoch_index": 0,
+        "required_capture_bytes": capture["raw_bytes"],
+        "required_capture_sha256": capture["raw_sha256"],
+        "required_capture_chain_sha256": capture["ledger_chain_sha256"],
+        "required_capture_ref": capture["capture_ref"],
+        "required_stable_projection": False,
+        "required_search_consumer": False,
+        "capture_identity_contract": module.SESSION_CAPTURE_RETRY_IDENTITY_CONTRACT,
+    }
+    base_raw = {
+        "bytes": capture["raw_bytes"],
+        "sha256": capture["raw_sha256"],
+        "indexing_status": "indexed",
+        "storage_mode": "monolithic_snapshot_v1",
+    }
+
+    cases = [
+        ("pure_legacy_exact", {}, True),
+        (
+            "pure_legacy_bytes_mismatch",
+            {"bytes": capture["raw_bytes"] + 1},
+            False,
+        ),
+        (
+            "pure_legacy_sha_mismatch",
+            {"sha256": "sha256:wrong"},
+            False,
+        ),
+        (
+            "chain_only_exact",
+            {"ledger_chain_sha256": capture["ledger_chain_sha256"]},
+            False,
+        ),
+        (
+            "chain_only_mismatch",
+            {"ledger_chain_sha256": "sha256:wrong-chain"},
+            False,
+        ),
+        (
+            "ref_only_exact",
+            {"capture_ref": capture["capture_ref"]},
+            False,
+        ),
+        (
+            "ref_only_mismatch",
+            {"capture_ref": "raw-ledger:wrong-ref"},
+            False,
+        ),
+        (
+            "chain_and_ref_exact_without_epoch",
+            {
+                "ledger_chain_sha256": capture["ledger_chain_sha256"],
+                "capture_ref": capture["capture_ref"],
+            },
+            False,
+        ),
+        (
+            "chain_and_ref_mismatch_without_epoch",
+            {
+                "ledger_chain_sha256": "sha256:wrong-chain",
+                "capture_ref": "raw-ledger:wrong-ref",
+            },
+            False,
+        ),
+        (
+            "empty_epoch_partial_ledger",
+            {
+                "capture_ledger": {
+                    "epoch_id": "",
+                    "processed_watermark_bytes": capture["raw_bytes"],
+                    "chain_sha256": capture["ledger_chain_sha256"],
+                }
+            },
+            False,
+        ),
+        (
+            "epoch_exact_chain_ref_exact",
+            {
+                "capture_ledger": {
+                    "epoch_id": capture["ledger_epoch_id"],
+                    "processed_watermark_bytes": capture["raw_bytes"],
+                    "chain_sha256": capture["ledger_chain_sha256"],
+                },
+                "capture_ref": capture["capture_ref"],
+            },
+            True,
+        ),
+        (
+            "epoch_exact_bytes_advanced_sha_changed",
+            {
+                "bytes": capture["raw_bytes"] + 1,
+                "sha256": "sha256:later-watermark-sha",
+                "capture_ledger": {
+                    "epoch_id": capture["ledger_epoch_id"],
+                    "processed_watermark_bytes": capture["raw_bytes"] + 1,
+                    "chain_sha256": capture["ledger_chain_sha256"],
+                },
+                "capture_ref": capture["capture_ref"],
+            },
+            True,
+        ),
+        (
+            "epoch_exact_bytes_below_required",
+            {
+                "capture_ledger": {
+                    "epoch_id": capture["ledger_epoch_id"],
+                    "processed_watermark_bytes": max(0, capture["raw_bytes"] - 1),
+                    "chain_sha256": capture["ledger_chain_sha256"],
+                },
+                "capture_ref": capture["capture_ref"],
+            },
+            False,
+        ),
+        (
+            "epoch_exact_chain_mismatch",
+            {
+                "capture_ledger": {
+                    "epoch_id": capture["ledger_epoch_id"],
+                    "processed_watermark_bytes": capture["raw_bytes"],
+                    "chain_sha256": "sha256:wrong-chain",
+                },
+                "capture_ref": capture["capture_ref"],
+            },
+            False,
+        ),
+        (
+            "epoch_exact_ref_mismatch",
+            {
+                "capture_ledger": {
+                    "epoch_id": capture["ledger_epoch_id"],
+                    "processed_watermark_bytes": capture["raw_bytes"],
+                    "chain_sha256": capture["ledger_chain_sha256"],
+                },
+                "capture_ref": "raw-ledger:wrong-ref",
+            },
+            False,
+        ),
+        (
+            "epoch_mismatch_chain_ref_exact",
+            {
+                "capture_ledger": {
+                    "epoch_id": "epoch:wrong",
+                    "processed_watermark_bytes": capture["raw_bytes"],
+                    "chain_sha256": capture["ledger_chain_sha256"],
+                },
+                "capture_ref": capture["capture_ref"],
+            },
+            False,
+        ),
+    ]
+
+    for name, raw_update, expected in cases:
+        manifest = module.read_json(manifest_path, {})
+        raw = dict(base_raw)
+        raw.update(raw_update)
+        manifest["raw"] = raw
+        module.write_json(manifest_path, manifest)
+        status = module.session_projection_freshness_obligation_status(
+            fixture["aoa_root"],
+            required,
+        )
+        assert status["ok"] is expected, name
+        if name == "pure_legacy_exact":
+            assert status["strict_legacy_monolithic_digest_satisfied"] is True
+            assert status["projected_capture_ledger_present"] is False
+
+    monkeypatch.setattr(
+        module,
+        "session_projection_freshness_vector",
+        lambda **_kwargs: {
+            "axes": {
+                "stable_session_projection": {"current": False},
+                "search": {"current": False},
+            }
+        },
+    )
+    manifest = module.read_json(manifest_path, {})
+    manifest["raw"] = dict(base_raw)
+    module.write_json(manifest_path, manifest)
+    axes_required = {
+        **required,
+        "required_stable_projection": True,
+        "required_search_consumer": True,
+    }
+    axes_status = module.session_projection_freshness_obligation_status(
+        fixture["aoa_root"],
+        axes_required,
+    )
+    assert axes_status["capture_identity_satisfied"] is True
+    assert axes_status["ok"] is False
+    assert axes_status["remaining_axes"] == [
+        "stable_session_projection",
+        "search",
+    ]
+
+
+def test_capture_watch_frontier_ceiling_applies_to_library_and_cli(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    for ordinal in range(module.CAPTURE_WATCH_MAX_FRONTIER + 3):
+        transcript = tmp_path / f"frontier-{ordinal}.jsonl"
+        transcript.write_text('{"row": 1}\n', encoding="utf-8")
+        module.register_capture_watch(
+            aoa_root=aoa_root,
+            session_id=f"frontier-{ordinal}",
+            session_dir=aoa_root / "sessions" / f"frontier-{ordinal}",
+            transcript_path=transcript,
+            observed_at=f"2026-08-24T01:{ordinal:02d}:00Z",
+        )
+
+    requested = module.CAPTURE_WATCH_MAX_FRONTIER + 100
+    library_payload = module.reconcile_capture_watch(
+        aoa_root=aoa_root,
+        limit=requested,
+        apply=False,
+        now="2026-08-24T02:00:00Z",
+    )
+    assert library_payload["requested_limit"] == requested
+    assert library_payload["selection_limit"] == module.CAPTURE_WATCH_MAX_FRONTIER
+    assert library_payload["frontier_clamped"] is True
+    assert library_payload["selected_count"] == module.CAPTURE_WATCH_MAX_FRONTIER
+
+    args = module.build_parser().parse_args(
+        [
+            "capture-watch",
+            "all",
+            "--aoa-root",
+            str(aoa_root),
+            "--limit",
+            str(requested),
+        ]
+    )
+    assert args.func(args) == 0
+    cli_payload = json.loads(capsys.readouterr().out)
+    assert cli_payload["selection_limit"] == module.CAPTURE_WATCH_MAX_FRONTIER
+    assert cli_payload["selected_count"] == module.CAPTURE_WATCH_MAX_FRONTIER
+
+
+def test_capture_watch_budget_exhaustion_does_not_admit_partial_obligation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _fixture(
+        tmp_path,
+        monkeypatch,
+        session_id="capture-watch-budget-no-partial-queue",
+        schedule=False,
+    )
+    module.register_capture_watch(
+        aoa_root=fixture["aoa_root"],
+        session_id=fixture["session_id"],
+        session_dir=fixture["session_dir"],
+        transcript_path=fixture["transcript"],
+        observed_at="2026-08-24T03:00:00Z",
+    )
+    before = module.auto_maintenance_retry_queue_status(
+        fixture["aoa_root"],
+        now_epoch=100.0,
+    )
+    watch = module.reconcile_capture_watch(
+        aoa_root=fixture["aoa_root"],
+        limit=1,
+        apply=True,
+        budget_seconds=0.0,
+        now="2026-08-24T03:00:01Z",
+    )
+    after = module.auto_maintenance_retry_queue_status(
+        fixture["aoa_root"],
+        now_epoch=100.0,
+    )
+    assert watch["status"] == "budget_exhausted"
+    assert watch["completed_count"] == 0
+    assert len(watch["results"]) == 1
+    assert watch["results"][0]["status"] == "deferred_time_budget"
+    assert "queue_reconciliation" not in watch["results"][0]
+    assert after["items"] == before["items"] == {}
+    assert after["freshness_obligation_count"] == 0
+
+
+def test_capture_watch_defers_freshness_and_avoids_repeated_global_outbox_scans(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixtures = [
+        _fixture(
+            tmp_path,
+            monkeypatch,
+            session_id=f"bounded-selected-{ordinal}",
+            schedule=False,
+        )
+        for ordinal in range(3)
+    ]
+    for fixture in fixtures:
+        module.register_capture_watch(
+            aoa_root=fixture["aoa_root"],
+            session_id=fixture["session_id"],
+            session_dir=fixture["session_dir"],
+            transcript_path=fixture["transcript"],
+            observed_at="2026-08-24T04:00:00Z",
+        )
+    records_dir = fixtures[0]["aoa_root"] / module.PROJECTION_OUTBOX_RECORDS_DIR
+    records_dir.mkdir(parents=True, exist_ok=True)
+    for ordinal in range(11):
+        module.write_json(
+            records_dir / f"unrelated-{ordinal}.json",
+            {
+                "session_id": f"unrelated-{ordinal}",
+                "new_publish_id": f"publish-{ordinal}",
+            },
+        )
+
+    vector_calls = 0
+    outbox_lookup_calls = 0
+    outbox_reads = 0
+    original_vector = module.session_projection_freshness_vector
+    original_outbox = module.session_projection_outbox_record_for_publish
+    original_read_json = module.read_json
+
+    def counted_vector(**kwargs: Any) -> dict[str, Any]:
+        nonlocal vector_calls
+        vector_calls += 1
+        return original_vector(**kwargs)
+
+    def counted_outbox(*args: Any, **kwargs: Any) -> tuple[Path | None, dict[str, Any]]:
+        nonlocal outbox_lookup_calls
+        outbox_lookup_calls += 1
+        return original_outbox(*args, **kwargs)
+
+    def counted_read_json(path: Path, default: Any) -> Any:
+        nonlocal outbox_reads
+        if path.parent == records_dir:
+            outbox_reads += 1
+        return original_read_json(path, default)
+
+    monkeypatch.setattr(module, "session_projection_freshness_vector", counted_vector)
+    monkeypatch.setattr(
+        module,
+        "session_projection_outbox_record_for_publish",
+        counted_outbox,
+    )
+    monkeypatch.setattr(module, "read_json", counted_read_json)
+    watch = module.reconcile_capture_watch(
+        aoa_root=fixtures[0]["aoa_root"],
+        limit=3,
+        apply=True,
+        budget_seconds=5.0,
+        now="2026-08-24T04:00:01Z",
+    )
+    queue = module.auto_maintenance_retry_queue_status(
+        fixtures[0]["aoa_root"],
+        now_epoch=100.0,
+    )
+    assert watch["status"] == "applied"
+    assert watch["selected_count"] == 3
+    assert queue["freshness_obligation_count"] == 3
+    assert vector_calls == 3
+    assert outbox_lookup_calls == 0
+    assert outbox_reads == 11
+    assert outbox_reads < 3 * 11
+    assert all(
+        result["queue_reconciliation"]["freshness_admission"]["mode"]
+        == "precomputed_outside_queue_lock"
+        for result in watch["results"]
+    )
+
+
 def test_capture_watch_creates_missing_current_epoch_zero_obligation_idempotently(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -270,6 +656,44 @@ def test_satisfied_unchanged_capture_stays_absent_from_retry_queue(
     assert second["changed"] is False
     assert queue["items"] == {}
     assert queue["freshness_obligation_count"] == 0
+
+
+def test_outside_lock_freshness_suppression_revalidates_capture_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _fixture(
+        tmp_path,
+        monkeypatch,
+        session_id="capture-watch-preflight-revalidation",
+        schedule=False,
+    )
+    def status_then_advance(aoa_root: Path, options: dict[str, Any]) -> dict[str, Any]:
+        _append_capture(fixture, "changed-after-preflight", "2026-08-24T02:30:00Z")
+        return {"ok": True, "status": "satisfied"}
+
+    monkeypatch.setattr(
+        module,
+        "session_projection_freshness_obligation_status",
+        status_then_advance,
+    )
+    result = module.reconcile_session_projection_freshness_obligation(
+        aoa_root=fixture["aoa_root"],
+        session_id=fixture["session_id"],
+        session_dir=fixture["session_dir"],
+        transcript_path=fixture["transcript"],
+        freshness_reason="preflight_revalidation",
+        now_epoch=125.0,
+        create_if_missing=True,
+    )
+    queue = module.auto_maintenance_retry_queue_status(
+        fixture["aoa_root"],
+        now_epoch=125.0,
+    )
+    assert result["status"] == "scheduled"
+    assert result["freshness_admission"]["capture_identity_bound"] is False
+    assert queue["freshness_obligation_count"] == 1
+    assert _identity(_queue_item(fixture))[2] == fixture["transcript"].stat().st_size
 
 
 def test_strict_obligation_accepts_exact_legacy_monolithic_projection(
