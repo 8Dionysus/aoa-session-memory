@@ -1785,6 +1785,23 @@ AUTO_MAINTENANCE_RETRY_QUEUE_LOCK = "auto-maintenance-retry-queue.lock"
 AUTO_MAINTENANCE_RETRY_WORKER_LOCK = "auto-maintenance-retry-worker.lock"
 HEAVY_PROJECTION_LANE_LOCK = "session-projection-heavy.lock"
 AUTO_MAINTENANCE_RETRY_HISTORY_LIMIT = 40
+SESSION_CAPTURE_RETRY_IDENTITY_CONTRACT = (
+    "raw_capture_state_and_ledger_v1"
+)
+SESSION_CAPTURE_RETRY_IDENTITY_RECONCILIATION_DIAGNOSTIC = (
+    "capture_retry_queue_identity_reconciliation_unresolved"
+)
+SESSION_CAPTURE_RETRY_IDENTITY_ADMISSION_REFUSAL = (
+    "deep_admission_refused_capture_retry_queue_identity_"
+    "reconciliation_unresolved"
+)
+SESSION_CAPTURE_RETRY_IDENTITY_FIELDS = (
+    "required_capture_epoch_id",
+    "required_capture_bytes",
+    "required_capture_sha256",
+    "required_capture_chain_sha256",
+    "required_capture_ref",
+)
 AUTO_MAINTENANCE_CHILD_PROGRESS_RETRY_STATUSES = frozenset(
     {
         "applied_with_remaining_backlog",
@@ -18216,6 +18233,292 @@ SESSION_PROJECTION_FRESHNESS_OBLIGATION_KIND = (
 )
 
 
+def _capture_identity_is_strict(options: dict[str, Any]) -> bool:
+    """Return whether an obligation carries the current capture identity contract."""
+    return bool(
+        isinstance(options, dict)
+        and (
+            options.get("capture_identity_contract")
+            == SESSION_CAPTURE_RETRY_IDENTITY_CONTRACT
+            or any(
+                key in options
+                for key in (
+                    "required_capture_chain_sha256",
+                    "required_capture_ref",
+                )
+            )
+        )
+    )
+
+
+def _capture_identity_from_options(
+    options: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "epoch_id": str(
+            options.get("required_capture_epoch_id") or ""
+        ),
+        "epoch_index": int_value(
+            options.get("required_capture_epoch_index"),
+            -1,
+        ),
+        "bytes": int_value(
+            options.get("required_capture_bytes"),
+            -1,
+        ),
+        "sha256": str(
+            options.get("required_capture_sha256") or ""
+        ),
+        "chain_sha256": str(
+            options.get("required_capture_chain_sha256") or ""
+        ),
+        "capture_ref": str(
+            options.get("required_capture_ref") or ""
+        ),
+    }
+
+
+def _capture_identity_to_options(
+    identity: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "capture_identity_contract": (
+            SESSION_CAPTURE_RETRY_IDENTITY_CONTRACT
+        ),
+        "required_capture_epoch_id": str(
+            identity.get("epoch_id") or ""
+        ),
+        "required_capture_epoch_index": int_value(
+            identity.get("epoch_index"),
+            -1,
+        ),
+        "required_capture_bytes": int_value(
+            identity.get("bytes"),
+            -1,
+        ),
+        "required_capture_sha256": str(
+            identity.get("sha256") or ""
+        ),
+        "required_capture_chain_sha256": str(
+            identity.get("chain_sha256") or ""
+        ),
+        "required_capture_ref": str(
+            identity.get("capture_ref") or ""
+        ),
+        "required_capture_stable": bool(
+            identity.get("stable")
+        ),
+    }
+
+
+def _capture_identity_relation(
+    candidate: dict[str, Any],
+    baseline: dict[str, Any],
+) -> str:
+    """Compare identities without allowing an ambiguous writer to win."""
+    candidate_epoch = str(candidate.get("epoch_id") or "")
+    baseline_epoch = str(baseline.get("epoch_id") or "")
+    candidate_bytes = int_value(candidate.get("bytes"), -1)
+    baseline_bytes = int_value(baseline.get("bytes"), -1)
+    if not candidate_epoch or not baseline_epoch:
+        return "unresolved"
+    if candidate_bytes < 0 or baseline_bytes < 0:
+        return "unresolved"
+    if candidate_epoch == baseline_epoch:
+        if candidate_bytes < baseline_bytes:
+            return "older"
+        if candidate_bytes > baseline_bytes:
+            return "newer"
+        for key in ("chain_sha256", "capture_ref", "sha256"):
+            candidate_value = str(candidate.get(key) or "")
+            baseline_value = str(baseline.get(key) or "")
+            if candidate_value and baseline_value and candidate_value != baseline_value:
+                return "conflict"
+            if bool(candidate_value) != bool(baseline_value):
+                return "conflict"
+        return "equal"
+    candidate_index = int_value(candidate.get("epoch_index"), -1)
+    baseline_index = int_value(baseline.get("epoch_index"), -1)
+    if candidate_index < 0 or baseline_index < 0:
+        return "unresolved"
+    if candidate_index > baseline_index:
+        return "newer"
+    if candidate_index < baseline_index:
+        return "older"
+    return "conflict"
+
+
+def _capture_identity_current(
+    *,
+    aoa_root: Path,
+    session_id: str,
+    configured_session_dir: Path,
+) -> dict[str, Any]:
+    """Read and validate the owner-published current capture identity.
+
+    The state pointer is the normal source. An indexed ledger-backed
+    manifest is accepted as the post-catch-up representation of that same
+    identity because projection publication replaces deferred state.
+    """
+    resolved = session_dir_for_id(aoa_root, session_id)
+    session_dir = resolved if resolved.is_dir() else configured_session_dir
+
+    def unresolved(reason: str) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "diagnostic": SESSION_CAPTURE_RETRY_IDENTITY_RECONCILIATION_DIAGNOSTIC,
+            "reason": reason,
+            "session_id": session_id,
+            "session_dir": str(session_dir),
+        }
+
+    state = raw_capture_state_for_session(session_dir)
+    manifest = read_json(session_dir / "session.manifest.json", {})
+    raw = (
+        manifest.get("raw")
+        if isinstance(manifest, dict)
+        and isinstance(manifest.get("raw"), dict)
+        else {}
+    )
+    indexed_ledger = (
+        raw.get("capture_ledger")
+        if isinstance(raw.get("capture_ledger"), dict)
+        else {}
+    )
+    state_is_ledger = bool(
+        isinstance(state, dict)
+        and str(state.get("capture_mode") or "")
+        == "append_only_immutable_block_ledger_v1"
+    )
+    use_state = bool(
+        state_is_ledger
+        and raw_capture_state_receipt_valid(state)
+    )
+    use_indexed_manifest = bool(
+        not use_state
+        and isinstance(manifest, dict)
+        and manifest.get("archive_status") == "indexed"
+        and raw.get("indexing_status") == "indexed"
+        and indexed_ledger.get("epoch_id")
+        and indexed_ledger.get("chain_sha256")
+    )
+    if not use_state and not use_indexed_manifest:
+        return unresolved("capture_state_or_indexed_ledger_not_admitted")
+
+    if use_state:
+        epoch_id = str(state.get("ledger_epoch_id") or "")
+        raw_bytes = int_value(state.get("raw_bytes"), -1)
+        raw_sha256 = str(state.get("raw_sha256") or "")
+        chain_sha256 = str(state.get("ledger_chain_sha256") or "")
+        capture_ref = str(state.get("capture_ref") or "")
+        capture_path = Path(str(state.get("capture_path") or ""))
+        stable = bool(state.get("source_stable_during_capture"))
+        ledger_path = Path(str(state.get("ledger_path") or ""))
+        expected_source_path = str(state.get("source_path") or "")
+    else:
+        epoch_id = str(indexed_ledger.get("epoch_id") or "")
+        raw_bytes = int_value(raw.get("bytes"), -1)
+        raw_sha256 = str(raw.get("sha256") or "")
+        chain_sha256 = str(indexed_ledger.get("chain_sha256") or "")
+        capture_ref = f"raw-ledger:{epoch_id}:{chain_sha256}"
+        capture_path = Path(str(raw.get("path") or ""))
+        stable = bool(raw.get("source_stable_during_capture", True))
+        ledger_path = Path(str(indexed_ledger.get("path") or ""))
+        expected_source_path = str(raw.get("source_path") or "")
+
+    if not epoch_id or raw_bytes < 0 or not chain_sha256:
+        return unresolved("capture_identity_fields_missing")
+    if not stable:
+        return unresolved("capture_source_not_stable")
+    if not capture_path.is_file():
+        return unresolved("capture_materialization_missing")
+    try:
+        if capture_path.stat().st_size != raw_bytes:
+            return unresolved("capture_materialization_watermark_mismatch")
+    except OSError:
+        return unresolved("capture_materialization_stat_failed")
+    if not ledger_path.is_file():
+        ledger_path = raw_capture_ledger_path(session_dir)
+    ledger = read_json(ledger_path, {})
+    if not isinstance(ledger, dict) or str(ledger.get("session_id") or "") != session_id:
+        return unresolved("capture_ledger_unreadable_or_session_mismatch")
+    if str(ledger.get("current_epoch_id") or "") != epoch_id:
+        return unresolved("capture_identity_is_not_current_ledger_epoch")
+    epochs = ledger.get("epochs") if isinstance(ledger.get("epochs"), list) else []
+    epoch_index = -1
+    epoch: dict[str, Any] | None = None
+    for index, candidate in enumerate(epochs):
+        if isinstance(candidate, dict) and str(candidate.get("epoch_id") or "") == epoch_id:
+            epoch_index = index
+            epoch = candidate
+            break
+    if epoch is None:
+        return unresolved("capture_ledger_epoch_missing")
+    if int_value(epoch.get("captured_bytes"), -1) != raw_bytes:
+        return unresolved("capture_ledger_watermark_mismatch")
+    materialization = Path(str(epoch.get("materialization_path") or ""))
+    try:
+        if materialization.resolve() != capture_path.resolve() and not use_indexed_manifest:
+            return unresolved("capture_ledger_materialization_mismatch")
+    except OSError:
+        return unresolved("capture_ledger_materialization_unresolvable")
+    blocks = epoch.get("blocks") if isinstance(epoch.get("blocks"), list) else []
+    previous_chain = hashlib.sha256(b"").hexdigest()
+    expected_start = 0
+    for ordinal, block in enumerate(blocks):
+        if not isinstance(block, dict):
+            return unresolved(f"capture_ledger_block_invalid:{ordinal}")
+        byte_start = int_value(block.get("byte_start"), -1)
+        byte_count = int_value(block.get("byte_count"), -1)
+        block_sha256 = str(block.get("sha256") or "")
+        expected_chain = raw_capture_chain_sha256(
+            previous_chain_sha256=previous_chain,
+            block_sha256=block_sha256,
+            byte_start=byte_start,
+            byte_count=byte_count,
+        )
+        if not (
+            int_value(block.get("ordinal"), -1) == ordinal
+            and byte_start == expected_start
+            and byte_count > 0
+            and int_value(block.get("byte_end"), -1) == byte_start + byte_count
+            and str(block.get("previous_chain_sha256") or "") == previous_chain
+            and str(block.get("chain_sha256") or "") == expected_chain
+        ):
+            return unresolved(f"capture_ledger_chain_invalid:{ordinal}")
+        expected_start += byte_count
+        previous_chain = expected_chain
+    if expected_start != raw_bytes or previous_chain != chain_sha256:
+        return unresolved("capture_ledger_chain_or_coverage_mismatch")
+    expected_ref = f"raw-ledger:{epoch_id}:{chain_sha256}"
+    if use_state and capture_ref != expected_ref:
+        return unresolved("capture_state_capture_ref_mismatch")
+    full_raw_sha256 = str(epoch.get("full_raw_sha256") or "")
+    if raw_sha256 and full_raw_sha256 and raw_sha256 != full_raw_sha256:
+        return unresolved("capture_state_digest_mismatch")
+    if expected_source_path and raw.get("source_path") and str(raw.get("source_path")) != expected_source_path:
+        return unresolved("capture_source_path_mismatch")
+    identity = {
+        "epoch_id": epoch_id,
+        "epoch_index": epoch_index,
+        "bytes": raw_bytes,
+        "sha256": raw_sha256,
+        "chain_sha256": chain_sha256,
+        "capture_ref": expected_ref,
+        "stable": stable,
+        "session_id": session_id,
+        "session_dir": str(session_dir),
+        "capture_path": str(capture_path),
+        "ledger_path": str(ledger_path),
+        "raw_digest_status": (
+            str(state.get("raw_digest_status") or "")
+            if use_state
+            else ""
+        ),
+    }
+    return {"ok": True, "identity": identity}
+
+
 def session_projection_freshness_obligation_options(
     *,
     aoa_root: Path,
@@ -18229,6 +18532,21 @@ def session_projection_freshness_obligation_options(
     raw_bytes = int_value(capture.get("raw_bytes"), -1)
     raw_sha256 = str(capture.get("raw_sha256") or "")
     epoch_id = str(capture.get("ledger_epoch_id") or "")
+    ledger = read_json(raw_capture_ledger_path(session_dir), {})
+    epochs = (
+        ledger.get("epochs")
+        if isinstance(ledger, dict) and isinstance(ledger.get("epochs"), list)
+        else []
+    )
+    epoch_index = next(
+        (
+            index
+            for index, item in enumerate(epochs)
+            if isinstance(item, dict)
+            and str(item.get("epoch_id") or "") == epoch_id
+        ),
+        -1,
+    )
     return {
         "persistent_obligation": True,
         "obligation_kind": (
@@ -18237,7 +18555,11 @@ def session_projection_freshness_obligation_options(
         "session_id": session_id,
         "session_dir": str(session_dir),
         "transcript_path": str(transcript_path),
+        "capture_identity_contract": (
+            SESSION_CAPTURE_RETRY_IDENTITY_CONTRACT
+        ),
         "required_capture_epoch_id": epoch_id,
+        "required_capture_epoch_index": epoch_index,
         "required_capture_bytes": raw_bytes,
         "required_capture_sha256": raw_sha256,
         "required_capture_chain_sha256": str(
@@ -18297,12 +18619,38 @@ def session_projection_freshness_obligation_status(
     required_sha256 = str(
         options.get("required_capture_sha256") or ""
     )
+    required_chain_sha256 = str(
+        options.get("required_capture_chain_sha256") or ""
+    )
+    required_capture_ref = str(
+        options.get("required_capture_ref") or ""
+    )
+    strict_capture_identity = _capture_identity_is_strict(options)
     projected_epoch = str(ledger.get("epoch_id") or "")
     projected_bytes = int_value(
         ledger.get("processed_watermark_bytes"),
         int_value(raw.get("bytes"), -1),
     )
     projected_sha256 = str(raw.get("sha256") or "")
+    projected_chain_sha256 = str(
+        ledger.get("chain_sha256")
+        or raw.get("ledger_chain_sha256")
+        or ""
+    )
+    projected_capture_ref = str(raw.get("capture_ref") or "")
+    if not projected_capture_ref and projected_epoch and projected_chain_sha256:
+        projected_capture_ref = (
+            f"raw-ledger:{projected_epoch}:{projected_chain_sha256}"
+        )
+    capture_identity_satisfied = bool(
+        not strict_capture_identity
+        or (
+            required_chain_sha256
+            and required_capture_ref
+            and projected_chain_sha256 == required_chain_sha256
+            and projected_capture_ref == required_capture_ref
+        )
+    )
     published = bool(
         isinstance(manifest, dict)
         and manifest.get("archive_status") == "indexed"
@@ -18314,6 +18662,7 @@ def session_projection_freshness_obligation_status(
         and required_sha256
         and projected_bytes == required_bytes
         and projected_sha256 == required_sha256
+        and capture_identity_satisfied
     )
     if required_epoch and projected_epoch:
         satisfied = bool(
@@ -18321,6 +18670,7 @@ def session_projection_freshness_obligation_status(
             and projected_epoch == required_epoch
             and required_bytes >= 0
             and projected_bytes >= required_bytes
+            and capture_identity_satisfied
         )
         proof_mode = "append_only_capture_epoch_watermark"
     elif required_epoch:
@@ -18398,9 +18748,15 @@ def session_projection_freshness_obligation_status(
         "required_capture_epoch_id": required_epoch,
         "required_capture_bytes": required_bytes,
         "required_capture_sha256": required_sha256,
+        "required_capture_chain_sha256": required_chain_sha256,
+        "required_capture_ref": required_capture_ref,
         "projected_capture_epoch_id": projected_epoch,
         "projected_capture_bytes": projected_bytes,
         "projected_raw_sha256": projected_sha256,
+        "projected_capture_chain_sha256": projected_chain_sha256,
+        "projected_capture_ref": projected_capture_ref,
+        "strict_capture_identity": strict_capture_identity,
+        "capture_identity_satisfied": capture_identity_satisfied,
         "published_projection": published,
         "required_axes": required_axes,
         "satisfied_axes": satisfied_axes,
@@ -18465,101 +18821,15 @@ def schedule_session_projection_freshness_obligation(
     freshness_reason: str,
     now_epoch: float,
 ) -> dict[str, Any]:
-    options = session_projection_freshness_obligation_options(
+    return reconcile_session_projection_freshness_obligation(
         aoa_root=aoa_root,
         session_id=session_id,
         session_dir=session_dir,
         transcript_path=transcript_path,
         freshness_reason=freshness_reason,
-    )
-    required_bytes = int_value(
-        options.get("required_capture_bytes"), -1
-    )
-    if required_bytes < 0:
-        return {
-            "status": "not_scheduled_capture_watermark_missing",
-            "session_id": session_id,
-            "persistent_obligation": False,
-        }
-    profile = (
-        "deep"
-        if required_bytes >= SESSION_PROJECTION_HEAVY_LANE_RAW_BYTES
-        else "backlog"
-    )
-
-    def schedule(
-        queue_payload: dict[str, Any],
-    ) -> tuple[dict[str, Any], bool]:
-        items = (
-            queue_payload.get("items")
-            if isinstance(queue_payload.get("items"), dict)
-            else {}
-        )
-        queue_payload["items"] = items
-        destination_key = auto_maintenance_retry_key(
-            profile, session_id
-        )
-        for existing_key, existing_item in list(items.items()):
-            existing_options = (
-                existing_item.get("options")
-                if isinstance(existing_item, dict)
-                and isinstance(existing_item.get("options"), dict)
-                else {}
-            )
-            if not (
-                existing_key != destination_key
-                and existing_options.get("obligation_kind")
-                == SESSION_PROJECTION_FRESHNESS_OBLIGATION_KIND
-                and str(existing_options.get("session_id") or "")
-                == session_id
-            ):
-                continue
-            if destination_key not in items:
-                migrated = dict(existing_item)
-                migrated["queue_key"] = destination_key
-                migrated["profile"] = profile
-                migrated["target"] = session_id
-                items[destination_key] = migrated
-            items.pop(existing_key, None)
-        return (
-            auto_maintenance_retry_upsert_item(
-                queue_payload,
-                profile=profile,
-                target=session_id,
-                reason=(
-                    "session_projection_freshness:"
-                    f"{freshness_reason}"
-                ),
-                launch_status="freshness_obligation_enqueued",
-                options=options,
-                now_epoch=now_epoch,
-                initial_delay_seconds=0,
-            ),
-            True,
-        )
-
-    scheduled, queue = mutate_auto_maintenance_retry_queue(
-        aoa_root,
-        schedule,
         now_epoch=now_epoch,
+        create_if_missing=True,
     )
-    return {
-        **scheduled,
-        "profile": profile,
-        "target": session_id,
-        "persistent_obligation": True,
-        "obligation_kind": (
-            SESSION_PROJECTION_FRESHNESS_OBLIGATION_KIND
-        ),
-        "required_capture_epoch_id": options.get(
-            "required_capture_epoch_id"
-        ),
-        "required_capture_bytes": required_bytes,
-        "queue_path": queue.get("path"),
-        "truth_status": (
-            "persistent_retry_intent_bound_to_preserved_capture_watermark"
-        ),
-    }
 
 
 def hook_only_receipts_present(session_dir: Path) -> bool:
@@ -31648,6 +31918,12 @@ def reconcile_capture_watch(
 ) -> dict[str, Any]:
     """Recover missed capture hooks from a bounded watched-source frontier."""
     checked_at = now or utc_now()
+    try:
+        checked_epoch = datetime.fromisoformat(
+            checked_at.replace("Z", "+00:00")
+        ).timestamp()
+    except (AttributeError, TypeError, ValueError):
+        checked_epoch = time.time()
     execution_started = time.monotonic()
     process_cpu_started = time.process_time()
     process_io_started = capture_watch_process_io()
@@ -32215,6 +32491,34 @@ def reconcile_capture_watch(
                             )
                 else:
                     result["verified"] = True
+                if (
+                    apply
+                    and isinstance(manifest, dict)
+                    and bool(manifest.get("session_id"))
+                ):
+                    queue_reconciliation = (
+                        reconcile_session_projection_freshness_obligation(
+                            aoa_root=aoa_root,
+                            session_id=session_id,
+                            session_dir=session_dir,
+                            transcript_path=transcript_path,
+                            freshness_reason=(
+                                f"capture_watch:{result.get('status')}"
+                            ),
+                            now_epoch=checked_epoch,
+                            create_if_missing=False,
+                        )
+                    )
+                    result["queue_reconciliation"] = queue_reconciliation
+                    if queue_reconciliation.get("status") == (
+                        "identity_reconciliation_unresolved"
+                    ):
+                        result.setdefault("diagnostics", []).append(
+                            str(
+                                queue_reconciliation.get("diagnostic")
+                                or SESSION_CAPTURE_RETRY_IDENTITY_RECONCILIATION_DIAGNOSTIC
+                            )
+                        )
                 updates[session_id] = {
                     "last_checked_at": checked_at,
                     "last_status": result["status"],
@@ -65961,6 +66265,41 @@ def auto_maintenance_retry_add_history(queue_payload: dict[str, Any], row: dict[
     ]
 
 
+def _merge_auto_maintenance_retry_options(
+    existing_options: dict[str, Any],
+    incoming_options: dict[str, Any],
+) -> dict[str, Any]:
+    """Merge options while making capture identity updates monotonic."""
+    existing = dict(existing_options)
+    incoming = dict(incoming_options)
+    existing_identity = _capture_identity_from_options(existing)
+    incoming_identity = _capture_identity_from_options(incoming)
+    identity_update_allowed = True
+    if _capture_identity_is_strict(existing) and _capture_identity_is_strict(incoming):
+        relation = _capture_identity_relation(
+            incoming_identity,
+            existing_identity,
+        )
+        identity_update_allowed = relation in {"newer", "equal"}
+    merged = {**existing, **incoming}
+    if not identity_update_allowed:
+        for key in (
+            "capture_identity_contract",
+            *SESSION_CAPTURE_RETRY_IDENTITY_FIELDS,
+            "required_capture_epoch_index",
+            "required_capture_stable",
+        ):
+            if key in existing:
+                merged[key] = existing[key]
+            else:
+                merged.pop(key, None)
+    return {
+        key: value
+        for key, value in merged.items()
+        if value is not None
+    }
+
+
 def auto_maintenance_retry_upsert_item(
     queue_payload: dict[str, Any],
     *,
@@ -66024,18 +66363,12 @@ def auto_maintenance_retry_upsert_item(
         "next_attempt_at": auto_maintenance_retry_iso(next_attempt_epoch),
         "in_flight": bool(existing.get("in_flight")),
         "last_status": launch_status,
-        "options": {
-            key: value
-            for key, value in {
-                **(
-                    existing.get("options")
-                    if isinstance(existing.get("options"), dict)
-                    else {}
-                ),
-                **options,
-            }.items()
-            if value is not None
-        },
+        "options": _merge_auto_maintenance_retry_options(
+            existing.get("options")
+            if isinstance(existing.get("options"), dict)
+            else {},
+            options,
+        ),
     }
     items[queue_key] = item
     return {
@@ -66046,6 +66379,313 @@ def auto_maintenance_retry_upsert_item(
         "attempts_started": item["attempts_started"],
         "max_attempts": max_attempts,
         "occurrence_count": occurrence_count,
+    }
+
+
+def _reconcile_session_projection_freshness_obligation_in_payload(
+    *,
+    aoa_root: Path,
+    queue_payload: dict[str, Any],
+    session_id: str,
+    session_dir: Path,
+    transcript_path: Path,
+    freshness_reason: str,
+    now_epoch: float,
+    create_if_missing: bool,
+) -> tuple[dict[str, Any], bool]:
+    """Reconcile one session under the already-held queue lock."""
+    items = (
+        queue_payload.get("items")
+        if isinstance(queue_payload.get("items"), dict)
+        else {}
+    )
+    queue_payload["items"] = items
+    matching: list[tuple[str, dict[str, Any]]] = []
+    for key, item in items.items():
+        if not isinstance(item, dict):
+            continue
+        options = item.get("options") if isinstance(item.get("options"), dict) else {}
+        if not (
+            options.get("persistent_obligation") is True
+            and options.get("obligation_kind")
+            == SESSION_PROJECTION_FRESHNESS_OBLIGATION_KIND
+            and str(options.get("session_id") or "") == session_id
+        ):
+            continue
+        matching.append((str(key), item))
+    if not matching and not create_if_missing:
+        return (
+            {
+                "status": "no_persistent_obligation",
+                "session_id": session_id,
+                "changed": False,
+                "persistent_obligation": False,
+            },
+            False,
+        )
+
+    current_result = _capture_identity_current(
+        aoa_root=aoa_root,
+        session_id=session_id,
+        configured_session_dir=session_dir,
+    )
+    if current_result.get("ok") is not True:
+        diagnostic = str(
+            current_result.get("diagnostic")
+            or SESSION_CAPTURE_RETRY_IDENTITY_RECONCILIATION_DIAGNOSTIC
+        )
+        changed = False
+        for _key, item in matching:
+            if item.get("last_identity_reconciliation_diagnostic") != diagnostic:
+                item["last_identity_reconciliation_diagnostic"] = diagnostic
+                item["last_identity_reconciliation_reason"] = str(
+                    current_result.get("reason") or ""
+                )
+                item["updated_at"] = auto_maintenance_retry_iso(now_epoch)
+                changed = True
+        return (
+            {
+                "status": "identity_reconciliation_unresolved",
+                "diagnostic": diagnostic,
+                "reason": current_result.get("reason"),
+                "session_id": session_id,
+                "changed": changed,
+                "persistent_obligation": bool(matching),
+            },
+            changed,
+        )
+
+    identity = dict(current_result.get("identity") or {})
+    current_options = _capture_identity_to_options(identity)
+    desired_profile = (
+        "deep"
+        if int_value(identity.get("bytes"), -1)
+        >= SESSION_PROJECTION_HEAVY_LANE_RAW_BYTES
+        else "backlog"
+    )
+    if len(matching) > 1:
+        return (
+            {
+                "status": "identity_reconciliation_unresolved",
+                "diagnostic": SESSION_CAPTURE_RETRY_IDENTITY_RECONCILIATION_DIAGNOSTIC,
+                "reason": "multiple_persistent_obligations_for_session",
+                "session_id": session_id,
+                "capture_identity": identity,
+                "changed": False,
+                "persistent_obligation": True,
+            },
+            False,
+        )
+    if not matching:
+        options = {
+            "persistent_obligation": True,
+            "obligation_kind": SESSION_PROJECTION_FRESHNESS_OBLIGATION_KIND,
+            "session_id": session_id,
+            "session_dir": str(identity.get("session_dir") or session_dir),
+            "transcript_path": str(transcript_path),
+            "required_stable_projection": True,
+            "required_search_consumer": True,
+            "freshness_reason": freshness_reason,
+            **current_options,
+        }
+        scheduled = auto_maintenance_retry_upsert_item(
+            queue_payload,
+            profile=desired_profile,
+            target=session_id,
+            reason=f"session_projection_freshness:{freshness_reason}",
+            launch_status="freshness_obligation_enqueued",
+            options=options,
+            now_epoch=now_epoch,
+            initial_delay_seconds=0,
+        )
+        return (
+            {
+                **scheduled,
+                "status": "scheduled",
+                "session_id": session_id,
+                "capture_identity": identity,
+                "changed": True,
+                "persistent_obligation": True,
+            },
+            True,
+        )
+
+    existing_key, existing_item = matching[0]
+    existing_options = (
+        existing_item.get("options")
+        if isinstance(existing_item.get("options"), dict)
+        else {}
+    )
+    destination_key = auto_maintenance_retry_key(desired_profile, session_id)
+    target_key = existing_key
+    changed = False
+    if existing_key != destination_key:
+        if bool(existing_item.get("in_flight")):
+            # The active worker owns this queue key until its finish boundary.
+            # Retargeting in place preserves its claim identity; the next
+            # non-in-flight reconciliation can migrate the profile safely.
+            existing_item["profile_retarget_pending"] = desired_profile
+            existing_item["last_status"] = (
+                "capture_identity_reconciled_in_flight_profile_retarget_pending"
+            )
+            target_key = existing_key
+            changed = True
+        elif destination_key in items:
+            return (
+                {
+                    "status": "identity_reconciliation_unresolved",
+                    "diagnostic": SESSION_CAPTURE_RETRY_IDENTITY_RECONCILIATION_DIAGNOSTIC,
+                    "reason": "destination_profile_obligation_already_exists",
+                    "session_id": session_id,
+                    "capture_identity": identity,
+                    "changed": False,
+                    "persistent_obligation": True,
+                },
+                False,
+            )
+        else:
+            migrated = dict(existing_item)
+            migrated["queue_key"] = destination_key
+            migrated["profile"] = desired_profile
+            migrated["target"] = session_id
+            items[destination_key] = migrated
+            items.pop(existing_key, None)
+            existing_item = migrated
+            existing_key = destination_key
+            target_key = destination_key
+            changed = True
+
+    baseline_identity = _capture_identity_from_options(existing_options)
+    if int_value(baseline_identity.get("epoch_index"), -1) < 0:
+        ledger = read_json(Path(str(identity.get("ledger_path") or "")), {})
+        epochs = ledger.get("epochs") if isinstance(ledger, dict) and isinstance(ledger.get("epochs"), list) else []
+        baseline_identity["epoch_index"] = next(
+            (
+                index
+                for index, epoch in enumerate(epochs)
+                if isinstance(epoch, dict)
+                and str(epoch.get("epoch_id") or "")
+                == str(baseline_identity.get("epoch_id") or "")
+            ),
+            -1,
+        )
+    relation = (
+        "newer"
+        if not _capture_identity_is_strict(existing_options)
+        else _capture_identity_relation(identity, baseline_identity)
+    )
+    if relation in {"older", "conflict", "unresolved"}:
+        diagnostic = SESSION_CAPTURE_RETRY_IDENTITY_RECONCILIATION_DIAGNOSTIC
+        if existing_item.get("last_identity_reconciliation_diagnostic") != diagnostic:
+            existing_item["last_identity_reconciliation_diagnostic"] = diagnostic
+            existing_item["last_identity_reconciliation_reason"] = (
+                f"current_identity_relation:{relation}"
+            )
+            existing_item["updated_at"] = auto_maintenance_retry_iso(now_epoch)
+            changed = True
+        items[target_key] = existing_item
+        return (
+            {
+                "status": "identity_reconciliation_unresolved",
+                "diagnostic": diagnostic,
+                "reason": f"current_identity_relation:{relation}",
+                "session_id": session_id,
+                "capture_identity": identity,
+                "existing_identity": baseline_identity,
+                "queue_key": target_key,
+                "changed": changed,
+                "persistent_obligation": True,
+            },
+            changed,
+        )
+
+    identity_changed = relation == "newer" or not _capture_identity_is_strict(existing_options)
+    if identity_changed:
+        prior_identity = dict(baseline_identity)
+        merged_options = {
+            **existing_options,
+            **current_options,
+            "session_id": session_id,
+            "session_dir": str(identity.get("session_dir") or session_dir),
+            "transcript_path": str(transcript_path),
+            "freshness_reason": freshness_reason,
+            "required_stable_projection": True,
+            "required_search_consumer": True,
+        }
+        existing_item["options"] = merged_options
+        existing_item.pop("last_identity_reconciliation_diagnostic", None)
+        existing_item.pop("last_identity_reconciliation_reason", None)
+        if bool(existing_item.get("in_flight")):
+            existing_item["in_flight_capture_identity"] = prior_identity
+            existing_item["in_flight_capture_identity_superseded"] = True
+            existing_item["last_status"] = (
+                "capture_identity_superseded_in_flight_attempt"
+            )
+        else:
+            existing_item["status"] = "pending"
+            existing_item["last_status"] = "capture_identity_reconciled"
+        existing_item["updated_at"] = auto_maintenance_retry_iso(now_epoch)
+        items[target_key] = existing_item
+        changed = True
+    return (
+        {
+            "status": (
+                "identity_reconciled_updated"
+                if identity_changed
+                else "identity_already_current"
+            ),
+            "session_id": session_id,
+            "queue_key": target_key,
+            "profile": str(existing_item.get("profile") or desired_profile),
+            "capture_identity": identity,
+            "previous_identity": baseline_identity,
+            "relation": relation,
+            "in_flight": bool(existing_item.get("in_flight")),
+            "changed": changed,
+            "persistent_obligation": True,
+        },
+        changed,
+    )
+
+
+def reconcile_session_projection_freshness_obligation(
+    *,
+    aoa_root: Path,
+    session_id: str,
+    session_dir: Path,
+    transcript_path: Path,
+    freshness_reason: str,
+    now_epoch: float,
+    create_if_missing: bool,
+) -> dict[str, Any]:
+    """Reconcile capture publication and retry intent through the queue owner."""
+    result, queue_status = mutate_auto_maintenance_retry_queue(
+        aoa_root,
+        lambda payload: _reconcile_session_projection_freshness_obligation_in_payload(
+            aoa_root=aoa_root,
+            queue_payload=payload,
+            session_id=session_id,
+            session_dir=session_dir,
+            transcript_path=transcript_path,
+            freshness_reason=freshness_reason,
+            now_epoch=now_epoch,
+            create_if_missing=create_if_missing,
+        ),
+        now_epoch=now_epoch,
+    )
+    return {
+        **result,
+        "queue_path": queue_status.get("path"),
+        "queued_count": queue_status.get("queued_count"),
+        "truth_status": (
+            "capture_identity_reconciled_under_persistent_queue_lock"
+            if result.get("status") in {
+                "identity_reconciled_updated",
+                "identity_already_current",
+                "scheduled",
+            }
+            else "capture_identity_reconciliation_not_admitted"
+        ),
     }
 
 
@@ -66503,7 +67143,63 @@ def auto_maintenance_retry_dispatch(
                     return None, changed
                 dispatch_selection = due[0]
                 key = str(dispatch_selection["queue_key"])
-                item = items[key]
+                item = items.get(key)
+                if not isinstance(item, dict):
+                    return None, changed
+                item_options = (
+                    item.get("options")
+                    if isinstance(item.get("options"), dict)
+                    else {}
+                )
+                persistent_item = bool(
+                    item_options.get("persistent_obligation") is True
+                    and item_options.get("obligation_kind")
+                    == SESSION_PROJECTION_FRESHNESS_OBLIGATION_KIND
+                )
+                if persistent_item and _capture_identity_is_strict(item_options):
+                    reconciliation, reconciliation_changed = (
+                        _reconcile_session_projection_freshness_obligation_in_payload(
+                            aoa_root=aoa_root,
+                            queue_payload=queue_payload,
+                            session_id=str(item_options.get("session_id") or item.get("target") or ""),
+                            session_dir=Path(str(item_options.get("session_dir") or "")),
+                            transcript_path=Path(str(item_options.get("transcript_path") or "")),
+                            freshness_reason=str(item_options.get("freshness_reason") or "dispatcher_admission"),
+                            now_epoch=effective_now,
+                            create_if_missing=False,
+                        )
+                    )
+                    changed = changed or reconciliation_changed
+                    if reconciliation.get("status") == "identity_reconciliation_unresolved":
+                        return (
+                            {
+                                "admission_refused": True,
+                                "queue_key": key,
+                                "profile": str(item.get("profile") or ""),
+                                "target": str(item.get("target") or ""),
+                                "dispatch_selection": dispatch_selection,
+                                "diagnostic": (
+                                    reconciliation.get("diagnostic")
+                                    or SESSION_CAPTURE_RETRY_IDENTITY_RECONCILIATION_DIAGNOSTIC
+                                ),
+                                "reconciliation": reconciliation,
+                            },
+                            changed,
+                        )
+                    # Reconciliation can migrate a non-in-flight obligation
+                    # between backlog and deep. Re-read due order before the
+                    # claim so the worker never claims a stale queue key.
+                    due = auto_maintenance_retry_ordered_due_items(
+                        items,
+                        now_epoch=effective_now,
+                    )
+                    if not due:
+                        return None, changed
+                    dispatch_selection = due[0]
+                    key = str(dispatch_selection["queue_key"])
+                    item = items.get(key)
+                    if not isinstance(item, dict):
+                        return None, changed
                 item["attempts_started"] = max(0, int_value(item.get("attempts_started"))) + 1
                 item["in_flight"] = True
                 item["status"] = "in_flight"
@@ -66521,6 +67217,31 @@ def auto_maintenance_retry_dispatch(
                 now_epoch=effective_now,
             )
             if not isinstance(claimed, dict):
+                break
+            if claimed.get("admission_refused") is True:
+                results.append(
+                    {
+                        "queue_key": str(claimed.get("queue_key") or ""),
+                        "profile": str(claimed.get("profile") or ""),
+                        "target": str(claimed.get("target") or ""),
+                        "attempt": 0,
+                        "execution_id": None,
+                        "launch_status": SESSION_CAPTURE_RETRY_IDENTITY_ADMISSION_REFUSAL,
+                        "launch_ok": False,
+                        "launch_result_verified": False,
+                        "persistent_freshness_obligation": True,
+                        "disposition": "admission_refused",
+                        "diagnostics": [
+                            str(
+                                claimed.get("diagnostic")
+                                or SESSION_CAPTURE_RETRY_IDENTITY_RECONCILIATION_DIAGNOSTIC
+                            )
+                        ],
+                        "reconciliation": claimed.get("reconciliation"),
+                        "dispatch_selection": claimed.get("dispatch_selection"),
+                        "completed_at": auto_maintenance_retry_iso(effective_now),
+                    }
+                )
                 break
             queue_key = str(claimed.get("queue_key") or "")
             profile = str(claimed.get("profile") or "hot")
@@ -66543,6 +67264,12 @@ def auto_maintenance_retry_dispatch(
                 stored_options.get("persistent_obligation")
                 and stored_options.get("obligation_kind")
                 == SESSION_PROJECTION_FRESHNESS_OBLIGATION_KIND
+            )
+            claimed_capture_identity = (
+                _capture_identity_from_options(stored_options)
+                if persistent_freshness_obligation
+                and _capture_identity_is_strict(stored_options)
+                else {}
             )
             obligation_before = (
                 session_projection_freshness_obligation_status(
@@ -66748,6 +67475,76 @@ def auto_maintenance_retry_dispatch(
                         result_row,
                     )
                     return result_row, True
+                current_options = (
+                    current.get("options")
+                    if isinstance(current.get("options"), dict)
+                    else {}
+                )
+                if (
+                    persistent_freshness_obligation
+                    and claimed_capture_identity
+                    and _capture_identity_is_strict(current_options)
+                ):
+                    current_capture_identity = _capture_identity_from_options(
+                        current_options
+                    )
+                    supersession_relation = _capture_identity_relation(
+                        current_capture_identity,
+                        claimed_capture_identity,
+                    )
+                    if supersession_relation in {
+                        "newer",
+                        "conflict",
+                        "unresolved",
+                    }:
+                        current["in_flight"] = False
+                        current["status"] = "pending"
+                        current["last_status"] = (
+                            "capture_identity_superseded_in_flight_attempt"
+                        )
+                        current["last_attempt_finished_epoch"] = attempt_finished_epoch
+                        current["last_attempt_finished_at"] = auto_maintenance_retry_iso(
+                            attempt_finished_epoch
+                        )
+                        current["capture_identity_supersession_relation"] = (
+                            supersession_relation
+                        )
+                        current.pop("in_flight_capture_identity", None)
+                        current.pop("in_flight_capture_identity_superseded", None)
+                        pending_profile = str(
+                            current.pop("profile_retarget_pending", "")
+                            or ""
+                        )
+                        result_row["capture_identity_superseded"] = True
+                        result_row["capture_identity_supersession_relation"] = (
+                            supersession_relation
+                        )
+                        result_row["disposition"] = (
+                            "reasserted_after_capture_identity_supersession"
+                        )
+                        if pending_profile and pending_profile != str(
+                            current.get("profile") or ""
+                        ):
+                            pending_key = auto_maintenance_retry_key(
+                                pending_profile,
+                                target,
+                            )
+                            if pending_key not in items:
+                                current["queue_key"] = pending_key
+                                current["profile"] = pending_profile
+                                items[pending_key] = current
+                                items.pop(queue_key, None)
+                                result_row["queue_key"] = pending_key
+                            else:
+                                current["profile_retarget_pending"] = pending_profile
+                                items[queue_key] = current
+                        else:
+                            items[queue_key] = current
+                        auto_maintenance_retry_add_history(
+                            queue_payload,
+                            result_row,
+                        )
+                        return result_row, True
                 current_occurrence_count = max(0, int_value(current.get("occurrence_count")))
                 concurrent_occurrence_count = max(0, current_occurrence_count - claimed_occurrence_count)
                 result_row["concurrent_occurrence_count"] = concurrent_occurrence_count

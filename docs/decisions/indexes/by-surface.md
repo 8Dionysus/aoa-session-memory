@@ -323,6 +323,7 @@
 | [AOA-SM-D-0015 Deadline-Aware Cooperative Retry Dispatch](../AOA-SM-D-0015-deadline-aware-cooperative-retry-dispatch.md) | 2026-07-17 | Accepted | `docs/decisions/AOA-SM-D-0015-deadline-aware-cooperative-retry-dispatch.md` |
 | [AOA-SM-D-0034 Bounded Dirty-First Automatic Index Discovery](../AOA-SM-D-0034-bounded-dirty-first-automatic-index-discovery.md) | 2026-07-28 | Accepted | `docs/decisions/AOA-SM-D-0034-bounded-dirty-first-automatic-index-discovery.md` |
 | [AOA-SM-D-0072 Evidence Absence Is Not Maintenance Backlog](../AOA-SM-D-0072-evidence-absence-is-not-maintenance-backlog.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0072-evidence-absence-is-not-maintenance-backlog.md` |
+| [AOA-SM-D-0095 Capture-Bound Retry Obligation Supersession](../AOA-SM-D-0095-capture-bound-retry-obligation-supersession.md) | 2026-08-24 | Accepted | `docs/decisions/AOA-SM-D-0095-capture-bound-retry-obligation-supersession.md` |
 
 ## generated projection preservation
 
@@ -782,6 +783,7 @@
 | [AOA-SM-D-0049 Append-Only Raw Capture Ledger and Persistent Live-Tail Overlay](../AOA-SM-D-0049-append-only-raw-capture-ledger-and-persistent-live-tail-overlay.md) | 2026-08-10 | Accepted | `docs/decisions/AOA-SM-D-0049-append-only-raw-capture-ledger-and-persistent-live-tail-overlay.md` |
 | [AOA-SM-D-0054 Native-Assisted Portable SHA-256 Continuation](../AOA-SM-D-0054-native-assisted-portable-sha256-continuation.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0054-native-assisted-portable-sha256-continuation.md` |
 | [AOA-SM-D-0057 Append-Only Capture Ledger Stable Raw Publication](../AOA-SM-D-0057-append-only-capture-ledger-stable-raw-publication.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0057-append-only-capture-ledger-stable-raw-publication.md` |
+| [AOA-SM-D-0095 Capture-Bound Retry Obligation Supersession](../AOA-SM-D-0095-capture-bound-retry-obligation-supersession.md) | 2026-08-24 | Accepted | `docs/decisions/AOA-SM-D-0095-capture-bound-retry-obligation-supersession.md` |
 
 ## raw capture overlay
 
@@ -819,6 +821,7 @@
 | [AOA-SM-D-0084 Predecessor Proof Preserves Stored Dependency Generations](../AOA-SM-D-0084-predecessor-proof-preserves-stored-dependency-generations.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0084-predecessor-proof-preserves-stored-dependency-generations.md` |
 | [AOA-SM-D-0089 Durable Thin Hook Ingress Before Projection](../AOA-SM-D-0089-durable-thin-hook-ingress-before-projection.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0089-durable-thin-hook-ingress-before-projection.md` |
 | [AOA-SM-D-0090 Session Freshness Obligations Close on Watermark Proof](../AOA-SM-D-0090-session-freshness-obligations-close-on-watermark-proof.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0090-session-freshness-obligations-close-on-watermark-proof.md` |
+| [AOA-SM-D-0095 Capture-Bound Retry Obligation Supersession](../AOA-SM-D-0095-capture-bound-retry-obligation-supersession.md) | 2026-08-24 | Accepted | `docs/decisions/AOA-SM-D-0095-capture-bound-retry-obligation-supersession.md` |
 
 ## registry rebind
 
@@ -894,6 +897,7 @@
 | [AOA-SM-D-0015 Deadline-Aware Cooperative Retry Dispatch](../AOA-SM-D-0015-deadline-aware-cooperative-retry-dispatch.md) | 2026-07-17 | Accepted | `docs/decisions/AOA-SM-D-0015-deadline-aware-cooperative-retry-dispatch.md` |
 | [AOA-SM-D-0072 Evidence Absence Is Not Maintenance Backlog](../AOA-SM-D-0072-evidence-absence-is-not-maintenance-backlog.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0072-evidence-absence-is-not-maintenance-backlog.md` |
 | [AOA-SM-D-0073 Verified Fallback Completion Retires Retry](../AOA-SM-D-0073-verified-fallback-completion-retires-retry.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0073-verified-fallback-completion-retires-retry.md` |
+| [AOA-SM-D-0095 Capture-Bound Retry Obligation Supersession](../AOA-SM-D-0095-capture-bound-retry-obligation-supersession.md) | 2026-08-24 | Accepted | `docs/decisions/AOA-SM-D-0095-capture-bound-retry-obligation-supersession.md` |
 
 ## route readiness
 

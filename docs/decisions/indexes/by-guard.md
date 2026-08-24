@@ -356,6 +356,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0007 Typed Graph Bridge Admission](../AOA-SM-D-0007-typed-graph-bridge-admission.md) | 2026-07-16 | Accepted | `docs/decisions/AOA-SM-D-0007-typed-graph-bridge-admission.md` |
 
+## capture identity
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0095 Capture-Bound Retry Obligation Supersession](../AOA-SM-D-0095-capture-bound-retry-obligation-supersession.md) | 2026-08-24 | Accepted | `docs/decisions/AOA-SM-D-0095-capture-bound-retry-obligation-supersession.md` |
+
 ## capture watermark
 
 | Decision | Date | Status | Path |
@@ -530,6 +536,7 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0055 Bounded Incremental Reuse Admission](../AOA-SM-D-0055-bounded-incremental-reuse-admission.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0055-bounded-incremental-reuse-admission.md` |
+| [AOA-SM-D-0095 Capture-Bound Retry Obligation Supersession](../AOA-SM-D-0095-capture-bound-retry-obligation-supersession.md) | 2026-08-24 | Accepted | `docs/decisions/AOA-SM-D-0095-capture-bound-retry-obligation-supersession.md` |
 
 ## credential-value redaction
 
@@ -914,6 +921,7 @@
 | [AOA-SM-D-0048 Stage-Scoped Producer ABI and Guarded Predecessor Admission](../AOA-SM-D-0048-stage-scoped-producer-abi-and-guarded-predecessor-admission.md) | 2026-08-10 | Accepted | `docs/decisions/AOA-SM-D-0048-stage-scoped-producer-abi-and-guarded-predecessor-admission.md` |
 | [AOA-SM-D-0088 Independent Validation Nodes and Bounded Proof Kernels](../AOA-SM-D-0088-independent-validation-nodes-and-bounded-proof-kernels.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0088-independent-validation-nodes-and-bounded-proof-kernels.md` |
 | [AOA-SM-D-0091 Projection Generations Follow Materializer Boundaries](../AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md` |
+| [AOA-SM-D-0095 Capture-Bound Retry Obligation Supersession](../AOA-SM-D-0095-capture-bound-retry-obligation-supersession.md) | 2026-08-24 | Accepted | `docs/decisions/AOA-SM-D-0095-capture-bound-retry-obligation-supersession.md` |
 
 ## fail-closed child validation
 
@@ -1257,6 +1265,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0040 Served-Request Health Is Distinct from Provider Availability](../AOA-SM-D-0040-served-request-health-is-distinct-from-provider-availability.md) | 2026-07-31 | Accepted | `docs/decisions/AOA-SM-D-0040-served-request-health-is-distinct-from-provider-availability.md` |
 
+## monotonic supersession
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0095 Capture-Bound Retry Obligation Supersession](../AOA-SM-D-0095-capture-bound-retry-obligation-supersession.md) | 2026-08-24 | Accepted | `docs/decisions/AOA-SM-D-0095-capture-bound-retry-obligation-supersession.md` |
+
 ## mutation rollback
 
 | Decision | Date | Status | Path |
@@ -1562,6 +1576,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0006 Bounded Query-Demand Projection Catch-Up](../AOA-SM-D-0006-bounded-query-demand-projection-catch-up.md) | 2026-07-16 | Accepted | `docs/decisions/AOA-SM-D-0006-bounded-query-demand-projection-catch-up.md` |
+
+## queue lock
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0095 Capture-Bound Retry Obligation Supersession](../AOA-SM-D-0095-capture-bound-retry-obligation-supersession.md) | 2026-08-24 | Accepted | `docs/decisions/AOA-SM-D-0095-capture-bound-retry-obligation-supersession.md` |
 
 ## queue top-up
 

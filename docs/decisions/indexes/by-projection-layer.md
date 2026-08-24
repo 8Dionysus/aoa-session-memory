@@ -628,6 +628,12 @@
 | [AOA-SM-D-0024 Semantic Generation Pins for Evaluation Admission](../AOA-SM-D-0024-semantic-generation-pins-for-evaluation-admission.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0024-semantic-generation-pins-for-evaluation-admission.md` |
 | [AOA-SM-D-0025 Process-Loaded Producer Generation Identity](../AOA-SM-D-0025-process-loaded-producer-generation-identity.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0025-process-loaded-producer-generation-identity.md` |
 
+## persistent deep retry
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0095 Capture-Bound Retry Obligation Supersession](../AOA-SM-D-0095-capture-bound-retry-obligation-supersession.md) | 2026-08-24 | Accepted | `docs/decisions/AOA-SM-D-0095-capture-bound-retry-obligation-supersession.md` |
+
 ## persistent live-tail overlay
 
 | Decision | Date | Status | Path |
@@ -678,6 +684,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0093 Identity-Bound Session Telemetry Uses Owner Receipt Admission](../AOA-SM-D-0093-identity-bound-session-telemetry-admission.md) | 2026-08-22 | Accepted | `docs/decisions/AOA-SM-D-0093-identity-bound-session-telemetry-admission.md` |
+
+## preserved raw capture
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0095 Capture-Bound Retry Obligation Supersession](../AOA-SM-D-0095-capture-bound-retry-obligation-supersession.md) | 2026-08-24 | Accepted | `docs/decisions/AOA-SM-D-0095-capture-bound-retry-obligation-supersession.md` |
 
 ## projection state
 
@@ -1090,6 +1102,7 @@
 | [AOA-SM-D-0054 Native-Assisted Portable SHA-256 Continuation](../AOA-SM-D-0054-native-assisted-portable-sha256-continuation.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0054-native-assisted-portable-sha256-continuation.md` |
 | [AOA-SM-D-0078 Hot Status Does Not Parse Raw Projection Work](../AOA-SM-D-0078-hot-status-does-not-parse-raw-projection-work.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0078-hot-status-does-not-parse-raw-projection-work.md` |
 | [AOA-SM-D-0086 Live Tail Publish Watermark Authority](../AOA-SM-D-0086-live-tail-publish-watermark-authority.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0086-live-tail-publish-watermark-authority.md` |
+| [AOA-SM-D-0095 Capture-Bound Retry Obligation Supersession](../AOA-SM-D-0095-capture-bound-retry-obligation-supersession.md) | 2026-08-24 | Accepted | `docs/decisions/AOA-SM-D-0095-capture-bound-retry-obligation-supersession.md` |
 
 ## staged session projection
 
