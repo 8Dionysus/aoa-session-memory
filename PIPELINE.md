@@ -1035,17 +1035,21 @@ when its declared and actual SHA-256 both exactly match the staged raw; the
 published last-good projection remains untouched.
 
 Due retry items are ordered by a versioned profile-aware dispatch deadline,
-not by retry-ready time alone. Short hot and catch-up wait targets bound urgent
-latency. Once a backlog or deep target is breached, one earliest breached
-heavy item receives the first selection slot, after which ordinary deadline
-order continues. This reservation prevents an overloaded short-work stream
-from permanently displacing heavy work; it bounds queue selection only when
-the dispatcher receives execution opportunities and does not invent host
-capacity or semantic progress. Automatic profiles also use a cooperative work
-budget distinct from the longer host launcher timeout; explicit overrides
-remain visible. Queue and status packets expose the policy version, order,
-deadlines, breaches, fairness reservation, and selected item. These scheduling
-signals do not make a projection current.
+not by retry-ready time alone. A persisted current-epoch freshness obligation
+from capture-watch receives the first bounded selection slot; the dispatcher
+revalidates its exact capture identity under the queue lock before incrementing
+`attempts_started` or setting `in_flight`. Short hot and catch-up wait targets
+bound urgent latency. Among the remaining historical debt, once a backlog or
+deep target is breached, one earliest breached heavy item receives the next
+selection slot, after which ordinary deadline order continues. This preserves
+both current-epoch priority and heavy-work aging without making either a
+semantic freshness claim. It bounds queue selection only when the dispatcher
+receives execution opportunities and does not invent host capacity or semantic
+progress. Automatic profiles also use a cooperative work budget distinct from
+the longer host launcher timeout; explicit overrides remain visible. Queue and
+status packets expose the policy version, priority hint, order, deadlines,
+breaches, fairness reservation, and selected item. These scheduling signals do
+not make a projection current.
 
 The host launcher timeout is a hard runtime envelope, not an alternate work
 budget. For automatic profiles it is the smaller of the profile's absolute
@@ -1277,13 +1281,14 @@ hook paths, preserves an existing archive, and keeps optional host providers as
 overlays rather than dependencies.
 
 An explicit `render-systemd-units --output-dir <target>` operation can render
-the capture-only fresh-capture service/timer and the separate resource-gated
-discovery/stable-sweep service/timer. `install --systemd-unit-dir <target>`
-performs the same named-file upgrade alongside a portable install, replacing
-only those four files when `--force` is supplied. Neither route enables,
-starts, reloads, or otherwise mutates systemd; unit activation and live proof
-remain a runtime-owner operation. A portable export does not include host
-systemd state.
+the capture-only fresh-capture service/timer, the separate resource-gated
+discovery/stable-sweep service/timer, and the bounded persistent retry
+dispatcher service/timer. `install --systemd-unit-dir <target>` performs the
+same six named-file upgrade alongside a portable install, replacing only those
+files when `--force` is supplied. Neither route enables, starts, reloads, or
+otherwise mutates systemd; unit activation and live proof remain a
+runtime-owner operation. A portable export does not include host systemd
+state.
 
 The standalone bundle and a workspace-local installation must validate from
 the same source contracts. Host-local proofs, generated databases, diagnostics,

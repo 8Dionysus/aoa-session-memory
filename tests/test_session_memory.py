@@ -60607,9 +60607,13 @@ def test_rendered_capture_topology_is_capture_only_and_sweep_is_resource_gated(
         module.SESSION_MEMORY_CAPTURE_TIMER,
         module.SESSION_MEMORY_RESOURCE_GATED_SWEEP_SERVICE,
         module.SESSION_MEMORY_RESOURCE_GATED_SWEEP_TIMER,
+        module.SESSION_MEMORY_RETRY_DISPATCH_SERVICE,
+        module.SESSION_MEMORY_RETRY_DISPATCH_TIMER,
     }
     capture = units[module.SESSION_MEMORY_CAPTURE_SERVICE]
     sweep = units[module.SESSION_MEMORY_RESOURCE_GATED_SWEEP_SERVICE]
+    retry = units[module.SESSION_MEMORY_RETRY_DISPATCH_SERVICE]
+    retry_timer = units[module.SESSION_MEMORY_RETRY_DISPATCH_TIMER]
     assert module.session_memory_capture_unit_contract(
         module.SESSION_MEMORY_CAPTURE_SERVICE,
         capture,
@@ -60625,6 +60629,18 @@ def test_rendered_capture_topology_is_capture_only_and_sweep_is_resource_gated(
     assert "resource launch" in sweep
     assert "sweep-codex-sessions" in sweep
     assert "capture-watch" not in sweep
+    assert module.session_memory_retry_dispatch_unit_contract(
+        module.SESSION_MEMORY_RETRY_DISPATCH_SERVICE,
+        retry,
+    )["status"] == "current"
+    assert module.session_memory_retry_dispatch_timer_contract(
+        module.SESSION_MEMORY_RETRY_DISPATCH_TIMER,
+        retry_timer,
+    )["status"] == "current"
+    assert "capture-watch" not in retry
+    assert "sweep-codex-sessions" not in retry
+    assert "projection-catchup" not in retry
+    assert f"--limit {module.AUTO_MAINTENANCE_RETRY_DISPATCH_LIMIT}" in retry
 
     output_dir = tmp_path / "systemd-user"
     write_payload = module.write_session_memory_systemd_units(
@@ -60635,6 +60651,82 @@ def test_rendered_capture_topology_is_capture_only_and_sweep_is_resource_gated(
     assert write_payload["ok"] is True
     assert sorted(path.name for path in output_dir.iterdir()) == sorted(units)
     assert "activation" not in write_payload
+    activation = module.session_memory_retry_dispatch_activation_contract(
+        output_dir
+    )
+    assert activation["status"] == "current"
+    assert activation["activation"] == "not_probed"
+
+
+def test_retry_dispatch_activation_contract_fails_closed_when_named_units_are_missing(
+    tmp_path: Path,
+) -> None:
+    activation = module.session_memory_retry_dispatch_activation_contract(
+        tmp_path / "empty-systemd-user"
+    )
+
+    assert activation["status"] == "missing_source_units"
+    assert activation["activation"] == "not_probed"
+    assert activation["diagnostics"] == [
+        "retry_dispatch_source_topology_incomplete"
+    ]
+    assert set(activation["missing"]) == {
+        str(
+            tmp_path
+            / "empty-systemd-user"
+            / module.SESSION_MEMORY_RETRY_DISPATCH_SERVICE
+        ),
+        str(
+            tmp_path
+            / "empty-systemd-user"
+            / module.SESSION_MEMORY_RETRY_DISPATCH_TIMER
+        ),
+    }
+
+
+def test_auto_maintenance_retry_current_epoch_priority_precedes_historical_debt() -> None:
+    current_options = {
+        "persistent_obligation": True,
+        "obligation_kind": module.SESSION_PROJECTION_FRESHNESS_OBLIGATION_KIND,
+        "current_epoch_priority": True,
+    }
+    items = {
+        "backlog:historical": {
+            "profile": "backlog",
+            "target": "historical",
+            "next_attempt_epoch": 3_000.0,
+            "in_flight": False,
+            "options": {},
+        },
+        "deep:historical": {
+            "profile": "deep",
+            "target": "historical-heavy",
+            "next_attempt_epoch": 0.0,
+            "in_flight": False,
+            "options": {},
+        },
+        "hot:current": {
+            "profile": "hot",
+            "target": "current-session",
+            "next_attempt_epoch": 0.0,
+            "in_flight": False,
+            "options": current_options,
+        },
+    }
+
+    ordered = module.auto_maintenance_retry_ordered_due_items(
+        items,
+        now_epoch=4_000.0,
+    )
+
+    assert [row["queue_key"] for row in ordered] == [
+        "hot:current",
+        "deep:historical",
+        "backlog:historical",
+    ]
+    assert ordered[0]["current_epoch_priority"] is True
+    assert ordered[0]["fairness_reason"] == "current_epoch_freshness_priority"
+    assert ordered[1]["aged_heavy_fairness_reserved"] is True
 
 
 def test_graph_maintenance_compact_stdout_keeps_report_marker_in_bounded_tail(tmp_path: Path) -> None:
@@ -61539,7 +61631,7 @@ def test_auto_maintenance_retry_dispatch_uses_profile_deadlines_with_aging(
     compact = module.compact_maintenance_status_payload(
         {"automatic_retry": initial}
     )
-    assert compact["automatic_retry"]["dispatch_policy"]["version"] == 3
+    assert compact["automatic_retry"]["dispatch_policy"]["version"] == 4
     assert compact["automatic_retry"]["dispatch_order_due_keys"] == [
         "catchup:all",
         "backlog:all",
@@ -61553,7 +61645,7 @@ def test_auto_maintenance_retry_dispatch_uses_profile_deadlines_with_aging(
         limit=1,
         now_epoch=now_epoch,
     )
-    assert plan["dispatch_policy"]["version"] == 3
+    assert plan["dispatch_policy"]["version"] == 4
     assert plan["planned_queue_keys"] == ["catchup:all"]
     assert plan["planned_items"][0]["dispatch_deadline_epoch"] == 2_295.0
 
@@ -61627,7 +61719,7 @@ def test_auto_maintenance_retry_fairness_lab_bounds_aged_heavy_dispatch_under_ho
     }
     backlog = dispatched_by_key["backlog:all"]
     deep = dispatched_by_key["deep:all"]
-    assert report["dispatch_policy"]["version"] == 3
+    assert report["dispatch_policy"]["version"] == 4
     assert backlog["wait_seconds"] == 1_200.0
     assert backlog["aged_heavy_fairness_reserved"] is True
     assert deep["wait_seconds"] == 3_600.0
@@ -96682,6 +96774,8 @@ def test_install_upgrade_can_render_named_systemd_units_without_activation(
             module.SESSION_MEMORY_CAPTURE_TIMER,
             module.SESSION_MEMORY_RESOURCE_GATED_SWEEP_SERVICE,
             module.SESSION_MEMORY_RESOURCE_GATED_SWEEP_TIMER,
+            module.SESSION_MEMORY_RETRY_DISPATCH_SERVICE,
+            module.SESSION_MEMORY_RETRY_DISPATCH_TIMER,
         }
     )
     capture_text = (unit_dir / module.SESSION_MEMORY_CAPTURE_SERVICE).read_text(encoding="utf-8")
@@ -96691,6 +96785,11 @@ def test_install_upgrade_can_render_named_systemd_units_without_activation(
         in capture_text
     )
     assert "sweep-codex-sessions" not in capture_text
+    retry_text = (unit_dir / module.SESSION_MEMORY_RETRY_DISPATCH_SERVICE).read_text(encoding="utf-8")
+    assert "auto-maintenance-retry" in retry_text
+    assert "--apply" in retry_text
+    assert f"--limit {module.AUTO_MAINTENANCE_RETRY_DISPATCH_LIMIT}" in retry_text
+    assert "sweep-codex-sessions" not in retry_text
     assert "systemctl" not in json.dumps(payload, ensure_ascii=False)
 
 

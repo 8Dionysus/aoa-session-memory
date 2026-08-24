@@ -87,6 +87,7 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0094 Logical Registry Coverage and Capture-Only Ingress Separation](../AOA-SM-D-0094-logical-registry-coverage-and-capture-only-ingress.md) | 2026-08-22 | Accepted | `docs/decisions/AOA-SM-D-0094-logical-registry-coverage-and-capture-only-ingress.md` |
+| [AOA-SM-D-0096 Source-Owned Persistent Retry Dispatch Activation](../AOA-SM-D-0096-source-owned-persistent-retry-dispatch-activation.md) | 2026-08-24 | Accepted | `docs/decisions/AOA-SM-D-0096-source-owned-persistent-retry-dispatch-activation.md` |
 
 ## captured raw overlay
 
@@ -645,6 +646,7 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0015 Deadline-Aware Cooperative Retry Dispatch](../AOA-SM-D-0015-deadline-aware-cooperative-retry-dispatch.md) | 2026-07-17 | Accepted | `docs/decisions/AOA-SM-D-0015-deadline-aware-cooperative-retry-dispatch.md` |
+| [AOA-SM-D-0096 Source-Owned Persistent Retry Dispatch Activation](../AOA-SM-D-0096-source-owned-persistent-retry-dispatch-activation.md) | 2026-08-24 | Accepted | `docs/decisions/AOA-SM-D-0096-source-owned-persistent-retry-dispatch-activation.md` |
 
 ## physical archive lineage
 
@@ -797,6 +799,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0094 Logical Registry Coverage and Capture-Only Ingress Separation](../AOA-SM-D-0094-logical-registry-coverage-and-capture-only-ingress.md) | 2026-08-22 | Accepted | `docs/decisions/AOA-SM-D-0094-logical-registry-coverage-and-capture-only-ingress.md` |
+
+## resource-gated session projection
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0096 Source-Owned Persistent Retry Dispatch Activation](../AOA-SM-D-0096-source-owned-persistent-retry-dispatch-activation.md) | 2026-08-24 | Accepted | `docs/decisions/AOA-SM-D-0096-source-owned-persistent-retry-dispatch-activation.md` |
 
 ## resumable projection work
 

@@ -161,7 +161,7 @@ DECLARED_GRAPH_PROJECTION_GENERATION_TRANSITIONS: dict[
     # still conditional on reconstructing the exact predecessor identity from
     # its source and on the complete graph materialization proof performed by
     # graph-registry-rebind.
-    "bd77b499869a016f1914298f5e49eb696e29fe90633cb95253b312575c298d6e": (
+    "73d41538e41479d91ce2be59033a6187bb606f3de7fb95b003ef222db7c36dd6": (
         {
             # AOA-SM-D-0092: the previous current graph is admitted only when
             # the exact source-line bytes reconstruct its prior identity.
@@ -1782,12 +1782,19 @@ SESSION_MEMORY_RESOURCE_GATED_SWEEP_SERVICE = (
 SESSION_MEMORY_RESOURCE_GATED_SWEEP_TIMER = (
     "aoa-session-memory-resource-gated-sweep.timer"
 )
+SESSION_MEMORY_RETRY_DISPATCH_SERVICE = (
+    "aoa-session-memory-retry-dispatch.service"
+)
+SESSION_MEMORY_RETRY_DISPATCH_TIMER = (
+    "aoa-session-memory-retry-dispatch.timer"
+)
 SESSION_MEMORY_RESOURCE_DEMAND_OWNER = "aoa-session-memory"
 SESSION_MEMORY_RESOURCE_DEMAND_KEY_PREFIX = "aoa-session-memory"
 AUTO_MAINTENANCE_RETRY_QUEUE_SCHEMA_VERSION = 2
 AUTO_MAINTENANCE_RETRY_QUEUE_JSON = "auto-maintenance-retry-queue.json"
 AUTO_MAINTENANCE_RETRY_QUEUE_LOCK = "auto-maintenance-retry-queue.lock"
 AUTO_MAINTENANCE_RETRY_WORKER_LOCK = "auto-maintenance-retry-worker.lock"
+AUTO_MAINTENANCE_RETRY_DISPATCH_LIMIT = 4
 HEAVY_PROJECTION_LANE_LOCK = "session-projection-heavy.lock"
 AUTO_MAINTENANCE_RETRY_HISTORY_LIMIT = 40
 SESSION_CAPTURE_RETRY_IDENTITY_CONTRACT = (
@@ -1828,7 +1835,7 @@ AUTO_MAINTENANCE_RETRY_POLICY = {
     "backlog": {"base_delay_seconds": 300, "max_delay_seconds": 3600, "max_attempts": 4},
     "deep": {"base_delay_seconds": 900, "max_delay_seconds": 7200, "max_attempts": 3},
 }
-AUTO_MAINTENANCE_RETRY_DISPATCH_POLICY_VERSION = 3
+AUTO_MAINTENANCE_RETRY_DISPATCH_POLICY_VERSION = 4
 AUTO_MAINTENANCE_RETRY_DISPATCH_WAIT_TARGET_SECONDS = {
     "hot": 0,
     "catchup": 300,
@@ -65859,7 +65866,7 @@ def auto_maintenance_retry_dispatch_policy() -> dict[str, Any]:
     return {
         "version": AUTO_MAINTENANCE_RETRY_DISPATCH_POLICY_VERSION,
         "strategy": (
-            "breached_heavy_reservation_then_"
+            "current_epoch_freshness_then_breached_heavy_reservation_then_"
             "earliest_profile_dispatch_deadline"
         ),
         "dispatch_wait_target_seconds": dict(
@@ -65869,10 +65876,16 @@ def auto_maintenance_retry_dispatch_policy() -> dict[str, Any]:
             AUTO_MAINTENANCE_RETRY_DEFAULT_DISPATCH_WAIT_TARGET_SECONDS
         ),
         "fairness_law": (
-            "hot and catch-up work receive shorter dispatch targets; backlog "
-            "and deep work receive one explicit aged-heavy reservation as "
-            "soon as a target deadline passes, even under an overloaded "
-            "short-work queue"
+            "a persisted current-epoch freshness obligation receives the "
+            "first bounded selection slot; hot and catch-up work receive "
+            "shorter dispatch targets; backlog and deep work receive one "
+            "explicit aged-heavy reservation as soon as a target deadline "
+            "passes, even under an overloaded short-work queue"
+        ),
+        "current_epoch_priority_boundary": (
+            "capture-watch marks a current-epoch scheduler hint; the "
+            "dispatcher revalidates the exact capture identity under the "
+            "queue lock before attempts_started or in_flight"
         ),
         "capacity_boundary": (
             "the reservation bounds queue selection delay when the "
@@ -65897,6 +65910,13 @@ def auto_maintenance_retry_ordered_due_items(
         if next_attempt_epoch > effective_now:
             continue
         profile = str(item.get("profile") or "unknown")
+        options = item.get("options") if isinstance(item.get("options"), dict) else {}
+        current_epoch_priority = bool(
+            options.get("current_epoch_priority") is True
+            and options.get("persistent_obligation") is True
+            and options.get("obligation_kind")
+            == SESSION_PROJECTION_FRESHNESS_OBLIGATION_KIND
+        )
         dispatch_wait_target_seconds = max(
             0,
             int_value(
@@ -65921,11 +65941,18 @@ def auto_maintenance_retry_ordered_due_items(
                     0.0,
                     effective_now - dispatch_deadline_epoch,
                 ),
+                "current_epoch_priority": current_epoch_priority,
+                "dispatch_priority_reason": (
+                    "current_epoch_freshness_obligation"
+                    if current_epoch_priority
+                    else "profile_deadline_order"
+                ),
             }
         )
     ordered = sorted(
         rows,
         key=lambda row: (
+            0 if row["current_epoch_priority"] else 1,
             float(row["dispatch_deadline_epoch"]),
             float(row["next_attempt_epoch"]),
             str(row["queue_key"]),
@@ -65936,6 +65963,7 @@ def auto_maintenance_retry_ordered_due_items(
         for row in ordered
         if row["profile"] in {"backlog", "deep"}
         and row["dispatch_target_breached"]
+        and not row["current_epoch_priority"]
     ]
     reserved_key = ""
     if aged_heavy:
@@ -65949,11 +65977,17 @@ def auto_maintenance_retry_ordered_due_items(
         )
         reserved_key = str(reserved["queue_key"])
         ordered = [
+            *[
+                row
+                for row in ordered
+                if row["current_epoch_priority"]
+            ],
             reserved,
             *[
                 row
                 for row in ordered
                 if str(row["queue_key"]) != reserved_key
+                and not row["current_epoch_priority"]
             ],
         ]
     for rank, row in enumerate(ordered, start=1):
@@ -65964,6 +65998,8 @@ def auto_maintenance_retry_ordered_due_items(
         row["fairness_reason"] = (
             "aged_heavy_dispatch_target_breached"
             if row["aged_heavy_fairness_reserved"]
+            else "current_epoch_freshness_priority"
+            if row["current_epoch_priority"]
             else "profile_deadline_order"
         )
     return ordered
@@ -66597,6 +66633,9 @@ def _session_projection_freshness_options_for_identity(
     identity: dict[str, Any],
 ) -> dict[str, Any]:
     """Build prospective options from one already-read capture identity."""
+    current_epoch_priority = str(freshness_reason or "").startswith(
+        "capture_watch:"
+    )
     return {
         "persistent_obligation": True,
         "obligation_kind": SESSION_PROJECTION_FRESHNESS_OBLIGATION_KIND,
@@ -66606,6 +66645,12 @@ def _session_projection_freshness_options_for_identity(
         "required_stable_projection": True,
         "required_search_consumer": True,
         "freshness_reason": freshness_reason,
+        "current_epoch_priority": current_epoch_priority,
+        "dispatch_priority_reason": (
+            "capture_watch_current_epoch"
+            if current_epoch_priority
+            else "ordinary_freshness_obligation"
+        ),
         **_capture_identity_to_options(identity),
     }
 
@@ -66906,6 +66951,9 @@ def _reconcile_session_projection_freshness_obligation_in_payload(
     identity_changed = relation == "newer" or not _capture_identity_is_strict(existing_options)
     if identity_changed:
         prior_identity = dict(baseline_identity)
+        current_epoch_priority = str(freshness_reason or "").startswith(
+            "capture_watch:"
+        )
         merged_options = {
             **existing_options,
             **current_options,
@@ -66915,6 +66963,18 @@ def _reconcile_session_projection_freshness_obligation_in_payload(
             "freshness_reason": freshness_reason,
             "required_stable_projection": True,
             "required_search_consumer": True,
+            "current_epoch_priority": (
+                current_epoch_priority
+                or existing_options.get("current_epoch_priority") is True
+            ),
+            "dispatch_priority_reason": (
+                "capture_watch_current_epoch"
+                if current_epoch_priority
+                else str(
+                    existing_options.get("dispatch_priority_reason")
+                    or "ordinary_freshness_obligation"
+                )
+            ),
         }
         existing_item["options"] = merged_options
         existing_item.pop("last_identity_reconciliation_diagnostic", None)
@@ -66930,6 +66990,17 @@ def _reconcile_session_projection_freshness_obligation_in_payload(
             existing_item["last_status"] = "capture_identity_reconciled"
         existing_item["updated_at"] = auto_maintenance_retry_iso(now_epoch)
         items[target_key] = existing_item
+        changed = True
+    elif str(freshness_reason or "").startswith("capture_watch:") and not bool(
+        existing_options.get("current_epoch_priority") is True
+    ):
+        existing_item["options"] = {
+            **existing_options,
+            "current_epoch_priority": True,
+            "dispatch_priority_reason": "capture_watch_current_epoch",
+            "freshness_reason": freshness_reason,
+        }
+        existing_item["updated_at"] = auto_maintenance_retry_iso(now_epoch)
         changed = True
     return (
         {
@@ -173065,6 +173136,21 @@ def render_session_memory_systemd_units(
             "--write-report",
         ]
     )
+    retry_dispatch_exec = " ".join(
+        [
+            quote(python_bin),
+            quote(str(script)),
+            "auto-maintenance-retry",
+            "--workspace-root",
+            quote(str(workspace)),
+            "--aoa-root",
+            quote(str(root)),
+            "--apply",
+            "--limit",
+            str(AUTO_MAINTENANCE_RETRY_DISPATCH_LIMIT),
+            "--write-report",
+        ]
+    )
     return {
         SESSION_MEMORY_CAPTURE_SERVICE: "\n".join(
             [
@@ -173145,6 +173231,46 @@ def render_session_memory_systemd_units(
                 "",
             ]
         ),
+        SESSION_MEMORY_RETRY_DISPATCH_SERVICE: "\n".join(
+            [
+                "[Unit]",
+                "Description=AoA session-memory bounded persistent retry dispatcher",
+                f"Documentation={documentation}",
+                f"ConditionPathExists={script}",
+                "",
+                "[Service]",
+                "Type=oneshot",
+                f"WorkingDirectory={root}",
+                python_environment,
+                "Nice=13",
+                "IOSchedulingClass=idle",
+                "IOSchedulingPriority=7",
+                "TimeoutStartSec=140min",
+                "StandardOutput=null",
+                "StandardError=journal",
+                f"ExecStart={retry_dispatch_exec}",
+                "",
+            ]
+        ),
+        SESSION_MEMORY_RETRY_DISPATCH_TIMER: "\n".join(
+            [
+                "[Unit]",
+                "Description=Dispatch due AoA session-memory maintenance retries",
+                f"Documentation={documentation}",
+                "",
+                "[Timer]",
+                "OnBootSec=2min",
+                "OnUnitInactiveSec=1min",
+                "RandomizedDelaySec=15s",
+                "AccuracySec=15s",
+                "Persistent=true",
+                f"Unit={SESSION_MEMORY_RETRY_DISPATCH_SERVICE}",
+                "",
+                "[Install]",
+                "WantedBy=timers.target",
+                "",
+            ]
+        ),
     }
 
 
@@ -173203,6 +173329,137 @@ def session_memory_capture_unit_contract(
         "execstart_count": len(execstart_lines),
         "diagnostics": diagnostics,
         "truth_status": "source_rendered_systemd_unit_contract",
+    }
+
+
+def session_memory_retry_dispatch_unit_contract(
+    service: str,
+    unit_text: str,
+) -> dict[str, Any]:
+    """Validate the one source-owned persistent retry dispatcher unit."""
+    if service != SESSION_MEMORY_RETRY_DISPATCH_SERVICE:
+        return {
+            "service": service,
+            "status": "not_session_memory_retry_dispatch_unit",
+            "diagnostics": [],
+        }
+    diagnostics: list[str] = []
+    execstart_lines = systemd_unit_execstart_lines(unit_text)
+    if len(execstart_lines) != 1:
+        diagnostics.append(f"systemd_unit_expected_one_execstart:{len(execstart_lines)}")
+    command_line = execstart_lines[0] if execstart_lines else ""
+    try:
+        argv = shlex.split(command_line)
+    except ValueError as exc:
+        argv = []
+        diagnostics.append(f"systemd_unit_execstart_parse_failed:{exc}")
+    if "auto-maintenance-retry" not in argv:
+        diagnostics.append("retry_dispatch_unit_missing_auto_maintenance_retry")
+    if "--apply" not in argv:
+        diagnostics.append("retry_dispatch_unit_missing_apply")
+    if "--write-report" not in argv:
+        diagnostics.append("retry_dispatch_unit_missing_write_report")
+    if "--limit" not in argv:
+        diagnostics.append("retry_dispatch_unit_missing_bounded_limit")
+    elif argv[argv.index("--limit") + 1 : argv.index("--limit") + 2] != [
+        str(AUTO_MAINTENANCE_RETRY_DISPATCH_LIMIT)
+    ]:
+        diagnostics.append("retry_dispatch_unit_limit_not_source_bounded")
+    for forbidden in (
+        "capture-watch",
+        "sweep-codex-sessions",
+        "projection-catchup",
+        "auto-maintenance-resource",
+    ):
+        if forbidden in argv:
+            diagnostics.append(f"retry_dispatch_unit_contains_direct_route:{forbidden}")
+    return {
+        "service": service,
+        "topology": "persistent_retry_dispatch",
+        "status": "current" if not diagnostics else "drift",
+        "command_line": command_line,
+        "execstart_count": len(execstart_lines),
+        "dispatch_limit": AUTO_MAINTENANCE_RETRY_DISPATCH_LIMIT,
+        "diagnostics": diagnostics,
+        "truth_status": "source_rendered_systemd_unit_contract",
+    }
+
+
+def session_memory_retry_dispatch_timer_contract(
+    timer: str,
+    unit_text: str,
+) -> dict[str, Any]:
+    """Validate retry timer cadence without claiming activation or progress."""
+    if timer != SESSION_MEMORY_RETRY_DISPATCH_TIMER:
+        return {
+            "timer": timer,
+            "status": "not_session_memory_retry_dispatch_timer",
+            "diagnostics": [],
+        }
+    lines = {line.strip() for line in str(unit_text or "").splitlines()}
+    diagnostics: list[str] = []
+    required = {
+        "OnBootSec=2min",
+        "OnUnitInactiveSec=1min",
+        "RandomizedDelaySec=15s",
+        "AccuracySec=15s",
+        "Persistent=true",
+        f"Unit={SESSION_MEMORY_RETRY_DISPATCH_SERVICE}",
+        "WantedBy=timers.target",
+    }
+    diagnostics.extend(
+        f"retry_dispatch_timer_missing:{line}"
+        for line in sorted(required - lines)
+    )
+    return {
+        "timer": timer,
+        "service": SESSION_MEMORY_RETRY_DISPATCH_SERVICE,
+        "status": "current" if not diagnostics else "drift",
+        "activation": "not_performed",
+        "diagnostics": diagnostics,
+        "truth_status": "source_rendered_systemd_timer_contract",
+    }
+
+
+def session_memory_retry_dispatch_activation_contract(
+    unit_dir: Path,
+) -> dict[str, Any]:
+    """Check the named source units without probing or changing systemd state."""
+    root = Path(unit_dir).expanduser()
+    service_path = root / SESSION_MEMORY_RETRY_DISPATCH_SERVICE
+    timer_path = root / SESSION_MEMORY_RETRY_DISPATCH_TIMER
+    missing = [
+        str(path)
+        for path in (service_path, timer_path)
+        if not path.is_file()
+    ]
+    if missing:
+        return {
+            "unit_dir": str(root),
+            "status": "missing_source_units",
+            "activation": "not_probed",
+            "missing": missing,
+            "diagnostics": ["retry_dispatch_source_topology_incomplete"],
+        }
+    service_contract = session_memory_retry_dispatch_unit_contract(
+        SESSION_MEMORY_RETRY_DISPATCH_SERVICE,
+        service_path.read_text(encoding="utf-8"),
+    )
+    timer_contract = session_memory_retry_dispatch_timer_contract(
+        SESSION_MEMORY_RETRY_DISPATCH_TIMER,
+        timer_path.read_text(encoding="utf-8"),
+    )
+    diagnostics = [
+        *service_contract.get("diagnostics", []),
+        *timer_contract.get("diagnostics", []),
+    ]
+    return {
+        "unit_dir": str(root),
+        "status": "current" if not diagnostics else "drift",
+        "activation": "not_probed",
+        "service": service_contract,
+        "timer": timer_contract,
+        "diagnostics": diagnostics,
     }
 
 
@@ -173332,6 +173589,7 @@ def session_memory_unit_file_contracts(unit_dir: Path | None = None) -> list[dic
         *sorted(SESSION_MEMORY_RESOURCE_MAINTENANCE_UNITS),
         SESSION_MEMORY_CAPTURE_SERVICE,
         SESSION_MEMORY_RESOURCE_GATED_SWEEP_SERVICE,
+        SESSION_MEMORY_RETRY_DISPATCH_SERVICE,
     ]
     for service in services:
         path = root / service
@@ -173356,6 +173614,8 @@ def session_memory_unit_file_contracts(unit_dir: Path | None = None) -> list[dic
                 SESSION_MEMORY_CAPTURE_SERVICE,
                 SESSION_MEMORY_RESOURCE_GATED_SWEEP_SERVICE,
             }
+            else session_memory_retry_dispatch_unit_contract(service, text)
+            if service == SESSION_MEMORY_RETRY_DISPATCH_SERVICE
             else session_memory_resource_unit_contract(service, text)
         )
         contract["path"] = str(path)
@@ -173518,7 +173778,11 @@ def session_memory_timer_status() -> dict[str, Any]:
             {
                 str(timer.get("service") or "")
                 for timer in timers
-                if str(timer.get("service") or "") in SESSION_MEMORY_RESOURCE_MAINTENANCE_UNITS
+                if str(timer.get("service") or "")
+                in {
+                    *SESSION_MEMORY_RESOURCE_MAINTENANCE_UNITS,
+                    SESSION_MEMORY_RETRY_DISPATCH_SERVICE,
+                }
             }
         )
         for service in services:
@@ -173536,7 +173800,17 @@ def session_memory_timer_status() -> dict[str, Any]:
                 )
                 contract_diagnostics.append(f"systemd_unit_contract_probe_failed:{service}")
                 continue
-            contract = session_memory_resource_unit_contract(service, cat_completed.stdout or "")
+            contract = (
+                session_memory_retry_dispatch_unit_contract(
+                    service,
+                    cat_completed.stdout or "",
+                )
+                if service == SESSION_MEMORY_RETRY_DISPATCH_SERVICE
+                else session_memory_resource_unit_contract(
+                    service,
+                    cat_completed.stdout or "",
+                )
+            )
             contract["command"] = shlex.join(cat_command)
             contract["cat_returncode"] = cat_completed.returncode
             contract["stderr"] = (cat_completed.stderr or "").strip()[:500]
@@ -215978,12 +216252,17 @@ def command_render_systemd_units(args: argparse.Namespace) -> int:
         resource_launcher=args.resource_launcher,
     )
     contracts = [
-        session_memory_capture_unit_contract(name, text)
+        (
+            session_memory_retry_dispatch_unit_contract(name, text)
+            if name == SESSION_MEMORY_RETRY_DISPATCH_SERVICE
+            else session_memory_capture_unit_contract(name, text)
+        )
         for name, text in units.items()
         if name
         in {
             SESSION_MEMORY_CAPTURE_SERVICE,
             SESSION_MEMORY_RESOURCE_GATED_SWEEP_SERVICE,
+            SESSION_MEMORY_RETRY_DISPATCH_SERVICE,
         }
     ]
     write_payload: dict[str, Any] = {
@@ -220576,8 +220855,9 @@ def build_parser() -> argparse.ArgumentParser:
     install.add_argument(
         "--systemd-unit-dir",
         help=(
-            "Explicit output directory for the capture-only and resource-gated "
-            "systemd units; no unit is enabled or started."
+            "Explicit output directory for the capture-only, resource-gated "
+            "sweep, and bounded retry-dispatch systemd units; no unit is "
+            "enabled or started."
         ),
     )
     install.set_defaults(func=command_install)
@@ -220586,7 +220866,8 @@ def build_parser() -> argparse.ArgumentParser:
         "render-systemd-units",
         help=(
             "Render capture-only fresh-capture units and a separate "
-            "resource-gated discovery/stable sweep lane."
+            "resource-gated discovery/stable sweep lane plus the persistent "
+            "retry dispatcher."
         ),
     )
     render_systemd.add_argument("--workspace-root", required=True)
@@ -220594,7 +220875,7 @@ def build_parser() -> argparse.ArgumentParser:
     render_systemd.add_argument("--source-root", help="Codex sessions root; defaults to ~/.codex/sessions.")
     render_systemd.add_argument("--python-bin", default="/usr/bin/python3")
     render_systemd.add_argument("--resource-launcher", default="/usr/local/bin/abyss-machine")
-    render_systemd.add_argument("--output-dir", help="Write the four units to this explicit directory.")
+    render_systemd.add_argument("--output-dir", help="Write the six source-owned units to this explicit directory.")
     render_systemd.add_argument("--force", action="store_true", help="Replace existing named unit files in --output-dir.")
     render_systemd.set_defaults(func=command_render_systemd_units)
 

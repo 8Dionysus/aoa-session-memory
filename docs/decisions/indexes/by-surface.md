@@ -324,6 +324,7 @@
 | [AOA-SM-D-0034 Bounded Dirty-First Automatic Index Discovery](../AOA-SM-D-0034-bounded-dirty-first-automatic-index-discovery.md) | 2026-07-28 | Accepted | `docs/decisions/AOA-SM-D-0034-bounded-dirty-first-automatic-index-discovery.md` |
 | [AOA-SM-D-0072 Evidence Absence Is Not Maintenance Backlog](../AOA-SM-D-0072-evidence-absence-is-not-maintenance-backlog.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0072-evidence-absence-is-not-maintenance-backlog.md` |
 | [AOA-SM-D-0095 Capture-Bound Retry Obligation Supersession](../AOA-SM-D-0095-capture-bound-retry-obligation-supersession.md) | 2026-08-24 | Accepted | `docs/decisions/AOA-SM-D-0095-capture-bound-retry-obligation-supersession.md` |
+| [AOA-SM-D-0096 Source-Owned Persistent Retry Dispatch Activation](../AOA-SM-D-0096-source-owned-persistent-retry-dispatch-activation.md) | 2026-08-24 | Accepted | `docs/decisions/AOA-SM-D-0096-source-owned-persistent-retry-dispatch-activation.md` |
 
 ## generated projection preservation
 
@@ -506,6 +507,7 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0094 Logical Registry Coverage and Capture-Only Ingress Separation](../AOA-SM-D-0094-logical-registry-coverage-and-capture-only-ingress.md) | 2026-08-22 | Accepted | `docs/decisions/AOA-SM-D-0094-logical-registry-coverage-and-capture-only-ingress.md` |
+| [AOA-SM-D-0096 Source-Owned Persistent Retry Dispatch Activation](../AOA-SM-D-0096-source-owned-persistent-retry-dispatch-activation.md) | 2026-08-24 | Accepted | `docs/decisions/AOA-SM-D-0096-source-owned-persistent-retry-dispatch-activation.md` |
 
 ## instrumentation
 
@@ -898,6 +900,7 @@
 | [AOA-SM-D-0072 Evidence Absence Is Not Maintenance Backlog](../AOA-SM-D-0072-evidence-absence-is-not-maintenance-backlog.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0072-evidence-absence-is-not-maintenance-backlog.md` |
 | [AOA-SM-D-0073 Verified Fallback Completion Retires Retry](../AOA-SM-D-0073-verified-fallback-completion-retires-retry.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0073-verified-fallback-completion-retires-retry.md` |
 | [AOA-SM-D-0095 Capture-Bound Retry Obligation Supersession](../AOA-SM-D-0095-capture-bound-retry-obligation-supersession.md) | 2026-08-24 | Accepted | `docs/decisions/AOA-SM-D-0095-capture-bound-retry-obligation-supersession.md` |
+| [AOA-SM-D-0096 Source-Owned Persistent Retry Dispatch Activation](../AOA-SM-D-0096-source-owned-persistent-retry-dispatch-activation.md) | 2026-08-24 | Accepted | `docs/decisions/AOA-SM-D-0096-source-owned-persistent-retry-dispatch-activation.md` |
 
 ## route readiness
 
@@ -933,6 +936,7 @@
 | [AOA-SM-D-0089 Durable Thin Hook Ingress Before Projection](../AOA-SM-D-0089-durable-thin-hook-ingress-before-projection.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0089-durable-thin-hook-ingress-before-projection.md` |
 | [AOA-SM-D-0090 Session Freshness Obligations Close on Watermark Proof](../AOA-SM-D-0090-session-freshness-obligations-close-on-watermark-proof.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0090-session-freshness-obligations-close-on-watermark-proof.md` |
 | [AOA-SM-D-0094 Logical Registry Coverage and Capture-Only Ingress Separation](../AOA-SM-D-0094-logical-registry-coverage-and-capture-only-ingress.md) | 2026-08-22 | Accepted | `docs/decisions/AOA-SM-D-0094-logical-registry-coverage-and-capture-only-ingress.md` |
+| [AOA-SM-D-0096 Source-Owned Persistent Retry Dispatch Activation](../AOA-SM-D-0096-source-owned-persistent-retry-dispatch-activation.md) | 2026-08-24 | Accepted | `docs/decisions/AOA-SM-D-0096-source-owned-persistent-retry-dispatch-activation.md` |
 
 ## search
 
@@ -1054,6 +1058,7 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0094 Logical Registry Coverage and Capture-Only Ingress Separation](../AOA-SM-D-0094-logical-registry-coverage-and-capture-only-ingress.md) | 2026-08-22 | Accepted | `docs/decisions/AOA-SM-D-0094-logical-registry-coverage-and-capture-only-ingress.md` |
+| [AOA-SM-D-0096 Source-Owned Persistent Retry Dispatch Activation](../AOA-SM-D-0096-source-owned-persistent-retry-dispatch-activation.md) | 2026-08-24 | Accepted | `docs/decisions/AOA-SM-D-0096-source-owned-persistent-retry-dispatch-activation.md` |
 
 ## task episodes
 

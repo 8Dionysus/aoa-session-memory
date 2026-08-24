@@ -544,6 +544,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0021 Raw-Preserving Derived-Text Privacy Boundary](../AOA-SM-D-0021-raw-preserving-derived-text-privacy-boundary.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0021-raw-preserving-derived-text-privacy-boundary.md` |
 
+## current-epoch priority
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0096 Source-Owned Persistent Retry Dispatch Activation](../AOA-SM-D-0096-source-owned-persistent-retry-dispatch-activation.md) | 2026-08-24 | Accepted | `docs/decisions/AOA-SM-D-0096-source-owned-persistent-retry-dispatch-activation.md` |
+
 ## current-path uniqueness
 
 | Decision | Date | Status | Path |
@@ -1309,6 +1315,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0075 Runtime Owner Overlay Does Not Rescan Observed Routes](../AOA-SM-D-0075-runtime-owner-overlay-does-not-rescan-observed-routes.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0075-runtime-owner-overlay-does-not-rescan-observed-routes.md` |
 
+## one-lane dispatch
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0096 Source-Owned Persistent Retry Dispatch Activation](../AOA-SM-D-0096-source-owned-persistent-retry-dispatch-activation.md) | 2026-08-24 | Accepted | `docs/decisions/AOA-SM-D-0096-source-owned-persistent-retry-dispatch-activation.md` |
+
 ## orphan cleanup
 
 | Decision | Date | Status | Path |
@@ -1577,6 +1589,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0006 Bounded Query-Demand Projection Catch-Up](../AOA-SM-D-0006-bounded-query-demand-projection-catch-up.md) | 2026-07-16 | Accepted | `docs/decisions/AOA-SM-D-0006-bounded-query-demand-projection-catch-up.md` |
 
+## queue identity
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0096 Source-Owned Persistent Retry Dispatch Activation](../AOA-SM-D-0096-source-owned-persistent-retry-dispatch-activation.md) | 2026-08-24 | Accepted | `docs/decisions/AOA-SM-D-0096-source-owned-persistent-retry-dispatch-activation.md` |
+
 ## queue lock
 
 | Decision | Date | Status | Path |
@@ -1683,6 +1701,7 @@
 | [AOA-SM-D-0047 Exclusive Heavy Projection Lane and Isolated Segment Workers](../AOA-SM-D-0047-exclusive-heavy-projection-lane-and-isolated-segment-workers.md) | 2026-08-09 | Accepted | `docs/decisions/AOA-SM-D-0047-exclusive-heavy-projection-lane-and-isolated-segment-workers.md` |
 | [AOA-SM-D-0076 Observed Route Refresh Is One Covering Pass](../AOA-SM-D-0076-observed-route-refresh-is-one-covering-pass.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0076-observed-route-refresh-is-one-covering-pass.md` |
 | [AOA-SM-D-0094 Logical Registry Coverage and Capture-Only Ingress Separation](../AOA-SM-D-0094-logical-registry-coverage-and-capture-only-ingress.md) | 2026-08-22 | Accepted | `docs/decisions/AOA-SM-D-0094-logical-registry-coverage-and-capture-only-ingress.md` |
+| [AOA-SM-D-0096 Source-Owned Persistent Retry Dispatch Activation](../AOA-SM-D-0096-source-owned-persistent-retry-dispatch-activation.md) | 2026-08-24 | Accepted | `docs/decisions/AOA-SM-D-0096-source-owned-persistent-retry-dispatch-activation.md` |
 
 ## resource demand epoch
 
@@ -1695,6 +1714,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0093 Identity-Bound Session Telemetry Uses Owner Receipt Admission](../AOA-SM-D-0093-identity-bound-session-telemetry-admission.md) | 2026-08-22 | Accepted | `docs/decisions/AOA-SM-D-0093-identity-bound-session-telemetry-admission.md` |
+
+## restart recovery
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0096 Source-Owned Persistent Retry Dispatch Activation](../AOA-SM-D-0096-source-owned-persistent-retry-dispatch-activation.md) | 2026-08-24 | Accepted | `docs/decisions/AOA-SM-D-0096-source-owned-persistent-retry-dispatch-activation.md` |
 
 ## retry convergence
 
@@ -1851,6 +1876,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0089 Durable Thin Hook Ingress Before Projection](../AOA-SM-D-0089-durable-thin-hook-ingress-before-projection.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0089-durable-thin-hook-ingress-before-projection.md` |
+
+## source activation
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0096 Source-Owned Persistent Retry Dispatch Activation](../AOA-SM-D-0096-source-owned-persistent-retry-dispatch-activation.md) | 2026-08-24 | Accepted | `docs/decisions/AOA-SM-D-0096-source-owned-persistent-retry-dispatch-activation.md` |
 
 ## source attestation
 

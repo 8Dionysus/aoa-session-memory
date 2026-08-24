@@ -73,10 +73,12 @@ raw source, while duplicate receipts remain possible and visible.
 
 ## Systemd unit rendering
 
-Fresh capture and discovery are separate owner lanes. The fresh-capture unit is
-capture-watch-only; discovery and stable projection run in a separately named,
-resource-gated sweep unit. Render them into an explicitly chosen target when a
-runtime owner is ready to review deployment:
+Fresh capture, discovery/stable sweep, and persistent retry dispatch are
+separate owner lanes. The fresh-capture unit is capture-watch-only;
+discovery/stable projection runs in a separately named resource-gated sweep
+unit; and the retry timer invokes the bounded owner dispatcher, which performs
+resource admission for each child. Render them into an explicitly chosen
+target when a runtime owner is ready to review deployment:
 
 ```bash
 python3 scripts/aoa_session_memory.py render-systemd-units \
@@ -86,12 +88,15 @@ python3 scripts/aoa_session_memory.py render-systemd-units \
   --force
 ```
 
-An installed-root upgrade can render the same four named files with
-`install --systemd-unit-dir <target> --force`. The installer never enables,
+An installed-root upgrade can render the same six named files with
+`install --systemd-unit-dir <target> --force`: capture service/timer, sweep
+service/timer, and retry-dispatch service/timer. The installer never enables,
 starts, reloads, or trusts a unit, and it never changes a live systemd
 directory unless that directory is explicitly supplied by the caller. The
 rendered capture contract must remain one `capture-watch` `ExecStart`; the
-resource-gated sweep owns transcript discovery and stable projection.
+resource-gated sweep owns transcript discovery and stable projection; and the
+retry unit must contain only the bounded `auto-maintenance-retry` dispatcher,
+not capture, sweep, or projection-catchup work.
 
 ## User skills
 
@@ -126,5 +131,6 @@ validate, doctor, and audit syntax. Inspect the selected subcommand help in
 
 After installation, `projection-status` and `freshness-vector <session>` expose
 capture, live-overlay, stable-projection, and downstream-consumer progress.
-`auto-maintenance hot --apply` consumes the bounded event-driven queue;
-`projection-catchup` and deep maintenance remain explicit repair routes.
+`auto-maintenance hot --apply` remains the bounded event-driven queue producer;
+the source-rendered retry timer invokes `auto-maintenance-retry`, while
+`projection-catchup` and deep maintenance remain explicit child/repair routes.
