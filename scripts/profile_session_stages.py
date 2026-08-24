@@ -17,7 +17,7 @@ import json
 from pathlib import Path
 import re
 import sys
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 try:
     import identity_bound_session_telemetry as identity_telemetry
@@ -29,9 +29,10 @@ except ModuleNotFoundError:
 
 
 SCHEMA_VERSION = "stage_profile_v1"
-PROFILER_VERSION = "structured_segment_index_correlated_call_result_v1"
+PROFILER_VERSION = "structured_segment_index_correlated_call_result_identity_episode_v1"
 BOUNDED_MEASUREMENT_SCHEMA_VERSION = "bounded_measurement_v1"
 BOUNDED_PREFIX_ROUTE = "last_good_stable_projection_exact_prefix_v1"
+IDENTITY_EPISODE_COHORT_SCHEMA_VERSION = "identity_bound_episode_cohort_v1"
 
 STAGES = (
     "kag_navigation_index_gate",
@@ -96,6 +97,12 @@ class BoundedPrefixError(ProfileError):
     """Raised when an exact prefix cannot be admitted fail-closed."""
 
 
+def validate_max_episodes(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ProfileError("max_episodes_must_be_positive")
+    return value
+
+
 def read_json(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -104,6 +111,83 @@ def read_json(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ProfileError(f"json_object_required:{path.name}")
     return value
+
+
+def _owner_memory_module() -> Any:
+    try:
+        import aoa_session_memory as owner_memory
+    except ModuleNotFoundError:
+        scripts_dir = str(Path(__file__).resolve().parent)
+        if scripts_dir not in sys.path:
+            sys.path.insert(0, scripts_dir)
+        import aoa_session_memory as owner_memory
+    return owner_memory
+
+
+def _owner_current_context(
+    manifest: Mapping[str, Any],
+    index: Mapping[str, Any],
+    source: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Recompute the current owner generation and publish context."""
+
+    owner_memory = _owner_memory_module()
+    session_manifest_raw = manifest.get("raw") if isinstance(manifest.get("raw"), Mapping) else {}
+    for name, manifest_name in (
+        ("raw_sha256", "sha256"),
+        ("raw_bytes", "bytes"),
+        ("raw_line_count", "line_count"),
+    ):
+        if session_manifest_raw.get(manifest_name) != source.get(name):
+            raise ProfileError(f"owner_session_source_mismatch:{name}")
+
+    stored_projection = index.get("projection_publish")
+    if not isinstance(stored_projection, Mapping):
+        raise ProfileError("owner_projection_context_missing")
+    stored_source = stored_projection.get("source")
+    watermark = stored_projection.get("processed_watermark")
+    if not isinstance(stored_source, Mapping) or not isinstance(watermark, Mapping):
+        raise ProfileError("owner_projection_context_incomplete")
+    if any(stored_source.get(name) != source.get(name) for name in ("raw_sha256", "raw_bytes", "raw_line_count")):
+        raise ProfileError("owner_projection_source_mismatch")
+    processed_to_line = int_value(watermark.get("to_line"))
+    processed_to_timestamp = str(watermark.get("to_timestamp") or "")
+    if processed_to_line is None or processed_to_line < 1 or not processed_to_timestamp:
+        raise ProfileError("owner_projection_watermark_incomplete")
+    expected_projection = owner_memory.session_projection_publish_identity_from_scan(
+        {
+            "raw_sha256": source.get("raw_sha256"),
+            "raw_bytes": source.get("raw_bytes"),
+            "raw_line_count": source.get("raw_line_count"),
+            "processed_to_line": processed_to_line,
+            "processed_to_timestamp": processed_to_timestamp,
+        }
+    )
+    if dict(stored_projection) != expected_projection:
+        raise ProfileError("owner_projection_context_stale")
+
+    expected_task = owner_memory.task_episode_source_generation_identity()
+    expected_segment = owner_memory.segment_index_generation_identity()
+    expected_session = owner_memory.session_index_generation_identity()
+    stored_session = index.get("generation_identity")
+    if not isinstance(stored_session, Mapping) or dict(stored_session) != expected_session:
+        raise ProfileError("owner_session_generation_stale")
+    dependencies = index.get("dependency_generation_identities")
+    if not isinstance(dependencies, Mapping):
+        raise ProfileError("owner_dependency_generation_context_missing")
+    if dependencies.get("segment_index") != expected_segment:
+        raise ProfileError("owner_segment_generation_stale")
+    if dependencies.get("task_episode_source") != expected_task:
+        raise ProfileError("owner_task_episode_generation_stale")
+    index_schema = manifest.get("index_schema")
+    if not isinstance(index_schema, Mapping) or index_schema.get("projection_publish") != expected_projection:
+        raise ProfileError("owner_manifest_projection_context_stale")
+    return {
+        "projection": dict(expected_projection),
+        "task_episode_generation": str(expected_task.get("generation_id") or ""),
+        "segment_generation": str(expected_segment.get("generation_id") or ""),
+        "session_generation": str(expected_session.get("generation_id") or ""),
+    }
 
 
 def int_value(value: Any) -> int | None:
@@ -294,18 +378,29 @@ def result_status(events: Iterable[dict[str, Any]]) -> str | None:
     return next((value for value in values if value), None)
 
 
-def logical_ref(session_label: str, event: dict[str, Any]) -> dict[str, str]:
+def logical_ref(
+    session_label: str,
+    event: dict[str, Any],
+    *,
+    owner_root_witness: identity_telemetry.OwnerRootWitness,
+) -> dict[str, str]:
     line = int_value(event.get("line"))
     segment_id = "unknown"
     anchor = str(event.get("md_anchor") or "")
     if anchor:
         segment_id = anchor.split("__", 1)[0]
     raw = f"raw:line:{line}" if line is not None else "raw:line:unknown"
+    session_ref = identity_telemetry.public_session_ref(
+        session_label,
+        owner_root_witness=owner_root_witness,
+    )
     return {
-        "session": f"session:{session_label}",
+        "session": session_ref,
         "raw": raw,
-        "segment": f"session:{session_label}#segment:{segment_id}",
-        "event": str(event.get("event_id") or "unknown"),
+        "segment": f"{session_ref}#segment:{identity_telemetry.public_ref_component(segment_id, 'segment_id')}",
+        "event": identity_telemetry.public_ref_component(
+            str(event.get("event_id") or "unknown"), "event_id"
+        ),
     }
 
 
@@ -350,6 +445,7 @@ def load_segment_events(
     session_dir: Path,
     index: dict[str, Any],
     *,
+    owner_root_witness: identity_telemetry.OwnerRootWitness,
     expected_projection: dict[str, Any] | None = None,
     expected_segment_generation: str | None = None,
     expected_line_count: int | None = None,
@@ -369,6 +465,18 @@ def load_segment_events(
             if strict:
                 raise BoundedPrefixError("bounded_prefix_segment_index_missing")
             continue
+        try:
+            owner_membership = identity_telemetry._owner_segment_membership(
+                session_dir=session_dir,
+                index_path=index_path,
+                owner_root_witness=owner_root_witness,
+            )
+        except identity_telemetry.TelemetryError as exc:
+            if strict:
+                raise BoundedPrefixError(
+                    f"bounded_prefix_segment_owner_membership:{exc}"
+                ) from exc
+            owner_membership = None
         try:
             segment_index = read_json(index_path)
         except ProfileError:
@@ -399,6 +507,20 @@ def load_segment_events(
                 if strict:
                     raise BoundedPrefixError("bounded_prefix_segment_event_line_missing")
                 continue
+            facets = event.get("facets") if isinstance(event.get("facets"), Mapping) else {}
+            if "identity_bound_telemetry_receipt" in facets and owner_membership is not None:
+                try:
+                    event = identity_telemetry._attach_owner_source_evidence(
+                        event,
+                        source_ref=f"owner:segment:{index_path.name}",
+                        source_path=index_path,
+                        owner_membership=owner_membership,
+                        owner_root_witness=owner_root_witness,
+                    )
+                except identity_telemetry.TelemetryError:
+                    # The event remains readable, but its owner receipt facet
+                    # must fail closed without source-artifact evidence.
+                    pass
             if strict:
                 if expected_line_count is not None and not 1 <= line <= expected_line_count:
                     raise BoundedPrefixError("bounded_prefix_segment_event_outside_prefix")
@@ -416,41 +538,207 @@ def load_segment_events(
     return events_by_line
 
 
-def load_episode_payloads(session_dir: Path) -> list[dict[str, Any]]:
-    manifest = read_json(session_dir / "session-index-shards" / "manifest.json")
+def _canonical_payload_sha256(value: Any) -> str:
+    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def load_episode_records(
+    session_dir: Path,
+    *,
+    owner_root_witness: identity_telemetry.OwnerRootWitness,
+    session_id: str,
+    session_ref: str,
+    source_identity: Mapping[str, Any],
+    expected_projection: Mapping[str, Any],
+    expected_task_episode_generation: str,
+    expected_generation_context: Mapping[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Load only closed-safe generated episode metadata and its provenance."""
+
+    manifest_path = session_dir / "session-index-shards" / "manifest.json"
+    session_manifest_path = session_dir / "session.manifest.json"
+    manifest = read_json(manifest_path)
+    manifest_sha256 = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
     components = manifest.get("components") if isinstance(manifest.get("components"), dict) else {}
     refs = components.get("task_episodes") if isinstance(components.get("task_episodes"), list) else []
-    episodes: list[dict[str, Any]] = []
+    component_counts = manifest.get("component_counts")
+    declared_count: int | None = None
+    if not isinstance(component_counts, Mapping):
+        raise ProfileError("episode_component_count_missing")
+    declared_count = int_value(component_counts.get("task_episodes"))
+    if declared_count is None or declared_count < 0:
+        raise ProfileError("episode_component_count_invalid")
+    if declared_count != len(refs):
+        raise ProfileError("episode_component_count_mismatch")
+    component_order = manifest.get("component_order")
+    if not isinstance(component_order, Mapping):
+        raise ProfileError("episode_component_order_missing")
+    declared_order = component_order.get("task_episodes")
+    if (
+        not isinstance(declared_order, list)
+        or any(not isinstance(item, str) or not item for item in declared_order)
+        or len(declared_order) != declared_count
+        or len(set(declared_order)) != len(declared_order)
+        or [str(entry.get("ref") or "") for entry in refs if isinstance(entry, Mapping)] != declared_order
+    ):
+        raise ProfileError("episode_component_order_mismatch")
+    manifest_source = manifest.get("source_identity")
+    if not isinstance(manifest_source, Mapping):
+        raise ProfileError("episode_component_source_identity_missing")
+    if (
+        not re.fullmatch(r"[0-9a-f]{64}", str(source_identity.get("raw_sha256") or ""))
+        or int_value(source_identity.get("raw_bytes")) is None
+        or int_value(source_identity.get("raw_line_count")) is None
+        or int_value(source_identity.get("raw_line_count")) < 1
+    ):
+        raise ProfileError("episode_component_source_identity_incomplete")
+    for name in ("raw_sha256", "raw_bytes", "raw_line_count"):
+        if manifest_source.get(name) != source_identity.get(name):
+            raise ProfileError(f"episode_component_source_identity_mismatch:{name}")
+    task_generation = str(manifest_source.get("task_episode_generation_id") or "")
+    if not re.fullmatch(r"[0-9a-f]{64}", task_generation):
+        raise ProfileError("episode_component_generation_identity_missing")
+    records: list[dict[str, Any]] = []
+    seen_component_refs: set[str] = set()
+    seen_episode_ids: set[str] = set()
     for entry in refs:
         if not isinstance(entry, dict):
-            continue
+            raise ProfileError("episode_component_manifest_entry_invalid")
         ref = str(entry.get("ref") or "")
-        if not ref:
-            continue
+        if ref in seen_component_refs:
+            raise ProfileError("episode_component_ref_duplicate")
+        seen_component_refs.add(ref)
+        ref_parts = Path(ref).parts
+        if (
+            not ref.startswith("session-index-shards/task-episodes/")
+            or ".." in ref_parts
+            or not ref.endswith(".json")
+        ):
+            raise ProfileError("episode_component_ref_not_public_safe")
         component_path = session_dir / ref
         if not component_path.is_file():
-            continue
-        try:
-            component = read_json(component_path)
-        except ProfileError:
-            continue
+            raise ProfileError("episode_component_missing")
+        component = read_json(component_path)
+        artifact_sha256 = hashlib.sha256(component_path.read_bytes()).hexdigest()
+        if entry.get("artifact_sha256") != artifact_sha256:
+            raise ProfileError("episode_component_artifact_digest_mismatch")
+        if component.get("component") != "task_episodes":
+            raise ProfileError("episode_component_kind_mismatch")
         payload = component.get("payload") if isinstance(component.get("payload"), dict) else {}
-        if payload:
-            episodes.append(payload)
-    return episodes
+        if not payload:
+            raise ProfileError("episode_component_payload_missing")
+        payload_sha256 = _canonical_payload_sha256(payload)
+        if entry.get("payload_sha256") != payload_sha256:
+            raise ProfileError("episode_component_payload_digest_mismatch")
+        component_identity = component.get("source_identity")
+        if not isinstance(component_identity, Mapping):
+            raise ProfileError("episode_component_identity_missing")
+        if str(component_identity.get("task_episode_generation_id") or "") != task_generation:
+            raise ProfileError("episode_component_generation_mismatch")
+        episode_source_sha256 = str(component_identity.get("episode_source_sha256") or "")
+        if not re.fullmatch(r"[0-9a-f]{64}", episode_source_sha256):
+            raise ProfileError("episode_component_source_digest_missing")
+        component_range = event_range(dict(component_identity))
+        payload_range = event_range(payload)
+        if component_range is None or payload_range is None or component_range != payload_range:
+            raise ProfileError("episode_component_range_mismatch")
+        if episode_source_sha256 != identity_telemetry.canonical_episode_source_sha256(payload):
+            raise ProfileError("episode_component_source_digest_mismatch")
+        if component_range[0] < 1 or component_range[1] > int(source_identity["raw_line_count"]):
+            raise ProfileError("episode_component_range_out_of_source")
+        privacy_version = int_value(component_identity.get("privacy_policy_version"))
+        redaction_version = int_value(component_identity.get("redaction_policy_version"))
+        if privacy_version is None or redaction_version is None or privacy_version < 0 or redaction_version < 0:
+            raise ProfileError("episode_component_privacy_identity_missing")
+        episode_id = str(payload.get("episode_id") or "")
+        if not episode_id or episode_id == "unknown":
+            raise ProfileError("episode_component_episode_id_unresolved")
+        if episode_id in seen_episode_ids:
+            raise ProfileError("episode_component_episode_id_duplicate")
+        seen_episode_ids.add(episode_id)
+        encoded_episode_id = identity_telemetry.public_ref_component(episode_id, "episode_id")
+        try:
+            owner_membership = identity_telemetry._owner_episode_component_membership(
+                session_dir=session_dir,
+                component_ref=ref,
+                component_path=component_path,
+                owner_root_witness=owner_root_witness,
+            )
+        except identity_telemetry.TelemetryError as exc:
+            raise ProfileError(
+                f"episode_component_owner_membership:{exc}"
+            ) from exc
+        component_admission = identity_telemetry._issue_episode_component_admission(
+            session_id=session_id,
+            session_ref=session_ref,
+            episode_id=episode_id,
+            component_ref=ref,
+            manifest_sha256=manifest_sha256,
+            source=source_identity,
+            component_identity={
+                "task_episode_generation_id": task_generation,
+                "episode_source_sha256": episode_source_sha256,
+                "event_range": {"from_line": component_range[0], "to_line": component_range[1]},
+                "privacy_policy_version": privacy_version,
+                "redaction_policy_version": redaction_version,
+            },
+            artifact_sha256=artifact_sha256,
+            payload_sha256=payload_sha256,
+            manifest_path=manifest_path,
+            component_path=component_path,
+            session_manifest_path=session_manifest_path,
+            expected_projection=expected_projection,
+            expected_task_episode_generation=expected_task_episode_generation,
+            expected_generation_context=expected_generation_context,
+            owner_membership=owner_membership,
+        )
+        records.append(
+            {
+                "payload": payload,
+                "component_ref": ref,
+                "session_id": session_id,
+                "artifact_sha256": artifact_sha256,
+                "payload_sha256": payload_sha256,
+                "source_identity": {
+                    "task_episode_generation_id": task_generation,
+                    "episode_source_sha256": episode_source_sha256,
+                    "event_range": {"from_line": component_range[0], "to_line": component_range[1]},
+                    "privacy_policy_version": privacy_version,
+                    "redaction_policy_version": redaction_version,
+                },
+                "encoded_episode_id": encoded_episode_id,
+                "component_admission": component_admission,
+                "declared_order": list(declared_order),
+            }
+        )
+    expected_count = declared_count if declared_count is not None else len(refs)
+    if len(records) != expected_count or len(seen_component_refs) != expected_count or len(seen_episode_ids) != expected_count:
+        raise ProfileError("episode_component_closed_cardinality_mismatch")
+    return records
 
 
-def episode_ref(session_label: str, episode: dict[str, Any], event_key: str) -> dict[str, str] | None:
+def episode_ref(
+    session_label: str,
+    episode: dict[str, Any],
+    event_key: str,
+    *,
+    owner_root_witness: identity_telemetry.OwnerRootWitness,
+) -> dict[str, str] | None:
     value = episode.get(event_key)
     if not isinstance(value, list) or not value:
         return None
     first = value[0] if isinstance(value[0], dict) else {}
     line = int_value(first.get("line"))
     event_id = str(first.get("event_id") or "")
+    session_ref = identity_telemetry.public_session_ref(
+        session_label,
+        owner_root_witness=owner_root_witness,
+    )
     return {
-        "session": f"session:{session_label}",
+        "session": session_ref,
         "raw": f"raw:line:{line}" if line is not None else "raw:line:unknown",
-        "event": event_id or "unknown",
+        "event": identity_telemetry.public_ref_component(event_id or "unknown", "event_id"),
     }
 
 
@@ -507,6 +795,7 @@ def profile_episode(
     session_label: str,
     episode: dict[str, Any],
     events_by_line: dict[int, dict[str, Any]],
+    owner_root_witness: identity_telemetry.OwnerRootWitness,
 ) -> dict[str, Any]:
     line_range = event_range(episode)
     if line_range is None:
@@ -560,8 +849,20 @@ def profile_episode(
                 "tool": safe_tool_name(event),
                 "result_status": result_status(correlated) if correlated else None,
                 "span_seconds": span,
-                "call_ref": logical_ref(session_label, event),
-                "result_ref": logical_ref(session_label, first_result) if first_result else None,
+                "call_ref": logical_ref(
+                    session_label,
+                    event,
+                    owner_root_witness=owner_root_witness,
+                ),
+                "result_ref": (
+                    logical_ref(
+                        session_label,
+                        first_result,
+                        owner_root_witness=owner_root_witness,
+                    )
+                    if first_result
+                    else None
+                ),
                 "result_event_id": str(first_result.get("event_id") or "") if first_result else None,
                 "repeat_index": None,
                 "repeat": None,
@@ -718,9 +1019,26 @@ def profile_episode(
         "duration_seconds": duration,
         "duration_status": "observed" if duration is not None else "unknown",
         "boundary_refs": {
-            "start": episode_ref(session_label, episode, "intent_refs")
-            or {"session": f"session:{session_label}", "raw": f"raw:line:{start_line}"},
-            "end": {"session": f"session:{session_label}", "raw": f"raw:line:{end_line}"},
+            "start": episode_ref(
+                session_label,
+                episode,
+                "intent_refs",
+                owner_root_witness=owner_root_witness,
+            )
+            or {
+                "session": identity_telemetry.public_session_ref(
+                    session_label,
+                    owner_root_witness=owner_root_witness,
+                ),
+                "raw": f"raw:line:{start_line}",
+            },
+            "end": {
+                "session": identity_telemetry.public_session_ref(
+                    session_label,
+                    owner_root_witness=owner_root_witness,
+                ),
+                "raw": f"raw:line:{end_line}",
+            },
         },
         "event_count": len(events),
         "attempt_count": len(attempts) or None,
@@ -756,6 +1074,249 @@ def profile_episode(
             )
             if present
         ],
+    }
+
+
+def identity_episode_binding(
+    episode: Mapping[str, Any],
+    *,
+    session_id: str,
+    component_admission: identity_telemetry.EpisodeComponentAdmission,
+) -> dict[str, Any]:
+    """Return the loader-issued public coordinate for one generated component."""
+
+    episode_id = str(episode.get("episode_id") or "")
+    line_range = event_range(dict(episode))
+    if not episode_id or line_range is None:
+        raise ProfileError("episode_event_range_or_id_missing")
+    if not isinstance(component_admission, identity_telemetry.EpisodeComponentAdmission):
+        raise ProfileError("episode_component_admission_missing")
+    encoded_episode_id = identity_telemetry.public_ref_component(episode_id, "episode_id")
+    binding = component_admission.public_binding()
+    if binding["episode_id"] != identity_telemetry.public_ref_component(episode_id, "episode_id"):
+        raise ProfileError("episode_binding_episode_id_mismatch")
+    if binding["event_range"] != {"from_line": line_range[0], "to_line": line_range[1]}:
+        raise ProfileError("episode_binding_event_range_mismatch")
+    try:
+        return identity_telemetry.validate_episode_binding(
+            binding,
+            expected_context={
+                "session_id": str(session_id),
+                "session_ref": binding["session_ref"],
+                "source": binding["source"],
+                "episode_id": encoded_episode_id,
+                "episode_ref": binding["episode_ref"],
+                "episode_component_ref": binding["episode_component_ref"],
+                "component_identity": binding["component_identity"],
+                "event_range": binding["event_range"],
+            },
+            component_admission=component_admission,
+        )
+    except identity_telemetry.TelemetryError as exc:
+        raise ProfileError(f"episode_binding_not_exact:{exc}") from exc
+
+
+def episode_owner_receipt_with_event(
+    events_by_line: dict[int, dict[str, Any]],
+    episode: dict[str, Any],
+) -> tuple[
+    dict[str, Any] | None,
+    str | None,
+    identity_telemetry.CarryingEventWitness | None,
+]:
+    """Select one dedicated receipt only when its facet is bound to this episode."""
+
+    line_range = event_range(episode)
+    if line_range is None:
+        return None, "episode_event_range_missing", None
+    events = [
+        event
+        for line, event in sorted(events_by_line.items())
+        if line_range[0] <= line <= line_range[1]
+    ]
+    captured = identity_telemetry.capture_receipt_facets(events)
+    rejected = [entry for entry in captured if entry.get("status") != "admitted"]
+    if rejected:
+        return None, f"identity_bound_receipt_facet_rejected:{rejected[0].get('rejection') or 'unknown'}", None
+    bound = [entry.get("receipt") for entry in captured if isinstance(entry.get("receipt"), dict)]
+    receipt_ids = [str(receipt.get("receipt_id")) for receipt in bound]
+    if len(bound) > 1 or len(set(receipt_ids)) != len(receipt_ids):
+        return None, "duplicate_identity_bound_receipt", None
+    if bound:
+        witness = captured[0].get("witness") if captured else None
+        return (
+            bound[0],
+            None,
+            witness if isinstance(witness, identity_telemetry.CarryingEventWitness) else None,
+        )
+    return None, None, None
+
+
+def episode_owner_receipt(
+    events_by_line: dict[int, dict[str, Any]],
+    episode: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Compatibility wrapper that omits the carrying-event detail."""
+
+    receipt, rejection, _witness = episode_owner_receipt_with_event(events_by_line, episode)
+    return receipt, rejection
+
+
+def _typed_state(value: Any) -> str:
+    if isinstance(value, dict) and value.get("state") in identity_telemetry.FIELD_STATES:
+        return str(value["state"])
+    return "unknown"
+
+
+def identity_episode_cohort(
+    packets: list[dict[str, Any]],
+    *,
+    expected_episode_count: int | None = None,
+    expected_component_order: list[str] | None = None,
+    selection_status: str = "admitted",
+) -> dict[str, Any]:
+    """Summarize admission coverage without manufacturing metric observations."""
+
+    if selection_status not in {"admitted", "rejected", "unknown"}:
+        raise ProfileError("episode_cohort_selection_status_invalid")
+
+    packet_statuses: Counter[str] = Counter()
+    receipt_statuses: Counter[str] = Counter()
+    reasons: Counter[str] = Counter()
+    identity_states: Counter[str] = Counter()
+    trajectory_states: Counter[str] = Counter()
+    timing_states: Counter[str] = Counter()
+    cache_states: Counter[str] = Counter()
+    resource_states: Counter[str] = Counter()
+    seen_components: set[str] = set()
+    seen_episode_ids: set[str] = set()
+    observed_component_order: list[str] = []
+    duplicate_or_invalid_route = False
+    for packet in packets:
+        try:
+            route = packet.get("route_admission") if isinstance(packet, Mapping) else None
+            if not isinstance(route, Mapping) or route.get("route") != "episode_strict":
+                raise identity_telemetry.TelemetryAdmissionError("episode_cohort_strict_route_required")
+            identity_telemetry.verify_packet_integrity(packet)
+            eligibility = identity_telemetry._packet_eligibility(packet)
+            binding = packet.get("episode_binding")
+            manifest_admission = binding.get("manifest_admission") if isinstance(binding, Mapping) else None
+            component_ref = manifest_admission.get("component_ref") if isinstance(manifest_admission, Mapping) else None
+            episode_id = binding.get("episode_id") if isinstance(binding, Mapping) else None
+            key = (str(component_ref), str(episode_id))
+            if key in seen_components or str(episode_id) in seen_episode_ids:
+                duplicate_or_invalid_route = True
+                raise identity_telemetry.TelemetryAdmissionError("episode_cohort_component_or_episode_duplicate")
+            seen_components.add(key)
+            seen_episode_ids.add(str(episode_id))
+            observed_component_order.append(str(component_ref))
+        except identity_telemetry.TelemetryError as exc:
+            packet_statuses["excluded"] += 1
+            reasons[f"packet_integrity_rejected:{exc}"] += 1
+            continue
+        packet_statuses[str(eligibility.get("status") or "unknown")] += 1
+        reasons.update(str(reason) for reason in eligibility.get("reasons", []) if reason)
+        methods = packet.get("methods") if isinstance(packet.get("methods"), dict) else {}
+        federation = methods.get("owner_receipt_federation")
+        if isinstance(federation, dict):
+            receipt_statuses[str(federation.get("status") or "unknown")] += 1
+        identity = packet.get("identity") if isinstance(packet.get("identity"), dict) else {}
+        identity_states.update(_typed_state(identity.get(name)) for name in identity_telemetry.IDENTITY_FIELDS)
+        trajectory = packet.get("trajectory") if isinstance(packet.get("trajectory"), dict) else {}
+        trajectory_states[_typed_state(trajectory.get("chain_id"))] += 1
+        steps = trajectory.get("steps") if isinstance(trajectory.get("steps"), dict) else {}
+        trajectory_states.update(
+            str(step.get("state") or "unknown")
+            for step in steps.values()
+            if isinstance(step, dict)
+        )
+        timing = packet.get("timing") if isinstance(packet.get("timing"), dict) else {}
+        timing_states.update(_typed_state(timing.get(name)) for name in identity_telemetry.TIMING_FIELDS)
+        cache = packet.get("cache") if isinstance(packet.get("cache"), dict) else {}
+        cache_states.update(_typed_state(cache.get(name)) for name in ("posture", "identity", "observed_state"))
+        resource = packet.get("resource") if isinstance(packet.get("resource"), dict) else {}
+        resource_states[_typed_state(resource.get("posture"))] += 1
+        metrics = resource.get("metrics") if isinstance(resource.get("metrics"), dict) else {}
+        resource_states.update(_typed_state(metrics.get(name)) for name in identity_telemetry.RESOURCE_FIELDS)
+
+    expected_count = expected_episode_count
+    order_is_closed = (
+        isinstance(expected_component_order, list)
+        and observed_component_order == expected_component_order
+    )
+    cardinality_status = (
+        "rejected"
+        if selection_status != "admitted"
+        else "closed"
+        if isinstance(expected_count, int)
+        and not isinstance(expected_count, bool)
+        and expected_count >= 0
+        and expected_count == len(packets)
+        and not duplicate_or_invalid_route
+        and len(seen_components) == len(packets)
+        and order_is_closed
+        else "rejected"
+    )
+    eligible_count = (
+        packet_statuses.get("eligible_identity_packet", 0)
+        if cardinality_status == "closed"
+        else 0
+    )
+    if cardinality_status != "closed":
+        reasons["admission_cardinality_rejected"] += 1
+    return {
+        "schema_version": IDENTITY_EPISODE_COHORT_SCHEMA_VERSION,
+        "artifact_type": "identity_bound_episode_cohort",
+        "status": (
+            "rejected_selector_scope"
+            if selection_status == "rejected"
+            else "unknown_selector_scope"
+            if selection_status == "unknown"
+            else
+            "empty_episode_scope"
+            if not packets
+            else "eligible_identity_packets_observed"
+            if eligible_count
+            else "no_eligible_identity_packets"
+        ),
+        "selection_status": selection_status,
+        "episode_count": len(packets),
+        "admission_cardinality": {
+            "expected_episode_count": expected_count,
+            "observed_episode_count": len(packets),
+            "unique_component_count": len(seen_components),
+            "unique_episode_id_count": len(seen_episode_ids),
+            "declared_component_order": (
+                list(expected_component_order)
+                if isinstance(expected_component_order, list)
+                else None
+            ),
+            "observed_component_order": observed_component_order,
+            "status": cardinality_status,
+            "selection_status": selection_status,
+        },
+        "eligible_count": eligible_count,
+        "missing_count": packet_statuses.get("missing", 0),
+        "excluded_count": packet_statuses.get("excluded", 0),
+        "unknown_count": packet_statuses.get("unknown", 0),
+        "unobservable_count": packet_statuses.get("unobservable", 0),
+        "packet_status_counts": dict(sorted(packet_statuses.items())),
+        "receipt_status_counts": dict(sorted(receipt_statuses.items())),
+        "field_state_counts": {
+            "identity": dict(sorted(identity_states.items())),
+            "trajectory": dict(sorted(trajectory_states.items())),
+            "timing": dict(sorted(timing_states.items())),
+            "cache": dict(sorted(cache_states.items())),
+            "resource": dict(sorted(resource_states.items())),
+        },
+        "reason_counts": dict(sorted(reasons.items())),
+        "comparison_ready": False,
+        "comparison_status": "session_memory_admission_only_no_effect_or_verdict",
+        "effect": None,
+        "verdict": None,
+        "proof": False,
+        "acceptance": False,
+        "claim_ceiling": "episode_identity_and_observation_admission_only",
     }
 
 
@@ -963,9 +1524,14 @@ def bounded_projection_publish_identity(
 def bounded_component_source_identity(
     session_dir: Path,
     *,
+    owner_root_witness: identity_telemetry.OwnerRootWitness,
+    session_id: str,
     projection_publish: dict[str, Any],
     source: dict[str, Any],
     task_episode_generation: str,
+    expected_projection: Mapping[str, Any],
+    expected_task_episode_generation: str,
+    expected_generation_context: Mapping[str, Any],
 ) -> None:
     component_manifest_path = session_dir / "session-index-shards" / "manifest.json"
     component_manifest = read_json(component_manifest_path)
@@ -986,50 +1552,22 @@ def bounded_component_source_identity(
             raise BoundedPrefixError(f"bounded_prefix_task_episode_source_mismatch:{key}")
     if str(component_source.get("task_episode_generation_id") or "") != task_episode_generation:
         raise BoundedPrefixError("bounded_prefix_task_episode_generation_mismatch")
-    refs = (
-        component_manifest.get("components", {}).get("task_episodes")
-        if isinstance(component_manifest.get("components"), dict)
-        else None
-    )
-    if not isinstance(refs, list) or not refs:
-        raise BoundedPrefixError("bounded_prefix_task_episode_components_missing")
-    count = int_value(
-        (component_manifest.get("component_counts") or {}).get("task_episodes")
-        if isinstance(component_manifest.get("component_counts"), dict)
-        else None
-    )
-    if count is not None and count != len(refs):
-        raise BoundedPrefixError("bounded_prefix_task_episode_component_count_mismatch")
-    for entry in refs:
-        if not isinstance(entry, dict):
-            raise BoundedPrefixError("bounded_prefix_task_episode_component_entry_invalid")
-        ref = str(entry.get("ref") or "")
-        if not ref:
-            raise BoundedPrefixError("bounded_prefix_task_episode_component_ref_missing")
-        component_path = session_dir / ref
-        if not component_path.is_file():
-            raise BoundedPrefixError("bounded_prefix_task_episode_component_missing")
-        component = read_json(component_path)
-        if component.get("component") != "task_episodes":
-            raise BoundedPrefixError("bounded_prefix_task_episode_component_kind_mismatch")
-        identity = bounded_required_dict(component.get("source_identity"), "task_episode_component_identity")
-        if str(identity.get("task_episode_generation_id") or "") != task_episode_generation:
-            raise BoundedPrefixError("bounded_prefix_task_episode_component_generation_mismatch")
-        if int_value(identity.get("privacy_policy_version")) is None:
-            raise BoundedPrefixError("bounded_prefix_task_episode_component_privacy_identity_missing")
-        if int_value(identity.get("redaction_policy_version")) is None:
-            raise BoundedPrefixError("bounded_prefix_task_episode_component_redaction_identity_missing")
-        source_range = bounded_required_dict(identity.get("event_range"), "task_episode_component_event_range")
-        from_line = bounded_required_int(source_range.get("from_line"), "task_episode_component_event_range.from_line")
-        to_line = bounded_required_int(source_range.get("to_line"), "task_episode_component_event_range.to_line")
-        if from_line < 1 or to_line < from_line or to_line > source["raw_line_count"]:
-            raise BoundedPrefixError("bounded_prefix_task_episode_component_outside_prefix")
-        payload = bounded_required_dict(component.get("payload"), "task_episode_component_payload")
-        payload_range = event_range(payload)
-        if payload_range is None or payload_range[0] < 1 or payload_range[1] > source["raw_line_count"]:
-            raise BoundedPrefixError("bounded_prefix_task_episode_payload_outside_prefix")
-        for key in ("artifact_sha256", "payload_sha256"):
-            bounded_required_hex(entry.get(key), f"task_episode_component_entry.{key}")
+    try:
+        load_episode_records(
+            session_dir,
+            owner_root_witness=owner_root_witness,
+            session_id=session_id,
+            session_ref=identity_telemetry.public_session_ref(
+                session_id,
+                owner_root_witness=owner_root_witness,
+            ),
+            source_identity=source,
+            expected_projection=expected_projection,
+            expected_task_episode_generation=expected_task_episode_generation,
+            expected_generation_context=expected_generation_context,
+        )
+    except (ProfileError, identity_telemetry.TelemetryError) as exc:
+        raise BoundedPrefixError(f"bounded_prefix_owner_component_admission:{exc}") from exc
 
 
 def _optional_json(path: Path) -> dict[str, Any] | None:
@@ -1093,7 +1631,9 @@ def validate_bounded_prefix(
     selector: str,
     *,
     expected_pin: dict[str, Any] | None = None,
+    owner_root_witness: identity_telemetry.OwnerRootWitness | None = None,
 ) -> dict[str, Any]:
+    owner_root_witness = owner_root_witness or identity_telemetry._owner_root_witness_for_root(aoa_root)
     session_dir = select_session_dir(aoa_root, selector)
     manifest = read_json(session_dir / "session.manifest.json")
     index = read_json(session_dir / "session.index.json")
@@ -1101,19 +1641,37 @@ def validate_bounded_prefix(
     if not session_id or session_id != str(index.get("session_id") or ""):
         raise BoundedPrefixError("bounded_prefix_session_identity_mismatch")
     manifest_projection, projection, generation = bounded_projection_publish_identity(manifest, index)
+    try:
+        owner_context = _owner_current_context(manifest, index, projection["source"])
+    except ProfileError as exc:
+        raise BoundedPrefixError(f"bounded_prefix_owner_context:{exc}") from exc
+    if owner_context["projection"] != manifest_projection:
+        raise BoundedPrefixError("bounded_prefix_owner_projection_context_mismatch")
+    if owner_context["task_episode_generation"] != generation["task_episode_source"]:
+        raise BoundedPrefixError("bounded_prefix_owner_task_generation_mismatch")
     source = projection["source"]
     load_segment_events(
         session_dir,
         index,
+        owner_root_witness=owner_root_witness,
         expected_projection=manifest_projection,
         expected_segment_generation=generation["segment_index"],
         expected_line_count=source["raw_line_count"],
     )
     bounded_component_source_identity(
         session_dir,
+        owner_root_witness=owner_root_witness,
+        session_id=session_id,
         projection_publish=manifest_projection,
         source=source,
         task_episode_generation=generation["task_episode_source"],
+        expected_projection=owner_context["projection"],
+        expected_task_episode_generation=owner_context["task_episode_generation"],
+        expected_generation_context={
+            "task_episode_generation": generation["task_episode_source"],
+            "segment_generation": generation["segment_index"],
+            "session_generation": generation["session_index"],
+        },
     )
     observed_pin = {
         "raw_bytes": source["raw_bytes"],
@@ -1159,15 +1717,59 @@ def profile_session(
     *,
     max_episodes: int,
     session_label_override: str | None = None,
+    identity_source: dict[str, Any] | None = None,
+    identity_prefix_identity: str | None = None,
+    identity_publish_id: str | None = None,
+    identity_projection_status: str | None = None,
+    owner_root_witness: identity_telemetry.OwnerRootWitness | None = None,
 ) -> dict[str, Any]:
+    validate_max_episodes(max_episodes)
+    owner_root_witness = owner_root_witness or identity_telemetry._owner_root_witness_for_root(aoa_root)
     session_dir = select_session_dir(aoa_root, selector)
     manifest = read_json(session_dir / "session.manifest.json")
     index = read_json(session_dir / "session.index.json")
     session_label = session_label_override or str(manifest.get("session_label") or session_dir.name)
-    events_by_line = load_segment_events(session_dir, index)
-    episodes = load_episode_payloads(session_dir)
+    session_public_ref = identity_telemetry.public_session_ref(
+        session_label,
+        owner_root_witness=owner_root_witness,
+    )
     raw = manifest.get("raw") if isinstance(manifest.get("raw"), dict) else {}
     raw_line_count = int_value(raw.get("line_count"))
+    source_identity = {
+        key: raw.get(source_key)
+        for key, source_key in (
+            ("raw_sha256", "sha256"),
+            ("raw_bytes", "bytes"),
+            ("raw_line_count", "line_count"),
+        )
+        if raw.get(source_key) is not None
+    }
+    projection_source = identity_source if isinstance(identity_source, dict) else source_identity
+    session_id = str(manifest.get("session_id") or index.get("session_id") or "unknown")
+    owner_context = _owner_current_context(manifest, index, projection_source)
+    events_by_line = load_segment_events(
+        session_dir,
+        index,
+        owner_root_witness=owner_root_witness,
+        expected_projection=owner_context["projection"],
+        expected_segment_generation=owner_context["segment_generation"],
+        expected_line_count=int(projection_source["raw_line_count"]),
+    )
+    episode_records = load_episode_records(
+        session_dir,
+        owner_root_witness=owner_root_witness,
+        session_id=session_id,
+        session_ref=session_public_ref,
+        source_identity=projection_source,
+        expected_projection=owner_context["projection"],
+        expected_task_episode_generation=owner_context["task_episode_generation"],
+        expected_generation_context={
+            "task_episode_generation": owner_context["task_episode_generation"],
+            "segment_generation": owner_context["segment_generation"],
+            "session_generation": owner_context["session_generation"],
+        },
+    )
+    episodes = [record["payload"] for record in episode_records]
     raw_blocks_value = manifest.get("raw_blocks")
     if isinstance(raw_blocks_value, dict):
         raw_blocks = raw_blocks_value.get("blocks") if isinstance(raw_blocks_value.get("blocks"), list) else []
@@ -1181,8 +1783,10 @@ def profile_session(
         if isinstance(block, dict)
     )
     selected: list[dict[str, Any]] = []
+    selected_records: list[dict[str, Any]] = []
     skipped: Counter[str] = Counter()
-    for episode in episodes:
+    for record in episode_records:
+        episode = record["payload"]
         status = closed_episode_status(episode)
         if status != "closed":
             skipped[status] += 1
@@ -1203,10 +1807,43 @@ def profile_session(
                     session_label=session_label,
                     episode=episode,
                     events_by_line=events_by_line,
+                    owner_root_witness=owner_root_witness,
                 )
             )
+            selected_records.append(record)
         except ProfileError as exc:
             skipped[str(exc)] += 1
+
+    identity_packets: list[dict[str, Any]] = []
+    for episode_profile, component_record in zip(selected, selected_records):
+        owner_receipt, receipt_rejection, receipt_carrying_event_witness = episode_owner_receipt_with_event(
+            events_by_line,
+            episode_profile,
+        )
+        packet = identity_telemetry.project_identity_bound_episode_packet(
+            session_id=session_id,
+            session_ref=identity_telemetry.public_session_ref(
+                session_label,
+                owner_root_witness=owner_root_witness,
+            ),
+            source=projection_source,
+            prefix_identity=identity_prefix_identity,
+            publish_id=identity_publish_id,
+            projection_status=identity_projection_status or "bounded_readable_snapshot",
+            review_status=str(manifest.get("review_status") or "unknown"),
+            profile=episode_profile,
+            owner_receipt=owner_receipt,
+            receipt_rejection=receipt_rejection,
+            episode_binding=identity_episode_binding(
+                episode_profile,
+                session_id=session_id,
+                component_admission=component_record["component_admission"],
+            ),
+            component_admission=component_record["component_admission"],
+            receipt_carrying_event_witness=receipt_carrying_event_witness,
+        )
+        episode_profile["identity_bound_telemetry"] = packet
+        identity_packets.append(packet)
 
     stage_spans = aggregate_stage_buckets(selected)
     indexed_event_count = int_value(index.get("event_count"))
@@ -1222,10 +1859,17 @@ def profile_session(
         for episode in selected
         if episode.get("duration_seconds") is not None
     )
+    identity_cohort = identity_episode_cohort(
+        identity_packets,
+        expected_episode_count=len(episode_records),
+        expected_component_order=[
+            str(record["component_ref"])
+            for record in episode_records
+        ],
+    )
     return {
-        "session_label": session_label,
-        "session_ref": f"session:{session_label}",
-        "session_id": str(manifest.get("session_id") or index.get("session_id") or "unknown"),
+        "session_ref": session_public_ref,
+        "session_id": session_id,
         "archive_status": safe_text(manifest.get("archive_status") or index.get("archive_status")) or "unknown",
         "review_status": safe_text(manifest.get("review_status")) or "unknown",
         "scope_status": "usable_closed_episode_slice" if selected else "unknown",
@@ -1239,30 +1883,33 @@ def profile_session(
         "open_tail_excluded": block_statuses.get("open", 0) > 0,
         "raw_block_statuses": dict(sorted(block_statuses.items())) or None,
         "source_refs": {
-            "session_manifest": f"session:{session_label}#session.manifest.json",
-            "session_index": f"session:{session_label}#session.index.json",
+            "session_manifest": f"{session_public_ref}#session.manifest.json",
+            "session_index": f"{session_public_ref}#session.index.json",
             "raw_capture": "present" if raw_line_count is not None else "unknown",
         },
-        "source_identity": {
-            key: raw.get(source_key)
-            for key, source_key in (
-                ("raw_sha256", "sha256"),
-                ("raw_bytes", "bytes"),
-                ("raw_line_count", "line_count"),
-            )
-            if raw.get(source_key) is not None
-        },
+        "source_identity": source_identity,
         "coverage": {
             "indexed_event_count": indexed_event_count,
             "segment_event_count": len(events_by_line) or None,
             "raw_line_count": raw_line_count,
             "closed_episode_count": len(selected) or None,
+            "component_episode_count": len(episode_records),
+            "component_order": [
+                str(record["component_ref"])
+                for record in episode_records
+            ],
+            "component_cardinality": {
+                "manifest_entries": len(episode_records),
+                "selected_closed_episodes": len(selected),
+                "status": identity_cohort["admission_cardinality"]["status"],
+            },
             "closed_episode_duration_seconds": round(closed_duration, 6) if selected else None,
             "skipped_episode_counts": dict(sorted(skipped.items())) or None,
         },
         "stage_spans": stage_spans,
         "repeat_amplification": aggregate_repeats(selected),
         "episodes": selected,
+        "identity_bound_episode_cohort": identity_cohort,
         "unknown_reasons": [
             reason
             for reason, present in (
@@ -1285,12 +1932,15 @@ def build_bounded_report(
     owner_receipt: dict[str, Any] | None = None,
     owner_receipt_rejection: str | None = None,
 ) -> dict[str, Any]:
+    validate_max_episodes(max_episodes)
     if len(selectors) != 1:
         raise BoundedPrefixError("bounded_prefix_requires_one_session_selector")
+    owner_root_witness = identity_telemetry._owner_root_witness_for_root(aoa_root)
     scope = validate_bounded_prefix(
         aoa_root,
         selectors[0],
         expected_pin=expected_pin,
+        owner_root_witness=owner_root_witness,
     )
     session_id = scope["session_id"]
     tail_before = observe_bounded_tail(
@@ -1303,6 +1953,11 @@ def build_bounded_report(
         selectors[0],
         max_episodes=max_episodes,
         session_label_override=session_id,
+        identity_source=scope["source"],
+        identity_prefix_identity=scope["identity"],
+        identity_publish_id=f"sha256:{scope['projection']['publish_id']}",
+        identity_projection_status="stale-readable",
+        owner_root_witness=owner_root_witness,
     )
     tail_after = observe_bounded_tail(
         scope["session_dir"],
@@ -1328,7 +1983,10 @@ def build_bounded_report(
     measurement_scope = {
         "status": "stale-readable",
         "scope_currentness": "identity_bound_prefix_only",
-        "session_ref": f"session:{session_id}",
+        "session_ref": identity_telemetry.public_session_ref(
+            session_id,
+            owner_root_witness=owner_root_witness,
+        ),
         "prefix": {
             "identity": scope["identity"],
             "source": {
@@ -1387,7 +2045,10 @@ def build_bounded_report(
     }
     identity_bound_telemetry = identity_telemetry.project_identity_bound_packet(
         session_id=session_id,
-        session_ref=f"session:{session_id}",
+        session_ref=identity_telemetry.public_session_ref(
+            session_id,
+            owner_root_witness=owner_root_witness,
+        ),
         source=scope["source"],
         prefix_identity=scope["identity"],
         publish_id=f"sha256:{scope['projection']['publish_id']}",
@@ -1397,6 +2058,7 @@ def build_bounded_report(
         owner_receipt=owner_receipt,
         receipt_rejection=owner_receipt_rejection,
     )
+    identity_bound_episode_cohort = session_profile["identity_bound_episode_cohort"]
     return {
         "schema_version": BOUNDED_MEASUREMENT_SCHEMA_VERSION,
         "route": {
@@ -1408,13 +2070,17 @@ def build_bounded_report(
         },
         "corpus": {
             "selection_status": "one_explicit_session_selector",
-            "session_ref": f"session:{session_id}",
+            "session_ref": identity_telemetry.public_session_ref(
+                session_id,
+                owner_root_witness=owner_root_witness,
+            ),
             "scope": "closed_task_episodes_only; live/open tails are excluded",
         },
         "measurement_scope": measurement_scope,
         "session": session_profile,
         "aggregate": aggregate,
         "identity_bound_telemetry": identity_bound_telemetry,
+        "identity_bound_episode_cohort": identity_bound_episode_cohort,
         "stage_contract": {
             "stages": list(STAGES),
             **STAGE_CONTRACT,
@@ -1425,6 +2091,7 @@ def build_bounded_report(
             "supported_claims": [
                 "positive evidence from eligible closed episodes inside one exact stable prefix",
                 "identity-bound correlated structured call-to-result wall-clock spans",
+                "episode-level identity binding and explicit cohort eligibility states",
                 "explicit excluded-tail, unknown, and zero-result claim boundaries",
             ],
             "not_supported": [
@@ -1455,11 +2122,20 @@ def build_report(
     owner_receipt: dict[str, Any] | None = None,
     owner_receipt_rejection: str | None = None,
 ) -> dict[str, Any]:
+    validate_max_episodes(max_episodes)
+    owner_root_witness = identity_telemetry._owner_root_witness_for_root(aoa_root)
     sessions: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
     for selector in selectors:
         try:
-            sessions.append(profile_session(aoa_root, selector, max_episodes=max_episodes))
+            sessions.append(
+                profile_session(
+                    aoa_root,
+                    selector,
+                    max_episodes=max_episodes,
+                    owner_root_witness=owner_root_witness,
+                )
+            )
         except ProfileError as exc:
             errors.append({"selector": selector, "error": str(exc)})
 
@@ -1495,6 +2171,42 @@ def build_report(
                 receipt_rejection=rejection,
             )
         )
+    identity_packets = [
+        episode.get("identity_bound_telemetry")
+        for session in sessions
+        for episode in session.get("episodes", [])
+        if isinstance(episode, dict) and isinstance(episode.get("identity_bound_telemetry"), dict)
+    ]
+    public_selector_refs = [
+        str(session.get("session_ref"))
+        for session in sessions
+        if isinstance(session.get("session_ref"), str)
+    ]
+    public_failed_selectors = [
+        {
+            "selector_ref": identity_telemetry.public_session_ref(
+                str(error["selector"]),
+                owner_root_witness=owner_root_witness,
+            ),
+            "error": str(error["error"]).split(":", 1)[0],
+        }
+        for error in errors
+    ]
+    expected_episode_count = sum(
+        int(session.get("coverage", {}).get("component_episode_count") or len(session.get("episodes", [])))
+        for session in sessions
+        if isinstance(session, dict)
+    )
+    expected_component_order = [
+        str(component_ref)
+        for session in sessions
+        for component_ref in (
+            session.get("coverage", {}).get("component_order", [])
+            if isinstance(session.get("coverage", {}).get("component_order", []), list)
+            else []
+        )
+    ]
+    selection_status = "rejected" if errors or not selectors else "admitted"
     return {
         "schema_version": SCHEMA_VERSION,
         "profiler": {
@@ -1504,11 +2216,15 @@ def build_report(
             "source_surfaces": ["session.manifest.json", "session.index.json", "segment.index.json", "task_episode_components"],
         },
         "corpus": {
-            "selection_status": "bounded_explicit_session_selectors",
-            "selectors": selectors,
+            "selection_status": (
+                "rejected_selector_scope"
+                if selection_status == "rejected"
+                else "bounded_explicit_session_selectors"
+            ),
+            "selectors": public_selector_refs,
             "session_count": len(sessions) or None,
             "failed_selector_count": len(errors) or None,
-            "failed_selectors": errors or None,
+            "failed_selectors": public_failed_selectors or None,
             "scope": "closed_task_episodes_only; live/open session tails are excluded",
         },
         "stage_contract": {
@@ -1518,12 +2234,19 @@ def build_report(
         "sessions": sessions,
         "aggregate": aggregate,
         "identity_bound_telemetry": identity_bound_telemetry,
+        "identity_bound_episode_cohort": identity_episode_cohort(
+            identity_packets,
+            expected_episode_count=expected_episode_count,
+            expected_component_order=expected_component_order,
+            selection_status=selection_status,
+        ),
         "evaluator_input": {
             "method_id": PROFILER_VERSION,
             "comparison_posture": "data_and_support_basis_only",
             "supported_claims": [
                 "correlated structured call-to-result wall-clock spans",
                 "normalized operation repeat counts within a closed task episode",
+                "episode-level identity binding and explicit cohort eligibility states",
                 "explicit unknown or excluded coverage reasons",
             ],
             "not_supported": [

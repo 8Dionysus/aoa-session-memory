@@ -2,9 +2,11 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "AoA identity-bound session telemetry",
   "description": "Public-safe typed validation-owner receipts, session-memory packets, and admission-only pair results. This schema does not grant validation or evaluation authority.",
+  "$comment": "Schema validation is shape-only. It cannot compare sibling ranges, recompute payload/source identity, reread artifacts, prove manifest membership, or establish current generation context; every strict admission must pass the owner runtime validator.",
   "oneOf": [
     {"$ref": "#/$defs/ownerReceipt"},
     {"$ref": "#/$defs/packet"},
+    {"$ref": "#/$defs/episodeCohort"},
     {"$ref": "#/$defs/comparisonAdmission"}
   ],
   "$defs": {
@@ -35,6 +37,16 @@
         "raw_sha256": {"$ref": "#/$defs/field"},
         "raw_bytes": {"$ref": "#/$defs/field"},
         "raw_line_count": {"$ref": "#/$defs/field"}
+      },
+      "additionalProperties": false
+    },
+    "publicSourceIdentity": {
+      "type": "object",
+      "required": ["raw_sha256", "raw_bytes", "raw_line_count"],
+      "properties": {
+        "raw_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "raw_bytes": {"type": "integer", "minimum": 0},
+        "raw_line_count": {"type": "integer", "minimum": 1}
       },
       "additionalProperties": false
     },
@@ -240,12 +252,311 @@
       },
       "additionalProperties": false
     },
+    "episodeBinding": {
+      "type": "object",
+      "$comment": "Cross-field equality, ordered ranges, source bounds, and generated component/manifest membership are enforced by the mandatory owner validator; Draft 2020-12 cannot compare sibling numeric properties.",
+      "x-owner-validator": "scripts.identity_bound_session_telemetry.validate_episode_binding",
+      "x-owner-validator-required": true,
+      "required": [
+        "episode_id",
+        "episode_ref",
+        "episode_component_ref",
+        "session_id",
+        "session_ref",
+        "source",
+        "component_identity",
+        "manifest_admission",
+        "event_range",
+        "binding_status",
+        "owner_validation",
+        "portable_witness"
+      ],
+      "properties": {
+        "episode_id": {"type": "string", "minLength": 1},
+        "episode_ref": {"$ref": "#/$defs/ref"},
+        "episode_component_ref": {"$ref": "#/$defs/ref"},
+        "session_id": {"type": "string", "minLength": 1},
+        "session_ref": {"type": "string", "minLength": 1},
+        "source": {"$ref": "#/$defs/publicSourceIdentity"},
+        "component_identity": {"$ref": "#/$defs/episodeComponentIdentity"},
+        "manifest_admission": {"$ref": "#/$defs/manifestAdmission"},
+        "event_range": {
+          "type": "object",
+          "required": ["from_line", "to_line"],
+          "properties": {
+            "from_line": {"type": "integer", "minimum": 1},
+            "to_line": {"type": "integer", "minimum": 1}
+          },
+          "additionalProperties": false
+        },
+        "binding_status": {"const": "exact_episode_range"},
+        "owner_validation": {"$ref": "#/$defs/ownerValidation"},
+        "portable_witness": {"$ref": "#/$defs/episodeAdmissionWitness"}
+      },
+      "additionalProperties": false
+    },
+    "episodeComponentIdentity": {
+      "type": "object",
+      "required": [
+        "component",
+        "artifact_sha256",
+        "payload_sha256",
+        "task_episode_generation_id",
+        "episode_source_sha256",
+        "event_range",
+        "privacy_policy_version",
+        "redaction_policy_version"
+      ],
+      "properties": {
+        "component": {"const": "task_episodes"},
+        "artifact_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "payload_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "task_episode_generation_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "episode_source_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "event_range": {
+          "type": "object",
+          "required": ["from_line", "to_line"],
+          "properties": {
+            "from_line": {"type": "integer", "minimum": 1},
+            "to_line": {"type": "integer", "minimum": 1}
+          },
+          "additionalProperties": false
+        },
+        "privacy_policy_version": {"type": "integer", "minimum": 0},
+        "redaction_policy_version": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "manifestAdmission": {
+      "type": "object",
+      "required": ["manifest_ref", "manifest_sha256", "component_ref"],
+      "properties": {
+        "manifest_ref": {
+          "allOf": [
+            {"$ref": "#/$defs/ref"},
+            {"properties": {"kind": {"const": "task-episode-component-manifest"}}}
+          ]
+        },
+        "manifest_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "component_ref": {
+          "type": "string",
+          "pattern": "^session-index-shards/task-episodes/[^/]+\\.json$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ownerSourceEvidence": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "status",
+        "source_ref",
+        "artifact_sha256",
+        "event_sha256",
+        "facet_sha256",
+        "receipt_document_sha256",
+        "record_sha256"
+      ],
+      "properties": {
+        "schema_version": {"const": "owner_source_evidence_v1"},
+        "status": {"enum": ["persistent_artifact", "process_local"]},
+        "source_ref": {"type": "string", "minLength": 1},
+        "artifact_sha256": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+        "event_sha256": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+        "facet_sha256": {"type": ["string", "null"], "pattern": "^sha256:[a-f0-9]{64}$"},
+        "receipt_document_sha256": {"type": ["string", "null"], "pattern": "^sha256:[a-f0-9]{64}$"},
+        "manifest_sha256": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+        "component_ref": {"type": "string", "minLength": 1},
+        "component_artifact_sha256": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+        "component_payload_sha256": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+        "source_raw_sha256": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+        "source_raw_line_count": {"type": "integer", "minimum": 1},
+        "session_manifest_sha256": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+        "owner_context_sha256": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+        "owner_root_sha256": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+        "owner_epoch_sha256": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+        "membership_witness_sha256": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+        "event_range": {
+          "type": "object",
+          "required": ["from_line", "to_line"],
+          "properties": {
+            "from_line": {"type": "integer", "minimum": 1},
+            "to_line": {"type": "integer", "minimum": 1}
+          },
+          "additionalProperties": false
+        },
+        "record_sha256": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"}
+      },
+      "additionalProperties": false
+    },
+    "persistentOwnerSourceEvidence": {
+      "$comment": "A process-local witness is never sufficient for portable or strict admission.",
+      "allOf": [
+        {"$ref": "#/$defs/ownerSourceEvidence"},
+        {"required": ["owner_root_sha256", "owner_epoch_sha256", "membership_witness_sha256"]},
+        {"properties": {"status": {"const": "persistent_artifact"}}}
+      ]
+    },
+    "episodeAdmissionWitness": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "issuer",
+        "manifest_sha256",
+        "component_ref",
+        "component_artifact_sha256",
+        "component_payload_sha256",
+        "task_episode_generation_id",
+        "episode_source_sha256",
+        "source_raw_sha256",
+        "source_raw_line_count",
+        "event_range",
+        "binding_sha256",
+        "witness_sha256"
+      ],
+      "properties": {
+        "schema_version": {"const": "identity_bound_episode_admission_witness_v1"},
+        "issuer": {"const": "aoa-session-memory"},
+        "manifest_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "component_ref": {"type": "string", "pattern": "^session-index-shards/task-episodes/[^/]+\\.json$"},
+        "component_artifact_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "component_payload_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "task_episode_generation_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "episode_source_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "source_raw_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "source_raw_line_count": {"type": "integer", "minimum": 1},
+        "event_range": {
+          "type": "object",
+          "required": ["from_line", "to_line"],
+          "properties": {
+            "from_line": {"type": "integer", "minimum": 1},
+            "to_line": {"type": "integer", "minimum": 1}
+          },
+          "additionalProperties": false
+        },
+        "binding_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "witness_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+      },
+      "additionalProperties": false
+    },
+    "ownerValidation": {
+      "type": "object",
+      "required": ["profile", "status", "validator", "ordered_range"],
+      "properties": {
+        "profile": {"const": "identity_bound_episode_owner_validator_v1"},
+        "status": {"const": "validated"},
+        "validator": {"const": "scripts.identity_bound_session_telemetry.validate_episode_binding"},
+        "ordered_range": {"const": "checked"}
+      },
+      "additionalProperties": false
+    },
+    "publicReceiptBinding": {
+      "type": "object",
+      "required": ["session_id", "session_ref", "correlation_id", "source", "projection", "carrying_event", "owner_record"],
+      "properties": {
+        "session_id": {"type": "string", "minLength": 1},
+        "session_ref": {"type": "string", "minLength": 1},
+        "correlation_id": {"type": "string", "minLength": 1},
+        "source": {"$ref": "#/$defs/publicSourceIdentity"},
+        "projection": {
+          "type": "object",
+          "required": ["prefix_identity", "publish_id"],
+          "properties": {
+            "prefix_identity": {"type": ["string", "null"]},
+            "publish_id": {"type": ["string", "null"]}
+          },
+          "additionalProperties": false
+        },
+        "carrying_event": {
+          "anyOf": [
+            {
+              "type": "object",
+              "required": ["line", "event_id", "correlation_id"],
+              "properties": {
+                "line": {"type": "integer", "minimum": 1},
+                "event_id": {"type": "string", "minLength": 1},
+                "correlation_id": {"type": "string", "minLength": 1}
+              },
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "required": ["line", "event_id", "correlation_id", "receipt_id", "facet_sha256"],
+              "properties": {
+                "line": {"type": "integer", "minimum": 1},
+                "event_id": {"type": "string", "minLength": 1},
+                "correlation_id": {"type": "string", "minLength": 1},
+                "receipt_id": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+                "facet_sha256": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"}
+              },
+              "additionalProperties": false
+            },
+            {"type": "null"}
+          ]
+        },
+        "owner_record": {"$ref": "#/$defs/ownerSourceEvidence"}
+      },
+      "additionalProperties": false
+    },
+    "receiptProvenance": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "issuer",
+        "receipt_id",
+        "receipt_payload_sha256",
+        "receipt_document_sha256",
+        "facet_sha256",
+        "binding_sha256",
+        "projection_sha256",
+        "owner_record",
+        "chain_sha256"
+      ],
+      "properties": {
+        "schema_version": {"const": "owner_receipt_provenance_chain_v1"},
+        "issuer": {"type": "string", "minLength": 1},
+        "receipt_id": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+        "receipt_payload_sha256": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+        "receipt_document_sha256": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+        "facet_sha256": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+        "binding_sha256": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+        "projection_sha256": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+        "owner_record": {"$ref": "#/$defs/ownerSourceEvidence"},
+        "chain_sha256": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"}
+      },
+      "additionalProperties": false
+    },
+    "routeAdmission": {
+      "type": "object",
+      "required": ["schema_version", "route", "binding_sha256", "owner_validator", "owner_record", "route_sha256"],
+      "properties": {
+        "schema_version": {"const": "identity_bound_packet_route_admission_v1"},
+        "route": {"enum": ["generic", "episode_strict"]},
+        "binding_sha256": {"type": ["string", "null"], "pattern": "^sha256:[a-f0-9]{64}$"},
+        "owner_validator": {"type": ["string", "null"]},
+        "owner_record": {"anyOf": [{"$ref": "#/$defs/persistentOwnerSourceEvidence"}, {"type": "null"}]},
+        "route_sha256": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"}
+      },
+      "additionalProperties": false
+    },
     "method": {
       "type": "object",
       "required": ["status", "claim_ceiling"],
       "properties": {
         "status": {"type": "string", "minLength": 1},
         "receipt_id": {"type": ["string", "null"]},
+        "binding": {
+          "anyOf": [
+            {"$ref": "#/$defs/publicReceiptBinding"},
+            {"type": "null"}
+          ]
+        },
+        "receipt_provenance": {
+          "anyOf": [
+            {"$ref": "#/$defs/receiptProvenance"},
+            {"type": "null"}
+          ]
+        },
         "claim_ceiling": {"type": "string", "minLength": 1},
         "rejection": {"type": ["string", "null"]}
       },
@@ -255,7 +566,7 @@
       "type": "object",
       "required": ["status", "reasons", "effect_verdict", "proof", "acceptance"],
       "properties": {
-        "status": {"enum": ["eligible_identity_packet", "excluded", "unknown", "unobservable"]},
+        "status": {"enum": ["eligible_identity_packet", "missing", "excluded", "unknown", "unobservable"]},
         "reasons": {"type": "array", "items": {"type": "string"}},
         "effect_verdict": {"type": "null"},
         "proof": {"const": false},
@@ -263,8 +574,111 @@
       },
       "additionalProperties": false
     },
+    "stateCounts": {
+      "type": "object",
+      "additionalProperties": {"type": "integer", "minimum": 0}
+    },
+    "episodeCohort": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "artifact_type",
+        "status",
+        "selection_status",
+        "episode_count",
+        "admission_cardinality",
+        "eligible_count",
+        "missing_count",
+        "excluded_count",
+        "unknown_count",
+        "unobservable_count",
+        "packet_status_counts",
+        "receipt_status_counts",
+        "field_state_counts",
+        "reason_counts",
+        "comparison_ready",
+        "comparison_status",
+        "effect",
+        "verdict",
+        "proof",
+        "acceptance",
+        "claim_ceiling"
+      ],
+      "properties": {
+        "schema_version": {"const": "identity_bound_episode_cohort_v1"},
+        "artifact_type": {"const": "identity_bound_episode_cohort"},
+        "status": {"enum": ["empty_episode_scope", "eligible_identity_packets_observed", "no_eligible_identity_packets", "rejected_selector_scope", "unknown_selector_scope"]},
+        "selection_status": {"enum": ["admitted", "rejected", "unknown"]},
+        "episode_count": {"type": "integer", "minimum": 0},
+        "admission_cardinality": {
+          "type": "object",
+          "required": ["expected_episode_count", "observed_episode_count", "unique_component_count", "unique_episode_id_count", "declared_component_order", "observed_component_order", "status", "selection_status"],
+          "properties": {
+            "expected_episode_count": {"type": ["integer", "null"], "minimum": 0},
+            "observed_episode_count": {"type": "integer", "minimum": 0},
+            "unique_component_count": {"type": "integer", "minimum": 0},
+            "unique_episode_id_count": {"type": "integer", "minimum": 0},
+            "declared_component_order": {"type": ["array", "null"], "items": {"type": "string"}},
+            "observed_component_order": {"type": "array", "items": {"type": "string"}},
+            "status": {"enum": ["closed", "rejected"]},
+            "selection_status": {"enum": ["admitted", "rejected", "unknown"]}
+          },
+          "additionalProperties": false
+        },
+        "eligible_count": {"type": "integer", "minimum": 0},
+        "missing_count": {"type": "integer", "minimum": 0},
+        "excluded_count": {"type": "integer", "minimum": 0},
+        "unknown_count": {"type": "integer", "minimum": 0},
+        "unobservable_count": {"type": "integer", "minimum": 0},
+        "packet_status_counts": {"$ref": "#/$defs/stateCounts"},
+        "receipt_status_counts": {"$ref": "#/$defs/stateCounts"},
+        "field_state_counts": {
+          "type": "object",
+          "required": ["identity", "trajectory", "timing", "cache", "resource"],
+          "properties": {
+            "identity": {"$ref": "#/$defs/stateCounts"},
+            "trajectory": {"$ref": "#/$defs/stateCounts"},
+            "timing": {"$ref": "#/$defs/stateCounts"},
+            "cache": {"$ref": "#/$defs/stateCounts"},
+            "resource": {"$ref": "#/$defs/stateCounts"}
+          },
+          "additionalProperties": false
+        },
+        "reason_counts": {"$ref": "#/$defs/stateCounts"},
+        "comparison_ready": {"const": false},
+        "comparison_status": {"const": "session_memory_admission_only_no_effect_or_verdict"},
+        "effect": {"type": "null"},
+        "verdict": {"type": "null"},
+        "proof": {"const": false},
+        "acceptance": {"const": false},
+        "claim_ceiling": {"const": "episode_identity_and_observation_admission_only"}
+      },
+      "additionalProperties": false
+    },
     "packet": {
       "type": "object",
+      "allOf": [
+        {
+          "if": {
+            "required": ["artifact_type"],
+            "properties": {"artifact_type": {"const": "identity_bound_episode_session_telemetry"}}
+          },
+          "then": {
+            "required": ["episode_binding"],
+            "properties": {"schema_version": {"const": "identity_bound_episode_session_telemetry_v1"}}
+          }
+        },
+        {
+          "if": {
+            "required": ["schema_version"],
+            "properties": {"schema_version": {"const": "identity_bound_episode_session_telemetry_v1"}}
+          },
+          "then": {
+            "required": ["episode_binding"],
+            "properties": {"artifact_type": {"const": "identity_bound_episode_session_telemetry"}}
+          }
+        }
+      ],
       "required": [
         "schema_version",
         "artifact_type",
@@ -282,13 +696,15 @@
         "eligibility",
         "authority",
         "integrity",
+        "route_admission",
         "packet_id"
       ],
       "properties": {
-        "schema_version": {"const": "identity_bound_session_telemetry_v1"},
-        "artifact_type": {"const": "identity_bound_session_telemetry"},
+        "schema_version": {"enum": ["identity_bound_session_telemetry_v1", "identity_bound_episode_session_telemetry_v1"]},
+        "artifact_type": {"enum": ["identity_bound_session_telemetry", "identity_bound_episode_session_telemetry"]},
         "producer": {"$ref": "#/$defs/producer"},
         "scope": {"$ref": "#/$defs/scope"},
+        "episode_binding": {"$ref": "#/$defs/episodeBinding"},
         "identity": {"$ref": "#/$defs/identity"},
         "trajectory": {"$ref": "#/$defs/trajectory"},
         "timing": {"$ref": "#/$defs/timing"},
@@ -323,29 +739,86 @@
         },
         "integrity": {
           "type": "object",
-          "required": ["status", "receipt_id", "projection_binding"],
+          "required": ["status", "receipt_id", "projection_binding", "route_floor"],
           "properties": {
             "status": {"const": "verified"},
             "receipt_id": {"type": ["string", "null"], "pattern": "^sha256:[a-f0-9]{64}$"},
-            "projection_binding": {"const": "exact_session_projection_context"}
+            "projection_binding": {"const": "exact_session_projection_context"},
+            "route_floor": {"enum": ["generic", "episode_strict"]}
           },
           "additionalProperties": false
         },
+        "route_admission": {"$ref": "#/$defs/routeAdmission"},
         "packet_id": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"}
       },
       "additionalProperties": false
     },
     "comparisonAdmission": {
       "type": "object",
-      "required": ["schema_version", "status", "eligible", "reasons", "effect", "verdict", "authority"],
+      "required": ["schema_version", "status", "eligible", "reasons", "comparison_contract", "effect", "verdict", "proof", "acceptance", "authority"],
       "properties": {
         "schema_version": {"const": "identity_bound_session_comparison_admission_v1"},
         "status": {"enum": ["matched_identity_bound_pair", "excluded_identity_bound_pair"]},
         "eligible": {"type": "boolean"},
         "reasons": {"type": "array", "items": {"type": "string"}},
+        "comparison_contract": {
+          "anyOf": [
+            {"$ref": "#/$defs/comparisonContract"},
+            {"type": "null"}
+          ]
+        },
         "effect": {"type": "null"},
         "verdict": {"type": "null"},
+        "proof": {"const": false},
+        "acceptance": {"const": false},
         "authority": {"const": "session-memory-admission-only; validation-owner-and-eval-verdicts-external"}
+      },
+      "additionalProperties": false
+    },
+    "comparisonContract": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "design",
+        "left_role",
+        "right_role",
+        "required_equal_identity_fields",
+        "allowed_identity_differences",
+        "required_equal_scope_fields",
+        "allowed_scope_differences",
+        "equality_anchors",
+        "role_binding",
+        "claim_ceiling"
+      ],
+      "properties": {
+        "schema_version": {"const": "identity_bound_cohort_comparison_v1"},
+        "design": {"enum": ["paired", "before_after", "treatment_control"]},
+        "left_role": {"type": "string", "minLength": 1},
+        "right_role": {"type": "string", "minLength": 1},
+        "required_equal_identity_fields": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+        "allowed_identity_differences": {"type": "array", "items": {"type": "string"}},
+        "required_equal_scope_fields": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+        "allowed_scope_differences": {"type": "array", "items": {"type": "string"}},
+        "equality_anchors": {
+          "type": "object",
+          "required": ["identity", "scope"],
+          "properties": {
+            "identity": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+            "scope": {"type": "array", "items": {"type": "string"}, "minItems": 1}
+          },
+          "additionalProperties": false
+        },
+        "role_binding": {
+          "type": "object",
+          "required": ["field", "left_value", "right_value"],
+          "properties": {
+            "field": {"const": "route_or_treatment_identity"},
+            "left_value": {"type": "string", "minLength": 1},
+            "right_value": {"type": "string", "minLength": 1}
+          },
+          "additionalProperties": false
+        },
+        "claim_ceiling": {"const": "admission_only_no_effect_or_verdict"}
       },
       "additionalProperties": false
     }
