@@ -1035,21 +1035,22 @@ when its declared and actual SHA-256 both exactly match the staged raw; the
 published last-good projection remains untouched.
 
 Due retry items are ordered by a versioned profile-aware dispatch deadline,
-not by retry-ready time alone. A persisted current-epoch freshness obligation
-from capture-watch receives the first bounded selection slot; the dispatcher
-revalidates its exact capture identity under the queue lock before incrementing
-`attempts_started` or setting `in_flight`. Short hot and catch-up wait targets
-bound urgent latency. Among the remaining historical debt, once a backlog or
-deep target is breached, one earliest breached heavy item receives the next
-selection slot, after which ordinary deadline order continues. This preserves
-both current-epoch priority and heavy-work aging without making either a
-semantic freshness claim. It bounds queue selection only when the dispatcher
-receives execution opportunities and does not invent host capacity or semantic
-progress. Automatic profiles also use a cooperative work budget distinct from
-the longer host launcher timeout; explicit overrides remain visible. Queue and
-status packets expose the policy version, priority hint, order, deadlines,
-breaches, fairness reservation, and selected item. These scheduling signals do
-not make a projection current.
+not by retry-ready time alone. Persisted current-epoch freshness obligations
+from capture-watch receive the first bounded selection slots; the dispatcher
+revalidates the exact capture identity under the queue lock before incrementing
+`attempts_started` or setting `in_flight`. For any bounded batch larger than
+one, the final slot is reserved for one earliest breached historical backlog or
+deep item, so an overloaded current-epoch queue cannot consume every
+opportunity. Short hot and catch-up wait targets bound urgent latency. The
+remaining historical debt follows ordinary deadline order. This preserves both
+current-epoch priority and heavy-work aging without making either a semantic
+freshness claim. It bounds queue selection only when the dispatcher receives
+execution opportunities and does not invent host capacity or semantic progress.
+Automatic profiles also use a cooperative work budget distinct from the longer
+host launcher timeout; explicit overrides remain visible. Queue and status
+packets expose the policy version, priority hint, order, deadlines, breaches,
+fairness reservation, and selected item. These scheduling signals do not make a
+projection current.
 
 The host launcher timeout is a hard runtime envelope, not an alternate work
 budget. For automatic profiles it is the smaller of the profile's absolute

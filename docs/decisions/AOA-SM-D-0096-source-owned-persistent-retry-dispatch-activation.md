@@ -63,12 +63,14 @@ enable, start, reload, or trust systemd.
 
 Capture-watch may mark a freshness obligation with
 `current_epoch_priority=true` as a persisted scheduling hint. The selector
-places such due obligations in the first bounded selection slots. It then
-applies the existing aged-heavy reservation and profile deadline order to the
-remaining historical debt. Before `attempts_started` or `in_flight`, the
-dispatcher revalidates the exact capture identity under the persistent queue
-lock; an unresolved or stale identity still fails closed. The hint is not a
-freshness proof and does not perform capture, discovery, or projection work.
+places such due obligations in the first bounded selection slots. For any
+bounded batch larger than one, the final slot is reserved for one earliest
+breached historical backlog or deep item, so current-epoch debt cannot consume
+every opportunity. The remaining historical debt follows the existing profile
+deadline order. Before `attempts_started` or `in_flight`, the dispatcher
+revalidates the exact capture identity under the persistent queue lock; an
+unresolved or stale identity still fails closed. The hint is not a freshness
+proof and does not perform capture, discovery, or projection work.
 
 The existing profile-specific systemd units remain outside this source-owned
 automatic topology. A runtime owner may leave already-disabled legacy files in
@@ -92,7 +94,8 @@ The current-epoch hint is derived only from the bounded capture-watch route.
 It improves selection without reading raw capture or global state in the
 selector. The claim-time identity revalidation prevents a stale hint from
 launching old projection work. Historical heavy fairness remains visible and
-bounded after the current-epoch slots.
+bounded in every multi-slot dispatch batch, even when current-epoch work is
+backlogged.
 
 ## Consequences
 
@@ -101,6 +104,7 @@ bounded after the current-epoch slots.
 - Positive: capture remains lightweight, and the retry child still passes
   resource admission, maintenance locking, and heavy-lane exclusion.
 - Positive: current-epoch freshness is selected ahead of historical debt while
+  every multi-slot batch still reserves one historical heavy opportunity, and
   retry attempts and stale-identity refusal remain restart-safe.
 - Tradeoff: a rendered unit is still only source/install evidence until a
   runtime owner activates and observes it; scheduled dispatch is not semantic

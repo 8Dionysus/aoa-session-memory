@@ -60732,6 +60732,46 @@ def test_auto_maintenance_retry_current_epoch_priority_precedes_historical_debt(
     assert ordered[1]["aged_heavy_fairness_reserved"] is True
 
 
+def test_auto_maintenance_retry_bounded_batch_reserves_historical_heavy_slot() -> None:
+    current_options = {
+        "persistent_obligation": True,
+        "obligation_kind": module.SESSION_PROJECTION_FRESHNESS_OBLIGATION_KIND,
+        "current_epoch_priority": True,
+    }
+    items = {
+        f"backlog:current-{index}": {
+            "profile": "backlog",
+            "target": f"current-{index}",
+            "next_attempt_epoch": 0.0,
+            "in_flight": False,
+            "options": current_options,
+        }
+        for index in range(5)
+    }
+    items["deep:historical"] = {
+        "profile": "deep",
+        "target": "historical-heavy",
+        "next_attempt_epoch": 0.0,
+        "in_flight": False,
+        "options": {},
+    }
+
+    ordered = module.auto_maintenance_retry_ordered_due_items(
+        items,
+        now_epoch=4_000.0,
+        selection_limit=4,
+    )
+
+    assert [row["queue_key"] for row in ordered[:4]] == [
+        "backlog:current-0",
+        "backlog:current-1",
+        "backlog:current-2",
+        "deep:historical",
+    ]
+    assert ordered[3]["aged_heavy_fairness_reserved"] is True
+    assert ordered[3]["current_epoch_priority"] is False
+
+
 def test_graph_maintenance_compact_stdout_keeps_report_marker_in_bounded_tail(tmp_path: Path) -> None:
     aoa_root = tmp_path / ".aoa"
     diagnostics_dir = aoa_root / "diagnostics"
@@ -61634,7 +61674,7 @@ def test_auto_maintenance_retry_dispatch_uses_profile_deadlines_with_aging(
     compact = module.compact_maintenance_status_payload(
         {"automatic_retry": initial}
     )
-    assert compact["automatic_retry"]["dispatch_policy"]["version"] == 4
+    assert compact["automatic_retry"]["dispatch_policy"]["version"] == 5
     assert compact["automatic_retry"]["dispatch_order_due_keys"] == [
         "catchup:all",
         "backlog:all",
@@ -61648,7 +61688,7 @@ def test_auto_maintenance_retry_dispatch_uses_profile_deadlines_with_aging(
         limit=1,
         now_epoch=now_epoch,
     )
-    assert plan["dispatch_policy"]["version"] == 4
+    assert plan["dispatch_policy"]["version"] == 5
     assert plan["planned_queue_keys"] == ["catchup:all"]
     assert plan["planned_items"][0]["dispatch_deadline_epoch"] == 2_295.0
 
@@ -61722,7 +61762,7 @@ def test_auto_maintenance_retry_fairness_lab_bounds_aged_heavy_dispatch_under_ho
     }
     backlog = dispatched_by_key["backlog:all"]
     deep = dispatched_by_key["deep:all"]
-    assert report["dispatch_policy"]["version"] == 4
+    assert report["dispatch_policy"]["version"] == 5
     assert backlog["wait_seconds"] == 1_200.0
     assert backlog["aged_heavy_fairness_reserved"] is True
     assert deep["wait_seconds"] == 3_600.0

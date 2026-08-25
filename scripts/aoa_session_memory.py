@@ -1835,7 +1835,7 @@ AUTO_MAINTENANCE_RETRY_POLICY = {
     "backlog": {"base_delay_seconds": 300, "max_delay_seconds": 3600, "max_attempts": 4},
     "deep": {"base_delay_seconds": 900, "max_delay_seconds": 7200, "max_attempts": 3},
 }
-AUTO_MAINTENANCE_RETRY_DISPATCH_POLICY_VERSION = 4
+AUTO_MAINTENANCE_RETRY_DISPATCH_POLICY_VERSION = 5
 AUTO_MAINTENANCE_RETRY_DISPATCH_WAIT_TARGET_SECONDS = {
     "hot": 0,
     "catchup": 300,
@@ -65877,10 +65877,12 @@ def auto_maintenance_retry_dispatch_policy() -> dict[str, Any]:
         ),
         "fairness_law": (
             "a persisted current-epoch freshness obligation receives the "
-            "first bounded selection slot; hot and catch-up work receive "
-            "shorter dispatch targets; backlog and deep work receive one "
-            "explicit aged-heavy reservation as soon as a target deadline "
-            "passes, even under an overloaded short-work queue"
+            "first bounded selection slots; for a batch larger than one, "
+            "one final bounded slot is reserved for aged historical heavy "
+            "work; hot and catch-up work receive shorter dispatch targets; "
+            "backlog and deep work receive that reservation as soon as a "
+            "target deadline passes, even under an overloaded short-work "
+            "queue"
         ),
         "current_epoch_priority_boundary": (
             "capture-watch marks a current-epoch scheduler hint; the "
@@ -65900,6 +65902,7 @@ def auto_maintenance_retry_ordered_due_items(
     items: dict[str, Any],
     *,
     now_epoch: float,
+    selection_limit: int | None = None,
 ) -> list[dict[str, Any]]:
     effective_now = float(now_epoch)
     rows: list[dict[str, Any]] = []
@@ -65976,18 +65979,27 @@ def auto_maintenance_retry_ordered_due_items(
             ),
         )
         reserved_key = str(reserved["queue_key"])
+        current_rows = [
+            row for row in ordered if row["current_epoch_priority"]
+        ]
+        non_current_rows = [
+            row for row in ordered if not row["current_epoch_priority"]
+        ]
+        if selection_limit is not None and int_value(selection_limit) > 1:
+            current_quota = max(0, int_value(selection_limit) - 1)
+            current_prefix = current_rows[:current_quota]
+            current_suffix = current_rows[current_quota:]
+        else:
+            current_prefix = current_rows
+            current_suffix = []
         ordered = [
-            *[
-                row
-                for row in ordered
-                if row["current_epoch_priority"]
-            ],
+            *current_prefix,
             reserved,
+            *current_suffix,
             *[
                 row
-                for row in ordered
+                for row in non_current_rows
                 if str(row["queue_key"]) != reserved_key
-                and not row["current_epoch_priority"]
             ],
         ]
     for rank, row in enumerate(ordered, start=1):
@@ -66187,12 +66199,14 @@ def auto_maintenance_retry_queue_status_from_payload(
     payload: dict[str, Any],
     *,
     now_epoch: float | None = None,
+    selection_limit: int | None = None,
 ) -> dict[str, Any]:
     effective_now = time.time() if now_epoch is None else float(now_epoch)
     items = payload.get("items") if isinstance(payload.get("items"), dict) else {}
     ordered_due_items = auto_maintenance_retry_ordered_due_items(
         items,
         now_epoch=effective_now,
+        selection_limit=selection_limit,
     )
     due_keys = [str(item["queue_key"]) for item in ordered_due_items]
     in_flight_keys = sorted(
@@ -66269,11 +66283,17 @@ def auto_maintenance_retry_queue_status_from_payload(
     }
 
 
-def auto_maintenance_retry_queue_status(aoa_root: Path, *, now_epoch: float | None = None) -> dict[str, Any]:
+def auto_maintenance_retry_queue_status(
+    aoa_root: Path,
+    *,
+    now_epoch: float | None = None,
+    selection_limit: int | None = None,
+) -> dict[str, Any]:
     return auto_maintenance_retry_queue_status_from_payload(
         aoa_root,
         auto_maintenance_retry_queue_payload(aoa_root),
         now_epoch=now_epoch,
+        selection_limit=selection_limit,
     )
 
 
@@ -67517,8 +67537,12 @@ def auto_maintenance_retry_dispatch(
 ) -> dict[str, Any]:
     effective_now = time.time() if now_epoch is None else float(now_epoch)
     dispatch_started_epoch = effective_now
-    initial = auto_maintenance_retry_queue_status(aoa_root, now_epoch=effective_now)
     bounded_limit = max(0, int_value(limit, 1))
+    initial = auto_maintenance_retry_queue_status(
+        aoa_root,
+        now_epoch=effective_now,
+        selection_limit=bounded_limit,
+    )
     base_payload: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "auto_maintenance_retry_dispatch",
@@ -67555,7 +67579,11 @@ def auto_maintenance_retry_dispatch(
             fcntl.flock(worker_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             base_payload["status"] = "worker_already_running"
-            base_payload["queue_after"] = auto_maintenance_retry_queue_status(aoa_root, now_epoch=effective_now)
+            base_payload["queue_after"] = auto_maintenance_retry_queue_status(
+                aoa_root,
+                now_epoch=effective_now,
+                selection_limit=bounded_limit,
+            )
             return base_payload
 
         recovered_once = False
@@ -67586,6 +67614,7 @@ def auto_maintenance_retry_dispatch(
                 due = auto_maintenance_retry_ordered_due_items(
                     items,
                     now_epoch=effective_now,
+                    selection_limit=bounded_limit,
                 )
                 if not due:
                     return None, changed
@@ -67640,6 +67669,7 @@ def auto_maintenance_retry_dispatch(
                     due = auto_maintenance_retry_ordered_due_items(
                         items,
                         now_epoch=effective_now,
+                        selection_limit=bounded_limit,
                     )
                     if not due:
                         return None, changed
@@ -68161,7 +68191,11 @@ def auto_maintenance_retry_dispatch(
             effective_now = attempt_finished_epoch
         fcntl.flock(worker_handle, fcntl.LOCK_UN)
 
-    queue_after = auto_maintenance_retry_queue_status(aoa_root, now_epoch=effective_now)
+    queue_after = auto_maintenance_retry_queue_status(
+        aoa_root,
+        now_epoch=effective_now,
+        selection_limit=bounded_limit,
+    )
     base_payload.update(
         {
             "status": "processed" if results else "no_due_jobs",
