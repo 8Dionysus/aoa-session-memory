@@ -1036,21 +1036,27 @@ published last-good projection remains untouched.
 
 Due retry items are ordered by a versioned profile-aware dispatch deadline,
 not by retry-ready time alone. Persisted current-epoch freshness obligations
-from capture-watch receive the first bounded selection slots; the dispatcher
+from capture-watch receive the first practical selection slots; the dispatcher
 revalidates the exact capture identity under the queue lock before incrementing
-`attempts_started` or setting `in_flight`. For any bounded batch larger than
-one, the final slot is reserved for one earliest breached historical backlog or
-deep item, so an overloaded current-epoch queue cannot consume every
-opportunity. Short hot and catch-up wait targets bound urgent latency. The
-remaining historical debt follows ordinary deadline order. This preserves both
-current-epoch priority and heavy-work aging without making either a semantic
-freshness claim. It bounds queue selection only when the dispatcher receives
-execution opportunities and does not invent host capacity or semantic progress.
-Automatic profiles also use a cooperative work budget distinct from the longer
-host launcher timeout; explicit overrides remain visible. Queue and status
-packets expose the policy version, priority hint, order, deadlines, breaches,
-fairness reservation, and selected item. These scheduling signals do not make a
-projection current.
+`attempts_started` or setting `in_flight`. A candidate whose identity fails
+closed is an admission refusal, not a practical slot: the dispatcher records
+the refusal, excludes that queue key only for the current bounded invocation,
+and continues through the same deterministic order. This lets an actionable
+true-current obligation reach a practical slot without weakening identity
+admission or changing the refused item's retry state. For any bounded batch
+larger than one, the final practical slot is reserved for one earliest breached
+historical backlog or deep item, so an overloaded current-epoch queue cannot
+consume every opportunity. The reservation is recomputed over the remaining
+eligible rows after a fail-closed refusal. Short hot and catch-up wait targets
+bound urgent latency. The remaining historical debt follows ordinary deadline
+order. This preserves both current-epoch priority and heavy-work aging without
+making either a semantic freshness claim. The launch cap remains bounded by
+the dispatcher limit; candidate examination of fail-closed refusals does not
+claim host capacity or semantic progress. Automatic profiles also use a
+cooperative work budget distinct from the longer host launcher timeout;
+explicit overrides remain visible. Queue and status packets expose the policy
+version, priority hint, order, deadlines, breaches, fairness reservation, and
+selected item. These scheduling signals do not make a projection current.
 
 The host launcher timeout is a hard runtime envelope, not an alternate work
 budget. For automatic profiles it is the smaller of the profile's absolute

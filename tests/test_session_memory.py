@@ -60772,6 +60772,272 @@ def test_auto_maintenance_retry_bounded_batch_reserves_historical_heavy_slot() -
     assert ordered[3]["current_epoch_priority"] is False
 
 
+@pytest.mark.parametrize("selection_limit", [0, 1, 2, 4])
+def test_auto_maintenance_retry_selection_boundaries_are_stable(
+    selection_limit: int,
+) -> None:
+    current_options = {
+        "persistent_obligation": True,
+        "obligation_kind": module.SESSION_PROJECTION_FRESHNESS_OBLIGATION_KIND,
+        "current_epoch_priority": True,
+    }
+    items = {
+        f"backlog:current-{index}": {
+            "profile": "backlog",
+            "target": f"current-{index}",
+            "next_attempt_epoch": 0.0,
+            "in_flight": False,
+            "options": current_options,
+        }
+        for index in range(2)
+    }
+    items["deep:historical"] = {
+        "profile": "deep",
+        "target": "historical-heavy",
+        "next_attempt_epoch": 0.0,
+        "in_flight": False,
+        "options": {},
+    }
+
+    first = module.auto_maintenance_retry_ordered_due_items(
+        items,
+        now_epoch=4_000.0,
+        selection_limit=selection_limit,
+    )
+    repeated = module.auto_maintenance_retry_ordered_due_items(
+        items,
+        now_epoch=4_000.0,
+        selection_limit=selection_limit,
+    )
+
+    assert [item["queue_key"] for item in first] == [
+        item["queue_key"] for item in repeated
+    ]
+    assert [item["queue_key"] for item in first[:selection_limit]] == (
+        []
+        if selection_limit == 0
+        else ["backlog:current-0"]
+        if selection_limit == 1
+        else ["backlog:current-0", "deep:historical"]
+        if selection_limit == 2
+        else [
+            "backlog:current-0",
+            "backlog:current-1",
+            "deep:historical",
+        ]
+    )
+
+
+def test_auto_maintenance_retry_skips_unactionable_current_without_consuming_slots(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    now_epoch = 4_000.0
+    current_count = 441
+    blocked_count = current_count - 1
+
+    def current_item(target: str) -> dict[str, Any]:
+        return {
+            "queue_key": f"backlog:{target}",
+            "profile": "backlog",
+            "target": target,
+            "status": "pending",
+            "in_flight": False,
+            "attempts_started": 0,
+            "max_attempts": 4,
+            "occurrence_count": 1,
+            "base_delay_seconds": 300,
+            "max_delay_seconds": 3_600,
+            "next_attempt_epoch": 0.0,
+            "next_attempt_at": module.auto_maintenance_retry_iso(0.0),
+            "options": {
+                "persistent_obligation": True,
+                "obligation_kind": (
+                    module.SESSION_PROJECTION_FRESHNESS_OBLIGATION_KIND
+                ),
+                "current_epoch_priority": True,
+                "session_id": target,
+                "session_dir": str(aoa_root / "sessions" / target),
+                "transcript_path": str(tmp_path / f"{target}.jsonl"),
+                "capture_identity_contract": (
+                    module.SESSION_CAPTURE_RETRY_IDENTITY_CONTRACT
+                ),
+                "required_capture_epoch_id": f"epoch-{target}",
+                "required_capture_epoch_index": 0,
+                "required_capture_bytes": 1,
+                "required_capture_sha256": f"sha-{target}",
+                "required_capture_chain_sha256": f"chain-{target}",
+                "required_capture_ref": f"raw-ledger:epoch-{target}:chain-{target}",
+                "required_capture_stable": True,
+                "required_stable_projection": True,
+                "required_search_consumer": True,
+            },
+        }
+
+    items = {
+        f"backlog:current-{index:03d}": current_item(
+            f"current-{index:03d}"
+        )
+        for index in range(blocked_count)
+    }
+    actionable_target = "current-440"
+    items[f"backlog:{actionable_target}"] = current_item(actionable_target)
+    for profile, target in (
+        ("backlog", "historical-aged"),
+        ("deep", "historical-heavy"),
+        ("backlog", "historical-later"),
+    ):
+        queue_key = f"{profile}:{target}"
+        items[queue_key] = {
+            "queue_key": queue_key,
+            "profile": profile,
+            "target": target,
+            "status": "pending",
+            "in_flight": False,
+            "attempts_started": 0,
+            "max_attempts": 4,
+            "occurrence_count": 1,
+            "base_delay_seconds": 300,
+            "max_delay_seconds": 3_600,
+            "next_attempt_epoch": 0.0,
+            "next_attempt_at": module.auto_maintenance_retry_iso(0.0),
+            "options": {},
+        }
+    module.write_auto_maintenance_retry_queue(
+        aoa_root,
+        {"items": items, "history": []},
+        now_epoch=now_epoch,
+    )
+
+    baseline = module.auto_maintenance_retry_queue_status(
+        aoa_root,
+        now_epoch=now_epoch,
+        selection_limit=4,
+    )
+    baseline_target = next(
+        item
+        for item in baseline["due_items"]
+        if item["queue_key"] == f"backlog:{actionable_target}"
+    )
+    assert baseline_target["dispatch_rank"] == 442
+    assert [item["queue_key"] for item in baseline["due_items"][:4]] == [
+        "backlog:current-000",
+        "backlog:current-001",
+        "backlog:current-002",
+        "backlog:historical-aged",
+    ]
+
+    def reconcile(**kwargs: Any) -> tuple[dict[str, Any], bool]:
+        session_id = str(kwargs["session_id"])
+        if session_id != actionable_target:
+            return (
+                {
+                    "status": "identity_reconciliation_unresolved",
+                    "diagnostic": (
+                        module.SESSION_CAPTURE_RETRY_IDENTITY_RECONCILIATION_DIAGNOSTIC
+                    ),
+                    "reason": "synthetic_non_actionable_identity",
+                    "session_id": session_id,
+                    "changed": False,
+                    "persistent_obligation": True,
+                },
+                False,
+            )
+        return (
+            {
+                "status": "identity_already_current",
+                "session_id": session_id,
+                "changed": False,
+                "persistent_obligation": True,
+            },
+            False,
+        )
+
+    monkeypatch.setattr(
+        module,
+        "_reconcile_session_projection_freshness_obligation_in_payload",
+        reconcile,
+    )
+    monkeypatch.setattr(
+        module,
+        "session_projection_freshness_obligation_status",
+        lambda *_args, **_kwargs: {
+            "ok": False,
+            "status": "remaining",
+            "projected_capture_bytes": 0,
+            "satisfied_axes": [],
+        },
+    )
+    launches: list[dict[str, Any]] = []
+
+    def resource_denial(**kwargs: Any) -> dict[str, Any]:
+        launches.append(kwargs)
+        return {
+            "ok": False,
+            "status": "resource_blocked",
+            "child_result_verified": False,
+        }
+
+    monkeypatch.setattr(module, "auto_maintenance_resource_launch", resource_denial)
+    dispatched = module.auto_maintenance_retry_dispatch(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        apply=True,
+        limit=4,
+        now_epoch=now_epoch,
+    )
+
+    assert dispatched["dispatch_policy"]["version"] == 6
+    assert dispatched["skipped_admission_count"] == blocked_count
+    assert dispatched["examined_count"] == blocked_count + 4
+    assert dispatched["dispatch_slots_used"] == 4
+    assert dispatched["processed_count"] == 4
+    assert len(launches) == 4
+    assert launches[0]["target"] == actionable_target
+    assert {call["target"] for call in launches[1:]} == {
+        "historical-aged",
+        "historical-heavy",
+        "historical-later",
+    }
+
+    refusal_rows = [
+        row
+        for row in dispatched["results"]
+        if row["disposition"] == "admission_refused"
+    ]
+    assert len(refusal_rows) == blocked_count
+    assert all(row["attempt"] == 0 for row in refusal_rows)
+    assert all(
+        row["dispatch_selection"]["current_epoch_priority"] is True
+        for row in refusal_rows
+    )
+    target_result = next(
+        row
+        for row in dispatched["results"]
+        if row["queue_key"] == f"backlog:{actionable_target}"
+    )
+    assert target_result["dispatch_selection"]["current_epoch_priority"] is True
+    assert target_result["dispatch_selection"]["dispatch_rank"] == 1
+
+    after = module.auto_maintenance_retry_queue_status(
+        aoa_root,
+        now_epoch=now_epoch,
+        selection_limit=4,
+    )
+    assert all(
+        after["items"][f"backlog:current-{index:03d}"]["attempts_started"] == 0
+        and after["items"][f"backlog:current-{index:03d}"]["in_flight"] is False
+        for index in range(blocked_count)
+    )
+    target_item = after["items"][f"backlog:{actionable_target}"]
+    assert target_item["attempts_started"] == 1
+    assert target_item["in_flight"] is False
+    assert target_item["next_attempt_epoch"] > now_epoch
+
+
 def test_graph_maintenance_compact_stdout_keeps_report_marker_in_bounded_tail(tmp_path: Path) -> None:
     aoa_root = tmp_path / ".aoa"
     diagnostics_dir = aoa_root / "diagnostics"
@@ -61674,7 +61940,7 @@ def test_auto_maintenance_retry_dispatch_uses_profile_deadlines_with_aging(
     compact = module.compact_maintenance_status_payload(
         {"automatic_retry": initial}
     )
-    assert compact["automatic_retry"]["dispatch_policy"]["version"] == 5
+    assert compact["automatic_retry"]["dispatch_policy"]["version"] == 6
     assert compact["automatic_retry"]["dispatch_order_due_keys"] == [
         "catchup:all",
         "backlog:all",
@@ -61688,7 +61954,7 @@ def test_auto_maintenance_retry_dispatch_uses_profile_deadlines_with_aging(
         limit=1,
         now_epoch=now_epoch,
     )
-    assert plan["dispatch_policy"]["version"] == 5
+    assert plan["dispatch_policy"]["version"] == 6
     assert plan["planned_queue_keys"] == ["catchup:all"]
     assert plan["planned_items"][0]["dispatch_deadline_epoch"] == 2_295.0
 
@@ -61762,7 +62028,7 @@ def test_auto_maintenance_retry_fairness_lab_bounds_aged_heavy_dispatch_under_ho
     }
     backlog = dispatched_by_key["backlog:all"]
     deep = dispatched_by_key["deep:all"]
-    assert report["dispatch_policy"]["version"] == 5
+    assert report["dispatch_policy"]["version"] == 6
     assert backlog["wait_seconds"] == 1_200.0
     assert backlog["aged_heavy_fairness_reserved"] is True
     assert deep["wait_seconds"] == 3_600.0

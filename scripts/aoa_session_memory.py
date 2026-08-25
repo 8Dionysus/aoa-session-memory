@@ -1835,7 +1835,7 @@ AUTO_MAINTENANCE_RETRY_POLICY = {
     "backlog": {"base_delay_seconds": 300, "max_delay_seconds": 3600, "max_attempts": 4},
     "deep": {"base_delay_seconds": 900, "max_delay_seconds": 7200, "max_attempts": 3},
 }
-AUTO_MAINTENANCE_RETRY_DISPATCH_POLICY_VERSION = 5
+AUTO_MAINTENANCE_RETRY_DISPATCH_POLICY_VERSION = 6
 AUTO_MAINTENANCE_RETRY_DISPATCH_WAIT_TARGET_SECONDS = {
     "hot": 0,
     "catchup": 300,
@@ -65877,7 +65877,9 @@ def auto_maintenance_retry_dispatch_policy() -> dict[str, Any]:
         ),
         "fairness_law": (
             "a persisted current-epoch freshness obligation receives the "
-            "first bounded selection slots; for a batch larger than one, "
+            "first practical selection slots; fail-closed non-actionable "
+            "identity refusals do not consume those slots; for a batch "
+            "larger than one, "
             "one final bounded slot is reserved for aged historical heavy "
             "work; hot and catch-up work receive shorter dispatch targets; "
             "backlog and deep work receive that reservation as soon as a "
@@ -65892,7 +65894,16 @@ def auto_maintenance_retry_dispatch_policy() -> dict[str, Any]:
         "capacity_boundary": (
             "the reservation bounds queue selection delay when the "
             "dispatcher itself receives bounded execution opportunities; "
-            "it does not claim capacity that the host did not provide"
+            "the practical launch cap remains bounded, while a candidate "
+            "that fails closed before claim may be examined and skipped "
+            "without claiming host capacity"
+        ),
+        "actionability_boundary": (
+            "current_epoch_priority is a persisted scheduler hint; exact "
+            "capture identity remains the claim-time admission authority. "
+            "An unresolved identity is recorded as an admission refusal, "
+            "excluded for this bounded dispatch cycle, and cannot block a "
+            "later actionable current obligation or the historical reserve"
         ),
         "truth_status": "generated_retry_dispatch_order_not_semantic_freshness",
     }
@@ -65903,11 +65914,21 @@ def auto_maintenance_retry_ordered_due_items(
     *,
     now_epoch: float,
     selection_limit: int | None = None,
+    excluded_queue_keys: Iterable[str] | None = None,
 ) -> list[dict[str, Any]]:
     effective_now = float(now_epoch)
+    excluded = {
+        str(queue_key)
+        for queue_key in (excluded_queue_keys or ())
+        if str(queue_key)
+    }
     rows: list[dict[str, Any]] = []
     for key, item in items.items():
-        if not isinstance(item, dict) or bool(item.get("in_flight")):
+        if (
+            not isinstance(item, dict)
+            or str(key) in excluded
+            or bool(item.get("in_flight"))
+        ):
             continue
         next_attempt_epoch = float(item.get("next_attempt_epoch") or 0.0)
         if next_attempt_epoch > effective_now:
@@ -67555,6 +67576,9 @@ def auto_maintenance_retry_dispatch(
         "queue_before": initial,
         "results": [],
         "processed_count": 0,
+        "dispatch_slots_used": 0,
+        "examined_count": 0,
+        "skipped_admission_count": 0,
         "recovered_in_flight_count": 0,
         "dispatch_policy": auto_maintenance_retry_dispatch_policy(),
         "owner_boundary": ".aoa owns the persistent retry intent; the host scheduler only invokes this bounded dispatcher.",
@@ -67588,7 +67612,9 @@ def auto_maintenance_retry_dispatch(
 
         recovered_once = False
         results: list[dict[str, Any]] = []
-        for _ in range(bounded_limit):
+        skipped_queue_keys: set[str] = set()
+        dispatch_slots_used = 0
+        while dispatch_slots_used < bounded_limit:
             def claim(queue_payload: dict[str, Any]) -> tuple[dict[str, Any] | None, bool]:
                 nonlocal recovered_once
                 items = queue_payload.get("items") if isinstance(queue_payload.get("items"), dict) else {}
@@ -67615,6 +67641,7 @@ def auto_maintenance_retry_dispatch(
                     items,
                     now_epoch=effective_now,
                     selection_limit=bounded_limit,
+                    excluded_queue_keys=skipped_queue_keys,
                 )
                 if not due:
                     return None, changed
@@ -67670,6 +67697,7 @@ def auto_maintenance_retry_dispatch(
                         items,
                         now_epoch=effective_now,
                         selection_limit=bounded_limit,
+                        excluded_queue_keys=skipped_queue_keys,
                     )
                     if not due:
                         return None, changed
@@ -67697,6 +67725,10 @@ def auto_maintenance_retry_dispatch(
             if not isinstance(claimed, dict):
                 break
             if claimed.get("admission_refused") is True:
+                skipped_key = str(claimed.get("queue_key") or "")
+                if skipped_key:
+                    skipped_queue_keys.add(skipped_key)
+                base_payload["skipped_admission_count"] += 1
                 results.append(
                     {
                         "queue_key": str(claimed.get("queue_key") or ""),
@@ -67720,7 +67752,12 @@ def auto_maintenance_retry_dispatch(
                         "completed_at": auto_maintenance_retry_iso(effective_now),
                     }
                 )
-                break
+                # A failed-closed identity is not a practical dispatch slot.
+                # Keep the obligation pending with attempts_started=0 and let
+                # the same bounded batch offer its next actionable current
+                # item or its aged-heavy reservation.
+                continue
+            dispatch_slots_used += 1
             queue_key = str(claimed.get("queue_key") or "")
             profile = str(claimed.get("profile") or "hot")
             target = str(claimed.get("target") or "all")
@@ -68200,7 +68237,11 @@ def auto_maintenance_retry_dispatch(
         {
             "status": "processed" if results else "no_due_jobs",
             "results": results,
-            "processed_count": len(results),
+            "processed_count": dispatch_slots_used,
+            "dispatch_slots_used": dispatch_slots_used,
+            "examined_count": len(results),
+            "skipped_admission_count": len(skipped_queue_keys),
+            "skipped_admission_queue_key_sample": sorted(skipped_queue_keys)[:32],
             "queue_after": queue_after,
             "completed_at": auto_maintenance_retry_iso(effective_now),
             "elapsed_ms": max(0, int((effective_now - dispatch_started_epoch) * 1000)),

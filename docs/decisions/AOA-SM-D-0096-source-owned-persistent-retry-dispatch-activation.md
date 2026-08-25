@@ -63,14 +63,34 @@ enable, start, reload, or trust systemd.
 
 Capture-watch may mark a freshness obligation with
 `current_epoch_priority=true` as a persisted scheduling hint. The selector
-places such due obligations in the first bounded selection slots. For any
-bounded batch larger than one, the final slot is reserved for one earliest
+places such due obligations in the first practical selection slots. A
+fail-closed non-actionable hint does not consume a practical slot. For any
+bounded batch larger than one, the final practical slot is reserved for one earliest
 breached historical backlog or deep item, so current-epoch debt cannot consume
 every opportunity. The remaining historical debt follows the existing profile
 deadline order. Before `attempts_started` or `in_flight`, the dispatcher
 revalidates the exact capture identity under the persistent queue lock; an
 unresolved or stale identity still fails closed. The hint is not a freshness
 proof and does not perform capture, discovery, or projection work.
+
+### Review amendment — 2026-08-25
+
+A current-epoch hint can still be non-actionable at the claim boundary when
+its exact capture identity is missing, stale, or ambiguous. Treating that
+fail-closed refusal as the end of the whole bounded batch created head-of-line
+starvation: later actionable current work and the historical heavy reservation
+never received a practical slot, while the refused obligation correctly
+remained at `attempts_started=0` and `in_flight=false`.
+
+Policy version 6 keeps the same deterministic deadline order, bounded launch
+limit, and final breached-heavy reservation. The dispatcher now excludes a
+refused queue key only for the current invocation and continues selection. It
+recomputes the bounded reservation over the remaining eligible rows, so every
+eligible batch under current-freshness pressure can offer a practical slot to
+an actionable true-current obligation when one exists. A refusal is visible in
+the dispatch result and does not consume a practical launch slot, change retry
+timing, increment attempts, set a lease, or bypass the exact identity,
+resource, maintenance-lock, or exclusive heavy-lane gates.
 
 The existing profile-specific systemd units remain outside this source-owned
 automatic topology. A runtime owner may leave already-disabled legacy files in
@@ -106,6 +126,9 @@ backlogged.
 - Positive: current-epoch freshness is selected ahead of historical debt while
   every multi-slot batch still reserves one historical heavy opportunity, and
   retry attempts and stale-identity refusal remain restart-safe.
+- Positive: one stale or ambiguous current-epoch hint cannot block later
+  actionable current work or the reserved historical heavy opportunity in the
+  same bounded dispatcher invocation.
 - Tradeoff: a rendered unit is still only source/install evidence until a
   runtime owner activates and observes it; scheduled dispatch is not semantic
   freshness.
@@ -140,9 +163,9 @@ independent automatic successor availability and semantic acceptance review.
 ## Verification
 
 Deterministic tests must cover the source-rendered six-unit topology, missing
-retry activation files, current-epoch selector priority, one-lane exclusion,
-resource refusal and later resumption, interrupted claim recovery, and
-strict current-identity admission. Source compilation, decision-index
-regeneration/check, focused retry/identity/systemd tests, the full owner
-suite, portable public-safety audit, and live runtime evidence remain
-separate claims.
+retry activation files, current-epoch selector priority and bounded-batch
+actionability, one-lane exclusion, resource refusal and later resumption,
+interrupted claim recovery, and strict current-identity admission. Source
+compilation, decision-index regeneration/check, focused retry/identity/systemd
+tests, the full owner suite, portable public-safety audit, and live runtime
+evidence remain separate claims.
