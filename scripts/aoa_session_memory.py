@@ -1835,7 +1835,8 @@ AUTO_MAINTENANCE_RETRY_POLICY = {
     "backlog": {"base_delay_seconds": 300, "max_delay_seconds": 3600, "max_attempts": 4},
     "deep": {"base_delay_seconds": 900, "max_delay_seconds": 7200, "max_attempts": 3},
 }
-AUTO_MAINTENANCE_RETRY_DISPATCH_POLICY_VERSION = 6
+AUTO_MAINTENANCE_RETRY_DISPATCH_POLICY_VERSION = 7
+AUTO_MAINTENANCE_RETRY_DISPATCH_STATE_SCHEMA_VERSION = 1
 AUTO_MAINTENANCE_RETRY_DISPATCH_WAIT_TARGET_SECONDS = {
     "hot": 0,
     "catchup": 300,
@@ -65866,8 +65867,9 @@ def auto_maintenance_retry_dispatch_policy() -> dict[str, Any]:
     return {
         "version": AUTO_MAINTENANCE_RETRY_DISPATCH_POLICY_VERSION,
         "strategy": (
-            "current_epoch_freshness_then_breached_heavy_reservation_then_"
-            "earliest_profile_dispatch_deadline"
+            "current_epoch_fresh_arrival_reservation_then_current_epoch_"
+            "round_robin_then_breached_heavy_reservation_then_earliest_"
+            "profile_dispatch_deadline"
         ),
         "dispatch_wait_target_seconds": dict(
             AUTO_MAINTENANCE_RETRY_DISPATCH_WAIT_TARGET_SECONDS
@@ -65877,9 +65879,13 @@ def auto_maintenance_retry_dispatch_policy() -> dict[str, Any]:
         ),
         "fairness_law": (
             "a persisted current-epoch freshness obligation receives the "
-            "first practical selection slots; fail-closed non-actionable "
-            "identity refusals do not consume those slots; for a batch "
-            "larger than one, "
+            "first practical selection slots; when arrival metadata exists, "
+            "one newest never-attempted current obligation is reserved for "
+            "natural freshness and the remaining current lane rotates from "
+            "the persisted cursor; current-lane turns alternate between "
+            "those two lanes so continuous arrivals cannot starve queued "
+            "current work; fail-closed non-actionable identity refusals do "
+            "not consume those slots; for a batch larger than one, "
             "one final bounded slot is reserved for aged historical heavy "
             "work; hot and catch-up work receive shorter dispatch targets; "
             "backlog and deep work receive that reservation as soon as a "
@@ -65894,7 +65900,8 @@ def auto_maintenance_retry_dispatch_policy() -> dict[str, Any]:
         "capacity_boundary": (
             "the reservation bounds queue selection delay when the "
             "dispatcher itself receives bounded execution opportunities; "
-            "the practical launch cap remains bounded, while a candidate "
+            "the practical launch cap remains bounded, while the current "
+            "fresh-arrival and cursor lanes share those opportunities and a candidate "
             "that fails closed before claim may be examined and skipped "
             "without claiming host capacity"
         ),
@@ -65909,12 +65916,102 @@ def auto_maintenance_retry_dispatch_policy() -> dict[str, Any]:
     }
 
 
+def auto_maintenance_retry_dispatch_state(
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Normalize persisted scheduler state without making it projection truth."""
+    raw = payload if isinstance(payload, dict) else {}
+    state = raw.get("dispatch_state")
+    if not isinstance(state, dict) and "current_epoch_turn" in raw:
+        state = raw
+    state = state if isinstance(state, dict) else {}
+    turn = str(state.get("current_epoch_turn") or "fresh_arrival")
+    if turn not in {"fresh_arrival", "current_round_robin"}:
+        turn = "fresh_arrival"
+    cursor = str(state.get("current_epoch_cursor") or "")
+    return {
+        "schema_version": AUTO_MAINTENANCE_RETRY_DISPATCH_STATE_SCHEMA_VERSION,
+        "current_epoch_turn": turn,
+        "current_epoch_cursor": cursor,
+        "current_epoch_dispatch_count": max(
+            0,
+            int_value(state.get("current_epoch_dispatch_count")),
+        ),
+        "last_current_epoch_dispatch_at": str(
+            state.get("last_current_epoch_dispatch_at") or ""
+        ),
+    }
+
+
+def _auto_maintenance_retry_has_arrival_metadata(
+    row: dict[str, Any],
+) -> bool:
+    return float(row.get("enqueued_at_epoch") or 0.0) > 0.0
+
+
+def _auto_maintenance_retry_rotate_after_cursor(
+    rows: list[dict[str, Any]],
+    cursor: str,
+) -> list[dict[str, Any]]:
+    if not rows or not cursor:
+        return list(rows)
+    cursor_index = next(
+        (
+            index
+            for index, row in enumerate(rows)
+            if str(row.get("queue_key") or "") == cursor
+        ),
+        None,
+    )
+    if cursor_index is None:
+        return list(rows)
+    return [*rows[cursor_index + 1 :], *rows[: cursor_index + 1]]
+
+
+def _auto_maintenance_retry_advance_dispatch_state(
+    queue_payload: dict[str, Any],
+    dispatch_selection: dict[str, Any],
+    *,
+    now_epoch: float,
+) -> bool:
+    """Advance the current-lane cursor only after a practical claim."""
+    if dispatch_selection.get("current_epoch_priority") is not True:
+        return False
+    lane = str(dispatch_selection.get("current_epoch_fairness_lane") or "")
+    if lane not in {
+        "fresh_arrival_reserve",
+        "current_round_robin",
+    }:
+        return False
+    state = auto_maintenance_retry_dispatch_state(queue_payload)
+    state["current_epoch_cursor"] = str(
+        dispatch_selection.get("queue_key") or ""
+    )
+    state["current_epoch_dispatch_count"] = max(
+        0,
+        int_value(state.get("current_epoch_dispatch_count")),
+    ) + 1
+    state["last_current_epoch_dispatch_at"] = auto_maintenance_retry_iso(
+        now_epoch
+    )
+    state["current_epoch_turn"] = (
+        "current_round_robin"
+        if lane == "fresh_arrival_reserve"
+        else "fresh_arrival"
+    )
+    if queue_payload.get("dispatch_state") == state:
+        return False
+    queue_payload["dispatch_state"] = state
+    return True
+
+
 def auto_maintenance_retry_ordered_due_items(
     items: dict[str, Any],
     *,
     now_epoch: float,
     selection_limit: int | None = None,
     excluded_queue_keys: Iterable[str] | None = None,
+    scheduler_state: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     effective_now = float(now_epoch)
     excluded = {
@@ -65965,6 +66062,13 @@ def auto_maintenance_retry_ordered_due_items(
                     0.0,
                     effective_now - dispatch_deadline_epoch,
                 ),
+                "enqueued_at_epoch": float(
+                    item.get("enqueued_at_epoch") or 0.0
+                ),
+                "attempts_started": max(
+                    0,
+                    int_value(item.get("attempts_started")),
+                ),
                 "current_epoch_priority": current_epoch_priority,
                 "dispatch_priority_reason": (
                     "current_epoch_freshness_obligation"
@@ -65982,9 +66086,69 @@ def auto_maintenance_retry_ordered_due_items(
             str(row["queue_key"]),
         ),
     )
+    current_rows = [
+        row for row in ordered if row["current_epoch_priority"]
+    ]
+    non_current_rows = [
+        row for row in ordered if not row["current_epoch_priority"]
+    ]
+    current_fairness_enabled = any(
+        _auto_maintenance_retry_has_arrival_metadata(row)
+        for row in current_rows
+    )
+    current_fairness_state = auto_maintenance_retry_dispatch_state(
+        scheduler_state
+    )
+    current_epoch_fresh_row: dict[str, Any] | None = None
+    if current_fairness_enabled:
+        current_fairness_order = _auto_maintenance_retry_rotate_after_cursor(
+            current_rows,
+            str(current_fairness_state.get("current_epoch_cursor") or ""),
+        )
+        fresh_candidates = [
+            row
+            for row in current_rows
+            if row["attempts_started"] == 0
+            and _auto_maintenance_retry_has_arrival_metadata(row)
+        ]
+        if fresh_candidates:
+            current_epoch_fresh_row = max(
+                fresh_candidates,
+                key=lambda row: (
+                    float(row["enqueued_at_epoch"]),
+                    str(row["queue_key"]),
+                ),
+            )
+        if (
+            current_fairness_state["current_epoch_turn"] == "fresh_arrival"
+            and current_epoch_fresh_row is not None
+        ):
+            current_rows = [
+                current_epoch_fresh_row,
+                *[
+                    row
+                    for row in current_fairness_order
+                    if row["queue_key"] != current_epoch_fresh_row["queue_key"]
+                ],
+            ]
+        else:
+            current_rows = current_fairness_order
+    for row in current_rows:
+        if not current_fairness_enabled:
+            row["current_epoch_fairness_lane"] = (
+                "current_epoch_deadline_order"
+            )
+        elif (
+            current_epoch_fresh_row is not None
+            and current_fairness_state["current_epoch_turn"] == "fresh_arrival"
+            and row["queue_key"] == current_epoch_fresh_row["queue_key"]
+        ):
+            row["current_epoch_fairness_lane"] = "fresh_arrival_reserve"
+        else:
+            row["current_epoch_fairness_lane"] = "current_round_robin"
     aged_heavy = [
         row
-        for row in ordered
+        for row in non_current_rows
         if row["profile"] in {"backlog", "deep"}
         and row["dispatch_target_breached"]
         and not row["current_epoch_priority"]
@@ -66000,12 +66164,6 @@ def auto_maintenance_retry_ordered_due_items(
             ),
         )
         reserved_key = str(reserved["queue_key"])
-        current_rows = [
-            row for row in ordered if row["current_epoch_priority"]
-        ]
-        non_current_rows = [
-            row for row in ordered if not row["current_epoch_priority"]
-        ]
         if selection_limit is not None and int_value(selection_limit) > 1:
             current_quota = max(0, int_value(selection_limit) - 1)
             current_prefix = current_rows[:current_quota]
@@ -66023,6 +66181,8 @@ def auto_maintenance_retry_ordered_due_items(
                 if str(row["queue_key"]) != reserved_key
             ],
         ]
+    else:
+        ordered = [*current_rows, *non_current_rows]
     for rank, row in enumerate(ordered, start=1):
         row["dispatch_rank"] = rank
         row["aged_heavy_fairness_reserved"] = (
@@ -66031,6 +66191,12 @@ def auto_maintenance_retry_ordered_due_items(
         row["fairness_reason"] = (
             "aged_heavy_dispatch_target_breached"
             if row["aged_heavy_fairness_reserved"]
+            else "current_epoch_fresh_arrival_reservation"
+            if row.get("current_epoch_fairness_lane")
+            == "fresh_arrival_reserve"
+            else "current_epoch_round_robin"
+            if row.get("current_epoch_fairness_lane")
+            == "current_round_robin"
             else "current_epoch_freshness_priority"
             if row["current_epoch_priority"]
             else "profile_deadline_order"
@@ -66072,6 +66238,7 @@ def auto_maintenance_retry_fairness_lab(
         ),
     )
     pending: dict[str, dict[str, Any]] = {}
+    dispatch_state = auto_maintenance_retry_dispatch_state({})
     dispatched: list[dict[str, Any]] = []
     tick = float(start_epoch)
     cursor = 0
@@ -66099,13 +66266,23 @@ def auto_maintenance_retry_fairness_lab(
                 "next_attempt_epoch": float(
                     arrival["arrival_epoch"]
                 ),
+                "enqueued_at_epoch": float(
+                    arrival["arrival_epoch"]
+                ),
+                "attempts_started": 0,
                 "in_flight": False,
+                "options": (
+                    dict(arrival.get("options"))
+                    if isinstance(arrival.get("options"), dict)
+                    else {}
+                ),
             }
         for _slot in range(capacity):
             ordered = (
                 auto_maintenance_retry_ordered_due_items(
                     pending,
                     now_epoch=tick,
+                    scheduler_state=dispatch_state,
                 )
             )
             if not ordered:
@@ -66126,6 +66303,15 @@ def auto_maintenance_retry_fairness_lab(
                         tick - arrival_epoch,
                     ),
                 }
+            )
+            state_payload = {"dispatch_state": dispatch_state}
+            _auto_maintenance_retry_advance_dispatch_state(
+                state_payload,
+                selected,
+                now_epoch=tick,
+            )
+            dispatch_state = auto_maintenance_retry_dispatch_state(
+                state_payload
             )
             pending.pop(queue_key, None)
         tick += interval
@@ -66184,6 +66370,7 @@ def auto_maintenance_retry_fairness_lab(
                 ),
             }
         ),
+        "dispatch_state": dispatch_state,
         "truth_status": (
             "deterministic_queue_selection_lab_under_declared_"
             "dispatcher_capacity_not_runtime_semantic_progress"
@@ -66211,6 +66398,7 @@ def auto_maintenance_retry_queue_payload(aoa_root: Path) -> dict[str, Any]:
             if key and isinstance(value, dict)
         },
         "history": [item for item in history if isinstance(item, dict)][:AUTO_MAINTENANCE_RETRY_HISTORY_LIMIT],
+        "dispatch_state": auto_maintenance_retry_dispatch_state(raw),
         "diagnostics": diagnostics,
     }
 
@@ -66228,6 +66416,9 @@ def auto_maintenance_retry_queue_status_from_payload(
         items,
         now_epoch=effective_now,
         selection_limit=selection_limit,
+        scheduler_state=payload.get("dispatch_state")
+        if isinstance(payload.get("dispatch_state"), dict)
+        else None,
     )
     due_keys = [str(item["queue_key"]) for item in ordered_due_items]
     in_flight_keys = sorted(
@@ -66291,6 +66482,7 @@ def auto_maintenance_retry_queue_status_from_payload(
         "dispatch_order_due_keys": due_keys,
         "due_items": ordered_due_items,
         "dispatch_policy": auto_maintenance_retry_dispatch_policy(),
+        "dispatch_state": auto_maintenance_retry_dispatch_state(payload),
         "in_flight_keys": in_flight_keys,
         "next_attempt_epoch": min(next_epochs) if next_epochs else None,
         "next_attempt_at": auto_maintenance_retry_iso(min(next_epochs)) if next_epochs else None,
@@ -66341,6 +66533,7 @@ def write_auto_maintenance_retry_queue(
             for item in (payload.get("history") or [])
             if isinstance(item, dict)
         ][:AUTO_MAINTENANCE_RETRY_HISTORY_LIMIT],
+        "dispatch_state": auto_maintenance_retry_dispatch_state(payload),
     }
     write_json_durable(
         auto_maintenance_retry_paths(aoa_root)["queue"],
@@ -67642,6 +67835,9 @@ def auto_maintenance_retry_dispatch(
                     now_epoch=effective_now,
                     selection_limit=bounded_limit,
                     excluded_queue_keys=skipped_queue_keys,
+                    scheduler_state=queue_payload.get("dispatch_state")
+                    if isinstance(queue_payload.get("dispatch_state"), dict)
+                    else None,
                 )
                 if not due:
                     return None, changed
@@ -67650,6 +67846,7 @@ def auto_maintenance_retry_dispatch(
                 item = items.get(key)
                 if not isinstance(item, dict):
                     return None, changed
+                item["queue_key"] = key
                 item_options = (
                     item.get("options")
                     if isinstance(item.get("options"), dict)
@@ -67698,6 +67895,9 @@ def auto_maintenance_retry_dispatch(
                         now_epoch=effective_now,
                         selection_limit=bounded_limit,
                         excluded_queue_keys=skipped_queue_keys,
+                        scheduler_state=queue_payload.get("dispatch_state")
+                        if isinstance(queue_payload.get("dispatch_state"), dict)
+                        else None,
                     )
                     if not due:
                         return None, changed
@@ -67713,6 +67913,14 @@ def auto_maintenance_retry_dispatch(
                 item["last_attempt_started_at"] = auto_maintenance_retry_iso(effective_now)
                 item["updated_at"] = auto_maintenance_retry_iso(effective_now)
                 items[key] = item
+                changed = (
+                    _auto_maintenance_retry_advance_dispatch_state(
+                        queue_payload,
+                        dispatch_selection,
+                        now_epoch=effective_now,
+                    )
+                    or changed
+                )
                 claimed_item = dict(item)
                 claimed_item["dispatch_selection"] = dispatch_selection
                 return claimed_item, True

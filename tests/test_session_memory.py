@@ -60828,6 +60828,154 @@ def test_auto_maintenance_retry_selection_boundaries_are_stable(
     )
 
 
+def test_auto_maintenance_retry_reserves_new_current_arrival_and_rotates_cursor() -> None:
+    current_options = {
+        "persistent_obligation": True,
+        "obligation_kind": module.SESSION_PROJECTION_FRESHNESS_OBLIGATION_KIND,
+        "current_epoch_priority": True,
+    }
+    items = {
+        f"backlog:old-{index:03d}": {
+            "profile": "backlog",
+            "target": f"old-{index:03d}",
+            "next_attempt_epoch": 0.0,
+            "enqueued_at_epoch": 1_000.0 + index,
+            "attempts_started": 0,
+            "in_flight": False,
+            "options": current_options,
+        }
+        for index in range(370)
+    }
+    items["backlog:natural-successor"] = {
+        "profile": "backlog",
+        "target": "natural-successor",
+        "next_attempt_epoch": 0.0,
+        "enqueued_at_epoch": 5_000.0,
+        "attempts_started": 0,
+        "in_flight": False,
+        "options": current_options,
+    }
+    items["deep:historical-heavy"] = {
+        "profile": "deep",
+        "target": "historical-heavy",
+        "next_attempt_epoch": 0.0,
+        "in_flight": False,
+        "options": {},
+    }
+
+    state = {
+        "current_epoch_turn": "fresh_arrival",
+        "current_epoch_cursor": "",
+    }
+    ordered = module.auto_maintenance_retry_ordered_due_items(
+        items,
+        now_epoch=6_000.0,
+        selection_limit=4,
+        scheduler_state=state,
+    )
+
+    assert ordered[0]["queue_key"] == "backlog:natural-successor"
+    assert ordered[0]["dispatch_rank"] == 1
+    assert ordered[0]["current_epoch_fairness_lane"] == (
+        "fresh_arrival_reserve"
+    )
+    assert ordered[0]["fairness_reason"] == (
+        "current_epoch_fresh_arrival_reservation"
+    )
+    assert ordered[3]["queue_key"] == "deep:historical-heavy"
+    assert ordered[3]["aged_heavy_fairness_reserved"] is True
+
+    state_payload = {"dispatch_state": state}
+    module._auto_maintenance_retry_advance_dispatch_state(
+        state_payload,
+        ordered[0],
+        now_epoch=6_000.0,
+    )
+    next_state = state_payload["dispatch_state"]
+    items["backlog:natural-successor"]["attempts_started"] = 1
+    next_order = module.auto_maintenance_retry_ordered_due_items(
+        items,
+        now_epoch=6_000.0,
+        selection_limit=1,
+        scheduler_state=next_state,
+    )
+
+    assert next_order[0]["queue_key"] == "backlog:old-000"
+    assert next_order[0]["current_epoch_fairness_lane"] == (
+        "current_round_robin"
+    )
+
+
+def test_auto_maintenance_retry_dispatch_persists_current_lane_cursor(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    current_options = {
+        "persistent_obligation": True,
+        "obligation_kind": module.SESSION_PROJECTION_FRESHNESS_OBLIGATION_KIND,
+        "current_epoch_priority": True,
+    }
+    items = {
+        "backlog:old": {
+            "queue_key": "backlog:old",
+            "profile": "backlog",
+            "target": "old",
+            "next_attempt_epoch": 0.0,
+            "enqueued_at_epoch": 1_000.0,
+            "attempts_started": 0,
+            "in_flight": False,
+            "options": current_options,
+        },
+        "backlog:natural-successor": {
+            "queue_key": "backlog:natural-successor",
+            "profile": "backlog",
+            "target": "natural-successor",
+            "next_attempt_epoch": 0.0,
+            "enqueued_at_epoch": 2_000.0,
+            "attempts_started": 0,
+            "in_flight": False,
+            "options": current_options,
+        },
+    }
+    module.write_auto_maintenance_retry_queue(
+        aoa_root,
+        {"items": items, "history": []},
+        now_epoch=3_000.0,
+    )
+    monkeypatch.setattr(
+        module,
+        "session_projection_freshness_obligation_status",
+        lambda *_args, **_kwargs: {"ok": True, "status": "satisfied"},
+    )
+
+    dispatched = module.auto_maintenance_retry_dispatch(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        apply=True,
+        limit=1,
+        now_epoch=3_000.0,
+    )
+
+    assert dispatched["results"][0]["queue_key"] == (
+        "backlog:natural-successor"
+    )
+    after = module.auto_maintenance_retry_queue_status(
+        aoa_root,
+        now_epoch=3_000.0,
+        selection_limit=1,
+    )
+    assert after["dispatch_state"]["current_epoch_cursor"] == (
+        "backlog:natural-successor"
+    )
+    assert after["dispatch_state"]["current_epoch_turn"] == (
+        "current_round_robin"
+    )
+    assert after["dispatch_order_due_keys"] == ["backlog:old"]
+
+
 def test_auto_maintenance_retry_skips_unactionable_current_without_consuming_slots(
     tmp_path: Path,
     monkeypatch: Any,
@@ -60990,7 +61138,7 @@ def test_auto_maintenance_retry_skips_unactionable_current_without_consuming_slo
         now_epoch=now_epoch,
     )
 
-    assert dispatched["dispatch_policy"]["version"] == 6
+    assert dispatched["dispatch_policy"]["version"] == 7
     assert dispatched["skipped_admission_count"] == blocked_count
     assert dispatched["examined_count"] == blocked_count + 4
     assert dispatched["dispatch_slots_used"] == 4
@@ -61940,7 +62088,7 @@ def test_auto_maintenance_retry_dispatch_uses_profile_deadlines_with_aging(
     compact = module.compact_maintenance_status_payload(
         {"automatic_retry": initial}
     )
-    assert compact["automatic_retry"]["dispatch_policy"]["version"] == 6
+    assert compact["automatic_retry"]["dispatch_policy"]["version"] == 7
     assert compact["automatic_retry"]["dispatch_order_due_keys"] == [
         "catchup:all",
         "backlog:all",
@@ -61954,7 +62102,7 @@ def test_auto_maintenance_retry_dispatch_uses_profile_deadlines_with_aging(
         limit=1,
         now_epoch=now_epoch,
     )
-    assert plan["dispatch_policy"]["version"] == 6
+    assert plan["dispatch_policy"]["version"] == 7
     assert plan["planned_queue_keys"] == ["catchup:all"]
     assert plan["planned_items"][0]["dispatch_deadline_epoch"] == 2_295.0
 
@@ -62028,7 +62176,7 @@ def test_auto_maintenance_retry_fairness_lab_bounds_aged_heavy_dispatch_under_ho
     }
     backlog = dispatched_by_key["backlog:all"]
     deep = dispatched_by_key["deep:all"]
-    assert report["dispatch_policy"]["version"] == 6
+    assert report["dispatch_policy"]["version"] == 7
     assert backlog["wait_seconds"] == 1_200.0
     assert backlog["aged_heavy_fairness_reserved"] is True
     assert deep["wait_seconds"] == 3_600.0
@@ -62039,6 +62187,57 @@ def test_auto_maintenance_retry_fairness_lab_bounds_aged_heavy_dispatch_under_ho
     assert report["truth_status"] == (
         "deterministic_queue_selection_lab_under_declared_"
         "dispatcher_capacity_not_runtime_semantic_progress"
+    )
+
+
+def test_auto_maintenance_retry_fairness_lab_bounds_natural_successors_under_current_debt() -> None:
+    current_options = {
+        "persistent_obligation": True,
+        "obligation_kind": module.SESSION_PROJECTION_FRESHNESS_OBLIGATION_KIND,
+        "current_epoch_priority": True,
+    }
+    arrivals: list[dict[str, Any]] = [
+        {
+            "queue_key": f"backlog:old-{index:03d}",
+            "profile": "backlog",
+            "target": f"old-{index:03d}",
+            "arrival_epoch": 1_000.0,
+            "options": current_options,
+        }
+        for index in range(12)
+    ]
+    for tick in range(1_060, 1_661, 60):
+        arrivals.append(
+            {
+                "queue_key": f"backlog:natural-{tick}",
+                "profile": "backlog",
+                "target": f"natural-{tick}",
+                "arrival_epoch": float(tick),
+                "options": current_options,
+            }
+        )
+
+    report = module.auto_maintenance_retry_fairness_lab(
+        arrivals,
+        start_epoch=1_000.0,
+        end_epoch=1_660.0,
+        dispatch_interval_seconds=60.0,
+        dispatch_capacity_per_tick=1,
+    )
+
+    natural_waits = [
+        float(item["wait_seconds"])
+        for item in report["dispatched"]
+        if str(item["queue_key"]).startswith("backlog:natural-")
+    ]
+    assert natural_waits
+    assert max(natural_waits) <= 60.0
+    assert report["dispatch_policy"]["version"] == 7
+    assert report["dispatch_policy"]["strategy"].startswith(
+        "current_epoch_fresh_arrival_reservation"
+    )
+    assert report["dispatch_state"]["current_epoch_dispatch_count"] == len(
+        report["dispatched"]
     )
 
 

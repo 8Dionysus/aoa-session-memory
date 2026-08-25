@@ -201,6 +201,10 @@ Ready when:
   and owner preflight rejects every remaining stage;
 - live tails wait for a quiet window without hiding stable evidence;
 - resource/lock deferral later resumes automatically;
+- a continuously arriving current-epoch obligation receives a bounded fresh-
+  arrival opportunity while older current work advances through a persisted
+  fair cursor, and fail-closed identity refusals do not consume or advance
+  either scheduling opportunity;
 - no heavy necessary projection starves indefinitely;
 - readers see honest stale/fallback state;
 - graph readers distinguish global recall freshness from bounded returned-

@@ -174,3 +174,26 @@ previous wrapper ignored the explicit nested mutation receipt, classified the
 cycle as terminal failure, and lost automatic continuation. Focused
 live-shaped regressions now require admitted partial progress and a scheduled
 continuation without promoting the projection to current.
+
+## Review Amendment — 2026-08-25
+
+A sustained current-epoch cohort exposed a second head-of-line failure in the
+deadline order: a newly persisted natural-session obligation could remain
+behind hundreds of older current obligations even though historical heavy work
+already had its own reservation. Policy version 7 retains current-epoch
+priority and the bounded heavy reservation, and adds a source-owned current
+lane scheduler. When arrival metadata is present, one newest
+never-attempted current obligation receives a fresh-arrival reservation; the
+remaining current lane rotates from a persisted cursor, alternating with that
+reservation. The cursor advances only after a practical claim, so a fail-closed
+capture-identity refusal neither consumes a launch slot nor changes the fair
+turn.
+
+The scheduler state is generated retry orchestration state, not projection or
+capture truth. The reservation bounds queue-selection delay only under declared
+dispatcher opportunities and does not create host capacity, prove resource
+execution, or guarantee semantic freshness. A deterministic arrival-stream
+regression now covers a one-slot dispatcher with continuous current arrivals,
+and a queue-shaped regression covers persisted cursor state across the next
+dispatch view. Full source, portable, runtime activation, and agent-facing
+freshness proofs remain separate gates.
