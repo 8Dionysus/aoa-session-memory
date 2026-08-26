@@ -664,13 +664,17 @@ def _expected_event_id(event: dict[str, Any]) -> str | None:
 
 
 def _logical_identity_key(event: dict[str, Any]) -> tuple[Any, ...] | None:
+    # The action is the semantic uniqueness fence.  Prediction and observation
+    # IDs remain useful for exact replay identity, but allowing two different
+    # IDs for one action would let cross-instance writers race past the
+    # pre-append checks and make replay fail only after a second record landed.
     event_type = event["event_type"]
     if event_type == "prediction_commitment":
-        return ("prediction", event["prediction_id"])
+        return ("prediction", event["action_id"])
     if event_type == "action_binding":
         return ("action", event["action_id"])
     if event_type == "observation":
-        return ("observation", event["action_id"], event["observation_id"])
+        return ("observation", event["action_id"])
     if event_type == "observation_conflict":
         return (
             "observation_conflict",

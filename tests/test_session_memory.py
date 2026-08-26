@@ -107521,6 +107521,126 @@ def test_epistemic_action_chain_serializes_same_instance_concurrency(
     assert module.validate_epistemic_action_chain(store)["ok"] is True
 
 
+def test_epistemic_action_chain_rejects_cross_instance_same_action_prediction_race(
+    tmp_path: Path,
+) -> None:
+    store = tmp_path / "epistemic-cross-instance-prediction-race.jsonl"
+    first = module.EpistemicActionChain.create(
+        store,
+        session_id="session-cross-instance-prediction",
+        turn_id="turn-cross-instance-prediction",
+    )
+    second = module.EpistemicActionChain.load(
+        store,
+        session_id="session-cross-instance-prediction",
+        turn_id="turn-cross-instance-prediction",
+    )
+    barrier = threading.Barrier(2)
+    results: list[tuple[str, str | None, str | None]] = []
+
+    def commit(chain: object, label: str) -> None:
+        barrier.wait()
+        try:
+            chain.commit_prediction(
+                "action-cross-instance-prediction",
+                module.epistemic_digest(f"expected-{label}"),
+                **_epistemic_prediction_kwargs(label),
+                prediction_id=f"prediction-{label}",
+            )
+            results.append(("committed", None, None))
+        except module.EpistemicActionError as exc:
+            results.append(("rejected", exc.reason_code, exc.state))
+
+    workers = [
+        threading.Thread(target=commit, args=(first, "prediction-a")),
+        threading.Thread(target=commit, args=(second, "prediction-b")),
+    ]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join()
+
+    assert sorted(result[0] for result in results) == ["committed", "rejected"]
+    rejected = next(result for result in results if result[0] == "rejected")
+    assert rejected[1] == "duplicate_logical_identity"
+    assert rejected[2] == "ambiguous"
+    loaded = module.EpistemicActionChain.load(
+        store,
+        session_id="session-cross-instance-prediction",
+        turn_id="turn-cross-instance-prediction",
+    )
+    assert loaded.inspect()["event_count"] == 1
+    assert module.validate_epistemic_action_chain(store)["ok"] is True
+
+
+def test_epistemic_action_chain_rejects_cross_instance_same_action_observation_race(
+    tmp_path: Path,
+) -> None:
+    store = tmp_path / "epistemic-cross-instance-observation-race.jsonl"
+    seed = module.EpistemicActionChain.create(
+        store,
+        session_id="session-cross-instance-observation",
+        turn_id="turn-cross-instance-observation",
+    )
+    seed.commit_prediction(
+        "action-cross-instance-observation",
+        module.epistemic_digest("expected-observation"),
+        **_epistemic_prediction_kwargs("observation-race"),
+        prediction_id="prediction-observation-race",
+    )
+    seed.bind_action(
+        "action-cross-instance-observation",
+        module.epistemic_digest("action-observation"),
+        **_epistemic_action_kwargs("observation-race"),
+    )
+    first = module.EpistemicActionChain.load(
+        store,
+        session_id="session-cross-instance-observation",
+        turn_id="turn-cross-instance-observation",
+    )
+    second = module.EpistemicActionChain.load(
+        store,
+        session_id="session-cross-instance-observation",
+        turn_id="turn-cross-instance-observation",
+    )
+    barrier = threading.Barrier(2)
+    results: list[tuple[str, str | None, str | None]] = []
+
+    def observe(chain: object, observation_id: str, digest: str) -> None:
+        barrier.wait()
+        try:
+            chain.record_observation(
+                "action-cross-instance-observation",
+                module.epistemic_digest(digest),
+                **_epistemic_observation_kwargs("observation-race"),
+                observation_id=observation_id,
+            )
+            results.append(("committed", None, None))
+        except module.EpistemicActionError as exc:
+            results.append(("rejected", exc.reason_code, exc.state))
+
+    workers = [
+        threading.Thread(target=observe, args=(first, "observation-a", "actual-a")),
+        threading.Thread(target=observe, args=(second, "observation-b", "actual-b")),
+    ]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join()
+
+    assert sorted(result[0] for result in results) == ["committed", "rejected"]
+    rejected = next(result for result in results if result[0] == "rejected")
+    assert rejected[1] == "duplicate_logical_identity"
+    assert rejected[2] == "ambiguous"
+    loaded = module.EpistemicActionChain.load(
+        store,
+        session_id="session-cross-instance-observation",
+        turn_id="turn-cross-instance-observation",
+    )
+    assert loaded.inspect()["event_count"] == 3
+    assert module.validate_epistemic_action_chain(store)["ok"] is True
+
+
 def test_epistemic_action_chain_rejects_store_symlink_alias(
     tmp_path: Path,
 ) -> None:
