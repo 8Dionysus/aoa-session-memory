@@ -106547,6 +106547,105 @@ def _epistemic_observation_kwargs(label: str) -> dict[str, object]:
     }
 
 
+def _canonical_epistemic_json(value: object) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _epistemic_event_id(event_type: str, identity: object) -> str:
+    return "event:" + hashlib.sha256(
+        _canonical_epistemic_json(
+            {"event_type": event_type, "identity": identity}
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _epistemic_prediction_commitment_digest(event: dict[str, object]) -> str:
+    material = {
+        "request_id": event["request_id"],
+        "attempt_id": event["attempt_id"],
+        "prediction_id": event["prediction_id"],
+        "action_id": event["action_id"],
+        "tool_use_id": event.get("tool_use_id"),
+        "expected_observation_digest": event[
+            "expected_observation_digest"
+        ],
+        "pre_action_marker": event["pre_action_marker"],
+        "observation_window_digest": event["observation_window_digest"],
+        "hypothesis_digest": event["hypothesis_digest"],
+        "expected_change_digest": event["expected_change_digest"],
+        "falsifier_digest": event["falsifier_digest"],
+        "confidence": event["confidence"],
+        "action_plan_digest": event["action_plan_digest"],
+    }
+    return module.epistemic_digest(_canonical_epistemic_json(material))
+
+
+def _rehash_epistemic_store(
+    store: Path,
+    events: list[dict[str, object]] | None = None,
+) -> list[dict[str, object]]:
+    if events is None:
+        events = [
+            json.loads(line)
+            for line in store.read_text(encoding="utf-8").splitlines()
+        ]
+    previous_digest = "genesis"
+    for sequence, event in enumerate(events, start=1):
+        event["sequence"] = sequence
+        event["prev_event_digest"] = previous_digest
+        material = {
+            key: value for key, value in event.items() if key != "event_digest"
+        }
+        event["event_digest"] = module.epistemic_digest(
+            _canonical_epistemic_json(material)
+        )
+        previous_digest = str(event["event_digest"])
+    store.write_text(
+        "".join(
+            _canonical_epistemic_json(event) + "\n" for event in events
+        ),
+        encoding="utf-8",
+    )
+    return events
+
+
+def _create_epistemic_candidate_store(store: Path, label: str) -> None:
+    chain = module.EpistemicActionChain.create(
+        store,
+        session_id=f"session-{label}",
+        turn_id=f"turn-{label}",
+    )
+    chain.commit_prediction(
+        f"action-{label}",
+        module.epistemic_digest(f"expected-{label}"),
+        **_epistemic_prediction_kwargs(label),
+        prediction_id=f"prediction-{label}",
+        created_at="2026-08-26T00:00:00Z",
+    )
+    chain.bind_action(
+        f"action-{label}",
+        module.epistemic_digest(f"action-{label}"),
+        **_epistemic_action_kwargs(label),
+        created_at="2026-08-26T00:00:01Z",
+    )
+    chain.record_observation(
+        f"action-{label}",
+        module.epistemic_digest(f"actual-{label}"),
+        **_epistemic_observation_kwargs(label),
+        observation_id=f"observation-{label}",
+        created_at="2026-08-26T00:00:02Z",
+    )
+    chain.derive_discrepancy(
+        f"action-{label}",
+        created_at="2026-08-26T00:00:03Z",
+    )
+
+
 def test_epistemic_action_chain_replays_prediction_action_observation_and_candidate(
     tmp_path: Path,
 ) -> None:
@@ -106964,7 +107063,7 @@ def test_epistemic_action_chain_rejects_timestamp_post_hoc_commitment(
     )
 
 
-def test_epistemic_action_chain_exposes_partial_update_candidate_and_conflict(
+def test_epistemic_action_chain_rejects_caller_discrepancy_classification(
     tmp_path: Path,
 ) -> None:
     store = tmp_path / "epistemic-partial.jsonl"
@@ -106988,22 +107087,53 @@ def test_epistemic_action_chain_exposes_partial_update_candidate_and_conflict(
         module.epistemic_digest("actual"),
         **_epistemic_observation_kwargs("partial"),
     )
+    with pytest.raises(module.EpistemicActionConflictError) as classification:
+        chain.derive_discrepancy(
+            "action-partial",
+            discrepancy_kind="partial_match",
+        )
+    assert classification.value.reason_code == (
+        "discrepancy_classification_conflict"
+    )
+    assert classification.value.state == "ambiguous"
     candidate = chain.derive_discrepancy(
         "action-partial",
-        discrepancy_kind="partial_match",
-        alternative_explanation_digest=module.epistemic_digest("alternative"),
         model_update_digest=module.epistemic_digest("update"),
-        next_distinguishing_action_digest=module.epistemic_digest("next"),
     )["model_update_candidate"]
-    assert candidate["discrepancy_kind"] == "partial_match"
+    assert candidate["discrepancy_kind"] == "ambiguous"
+    assert candidate["update_kind"] == "withhold_update"
     assert candidate["model_update_digest"] == module.epistemic_digest("update")
     with pytest.raises(module.EpistemicActionConflictError) as candidate_conflict:
         chain.derive_discrepancy(
             "action-partial",
-            discrepancy_kind="partial_match",
             model_update_digest=module.epistemic_digest("different-update"),
         )
     assert candidate_conflict.value.reason_code == "model_update_conflict"
+
+
+def test_epistemic_action_chain_rejects_conflicting_rederivation(
+    tmp_path: Path,
+) -> None:
+    store = tmp_path / "epistemic-rederivation.jsonl"
+    _create_epistemic_candidate_store(store, "rederivation")
+    chain = module.EpistemicActionChain.load(store)
+
+    with pytest.raises(module.EpistemicActionConflictError) as conflict:
+        chain.derive_discrepancy(
+            "action-rederivation",
+            discrepancy_kind="match",
+        )
+
+    assert conflict.value.reason_code == (
+        "discrepancy_classification_conflict"
+    )
+    assert conflict.value.state == "ambiguous"
+    assert chain.inspect()["chain_status"] == "ambiguous"
+    assert not any(
+        event["event_type"] == "discrepancy"
+        and event["discrepancy_kind"] == "match"
+        for event in chain.inspect()["events"]
+    )
 
 
 def test_epistemic_action_chain_serializes_concurrent_writers_and_duplicate_json(
@@ -107058,3 +107188,118 @@ def test_epistemic_action_chain_serializes_concurrent_writers_and_duplicate_json
     with pytest.raises(module.EpistemicActionIntegrityError) as duplicate:
         module.EpistemicActionChain.load(store)
     assert duplicate.value.reason_code == "event_shape_invalid"
+
+
+def test_epistemic_action_chain_rejects_rehashed_semantic_tampering(
+    tmp_path: Path,
+) -> None:
+    cases = [
+        (
+            "prediction",
+            0,
+            "hypothesis_digest",
+            module.epistemic_digest("tampered-hypothesis"),
+            "prediction_commitment_mismatch",
+        ),
+        (
+            "discrepancy",
+            3,
+            "discrepancy_kind",
+            "match",
+            "discrepancy_derivation_mismatch",
+        ),
+        (
+            "candidate",
+            4,
+            "update_kind",
+            "inspect_only",
+            "candidate_derivation_mismatch",
+        ),
+    ]
+    for name, event_index, field, value, reason_code in cases:
+        store = tmp_path / f"rehashed-{name}.jsonl"
+        _create_epistemic_candidate_store(store, f"tamper-{name}")
+        events = _rehash_epistemic_store(store)
+        events[event_index][field] = value
+        _rehash_epistemic_store(store, events)
+
+        result = module.validate_epistemic_action_chain(store)
+
+        assert result["ok"] is False
+        assert result["diagnostics"] == [reason_code]
+        with pytest.raises(module.EpistemicActionIntegrityError) as integrity:
+            module.EpistemicActionChain.load(store)
+        assert integrity.value.reason_code == reason_code
+
+
+def test_epistemic_action_chain_rejects_rehashed_duplicate_logical_identity(
+    tmp_path: Path,
+) -> None:
+    store = tmp_path / "rehashed-duplicate.jsonl"
+    _create_epistemic_candidate_store(store, "duplicate")
+    events = _rehash_epistemic_store(store)
+    duplicate = copy.deepcopy(events[0])
+    duplicate["prediction_id"] = "prediction-duplicate-other"
+    duplicate["prediction_commitment_digest"] = (
+        _epistemic_prediction_commitment_digest(duplicate)
+    )
+    duplicate["event_id"] = _epistemic_event_id(
+        "prediction_commitment",
+        {"prediction_id": duplicate["prediction_id"]},
+    )
+    events.append(duplicate)
+    _rehash_epistemic_store(store, events)
+
+    result = module.validate_epistemic_action_chain(store)
+
+    assert result["ok"] is False
+    assert result["diagnostics"] == ["duplicate_logical_identity"]
+
+
+def test_epistemic_action_chain_malformed_enum_values_return_diagnostics(
+    tmp_path: Path,
+) -> None:
+    cases = [
+        ("event_type", 0, []),
+        ("state", 0, {}),
+        ("observation_status", 2, []),
+        ("reason_code", 2, {}),
+        ("discrepancy_kind", 3, []),
+        ("candidate_status", 4, {}),
+        ("update_kind", 4, []),
+    ]
+    for name, event_index, value in cases:
+        store = tmp_path / f"malformed-{name}.jsonl"
+        _create_epistemic_candidate_store(store, f"malformed-{name}")
+        events = _rehash_epistemic_store(store)
+        events[event_index][name] = value
+        _rehash_epistemic_store(store, events)
+
+        result = module.validate_epistemic_action_chain(store)
+
+        assert result["ok"] is False
+        assert isinstance(result["diagnostics"], list)
+        assert result["diagnostics"]
+        assert all(isinstance(item, str) for item in result["diagnostics"])
+
+    cli_store = tmp_path / "malformed-cli.jsonl"
+    _create_epistemic_candidate_store(cli_store, "malformed-cli")
+    cli_events = _rehash_epistemic_store(cli_store)
+    cli_events[0]["event_type"] = []
+    _rehash_epistemic_store(cli_store, cli_events)
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT.with_name("aoa_epistemic_action_event_chain.py")),
+            "--store",
+            str(cli_store),
+            "validate",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 1
+    payload = json.loads(completed.stdout)
+    assert payload["ok"] is False
+    assert payload["diagnostics"] == ["event_type_invalid"]

@@ -113,6 +113,11 @@ EPISTEMIC_ACTION_REASON_CODES = frozenset(
         "timestamp_invalid",
         "attempt_identity_conflict",
         "tool_use_identity_conflict",
+        "duplicate_logical_identity",
+        "prediction_commitment_mismatch",
+        "discrepancy_classification_conflict",
+        "discrepancy_derivation_mismatch",
+        "candidate_derivation_mismatch",
         "unsupported_event_state",
         "unsupported_reason_code",
     }
@@ -169,6 +174,119 @@ _EVENT_FIELDS = frozenset(
 _VOLATILE_EVENT_FIELDS = frozenset(
     {"sequence", "prev_event_digest", "event_digest", "created_at"}
 )
+_EVENT_COMMON_FIELDS = frozenset(
+    {
+        "schema_version",
+        "event_type",
+        "event_id",
+        "sequence",
+        "prev_event_digest",
+        "event_digest",
+        "state",
+        "created_at",
+        "session_id",
+        "turn_id",
+    }
+)
+_EVENT_TYPE_FIELDS = {
+    "prediction_commitment": _EVENT_COMMON_FIELDS
+    | {
+        "request_id",
+        "attempt_id",
+        "tool_use_id",
+        "prediction_id",
+        "prediction_commitment_digest",
+        "pre_action_marker",
+        "observation_window_digest",
+        "hypothesis_digest",
+        "expected_change_digest",
+        "falsifier_digest",
+        "confidence",
+        "action_plan_digest",
+        "action_id",
+        "expected_observation_digest",
+    },
+    "action_binding": _EVENT_COMMON_FIELDS
+    | {
+        "request_id",
+        "attempt_id",
+        "tool_use_id",
+        "prediction_id",
+        "prediction_commitment_digest",
+        "action_id",
+        "action_digest",
+        "action_kind",
+        "effect_class",
+        "action_started_at",
+        "related_event_ids",
+    },
+    "observation": _EVENT_COMMON_FIELDS
+    | {
+        "request_id",
+        "attempt_id",
+        "tool_use_id",
+        "action_id",
+        "observation_id",
+        "observation_digest",
+        "observation_status",
+        "evidence_ref_ids",
+        "reason_code",
+        "related_event_ids",
+    },
+    "observation_conflict": _EVENT_COMMON_FIELDS
+    | {
+        "request_id",
+        "attempt_id",
+        "tool_use_id",
+        "action_id",
+        "observation_id",
+        "observation_digest",
+        "observation_status",
+        "evidence_ref_ids",
+        "reason_code",
+        "related_event_ids",
+    },
+    "discrepancy": _EVENT_COMMON_FIELDS
+    | {
+        "request_id",
+        "attempt_id",
+        "tool_use_id",
+        "prediction_id",
+        "action_id",
+        "expected_observation_digest",
+        "observed_observation_digest",
+        "discrepancy_kind",
+        "related_event_ids",
+        "source_event_ids",
+    },
+    "model_update_candidate": _EVENT_COMMON_FIELDS
+    | {
+        "request_id",
+        "attempt_id",
+        "tool_use_id",
+        "action_id",
+        "candidate_id",
+        "candidate_status",
+        "discrepancy_kind",
+        "update_kind",
+        "source_event_ids",
+        "related_event_ids",
+        "claim_ceiling",
+        "hypothesis_digest",
+        "expected_change_digest",
+        "falsifier_digest",
+        "confidence",
+        "action_plan_digest",
+        "observation_window_digest",
+        "pre_action_marker",
+        "alternative_explanation_digest",
+        "model_update_digest",
+        "next_distinguishing_action_digest",
+    },
+    # Refusals carry bounded context fields selected by the rejecting owner
+    # operation. Their values are still validated below.
+    "refusal": _EVENT_FIELDS,
+}
 
 
 class EpistemicActionError(ValueError):
@@ -325,6 +443,14 @@ def _safe_reason_code(value: Any, *, default: str) -> str:
     return value
 
 
+def _safe_discrepancy_kind(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or value not in EPISTEMIC_ACTION_DISCREPANCY_KINDS:
+        raise EpistemicActionPrivacyError("prediction_fields_invalid")
+    return value
+
+
 def _safe_timestamp(value: Any = None) -> str:
     if value is None:
         return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -357,6 +483,142 @@ def _event_digest(event: dict[str, Any]) -> str:
     return _hash_bytes(_canonical_json(material).encode("utf-8"))
 
 
+def _event_id_for(event_type: str, identity: Any) -> str:
+    return _derived_id(
+        "event",
+        {"event_type": event_type, "identity": identity},
+    )
+
+
+def _prediction_commitment_digest(event: dict[str, Any]) -> str:
+    return _hash_bytes(
+        _canonical_json(
+            {
+                "request_id": event["request_id"],
+                "attempt_id": event["attempt_id"],
+                "prediction_id": event["prediction_id"],
+                "action_id": event["action_id"],
+                "tool_use_id": event.get("tool_use_id"),
+                "expected_observation_digest": event[
+                    "expected_observation_digest"
+                ],
+                "pre_action_marker": event["pre_action_marker"],
+                "observation_window_digest": event[
+                    "observation_window_digest"
+                ],
+                "hypothesis_digest": event["hypothesis_digest"],
+                "expected_change_digest": event["expected_change_digest"],
+                "falsifier_digest": event["falsifier_digest"],
+                "confidence": event["confidence"],
+                "action_plan_digest": event["action_plan_digest"],
+            }
+        ).encode("utf-8")
+    )
+
+
+def _legacy_discrepancy_event_id(event: dict[str, Any]) -> str:
+    return _event_id_for(
+        "discrepancy",
+        {
+            "action_id": event["action_id"],
+            "source_event_ids": list(event["source_event_ids"]),
+            "discrepancy_kind": event["discrepancy_kind"],
+        },
+    )
+
+
+def _expected_event_id(event: dict[str, Any]) -> str | None:
+    event_type = event["event_type"]
+    if event_type == "prediction_commitment":
+        identity = {"prediction_id": event["prediction_id"]}
+    elif event_type == "action_binding":
+        identity = {"action_id": event["action_id"]}
+    elif event_type == "observation":
+        identity = {"observation_id": event["observation_id"]}
+    elif event_type == "observation_conflict":
+        identity = {
+            "request_id": event["request_id"],
+            "action_id": event["action_id"],
+            "attempt_id": event["attempt_id"],
+            "tool_use_id": event.get("tool_use_id"),
+            "observation_id": event["observation_id"],
+            "observation_digest": event.get("observation_digest"),
+            "observation_status": event["observation_status"],
+            "evidence_ref_ids": list(event["evidence_ref_ids"]),
+            "related_event_ids": list(event.get("related_event_ids", [])),
+        }
+    elif event_type == "discrepancy":
+        identity = {
+            "action_id": event["action_id"],
+            "source_event_ids": list(event["source_event_ids"]),
+        }
+    elif event_type == "model_update_candidate":
+        related_event_ids = event.get("related_event_ids", [])
+        discrepancy_event_id = (
+            related_event_ids[0] if len(related_event_ids) == 1 else None
+        )
+        identity = {
+            "candidate_id": event["candidate_id"],
+            "discrepancy_event_id": discrepancy_event_id,
+        }
+    elif event_type == "refusal":
+        identity = {
+            "reason_code": event["reason_code"],
+            "related_event_ids": list(event.get("related_event_ids", [])),
+            "fields": {
+                key: value
+                for key, value in event.items()
+                if key
+                not in {
+                    "schema_version",
+                    "event_type",
+                    "event_id",
+                    "sequence",
+                    "prev_event_digest",
+                    "event_digest",
+                    "state",
+                    "created_at",
+                    "session_id",
+                    "turn_id",
+                    "reason_code",
+                    "related_event_ids",
+                }
+            },
+        }
+    else:
+        return None
+    return _event_id_for(event_type, identity)
+
+
+def _logical_identity_key(event: dict[str, Any]) -> tuple[Any, ...] | None:
+    event_type = event["event_type"]
+    if event_type == "prediction_commitment":
+        return ("prediction", event["prediction_id"])
+    if event_type == "action_binding":
+        return ("action", event["action_id"])
+    if event_type == "observation":
+        return ("observation", event["action_id"], event["observation_id"])
+    if event_type == "observation_conflict":
+        return (
+            "observation_conflict",
+            event["action_id"],
+            event["observation_id"],
+            event.get("observation_digest"),
+            event["observation_status"],
+            tuple(event["evidence_ref_ids"]),
+            tuple(event.get("related_event_ids", [])),
+        )
+    if event_type == "discrepancy":
+        return (
+            "discrepancy",
+            event["action_id"],
+            tuple(event["source_event_ids"]),
+        )
+    if event_type == "model_update_candidate":
+        return ("candidate", event["candidate_id"])
+    return None
+
+
 def _event_semantics(event: dict[str, Any]) -> dict[str, Any]:
     return {
         key: value
@@ -372,6 +634,111 @@ def _unique_safe_ids(value: Any, field: str) -> list[str]:
     if len(set(result)) != len(result):
         raise EpistemicActionIntegrityError("event_shape_invalid")
     return result
+
+
+def _discrepancy_context(
+    events: Iterable[dict[str, Any]],
+    action_id: str,
+) -> dict[str, Any]:
+    prior_events = list(events)
+    predictions = [
+        event
+        for event in prior_events
+        if event.get("event_type") == "prediction_commitment"
+        and event.get("action_id") == action_id
+    ]
+    actions = [
+        event
+        for event in prior_events
+        if event.get("event_type") == "action_binding"
+        and event.get("action_id") == action_id
+    ]
+    observations = [
+        event
+        for event in prior_events
+        if event.get("event_type") == "observation"
+        and event.get("action_id") == action_id
+    ]
+    conflict_events = [
+        event
+        for event in prior_events
+        if (
+            event.get("event_type") == "observation_conflict"
+            or (
+                event.get("event_type") == "refusal"
+                and event.get("state") == "ambiguous"
+            )
+        )
+        and event.get("action_id") == action_id
+    ]
+    prediction = predictions[0] if len(predictions) == 1 else None
+    action = actions[0] if len(actions) == 1 else None
+    source_event_ids: list[str] = []
+    if prediction is not None:
+        source_event_ids.append(str(prediction["event_id"]))
+    if action is not None:
+        source_event_ids.append(str(action["event_id"]))
+    observation: dict[str, Any] | None = None
+    if len(observations) == 1 and not conflict_events:
+        observation = observations[0]
+        source_event_ids.append(str(observation["event_id"]))
+    elif observations or conflict_events:
+        source_event_ids.extend(
+            str(event["event_id"])
+            for event in [*observations, *conflict_events]
+        )
+    source_event_ids = list(dict.fromkeys(source_event_ids))[:8]
+    if conflict_events or len(observations) > 1:
+        discrepancy_kind = "ambiguous"
+    elif observation is None:
+        discrepancy_kind = "unknown"
+    elif observation.get("observation_status") != "observed":
+        discrepancy_kind = (
+            "ambiguous"
+            if observation.get("observation_status") == "ambiguous"
+            else "unknown"
+        )
+    elif prediction is None or action is None:
+        discrepancy_kind = "unknown"
+    elif observation.get("observation_digest") == prediction.get(
+        "expected_observation_digest"
+    ):
+        discrepancy_kind = "match"
+    else:
+        discrepancy_kind = "mismatch"
+    return {
+        "prediction": prediction,
+        "action": action,
+        "observations": observations,
+        "conflict_events": conflict_events,
+        "observation": observation,
+        "source_event_ids": source_event_ids,
+        "discrepancy_kind": discrepancy_kind,
+    }
+
+
+def _candidate_source_event_ids(discrepancy_event: dict[str, Any]) -> list[str]:
+    return list(
+        dict.fromkeys(
+            [
+                str(discrepancy_event["event_id"]),
+                *[
+                    str(item)
+                    for item in discrepancy_event.get("source_event_ids", [])
+                ],
+            ]
+        )
+    )[:8]
+
+
+def _candidate_update_kind(discrepancy_kind: str) -> str:
+    return {
+        "mismatch": "review_prediction",
+        "partial_match": "review_prediction",
+        "match": "inspect_only",
+        "unknown": "withhold_update",
+        "ambiguous": "withhold_update",
+    }[discrepancy_kind]
 
 
 def _validate_event_shape(
@@ -401,8 +768,14 @@ def _validate_event_shape(
     if event.get("schema_version") != EPISTEMIC_ACTION_EVENT_SCHEMA_VERSION:
         raise EpistemicActionIntegrityError("event_shape_invalid")
     event_type = event.get("event_type")
+    if not isinstance(event_type, str):
+        raise EpistemicActionIntegrityError("event_type_invalid")
     if event_type not in EPISTEMIC_ACTION_EVENT_TYPES:
         raise EpistemicActionIntegrityError("event_type_invalid")
+    if set(event) - _EVENT_TYPE_FIELDS[event_type]:
+        raise EpistemicActionIntegrityError("event_shape_invalid")
+    if not isinstance(event.get("state"), str):
+        raise EpistemicActionIntegrityError("unsupported_event_state")
     if event.get("state") not in EPISTEMIC_ACTION_STATES:
         raise EpistemicActionIntegrityError("unsupported_event_state")
     if not isinstance(event.get("sequence"), int) or isinstance(
@@ -460,24 +833,37 @@ def _validate_event_shape(
             _safe_digest(event[field], field)
     if "confidence" in event:
         _safe_confidence(event["confidence"])
-    if "observation_status" in event and event["observation_status"] not in EPISTEMIC_ACTION_OBSERVATION_STATUSES:
-        raise EpistemicActionIntegrityError("observation_status_invalid")
+    if "observation_status" in event:
+        if (
+            not isinstance(event["observation_status"], str)
+            or event["observation_status"]
+            not in EPISTEMIC_ACTION_OBSERVATION_STATUSES
+        ):
+            raise EpistemicActionIntegrityError("observation_status_invalid")
     if "reason_code" in event:
-        if event["reason_code"] not in EPISTEMIC_ACTION_REASON_CODES:
+        if (
+            not isinstance(event["reason_code"], str)
+            or event["reason_code"] not in EPISTEMIC_ACTION_REASON_CODES
+        ):
             raise EpistemicActionIntegrityError("unsupported_reason_code")
     for field in ("related_event_ids", "source_event_ids", "evidence_ref_ids"):
         if field in event:
             _unique_safe_ids(event[field], field)
-    if "discrepancy_kind" in event and event["discrepancy_kind"] not in EPISTEMIC_ACTION_DISCREPANCY_KINDS:
+    if "discrepancy_kind" in event and (
+        not isinstance(event["discrepancy_kind"], str)
+        or event["discrepancy_kind"] not in EPISTEMIC_ACTION_DISCREPANCY_KINDS
+    ):
         raise EpistemicActionIntegrityError("event_shape_invalid")
-    if "candidate_status" in event and event["candidate_status"] not in {
-        "shadow_only",
-        "unknown",
-        "ambiguous",
-        "refused",
-    }:
+    if "candidate_status" in event and (
+        not isinstance(event["candidate_status"], str)
+        or event["candidate_status"]
+        not in {"shadow_only", "unknown", "ambiguous", "refused"}
+    ):
         raise EpistemicActionIntegrityError("event_shape_invalid")
-    if "update_kind" in event and event["update_kind"] not in EPISTEMIC_ACTION_UPDATE_KINDS:
+    if "update_kind" in event and (
+        not isinstance(event["update_kind"], str)
+        or event["update_kind"] not in EPISTEMIC_ACTION_UPDATE_KINDS
+    ):
         raise EpistemicActionIntegrityError("event_shape_invalid")
     if "claim_ceiling" in event and event["claim_ceiling"] != EPISTEMIC_ACTION_CANDIDATE_CLAIM_CEILING:
         raise EpistemicActionIntegrityError("event_shape_invalid")
@@ -595,6 +981,9 @@ def _replay_records(
     expected_sequence = 1
     previous_digest = EPISTEMIC_ACTION_GENESIS
     seen_event_ids: set[str] = set()
+    seen_logical_identities: set[tuple[Any, ...]] = set()
+    seen_prediction_actions: set[str] = set()
+    seen_observation_actions: set[str] = set()
     for raw in records:
         event = _validate_event_shape(
             raw,
@@ -606,7 +995,16 @@ def _replay_records(
         if event["prev_event_digest"] != previous_digest:
             raise EpistemicActionIntegrityError("event_predecessor_mismatch")
         if event["event_id"] in seen_event_ids:
-            raise EpistemicActionIntegrityError("event_shape_invalid")
+            raise EpistemicActionIntegrityError("duplicate_logical_identity")
+        expected_event_id = _expected_event_id(event)
+        if expected_event_id is not None:
+            expected_event_ids = {expected_event_id}
+            if event["event_type"] == "discrepancy":
+                # v2 artifacts written before the stable discrepancy identity
+                # repair remain readable when their evidence is otherwise valid.
+                expected_event_ids.add(_legacy_discrepancy_event_id(event))
+            if event["event_id"] not in expected_event_ids:
+                raise EpistemicActionIntegrityError("event_identity_conflict")
         if event["event_digest"] != _event_digest(event):
             raise EpistemicActionIntegrityError("event_digest_mismatch")
         prior_by_id = {
@@ -622,12 +1020,24 @@ def _replay_records(
             if related is None:
                 raise EpistemicActionIntegrityError("event_predecessor_mismatch")
         event_type = event["event_type"]
-        related_events = [
-            prior_by_id[item]
-            for item in event.get("related_event_ids", [])
-            if item in prior_by_id
-        ]
-        if event_type == "action_binding":
+        if event_type == "prediction_commitment":
+            if event["prediction_commitment_digest"] != _prediction_commitment_digest(
+                event
+            ):
+                raise EpistemicActionIntegrityError(
+                    "prediction_commitment_mismatch"
+                )
+            if event["action_id"] in seen_prediction_actions:
+                raise EpistemicActionIntegrityError(
+                    "duplicate_logical_identity"
+                )
+            seen_prediction_actions.add(event["action_id"])
+        elif event_type == "action_binding":
+            related_events = [
+                prior_by_id[item]
+                for item in event.get("related_event_ids", [])
+                if item in prior_by_id
+            ]
             predictions = [
                 item
                 for item in related_events
@@ -645,82 +1055,162 @@ def _replay_records(
                 != event.get("tool_use_id")
                 or predictions[0].get("prediction_commitment_digest")
                 != event.get("prediction_commitment_digest")
+                or event.get("related_event_ids")
+                != [str(predictions[0]["event_id"])]
             ):
                 raise EpistemicActionIntegrityError("event_predecessor_mismatch")
             if event.get("action_started_at", "") < predictions[0].get(
                 "created_at", ""
             ):
                 raise EpistemicActionIntegrityError("event_predecessor_mismatch")
-        elif event_type in {"observation", "observation_conflict"}:
+        elif event_type == "observation":
+            related_events = [
+                prior_by_id[item]
+                for item in event.get("related_event_ids", [])
+                if item in prior_by_id
+            ]
             actions = [
                 item
                 for item in related_events
                 if item.get("event_type") == "action_binding"
             ]
-            if event_type == "observation_conflict":
-                actions = [
-                    item
-                    for item in related_events
-                    if item.get("action_id") == event.get("action_id")
-                ]
-            if event_type == "observation" and (
+            if (
                 len(actions) != 1
                 or actions[0].get("action_id") != event.get("action_id")
                 or actions[0].get("request_id") != event.get("request_id")
                 or actions[0].get("attempt_id") != event.get("attempt_id")
                 or actions[0].get("tool_use_id") != event.get("tool_use_id")
+                or event.get("related_event_ids")
+                != [str(actions[0]["event_id"])]
             ):
                 raise EpistemicActionIntegrityError("event_predecessor_mismatch")
-            if event_type == "observation_conflict" and not actions:
+            if event["action_id"] in seen_observation_actions:
+                raise EpistemicActionIntegrityError(
+                    "duplicate_logical_identity"
+                )
+            seen_observation_actions.add(event["action_id"])
+        elif event_type == "observation_conflict":
+            related_events = [
+                prior_by_id[item]
+                for item in event.get("related_event_ids", [])
+                if item in prior_by_id
+            ]
+            actions = [
+                item
+                for item in result
+                if item.get("event_type") == "action_binding"
+                and item.get("action_id") == event.get("action_id")
+            ]
+            if len(actions) != 1 or not related_events or not any(
+                item.get("event_type") == "observation"
+                and item.get("action_id") == event.get("action_id")
+                for item in related_events
+            ):
+                raise EpistemicActionIntegrityError("event_predecessor_mismatch")
+            if any(
+                item.get("action_id") != event.get("action_id")
+                or item.get("event_type") not in {"observation", "observation_conflict"}
+                for item in related_events
+            ):
+                raise EpistemicActionIntegrityError("event_predecessor_mismatch")
+            if (
+                event.get("request_id") != actions[0].get("request_id")
+                or event.get("attempt_id") != actions[0].get("attempt_id")
+                or event.get("tool_use_id") != actions[0].get("tool_use_id")
+            ):
                 raise EpistemicActionIntegrityError("event_predecessor_mismatch")
         elif event_type == "discrepancy":
-            source_events = [
-                prior_by_id[item]
-                for item in event.get("source_event_ids", [])
-                if item in prior_by_id
-            ]
-            if any(
-                item.get("request_id") != event.get("request_id")
-                or item.get("attempt_id") != event.get("attempt_id")
-                or item.get("tool_use_id") != event.get("tool_use_id")
-                for item in source_events
-                if item.get("event_type")
-                in {"prediction_commitment", "action_binding"}
-            ):
+            context = _discrepancy_context(result, event["action_id"])
+            prediction = context["prediction"]
+            action = context["action"]
+            if prediction is None or action is None:
                 raise EpistemicActionIntegrityError("event_predecessor_mismatch")
-            if not any(
-                item.get("event_type") == "prediction_commitment"
-                and item.get("action_id") == event.get("action_id")
-                for item in source_events
-            ) or not any(
-                item.get("event_type") == "action_binding"
-                and item.get("action_id") == event.get("action_id")
-                for item in source_events
+            expected_source_event_ids = context["source_event_ids"]
+            expected_discrepancy_kind = context["discrepancy_kind"]
+            expected_observation = context["observation"]
+            if (
+                event["source_event_ids"] != expected_source_event_ids
+                or event.get("related_event_ids") != expected_source_event_ids
+                or event["discrepancy_kind"] != expected_discrepancy_kind
+                or event.get("request_id") != prediction.get("request_id")
+                or event.get("attempt_id") != prediction.get("attempt_id")
+                or event.get("tool_use_id") != prediction.get("tool_use_id")
+                or event.get("prediction_id") != prediction.get("prediction_id")
+                or event.get("expected_observation_digest")
+                != prediction.get("expected_observation_digest")
             ):
-                raise EpistemicActionIntegrityError("event_predecessor_mismatch")
+                raise EpistemicActionIntegrityError(
+                    "discrepancy_derivation_mismatch"
+                )
+            expected_observed_digest = (
+                expected_observation.get("observation_digest")
+                if expected_observation is not None
+                and expected_observation.get("observation_status") == "observed"
+                else None
+            )
+            if event.get("observed_observation_digest") != expected_observed_digest:
+                raise EpistemicActionIntegrityError(
+                    "discrepancy_derivation_mismatch"
+                )
         elif event_type == "model_update_candidate":
-            source_events = [
-                prior_by_id[item]
-                for item in event.get("source_event_ids", [])
-                if item in prior_by_id
-            ]
+            related_event_ids = event.get("related_event_ids", [])
+            if len(related_event_ids) != 1:
+                raise EpistemicActionIntegrityError("candidate_derivation_mismatch")
+            discrepancy = prior_by_id.get(related_event_ids[0])
+            if discrepancy is None or discrepancy.get("event_type") != "discrepancy":
+                raise EpistemicActionIntegrityError("event_predecessor_mismatch")
+            context = _discrepancy_context(result, discrepancy["action_id"])
+            prediction = context["prediction"]
+            action = context["action"]
+            if prediction is None or action is None:
+                raise EpistemicActionIntegrityError("event_predecessor_mismatch")
+            candidate_id = _derived_id(
+                "candidate",
+                {
+                    "action_id": discrepancy["action_id"],
+                    "discrepancy_event_id": discrepancy["event_id"],
+                },
+            )
+            expected_source_event_ids = _candidate_source_event_ids(discrepancy)
+            expected_update_kind = _candidate_update_kind(
+                discrepancy["discrepancy_kind"]
+            )
+            expected_candidate = {
+                "request_id": prediction["request_id"],
+                "attempt_id": prediction["attempt_id"],
+                "action_id": discrepancy["action_id"],
+                "candidate_id": candidate_id,
+                "candidate_status": "shadow_only",
+                "discrepancy_kind": discrepancy["discrepancy_kind"],
+                "update_kind": expected_update_kind,
+                "source_event_ids": expected_source_event_ids,
+                "related_event_ids": [str(discrepancy["event_id"])],
+                "claim_ceiling": EPISTEMIC_ACTION_CANDIDATE_CLAIM_CEILING,
+                "tool_use_id": prediction.get("tool_use_id"),
+                "hypothesis_digest": prediction["hypothesis_digest"],
+                "expected_change_digest": prediction["expected_change_digest"],
+                "falsifier_digest": prediction["falsifier_digest"],
+                "confidence": prediction["confidence"],
+                "action_plan_digest": prediction["action_plan_digest"],
+                "observation_window_digest": prediction[
+                    "observation_window_digest"
+                ],
+                "pre_action_marker": prediction["pre_action_marker"],
+            }
             if any(
-                item.get("request_id") != event.get("request_id")
-                or item.get("attempt_id") != event.get("attempt_id")
-                or item.get("tool_use_id") != event.get("tool_use_id")
-                for item in source_events
-                if item.get("event_type")
-                in {"prediction_commitment", "action_binding"}
+                event.get(key) != expected_value
+                for key, expected_value in expected_candidate.items()
             ):
-                raise EpistemicActionIntegrityError("event_predecessor_mismatch")
-            if not any(
-                item.get("event_type") == "discrepancy"
-                and item.get("action_id") == event.get("action_id")
-                and item.get("discrepancy_kind")
-                == event.get("discrepancy_kind")
-                for item in source_events
-            ):
-                raise EpistemicActionIntegrityError("event_predecessor_mismatch")
+                raise EpistemicActionIntegrityError(
+                    "candidate_derivation_mismatch"
+                )
+        logical_identity = _logical_identity_key(event)
+        if logical_identity is not None:
+            if logical_identity in seen_logical_identities:
+                raise EpistemicActionIntegrityError(
+                    "duplicate_logical_identity"
+                )
+            seen_logical_identities.add(logical_identity)
         seen_event_ids.add(event["event_id"])
         result.append(dict(event))
         expected_sequence += 1
@@ -905,17 +1395,14 @@ class EpistemicActionChain:
         created_at: str | None = None,
         expected_sequence: int | None = None,
     ) -> tuple[dict[str, Any], bool]:
-        if event_type not in EPISTEMIC_ACTION_EVENT_TYPES:
+        if not isinstance(event_type, str) or event_type not in EPISTEMIC_ACTION_EVENT_TYPES:
             raise EpistemicActionError("event_type_invalid")
-        if state not in EPISTEMIC_ACTION_STATES:
+        if not isinstance(state, str) or state not in EPISTEMIC_ACTION_STATES:
             raise EpistemicActionError("unsupported_event_state")
         logical: dict[str, Any] = {
             "schema_version": EPISTEMIC_ACTION_EVENT_SCHEMA_VERSION,
             "event_type": event_type,
-            "event_id": _derived_id(
-                "event",
-                {"event_type": event_type, "identity": identity},
-            ),
+            "event_id": _event_id_for(event_type, identity),
             "state": state,
             "created_at": _safe_timestamp(created_at),
             "session_id": self.session_id,
@@ -944,6 +1431,15 @@ class EpistemicActionChain:
                     return dict(existing), False
                 raise EpistemicActionConflictError(
                     "event_identity_conflict",
+                    state="ambiguous",
+                )
+            logical_identity = _logical_identity_key(logical)
+            if logical_identity is not None and any(
+                _logical_identity_key(event) == logical_identity
+                for event in current
+            ):
+                raise EpistemicActionConflictError(
+                    "duplicate_logical_identity",
                     state="ambiguous",
                 )
             observed_sequence = len(current)
@@ -1215,24 +1711,22 @@ class EpistemicActionChain:
                 state="ambiguous",
                 event=refusal,
             )
-        commitment_digest = _hash_bytes(
-            _canonical_json(
-                {
-                    "request_id": safe_request_id,
-                    "attempt_id": safe_attempt_id,
-                    "prediction_id": safe_prediction_id,
-                    "action_id": safe_action_id,
-                    "tool_use_id": safe_tool_use_id,
-                    "expected_observation_digest": safe_expected,
-                    "pre_action_marker": safe_pre_action_marker,
-                    "observation_window_digest": safe_window,
-                    "hypothesis_digest": safe_hypothesis,
-                    "expected_change_digest": safe_expected_change,
-                    "falsifier_digest": safe_falsifier,
-                    "confidence": safe_confidence,
-                    "action_plan_digest": safe_action_plan,
-                }
-            ).encode("utf-8")
+        commitment_digest = _prediction_commitment_digest(
+            {
+                "request_id": safe_request_id,
+                "attempt_id": safe_attempt_id,
+                "prediction_id": safe_prediction_id,
+                "action_id": safe_action_id,
+                "tool_use_id": safe_tool_use_id,
+                "expected_observation_digest": safe_expected,
+                "pre_action_marker": safe_pre_action_marker,
+                "observation_window_digest": safe_window,
+                "hypothesis_digest": safe_hypothesis,
+                "expected_change_digest": safe_expected_change,
+                "falsifier_digest": safe_falsifier,
+                "confidence": safe_confidence,
+                "action_plan_digest": safe_action_plan,
+            }
         )
         event, _created = self._append_event(
             event_type="prediction_commitment",
@@ -1465,7 +1959,10 @@ class EpistemicActionChain:
             observation_digest = observed_digest
         elif observed_digest is not None and observed_digest != observation_digest:
             raise EpistemicActionPrivacyError("digest_invalid")
-        if observation_status not in EPISTEMIC_ACTION_OBSERVATION_STATUSES:
+        if (
+            not isinstance(observation_status, str)
+            or observation_status not in EPISTEMIC_ACTION_OBSERVATION_STATUSES
+        ):
             raise EpistemicActionPrivacyError("observation_status_invalid")
         if observation_status == "observed":
             safe_observation_digest = _safe_digest(
@@ -1686,12 +2183,7 @@ class EpistemicActionChain:
         """Derive a bounded discrepancy and persist only a shadow candidate."""
 
         safe_action_id = _safe_identifier(action_id, "action_id")
-        if discrepancy_kind is not None and discrepancy_kind not in {
-            "match",
-            "partial_match",
-            "mismatch",
-        }:
-            raise EpistemicActionPrivacyError("prediction_fields_invalid")
+        requested_discrepancy_kind = _safe_discrepancy_kind(discrepancy_kind)
         safe_alternative = _safe_digest(
             alternative_explanation_digest,
             "alternative_explanation_digest",
@@ -1707,22 +2199,9 @@ class EpistemicActionChain:
             "next_distinguishing_action_digest",
             required=False,
         )
-        prediction = next(
-            (
-                event
-                for event in self._prediction_events()
-                if event.get("action_id") == safe_action_id
-            ),
-            None,
-        )
-        action = next(
-            (
-                event
-                for event in self._action_events()
-                if event.get("action_id") == safe_action_id
-            ),
-            None,
-        )
+        context = _discrepancy_context(self._events, safe_action_id)
+        prediction = context["prediction"]
+        action = context["action"]
         if prediction is None or action is None:
             return {
                 "ok": False,
@@ -1732,50 +2211,38 @@ class EpistemicActionChain:
                 "discrepancy": None,
                 "model_update_candidate": None,
             }
-        observations = self._observation_events(safe_action_id)
-        conflict_events = [
-            event
-            for event in self._events
-            if (
-                event.get("event_type") == "observation_conflict"
-                or (
-                    event.get("event_type") == "refusal"
-                    and event.get("state") == "ambiguous"
-                )
-            )
-            and event.get("action_id") == safe_action_id
-        ]
-        source_event_ids = [str(prediction["event_id"]), str(action["event_id"])]
-        observation: dict[str, Any] | None = None
-        if len(observations) == 1 and not conflict_events:
-            observation = observations[0]
-            source_event_ids.append(str(observation["event_id"]))
-        elif observations or conflict_events:
-            source_event_ids.extend(
-                str(event["event_id"])
-                for event in [*observations, *conflict_events]
-            )
-        source_event_ids = list(dict.fromkeys(source_event_ids))[:8]
-        if conflict_events or len(observations) > 1:
-            discrepancy_kind = "ambiguous"
-        elif observation is None:
-            discrepancy_kind = "unknown"
-        elif observation.get("observation_status") != "observed":
-            discrepancy_kind = (
-                "ambiguous"
-                if observation.get("observation_status") == "ambiguous"
-                else "unknown"
-            )
-        elif discrepancy_kind is not None:
-            pass
-        elif observation.get("observation_digest") == prediction.get(
-            "expected_observation_digest"
+        discrepancy_kind = str(context["discrepancy_kind"])
+        if (
+            requested_discrepancy_kind is not None
+            and requested_discrepancy_kind != discrepancy_kind
         ):
-            discrepancy_kind = "match"
-        else:
-            discrepancy_kind = "mismatch"
-        if discrepancy_kind is None:
-            discrepancy_kind = "unknown"
+            refusal = self._record_refusal(
+                "discrepancy_classification_conflict",
+                related_event_ids=[
+                    str(prediction["event_id"]),
+                    str(action["event_id"]),
+                    *[
+                        str(event["event_id"])
+                        for event in context["observations"]
+                    ],
+                    *[
+                        str(event["event_id"])
+                        for event in context["conflict_events"]
+                    ],
+                ][:8],
+                fields={
+                    "action_id": safe_action_id,
+                    "discrepancy_kind": requested_discrepancy_kind,
+                },
+                state="ambiguous",
+            )
+            raise EpistemicActionConflictError(
+                "discrepancy_classification_conflict",
+                state="ambiguous",
+                event=refusal,
+            )
+        observation = context["observation"]
+        source_event_ids = context["source_event_ids"]
         fields: dict[str, Any] = {
             "request_id": prediction["request_id"],
             "attempt_id": prediction["attempt_id"],
@@ -1801,22 +2268,17 @@ class EpistemicActionChain:
             "unknown": "unknown",
             "ambiguous": "ambiguous",
         }[discrepancy_kind]
-        discrepancy_event_id = _derived_id(
-            "event",
-            {
-                "event_type": "discrepancy",
-                "identity": {
-                    "action_id": safe_action_id,
-                    "source_event_ids": source_event_ids,
-                    "discrepancy_kind": discrepancy_kind,
-                },
-            },
-        )
+        discrepancy_identity = {
+            "action_id": safe_action_id,
+            "source_event_ids": source_event_ids,
+        }
         existing_discrepancy = next(
             (
                 event
                 for event in self._events
-                if event.get("event_id") == discrepancy_event_id
+                if event.get("event_type") == "discrepancy"
+                and event.get("action_id") == safe_action_id
+                and event.get("source_event_ids") == source_event_ids
             ),
             None,
         )
@@ -1825,11 +2287,7 @@ class EpistemicActionChain:
                 event_type="discrepancy",
                 state=discrepancy_state,
                 fields=fields,
-                identity={
-                    "action_id": safe_action_id,
-                    "source_event_ids": source_event_ids,
-                    "discrepancy_kind": discrepancy_kind,
-                },
+                identity=discrepancy_identity,
                 created_at=created_at,
                 expected_sequence=expected_sequence,
             )
@@ -1872,17 +2330,7 @@ class EpistemicActionChain:
         model_update_digest: str | None,
         next_distinguishing_action_digest: str | None,
     ) -> dict[str, Any]:
-        source_event_ids = list(
-            dict.fromkeys(
-                [
-                    str(discrepancy_event["event_id"]),
-                    *[
-                        str(item)
-                        for item in discrepancy_event.get("source_event_ids", [])
-                    ],
-                ]
-            )
-        )[:8]
+        source_event_ids = _candidate_source_event_ids(discrepancy_event)
         candidate_id = _derived_id(
             "candidate",
             {
@@ -1930,13 +2378,7 @@ class EpistemicActionChain:
                 event=refusal,
             )
         discrepancy_kind = str(discrepancy_event["discrepancy_kind"])
-        update_kind = {
-            "mismatch": "review_prediction",
-            "partial_match": "review_prediction",
-            "match": "inspect_only",
-            "unknown": "withhold_update",
-            "ambiguous": "withhold_update",
-        }[discrepancy_kind]
+        update_kind = _candidate_update_kind(discrepancy_kind)
         fields = {
             "request_id": prediction_event["request_id"],
             "attempt_id": prediction_event["attempt_id"],
@@ -2189,6 +2631,10 @@ def validate_epistemic_action_chain_artifact(
             raise EpistemicActionIntegrityError("event_shape_invalid")
     except EpistemicActionError as exc:
         diagnostics.append(exc.reason_code)
+    except (KeyError, TypeError, ValueError):
+        # Malformed JSON values must remain a bounded artifact diagnostic, not
+        # leak an implementation exception through validation.
+        diagnostics.append("event_shape_invalid")
     return {
         "ok": not diagnostics,
         "status": "current" if not diagnostics else "invalid",
@@ -2217,6 +2663,15 @@ def validate_epistemic_action_chain(
             "chain_status": exc.state,
             "event_count": 0,
             "diagnostics": [exc.reason_code],
+            "claim_ceiling": EPISTEMIC_ACTION_CLAIM_CEILING,
+        }
+    except (KeyError, TypeError, ValueError):
+        return {
+            "ok": False,
+            "status": "invalid",
+            "chain_status": "unknown",
+            "event_count": 0,
+            "diagnostics": ["event_shape_invalid"],
             "claim_ceiling": EPISTEMIC_ACTION_CLAIM_CEILING,
         }
     return validate_epistemic_action_chain_artifact(artifact)
@@ -2478,6 +2933,19 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if payload.get("ok", True) else 1
     except EpistemicActionError as exc:
         print(json.dumps(_cli_error(exc), indent=2, sort_keys=True))
+        return 1
+    except (KeyError, TypeError, ValueError):
+        print(
+            json.dumps(
+                {
+                    "ok": False,
+                    "state": "refused",
+                    "reason_code": "event_shape_invalid",
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
         return 1
 
 

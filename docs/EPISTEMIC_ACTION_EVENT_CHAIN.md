@@ -32,14 +32,21 @@ predecessor digest, and an event digest. An identical logical append is a
 replay-safe no-op. A different record with the same logical identity is
 rejected.
 
+Replay also recomputes the prediction commitment, predecessor-derived
+discrepancy, and shadow-candidate fields. Logical identities are unique across
+the chain, so recomputing the outer hash chain cannot make duplicate or
+cross-field-inconsistent records admissible. For an observed result, an exact
+expected/observed digest equality derives `match`; a different digest derives
+`mismatch`. `partial_match` remains a schema value for compatibility, but an
+opaque digest cannot establish it and a caller-supplied conflicting value is
+recorded as `ambiguous` and refused.
+
 Missing or interrupted observations are recorded as `unknown`. Conflicting
 observations and immutable-identity conflicts are recorded or returned as
 `ambiguous`. Invalid ordering and privacy input is `refused` without storing
-the unsafe value. A discrepancy may be `match`, `partial_match`, or
-`mismatch` only when an observation is present. A model-update candidate is
-always `shadow_only`; its alternative explanation, proposed update, and next
-distinguishing action are opaque digests, and it never changes a model or
-claims semantic benefit.
+the unsafe value. A model-update candidate is always `shadow_only`; its
+alternative explanation, proposed update, and next distinguishing action are
+opaque digests, and it never changes a model or claims semantic benefit.
 
 ## Claim boundary
 
