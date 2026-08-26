@@ -106819,6 +106819,28 @@ def test_epistemic_action_chain_rejects_ordering_post_hoc_and_immutable_predicti
     assert immutable.value.reason_code == "prediction_immutable_conflict"
     assert immutable.value.state == "ambiguous"
     assert first["sequence"] == 1
+    events = chain.inspect()["events"]
+    assert len(events) == 4
+    assert [event["event_type"] for event in events] == [
+        "prediction_commitment",
+        "action_binding",
+        "refusal",
+        "refusal",
+    ]
+    assert [event["state"] for event in events] == [
+        "committed",
+        "bound",
+        "refused",
+        "ambiguous",
+    ]
+    assert [event["reason_code"] for event in events[2:]] == [
+        "post_hoc_prediction",
+        "prediction_immutable_conflict",
+    ]
+    assert sum(
+        event["event_type"] == "prediction_commitment" for event in events
+    ) == 1
+    assert sum(event["event_type"] == "action_binding" for event in events) == 1
 
 
 def test_epistemic_action_chain_preserves_interruption_missing_and_shadow_only_candidate(
@@ -107002,6 +107024,15 @@ def test_epistemic_action_chain_detects_stale_writers_and_tampered_replay(
             **_epistemic_prediction_kwargs("concurrency-b"),
         )
     assert concurrency.value.reason_code == "concurrency_conflict"
+    stale_artifact = module.EpistemicActionChain.load(store).inspect()
+    assert stale_artifact["event_count"] == 1
+    assert [event["event_type"] for event in stale_artifact["events"]] == [
+        "prediction_commitment"
+    ]
+    assert not any(
+        event.get("action_id") == "action-concurrency-b"
+        for event in stale_artifact["events"]
+    )
     current = module.EpistemicActionChain.load(store)
     with pytest.raises(module.EpistemicActionConcurrencyError) as sequence:
         current.commit_prediction(
@@ -107204,6 +107235,181 @@ def test_epistemic_action_chain_requires_observed_evidence_and_timestamp(
     assert not any(
         event["event_type"] == "observation" for event in chain.inspect()["events"]
     )
+
+
+def test_epistemic_action_chain_rejects_null_required_timestamps(
+    tmp_path: Path,
+) -> None:
+    prediction_store = tmp_path / "epistemic-null-created-at.jsonl"
+    prediction_chain = module.EpistemicActionChain.create(
+        prediction_store,
+        session_id="session-null-created-at",
+        turn_id="turn-null-created-at",
+    )
+    with pytest.raises(module.EpistemicActionPrivacyError) as created_error:
+        prediction_chain.commit_prediction(
+            "action-null-created-at",
+            module.epistemic_digest("expected-null-created-at"),
+            **_epistemic_prediction_kwargs("null-created-at"),
+            created_at=None,
+        )
+    assert created_error.value.reason_code == "timestamp_invalid"
+    assert prediction_chain.inspect()["event_count"] == 0
+    assert not prediction_store.exists()
+
+    action_store = tmp_path / "epistemic-null-action-started-at.jsonl"
+    action_chain = module.EpistemicActionChain.create(
+        action_store,
+        session_id="session-null-action-started-at",
+        turn_id="turn-null-action-started-at",
+    )
+    action_chain.commit_prediction(
+        "action-null-action-started-at",
+        module.epistemic_digest("expected-null-action-started-at"),
+        **_epistemic_prediction_kwargs("null-action-started-at"),
+        created_at="2026-08-26T00:00:00Z",
+    )
+    null_action = _epistemic_action_kwargs("null-action-started-at")
+    null_action["action_started_at"] = None
+    with pytest.raises(module.EpistemicActionPrivacyError) as action_error:
+        action_chain.bind_action(
+            "action-null-action-started-at",
+            module.epistemic_digest("action-null-action-started-at"),
+            **null_action,
+        )
+    assert action_error.value.reason_code == "timestamp_invalid"
+    assert [event["event_type"] for event in action_chain.inspect()["events"]] == [
+        "prediction_commitment"
+    ]
+
+    valid_action = _epistemic_action_kwargs("null-action-started-at")
+    action_chain.bind_action(
+        "action-null-action-started-at",
+        module.epistemic_digest("action-null-action-started-at"),
+        **valid_action,
+        created_at="2026-08-26T00:00:01Z",
+    )
+    null_observation = _epistemic_observation_kwargs(
+        "null-action-started-at",
+        observed_at=None,
+    )
+    with pytest.raises(module.EpistemicActionPrivacyError) as observation_error:
+        action_chain.record_observation(
+            "action-null-action-started-at",
+            module.epistemic_digest("actual-null-observed-at"),
+            **null_observation,
+            observation_id="observation-null-observed-at",
+        )
+    assert observation_error.value.reason_code == "timestamp_invalid"
+    assert [event["event_type"] for event in action_chain.inspect()["events"]] == [
+        "prediction_commitment",
+        "action_binding",
+    ]
+
+
+def test_epistemic_action_chain_rejects_invalid_required_timestamps_before_replay(
+    tmp_path: Path,
+) -> None:
+    missing = object()
+    cases = [
+        ("created-at-missing", 0, "created_at", missing),
+        ("created-at-null", 0, "created_at", None),
+        ("created-at-non-string", 0, "created_at", 17),
+        ("created-at-malformed", 0, "created_at", "2026-13-26T00:00:00Z"),
+        (
+            "window-start-null",
+            0,
+            "observation_window_start_at",
+            None,
+        ),
+        ("action-started-missing", 1, "action_started_at", missing),
+        (
+            "action-started-malformed",
+            1,
+            "action_started_at",
+            "2026-08-26T00:00:00+00:00",
+        ),
+        ("observed-at-missing", 2, "observed_at", missing),
+        ("observed-at-null", 2, "observed_at", None),
+        ("observed-at-non-string", 2, "observed_at", 23),
+    ]
+    for label, event_index, field, value in cases:
+        store = tmp_path / f"epistemic-invalid-timestamp-{label}.jsonl"
+        _create_epistemic_candidate_store(store, label)
+        events = _rehash_epistemic_store(store)
+        if value is missing:
+            del events[event_index][field]
+        else:
+            events[event_index][field] = value
+        _rehash_epistemic_store(store, events)
+
+        result = module.validate_epistemic_action_chain(store)
+
+        assert result["ok"] is False, label
+        assert result["diagnostics"] == ["timestamp_invalid"], label
+        with pytest.raises(module.EpistemicActionError) as replay_error:
+            module.EpistemicActionChain.load(store)
+        assert replay_error.value.reason_code == "timestamp_invalid", label
+
+
+def test_epistemic_action_event_schema_requires_type_specific_timestamps(
+    tmp_path: Path,
+) -> None:
+    from jsonschema import Draft202012Validator
+
+    store = tmp_path / "epistemic-schema-timestamps.jsonl"
+    chain = module.EpistemicActionChain.create(
+        store,
+        session_id="session-schema-timestamps",
+        turn_id="turn-schema-timestamps",
+    )
+    chain.commit_prediction(
+        "action-schema-timestamps",
+        module.epistemic_digest("expected-schema-timestamps"),
+        **_epistemic_prediction_kwargs("schema-timestamps"),
+        prediction_id="prediction-schema-timestamps",
+    )
+    chain.bind_action(
+        "action-schema-timestamps",
+        module.epistemic_digest("action-schema-timestamps"),
+        **_epistemic_action_kwargs("schema-timestamps"),
+    )
+    chain.record_observation(
+        "action-schema-timestamps",
+        module.epistemic_digest("actual-schema-timestamps"),
+        **_epistemic_observation_kwargs("schema-timestamps"),
+        observation_id="observation-schema-timestamps",
+    )
+    chain.derive_discrepancy(
+        "action-schema-timestamps",
+        alternative_explanation_digest=module.epistemic_digest(
+            "alternative-schema-timestamps"
+        ),
+        model_update_digest=module.epistemic_digest("update-schema-timestamps"),
+        next_distinguishing_action_digest=module.epistemic_digest(
+            "next-schema-timestamps"
+        ),
+    )
+    artifact = chain.inspect()
+    schema = json.loads(
+        (
+            SCRIPT.parents[1]
+            / "schemas"
+            / "epistemic-action-event-chain.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    Draft202012Validator.check_schema(schema)
+    validator = Draft202012Validator(schema)
+    validator.validate(artifact)
+
+    for event_index, field in (
+        (0, "observation_window_start_at"),
+        (1, "action_started_at"),
+        (2, "observed_at"),
+    ):
+        invalid = copy.deepcopy(artifact)
+        del invalid["events"][event_index][field]
+        assert list(validator.iter_errors(invalid)), field
 
 
 def test_epistemic_action_chain_derives_partial_and_rejects_conflicting_classification(
@@ -107570,6 +107776,10 @@ def test_epistemic_action_chain_rejects_cross_instance_same_action_prediction_ra
         turn_id="turn-cross-instance-prediction",
     )
     assert loaded.inspect()["event_count"] == 1
+    assert loaded.inspect()["chain_status"] == "ready"
+    assert [event["event_type"] for event in loaded.inspect()["events"]] == [
+        "prediction_commitment"
+    ]
     assert module.validate_epistemic_action_chain(store)["ok"] is True
 
 
@@ -107638,6 +107848,12 @@ def test_epistemic_action_chain_rejects_cross_instance_same_action_observation_r
         turn_id="turn-cross-instance-observation",
     )
     assert loaded.inspect()["event_count"] == 3
+    assert loaded.inspect()["chain_status"] == "ready"
+    assert [event["event_type"] for event in loaded.inspect()["events"]] == [
+        "prediction_commitment",
+        "action_binding",
+        "observation",
+    ]
     assert module.validate_epistemic_action_chain(store)["ok"] is True
 
 

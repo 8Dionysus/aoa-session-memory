@@ -42,6 +42,7 @@ _DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _TIMESTAMP_RE = re.compile(
     r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?Z$"
 )
+_UNSET = object()
 
 EPISTEMIC_ACTION_EVENT_TYPES = frozenset(
     {
@@ -473,11 +474,16 @@ def _safe_discrepancy_kind(value: Any) -> str | None:
     return value
 
 
+def _current_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace(
+        "+00:00", "Z"
+    )
+
+
 def _safe_timestamp(value: Any = None) -> str:
-    if value is None:
-        return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace(
-            "+00:00", "Z"
-        )
+    # A missing or explicit null timestamp is never a request for the current
+    # time.  Creation-time omission is handled explicitly by
+    # _event_timestamp; replay and stored values always take this path.
     if not isinstance(value, str) or not _TIMESTAMP_RE.fullmatch(value):
         raise EpistemicActionPrivacyError("timestamp_invalid")
     try:
@@ -502,10 +508,26 @@ def _safe_timestamp(value: Any = None) -> str:
     return result
 
 
-def _timestamp_value(value: str) -> datetime:
+def _event_timestamp(value: Any) -> str:
+    if value is _UNSET:
+        return _current_timestamp()
+    return _safe_timestamp(value)
+
+
+def _provided_created_at(value: Any) -> Any:
+    if value is _UNSET:
+        return _UNSET
+    return _safe_timestamp(value)
+
+
+def _timestamp_value(value: Any) -> datetime:
     """Parse a validated UTC timestamp for causal/window comparisons."""
 
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    safe_value = _safe_timestamp(value)
+    try:
+        return datetime.fromisoformat(safe_value.replace("Z", "+00:00"))
+    except (TypeError, ValueError) as exc:
+        raise EpistemicActionIntegrityError("timestamp_invalid") from exc
 
 
 def _validate_observation_window(
@@ -839,6 +861,9 @@ def _validate_event_shape(
 ) -> dict[str, Any]:
     if not isinstance(event, dict):
         raise EpistemicActionIntegrityError("event_shape_invalid")
+    if "created_at" not in event:
+        raise EpistemicActionIntegrityError("timestamp_invalid")
+    _safe_timestamp(event["created_at"])
     if set(event) - _EVENT_FIELDS:
         raise EpistemicActionIntegrityError("event_shape_invalid")
     required = {
@@ -862,6 +887,21 @@ def _validate_event_shape(
         raise EpistemicActionIntegrityError("event_type_invalid")
     if event_type not in EPISTEMIC_ACTION_EVENT_TYPES:
         raise EpistemicActionIntegrityError("event_type_invalid")
+    required_timestamps = {
+        "prediction_commitment": (
+            "observation_window_start_at",
+            "observation_window_end_at",
+        ),
+        "action_binding": ("action_started_at",),
+    }.get(event_type, ())
+    if event_type in {"observation", "observation_conflict"} and event.get(
+        "observation_status"
+    ) == "observed":
+        required_timestamps = (*required_timestamps, "observed_at")
+    for field in required_timestamps:
+        if field not in event:
+            raise EpistemicActionIntegrityError("timestamp_invalid")
+        _safe_timestamp(event[field])
     if set(event) - _EVENT_TYPE_FIELDS[event_type]:
         raise EpistemicActionIntegrityError("event_shape_invalid")
     if not isinstance(event.get("state"), str):
@@ -881,7 +921,6 @@ def _validate_event_shape(
     if expected_turn_id is not None and turn_id != expected_turn_id:
         raise EpistemicActionIntegrityError("chain_scope_mismatch")
     _safe_identifier(event.get("event_id"), "event_id")
-    _safe_timestamp(event.get("created_at"))
     previous = event.get("prev_event_digest")
     if previous != EPISTEMIC_ACTION_GENESIS:
         _safe_digest(previous, "prev_event_digest")
@@ -1567,7 +1606,7 @@ class EpistemicActionChain:
         state: str,
         fields: dict[str, Any],
         identity: Any,
-        created_at: str | None = None,
+        created_at: Any = _UNSET,
         expected_sequence: int | None = None,
     ) -> tuple[dict[str, Any], bool]:
         if not isinstance(event_type, str) or event_type not in EPISTEMIC_ACTION_EVENT_TYPES:
@@ -1579,7 +1618,7 @@ class EpistemicActionChain:
             "event_type": event_type,
             "event_id": _event_id_for(event_type, identity),
             "state": state,
-            "created_at": _safe_timestamp(created_at),
+            "created_at": _event_timestamp(created_at),
             "session_id": self.session_id,
             "turn_id": self.turn_id,
         }
@@ -1613,6 +1652,9 @@ class EpistemicActionChain:
                 _logical_identity_key(event) == logical_identity
                 for event in current
             ):
+                # The losing cross-instance attempt is deliberately refused
+                # before append.  The owner ABI does not retain a durable
+                # race-loser record or infer a causal winner/loser verdict.
                 raise EpistemicActionConflictError(
                     "duplicate_logical_identity",
                     state="ambiguous",
@@ -1737,17 +1779,18 @@ class EpistemicActionChain:
         falsifier_digest: str,
         confidence: float,
         action_plan_digest: str,
-        observation_window_start_at: str,
-        observation_window_end_at: str,
+        observation_window_start_at: Any = _UNSET,
+        observation_window_end_at: Any = _UNSET,
         expected_observation_facet_ids: Iterable[str] = (),
         tool_use_id: str | None = None,
         expected_digest: str | None = None,
         prediction_id: str | None = None,
-        created_at: str | None = None,
+        created_at: Any = _UNSET,
         expected_sequence: int | None = None,
     ) -> dict[str, Any]:
         """Commit a prediction before an action can be bound."""
 
+        safe_created_at = _provided_created_at(created_at)
         safe_request_id = _safe_identifier(request_id, "request_id")
         safe_attempt_id = _safe_identifier(attempt_id, "attempt_id")
         safe_action_id = _safe_identifier(action_id, "action_id")
@@ -1957,7 +2000,7 @@ class EpistemicActionChain:
                 ),
             },
             identity={"prediction_id": safe_prediction_id},
-            created_at=created_at,
+            created_at=safe_created_at,
             expected_sequence=expected_sequence,
         )
         return event
@@ -1970,14 +2013,15 @@ class EpistemicActionChain:
         attempt_id: str,
         action_kind: str,
         effect_class: str,
-        action_started_at: str,
+        action_started_at: Any = _UNSET,
         tool_use_id: str | None = None,
         prediction_id: str | None = None,
-        created_at: str | None = None,
+        created_at: Any = _UNSET,
         expected_sequence: int | None = None,
     ) -> dict[str, Any]:
         """Bind an action only to an already committed prediction."""
 
+        safe_created_at = _provided_created_at(created_at)
         safe_action_id = _safe_identifier(action_id, "action_id")
         safe_action_digest = _safe_digest(action_digest, "action_digest")
         safe_attempt_id = _safe_identifier(attempt_id, "attempt_id")
@@ -2142,7 +2186,7 @@ class EpistemicActionChain:
                 ),
             },
             identity={"action_id": safe_action_id},
-            created_at=created_at,
+            created_at=safe_created_at,
             expected_sequence=expected_sequence,
         )
         return event
@@ -2156,16 +2200,17 @@ class EpistemicActionChain:
         tool_use_id: str | None = None,
         evidence_ref_ids: Iterable[str] = (),
         observed_digest: str | None = None,
-        observed_at: str | None = None,
+        observed_at: Any = _UNSET,
         observed_observation_facet_ids: Iterable[str] = (),
         observation_id: str | None = None,
         observation_status: str = "observed",
         reason_code: str | None = None,
-        created_at: str | None = None,
+        created_at: Any = _UNSET,
         expected_sequence: int | None = None,
     ) -> dict[str, Any]:
         """Append one observation or an explicit missing/unknown state."""
 
+        safe_created_at = _provided_created_at(created_at)
         safe_action_id = _safe_identifier(action_id, "action_id")
         safe_attempt_id = _safe_identifier(attempt_id, "attempt_id")
         safe_tool_use_id = (
@@ -2199,7 +2244,7 @@ class EpistemicActionChain:
                 raise EpistemicActionPrivacyError(
                     "observation_evidence_required"
                 )
-            if observed_at is None:
+            if observed_at is _UNSET:
                 raise EpistemicActionPrivacyError(
                     "observation_timestamp_required"
                 )
@@ -2208,7 +2253,7 @@ class EpistemicActionChain:
             if observation_digest is not None:
                 raise EpistemicActionPrivacyError("observation_digest_forbidden")
             safe_observation_digest = None
-            if observed_at is not None:
+            if observed_at is not _UNSET and observed_at is not None:
                 raise EpistemicActionPrivacyError("observation_outside_window")
             safe_observed_at = None
         action_event = next(
@@ -2406,7 +2451,7 @@ class EpistemicActionChain:
             state=state,
             fields=fields,
             identity={"observation_id": safe_observation_id},
-            created_at=created_at,
+            created_at=safe_created_at,
             expected_sequence=expected_sequence,
         )
         return event
@@ -2471,11 +2516,12 @@ class EpistemicActionChain:
         alternative_explanation_digest: str | None = None,
         model_update_digest: str | None = None,
         next_distinguishing_action_digest: str | None = None,
-        created_at: str | None = None,
+        created_at: Any = _UNSET,
         expected_sequence: int | None = None,
     ) -> dict[str, Any]:
         """Derive a bounded discrepancy and persist only a shadow candidate."""
 
+        safe_created_at = _provided_created_at(created_at)
         safe_action_id = _safe_identifier(action_id, "action_id")
         requested_discrepancy_kind = _safe_discrepancy_kind(discrepancy_kind)
         safe_alternative = _safe_digest(
@@ -2582,7 +2628,7 @@ class EpistemicActionChain:
                 state=discrepancy_state,
                 fields=fields,
                 identity=discrepancy_identity,
-                created_at=created_at,
+                created_at=safe_created_at,
                 expected_sequence=expected_sequence,
             )
         else:
@@ -3215,19 +3261,23 @@ def main(argv: list[str] | None = None) -> int:
                     prediction_id=args.prediction_id,
                 )
             elif args.command == "observe":
+                observation_kwargs: dict[str, Any] = {
+                    "attempt_id": args.attempt_id,
+                    "tool_use_id": args.tool_use_id,
+                    "evidence_ref_ids": args.evidence_ref_id,
+                    "observed_observation_facet_ids": (
+                        args.observed_observation_facet_id
+                    ),
+                    "observation_id": args.observation_id,
+                    "observation_status": args.observation_status,
+                    "reason_code": args.reason_code,
+                }
+                if args.observed_at is not None:
+                    observation_kwargs["observed_at"] = args.observed_at
                 payload = chain.record_observation(
                     args.action_id,
                     args.observation_digest,
-                    attempt_id=args.attempt_id,
-                    tool_use_id=args.tool_use_id,
-                    evidence_ref_ids=args.evidence_ref_id,
-                    observed_at=args.observed_at,
-                    observed_observation_facet_ids=(
-                        args.observed_observation_facet_id
-                    ),
-                    observation_id=args.observation_id,
-                    observation_status=args.observation_status,
-                    reason_code=args.reason_code,
+                    **observation_kwargs,
                 )
             elif args.command == "derive-discrepancy":
                 payload = chain.derive_discrepancy(

@@ -201,7 +201,173 @@
         "claim_ceiling": {
           "const": "candidate_only_no_model_update_no_benefit"
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "event_type": {"const": "prediction_commitment"}
+            }
+          },
+          "then": {
+            "required": [
+              "request_id",
+              "attempt_id",
+              "prediction_id",
+              "prediction_commitment_digest",
+              "pre_action_marker",
+              "observation_window_digest",
+              "observation_window_start_at",
+              "observation_window_end_at",
+              "expected_observation_facet_ids",
+              "hypothesis_digest",
+              "expected_change_digest",
+              "falsifier_digest",
+              "confidence",
+              "action_plan_digest",
+              "action_id",
+              "expected_observation_digest"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "event_type": {"const": "action_binding"}
+            }
+          },
+          "then": {
+            "required": [
+              "request_id",
+              "attempt_id",
+              "prediction_id",
+              "action_id",
+              "action_digest",
+              "action_kind",
+              "effect_class",
+              "action_started_at",
+              "prediction_sequence",
+              "prediction_commitment_digest",
+              "related_event_ids"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "event_type": {
+                "enum": ["observation", "observation_conflict"]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "request_id",
+              "attempt_id",
+              "action_id",
+              "observation_id",
+              "observation_status",
+              "evidence_ref_ids",
+              "observed_observation_facet_ids",
+              "reason_code",
+              "related_event_ids"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "event_type": {
+                "enum": ["observation", "observation_conflict"]
+              },
+              "observation_status": {"const": "observed"}
+            }
+          },
+          "then": {
+            "required": ["observation_digest", "observed_at"]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "event_type": {
+                "enum": ["observation", "observation_conflict"]
+              },
+              "observation_status": {
+                "enum": ["missing", "unknown", "ambiguous", "refused"]
+              }
+            }
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                {"required": ["observation_digest"]},
+                {"required": ["observed_at"]}
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "event_type": {"const": "discrepancy"}
+            }
+          },
+          "then": {
+            "required": [
+              "request_id",
+              "attempt_id",
+              "prediction_id",
+              "action_id",
+              "expected_observation_digest",
+              "discrepancy_kind",
+              "related_event_ids",
+              "source_event_ids"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "event_type": {"const": "model_update_candidate"}
+            }
+          },
+          "then": {
+            "required": [
+              "request_id",
+              "attempt_id",
+              "action_id",
+              "candidate_id",
+              "candidate_status",
+              "discrepancy_kind",
+              "update_kind",
+              "source_event_ids",
+              "related_event_ids",
+              "claim_ceiling",
+              "hypothesis_digest",
+              "expected_change_digest",
+              "falsifier_digest",
+              "confidence",
+              "action_plan_digest",
+              "observation_window_digest",
+              "pre_action_marker"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "event_type": {"const": "refusal"}
+            }
+          },
+          "then": {
+            "required": ["reason_code"],
+            "properties": {
+              "state": {"enum": ["refused", "ambiguous"]}
+            }
+          }
+        }
+      ]
     },
     "modelUpdateCandidate": {
       "type": "object",

@@ -38,6 +38,13 @@ same logical identity is rejected as ambiguous. A stale writer is refused as
 a concurrency conflict, while two active records that claim one logical
 action are ambiguous.
 
+The same-action fence rejects a losing cross-instance prediction or observation
+attempt before it can append a record. The owner ABI does not retain that losing
+attempt as a durable refusal or ambiguity event: the losing caller receives
+`duplicate_logical_identity` with `ambiguous` state, while a later reload of the
+winner-only chain can remain `ready`. This is a fail-closed storage disposition,
+not a causal winner/loser verdict or evidence that both attempts occurred.
+
 Replay also recomputes the prediction commitment, predecessor-derived
 discrepancy, and shadow-candidate fields. Logical identities are unique across
 the chain, so recomputing the outer hash chain cannot make duplicate or
@@ -52,7 +59,11 @@ conflicting value is recorded as `ambiguous` and refused.
 Missing or interrupted observations are recorded as `unknown`. Conflicting
 observations and immutable-identity conflicts are recorded or returned as
 `ambiguous`. Invalid ordering and privacy input is `refused` without storing
-the unsafe value. A model-update candidate is always `shadow_only`; its
+the unsafe value. Required persisted timestamps are non-null, bounded UTC
+strings; replay reports `timestamp_invalid` for missing, null, non-string, or
+malformed values before comparing event times. A creation call may omit its
+local event timestamp, but an explicit null never falls back to the current
+time. A model-update candidate is always `shadow_only`; its
 alternative explanation, proposed update, and next distinguishing action are
 opaque digests, and it never changes a model or claims semantic benefit.
 
