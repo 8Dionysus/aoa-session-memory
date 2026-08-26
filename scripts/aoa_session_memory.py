@@ -569,6 +569,16 @@ PROJECTION_OUTBOX_RETIREMENTS_DIR = (
 )
 PROJECTION_OUTBOX_SCHEMA_VERSION = 1
 PROJECTION_OUTBOX_RETIREMENT_SCHEMA_VERSION = 1
+PROJECTION_OUTBOX_FAIRNESS_SCHEMA_VERSION = 1
+PROJECTION_OUTBOX_FAIRNESS_POLICY = (
+    "oldest_pending_consumer_round_robin_restart_safe_v1"
+)
+PROJECTION_OUTBOX_FAIRNESS_STATE_JSON = (
+    PROJECTION_OUTBOX_ROOT / "consumer-fairness.json"
+)
+PROJECTION_OUTBOX_FAIRNESS_LOCK = (
+    PROJECTION_OUTBOX_ROOT / "consumer-fairness.lock"
+)
 SESSION_PROJECTION_PROGRESS_RECEIPTS_ROOT = (
     DIAGNOSTICS_ROOT / "session-projection-progress"
 )
@@ -27689,27 +27699,70 @@ def projection_outbox_record_integrity_valid(
     record: dict[str, Any],
 ) -> bool:
     record_id = str(record.get("record_id") or "")
+    session_id = record.get("session_id")
+    old_publish_id = record.get("old_publish_id")
+    new_publish_id = record.get("new_publish_id")
+    changes = record.get("changes")
     publication_receipt = record.get("publication_receipt")
     required_consumers = record.get("required_consumers")
+    retry_policy = record.get("retry_policy")
+    valid_changes = bool(
+        isinstance(changes, list)
+        and all(
+            isinstance(change, dict)
+            and isinstance(change.get("component_id"), str)
+            and bool(change.get("component_id"))
+            and isinstance(change.get("component_type"), str)
+            and bool(change.get("component_type"))
+            and change.get("operation") in {"publish", "replace", "tombstone"}
+            and isinstance(change.get("old_digest"), str)
+            and isinstance(change.get("new_digest"), str)
+            and isinstance(change.get("source_ref"), str)
+            and isinstance(change.get("generation_identity"), dict)
+            and isinstance(change.get("required_consumers"), list)
+            and all(
+                isinstance(consumer, str)
+                for consumer in change.get("required_consumers", [])
+            )
+            and len(change.get("required_consumers", []))
+            == len(set(change.get("required_consumers", [])))
+            and all(
+                consumer in PROJECTION_OUTBOX_CONSUMERS
+                for consumer in change.get("required_consumers", [])
+            )
+            for change in changes
+        )
+    )
     return bool(
         record.get("schema_version") == PROJECTION_OUTBOX_SCHEMA_VERSION
         and record.get("artifact_type")
         == "session_projection_component_outbox"
         and re.fullmatch(r"[a-f0-9]{64}", record_id)
         and projection_outbox_record_identity_digest(record) == record_id
+        and isinstance(session_id, str)
+        and bool(session_id)
+        and isinstance(old_publish_id, str)
+        and isinstance(new_publish_id, str)
+        and bool(new_publish_id)
         and record.get("status") == "pending"
         and record.get("truth_status")
         == "changed_component_work_intent_not_downstream_completion"
-        and isinstance(record.get("changes"), list)
+        and valid_changes
         and isinstance(required_consumers, list)
+        and all(isinstance(consumer, str) for consumer in required_consumers)
+        and len(required_consumers) == len(set(required_consumers))
         and all(
             consumer in PROJECTION_OUTBOX_CONSUMERS
             for consumer in required_consumers
         )
+        and isinstance(record.get("created_at"), str)
+        and bool(record.get("created_at"))
+        and isinstance(retry_policy, dict)
         and isinstance(publication_receipt, dict)
+        and isinstance(publication_receipt.get("session_dir"), str)
         and bool(publication_receipt.get("session_dir"))
         and str(publication_receipt.get("publish_id") or "")
-        == str(record.get("new_publish_id") or "")
+        == new_publish_id
     )
 
 
@@ -27718,6 +27771,218 @@ def projection_outbox_same_path(left: Path, right: Path) -> bool:
         return left.expanduser().resolve() == right.expanduser().resolve()
     except OSError:
         return str(left) == str(right)
+
+
+def projection_outbox_fairness_state_path(aoa_root: Path) -> Path:
+    return aoa_root / PROJECTION_OUTBOX_FAIRNESS_STATE_JSON
+
+
+def projection_outbox_fairness_default_state() -> dict[str, Any]:
+    return {
+        "schema_version": PROJECTION_OUTBOX_FAIRNESS_SCHEMA_VERSION,
+        "artifact_type": "projection_outbox_consumer_fairness_state",
+        "policy": PROJECTION_OUTBOX_FAIRNESS_POLICY,
+        "consumers": list(PROJECTION_OUTBOX_CONSUMERS),
+        "cursor_by_consumer": {
+            consumer: "" for consumer in PROJECTION_OUTBOX_CONSUMERS
+        },
+        "global_cursor": "",
+        "updated_at": "",
+        "advance_count": 0,
+        "truth_status": (
+            "scheduler_cursor_only_not_consumer_completion_or_freshness"
+        ),
+    }
+
+
+def projection_outbox_fairness_state(
+    aoa_root: Path,
+) -> dict[str, Any]:
+    """Read the restart-safe outbox scheduler cursor fail-closed.
+
+    The cursor is only a scheduling aid.  It never changes an outbox record,
+    consumer state, or retirement receipt, and a malformed cursor cannot be
+    silently replaced by a new one while a live worker is making decisions.
+    """
+    path = projection_outbox_fairness_state_path(aoa_root)
+    if not path.exists():
+        return {
+            **projection_outbox_fairness_default_state(),
+            "ok": True,
+            "status": "missing_defaulted",
+            "path": str(path),
+            "diagnostics": [],
+        }
+    payload = read_json(path, {})
+    diagnostics: list[str] = []
+    if not isinstance(payload, dict) or not payload:
+        diagnostics.append("projection_outbox_fairness_state_invalid_json")
+        payload = {}
+    if payload.get("schema_version") != PROJECTION_OUTBOX_FAIRNESS_SCHEMA_VERSION:
+        diagnostics.append("projection_outbox_fairness_state_schema_mismatch")
+    if payload.get("artifact_type") != "projection_outbox_consumer_fairness_state":
+        diagnostics.append("projection_outbox_fairness_state_artifact_type_mismatch")
+    if payload.get("policy") != PROJECTION_OUTBOX_FAIRNESS_POLICY:
+        diagnostics.append("projection_outbox_fairness_state_policy_mismatch")
+    if payload.get("consumers") != list(PROJECTION_OUTBOX_CONSUMERS):
+        diagnostics.append("projection_outbox_fairness_state_consumer_order_mismatch")
+    cursors = payload.get("cursor_by_consumer")
+    if not isinstance(cursors, dict):
+        diagnostics.append("projection_outbox_fairness_state_cursors_invalid")
+        cursors = {}
+    else:
+        for consumer in PROJECTION_OUTBOX_CONSUMERS:
+            value = cursors.get(consumer, "")
+            if not isinstance(value, str):
+                diagnostics.append(
+                    f"projection_outbox_fairness_state_cursor_invalid:{consumer}"
+                )
+    global_cursor = payload.get("global_cursor", "")
+    if not isinstance(global_cursor, str):
+        diagnostics.append("projection_outbox_fairness_state_global_cursor_invalid")
+    if diagnostics:
+        return {
+            **projection_outbox_fairness_default_state(),
+            "ok": False,
+            "status": "invalid",
+            "path": str(path),
+            "diagnostics": diagnostics,
+        }
+    return {
+        **payload,
+        "ok": True,
+        "status": "current",
+        "path": str(path),
+        "diagnostics": [],
+        "cursor_by_consumer": {
+            consumer: str(cursors.get(consumer) or "")
+            for consumer in PROJECTION_OUTBOX_CONSUMERS
+        },
+        "global_cursor": str(global_cursor or ""),
+    }
+
+
+def projection_outbox_rotate_after_cursor(
+    records: list[dict[str, Any]],
+    cursor: str,
+) -> list[dict[str, Any]]:
+    if not records or not cursor:
+        return list(records)
+    cursor_index = next(
+        (
+            index
+            for index, record in enumerate(records)
+            if str(record.get("outbox_record_id") or "") == cursor
+        ),
+        None,
+    )
+    if cursor_index is None:
+        return list(records)
+    return [*records[cursor_index + 1 :], *records[: cursor_index + 1]]
+
+
+def projection_outbox_advance_fairness_state(
+    aoa_root: Path,
+    *,
+    consumer: str | None,
+    record_ids: Iterable[str],
+    apply: bool,
+) -> dict[str, Any]:
+    """Advance only a scheduler cursor after a bounded practical selection."""
+    selected_ids = [
+        str(record_id)
+        for record_id in record_ids
+        if str(record_id)
+    ]
+    if not apply or not selected_ids:
+        return {
+            "status": "not_applied",
+            "changed": False,
+            "record_ids": selected_ids,
+        }
+    if consumer is not None and consumer not in PROJECTION_OUTBOX_CONSUMERS:
+        return {
+            "status": "invalid_consumer",
+            "changed": False,
+            "record_ids": selected_ids,
+            "diagnostics": [
+                f"projection_outbox_fairness_unknown_consumer:{consumer}"
+            ],
+        }
+    state_before = projection_outbox_fairness_state(aoa_root)
+    if state_before.get("ok") is not True:
+        return {
+            "status": "scheduler_state_invalid",
+            "changed": False,
+            "record_ids": selected_ids,
+            "diagnostics": list(state_before.get("diagnostics") or []),
+        }
+    lock_path = aoa_root / PROJECTION_OUTBOX_FAIRNESS_LOCK
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as lock_handle:
+        fcntl.flock(lock_handle, fcntl.LOCK_EX)
+        state = projection_outbox_fairness_state(aoa_root)
+        if state.get("ok") is not True:
+            return {
+                "status": "scheduler_state_invalid",
+                "changed": False,
+                "record_ids": selected_ids,
+                "diagnostics": list(state.get("diagnostics") or []),
+            }
+        cursor_by_consumer = {
+            consumer_name: str(
+                (
+                    state.get("cursor_by_consumer")
+                    if isinstance(state.get("cursor_by_consumer"), dict)
+                    else {}
+                ).get(consumer_name)
+                or ""
+            )
+            for consumer_name in PROJECTION_OUTBOX_CONSUMERS
+        }
+        if consumer is None:
+            state["global_cursor"] = selected_ids[-1]
+        else:
+            cursor_by_consumer[consumer] = selected_ids[-1]
+        state["cursor_by_consumer"] = cursor_by_consumer
+        state["updated_at"] = utc_now()
+        state["advance_count"] = max(0, int_value(state.get("advance_count"))) + 1
+        state.pop("ok", None)
+        state.pop("status", None)
+        state.pop("path", None)
+        state.pop("diagnostics", None)
+        write_json_durable(projection_outbox_fairness_state_path(aoa_root), state)
+    return {
+        "status": "advanced",
+        "changed": True,
+        "record_ids": selected_ids,
+        "consumer": consumer or "global",
+        "cursor": selected_ids[-1],
+    }
+
+
+def projection_outbox_completion_receipt_identity_valid(
+    receipt: Any,
+    *,
+    record: dict[str, Any],
+    consumer: str,
+) -> bool:
+    """Validate optional receipt identity without constraining legacy detail."""
+    if not isinstance(receipt, dict) or not receipt:
+        return False
+    expected_record_id = str(record.get("record_id") or "")
+    expected_publish_id = str(record.get("new_publish_id") or "")
+    identity_pairs = (
+        ("consumer", consumer),
+        ("outbox_record_id", expected_record_id),
+        ("record_id", expected_record_id),
+        ("source_publish_id", expected_publish_id),
+        ("publish_id", expected_publish_id),
+    )
+    return all(
+        key not in receipt or receipt.get(key) == expected
+        for key, expected in identity_pairs
+    )
 
 
 def write_projection_outbox_record(
@@ -28279,8 +28544,11 @@ def write_projection_outbox_consumer_state(
             and str(existing.get("consumer") or "") == consumer
             and str(existing.get("source_publish_id") or "")
             == str(record.get("new_publish_id") or "")
-            and isinstance(existing_receipt, dict)
-            and existing_receipt
+            and projection_outbox_completion_receipt_identity_valid(
+                existing_receipt,
+                record=record,
+                consumer=consumer,
+            )
         )
         if not existing_is_exact:
             raise ValueError(
@@ -28345,6 +28613,14 @@ def write_projection_outbox_consumer_state(
         raise ValueError(
             "projection_outbox_completion_receipt_required"
         )
+    if status == "complete" and not projection_outbox_completion_receipt_identity_valid(
+        payload["completion_receipt"],
+        record=record,
+        consumer=consumer,
+    ):
+        raise ValueError(
+            "projection_outbox_completion_receipt_identity_mismatch"
+        )
     write_json_durable(path, payload)
     return {
         "status": status,
@@ -28407,7 +28683,11 @@ def projection_outbox_consumer_completion(
         == str(record.get("session_id") or "")
         and str(state.get("consumer") or "") == consumer
         and str(state.get("source_publish_id") or "") == publish_id
-        and receipt
+        and projection_outbox_completion_receipt_identity_valid(
+            receipt,
+            record=record,
+            consumer=consumer,
+        )
     )
     return {
         "consumer": consumer,
@@ -28733,40 +29013,35 @@ def reconcile_projection_outbox_retirements(
     apply: bool = False,
 ) -> dict[str, Any]:
     """Bounded metadata-only retirement reconciliation for current records."""
-    records_dir = aoa_root / PROJECTION_OUTBOX_RECORDS_DIR
-    inspected = 0
+    ready = projection_outbox_ready_sessions(
+        aoa_root,
+        limit=limit,
+        session_id=session_id,
+        advance_cursor=apply,
+    )
+    inspected = int_value(ready.get("inspected_record_count"))
     candidates = 0
     written: list[dict[str, Any]] = []
     deferred: list[dict[str, Any]] = []
-    for path in sorted(
-        records_dir.glob("*.json"),
-        key=lambda item: item.stat().st_mtime_ns,
-        reverse=True,
-    ):
-        record = read_json(path, {})
-        if not isinstance(record, dict) or not record:
-            continue
-        record_session_id = str(record.get("session_id") or "")
-        if session_id and record_session_id != session_id:
-            continue
-        if inspected >= max(0, int_value(limit, 32)):
-            break
-        inspected += 1
-        session_dir = Path(
-            str(
-                (
-                    record.get("publication_receipt")
-                    if isinstance(record.get("publication_receipt"), dict)
-                    else {}
-                ).get("session_dir")
-                or ""
-            )
+    if ready.get("status") == "scheduler_state_invalid":
+        deferred.append(
+            {
+                "status": "scheduler_state_invalid",
+                "diagnostics": list(ready.get("diagnostics") or []),
+            }
         )
-        if not session_dir.is_dir():
+    for candidate in ready.get("records", []):
+        if not isinstance(candidate, dict):
+            continue
+        path = Path(str(candidate.get("outbox_record_path") or ""))
+        record = read_json(path, {})
+        session_dir = Path(str(candidate.get("path") or ""))
+        if not isinstance(record, dict) or not record or not session_dir.is_dir():
             deferred.append(
                 {
-                    "record_id": record.get("record_id"),
-                    "status": "session_dir_missing",
+                    "record_id": candidate.get("outbox_record_id"),
+                    "session_id": candidate.get("session_id"),
+                    "status": "record_or_session_unavailable",
                 }
             )
             continue
@@ -28782,7 +29057,7 @@ def reconcile_projection_outbox_retirements(
             deferred.append(
                 {
                     "record_id": record.get("record_id"),
-                    "session_id": record_session_id,
+                    "session_id": str(record.get("session_id") or ""),
                     "status": status.get("status"),
                     "pending_consumers": status.get("pending_consumers", []),
                 }
@@ -28793,7 +29068,7 @@ def reconcile_projection_outbox_retirements(
             deferred.append(
                 {
                     "record_id": record.get("record_id"),
-                    "session_id": record_session_id,
+                    "session_id": str(record.get("session_id") or ""),
                     "status": "retirement_pending_apply",
                 }
             )
@@ -28818,6 +29093,9 @@ def reconcile_projection_outbox_retirements(
         "written_count": len(written),
         "written": written,
         "deferred": deferred,
+        "blocked_record_count": int_value(ready.get("blocked_record_count")),
+        "blocked_records": list(ready.get("blocked_records") or []),
+        "fairness": ready.get("fairness", {}),
         "truth_status": (
             "metadata_only_retirement_receipts_after_exact_consumer_proofs"
         ),
@@ -28952,16 +29230,52 @@ def projection_outbox_ready_sessions(
     *,
     limit: int = 16,
     session_id: str | None = None,
+    consumer: str | None = None,
+    advance_cursor: bool = False,
 ) -> dict[str, Any]:
+    """Select current outbox work with a bounded, restart-safe fair cursor.
+
+    Records are immutable work intent.  The selector only admits a record
+    after validating its content identity, authoritative path, publication
+    binding, and current manifest publication.  Invalid or superseded legacy
+    files are reported as admission blocks and never rewritten.  Consumer
+    lanes can ask for their own pending work so a blocked graph lane cannot
+    occupy entity/search/episode selection slots.
+    """
     target_session_id = str(session_id or "")
+    target_consumer = str(consumer or "")
+    if target_consumer and target_consumer not in PROJECTION_OUTBOX_CONSUMERS:
+        return {
+            "schema_version": PROJECTION_OUTBOX_FAIRNESS_SCHEMA_VERSION,
+            "artifact_type": "projection_outbox_ready_sessions",
+            "generated_at": utc_now(),
+            "status": "invalid_consumer",
+            "records": [],
+            "ready_session_count": 0,
+            "inspected_record_count": 0,
+            "stale_record_count": 0,
+            "blocked_record_count": 0,
+            "blocked_records": [],
+            "missing_consumer_state_record_count": 0,
+            "fairness": {},
+            "diagnostics": [
+                f"projection_outbox_ready_unknown_consumer:{target_consumer}"
+            ],
+            "raw_bytes_read": 0,
+            "archive_manifest_scan_performed": False,
+            "truth_status": (
+                "projection_outbox_selection_not_semantic_completion"
+            ),
+        }
     records_dir = aoa_root / PROJECTION_OUTBOX_RECORDS_DIR
     selected_by_session: dict[str, tuple[str, dict[str, Any]]] = {}
     inspected_count = 0
     stale_record_count = 0
+    blocked_records: list[dict[str, Any]] = []
+    missing_consumer_state_record_count = 0
     for path in sorted(
         records_dir.glob("*.json"),
-        key=lambda item: item.stat().st_mtime_ns,
-        reverse=True,
+        key=lambda item: item.name,
     ):
         record = read_json(path, {})
         if not isinstance(record, dict) or not record:
@@ -28984,6 +29298,43 @@ def projection_outbox_ready_sessions(
         )
         if not record_session_id or not session_dir.is_dir():
             stale_record_count += 1
+            blocked_records.append(
+                {
+                    "record_id": str(record.get("record_id") or ""),
+                    "session_id": record_session_id,
+                    "status": "admission_blocked",
+                    "diagnostics": [
+                        "outbox_publication_session_dir_missing"
+                    ],
+                }
+            )
+            continue
+        if not projection_outbox_record_integrity_valid(record):
+            stale_record_count += 1
+            blocked_records.append(
+                {
+                    "record_id": str(record.get("record_id") or ""),
+                    "session_id": record_session_id,
+                    "status": "admission_blocked",
+                    "diagnostics": ["outbox_record_invalid"],
+                }
+            )
+            continue
+        if not projection_outbox_same_path(
+            projection_outbox_root_for_session(session_dir),
+            aoa_root / PROJECTION_OUTBOX_ROOT,
+        ):
+            stale_record_count += 1
+            blocked_records.append(
+                {
+                    "record_id": str(record.get("record_id") or ""),
+                    "session_id": record_session_id,
+                    "status": "admission_blocked",
+                    "diagnostics": [
+                        "outbox_publication_session_dir_outside_owner_root"
+                    ],
+                }
+            )
             continue
         manifest = read_json(
             session_dir / "session.manifest.json",
@@ -28997,6 +29348,16 @@ def projection_outbox_ready_sessions(
         )
         if publish_id != str(record.get("new_publish_id") or ""):
             stale_record_count += 1
+            blocked_records.append(
+                {
+                    "record_id": str(record.get("record_id") or ""),
+                    "session_id": record_session_id,
+                    "status": "admission_blocked",
+                    "diagnostics": [
+                        "outbox_record_publish_id_not_current"
+                    ],
+                }
+            )
             continue
         retirement_status = projection_outbox_retirement_status(
             aoa_root,
@@ -29006,6 +29367,16 @@ def projection_outbox_ready_sessions(
         )
         if retirement_status.get("status") == "outbox_record_binding_invalid":
             stale_record_count += 1
+            blocked_records.append(
+                {
+                    "record_id": str(record.get("record_id") or ""),
+                    "session_id": record_session_id,
+                    "status": "admission_blocked",
+                    "diagnostics": list(
+                        retirement_status.get("binding_diagnostics") or []
+                    ),
+                }
+            )
             continue
         pending_consumers: list[str] = []
         for consumer in retirement_status.get("required_consumers", []):
@@ -29019,6 +29390,17 @@ def projection_outbox_ready_sessions(
             and retirement_status.get("status") == "retired"
         ):
             continue
+        if any(
+            not projection_outbox_consumer_state_path(
+                session_dir,
+                consumer=required_consumer,
+                record_id=str(record.get("record_id") or ""),
+            ).is_file()
+            for required_consumer in retirement_status.get(
+                "required_consumers", []
+            )
+        ):
+            missing_consumer_state_record_count += 1
         display = (
             manifest.get("display")
             if isinstance(manifest, dict)
@@ -29056,21 +29438,82 @@ def projection_outbox_ready_sessions(
         ordering = str(record.get("created_at") or "")
         if existing is None or ordering > existing[0]:
             selected_by_session[record_session_id] = (ordering, candidate)
-        if len(selected_by_session) >= max(1, limit):
-            break
-    records = [
+    all_records = [
         item[1]
         for item in sorted(
             selected_by_session.values(),
             key=lambda pair: (
                 pair[0],
-                int_value(pair[1].get("outbox_mtime_ns")),
                 str(pair[1].get("session_id") or ""),
+                str(pair[1].get("outbox_record_id") or ""),
             ),
         )
     ]
+    fairness = projection_outbox_fairness_state(aoa_root)
+    if fairness.get("ok") is not True:
+        return {
+            "schema_version": PROJECTION_OUTBOX_FAIRNESS_SCHEMA_VERSION,
+            "artifact_type": "projection_outbox_ready_sessions",
+            "generated_at": utc_now(),
+            "status": "scheduler_state_invalid",
+            "records": [],
+            "ready_session_count": 0,
+            "inspected_record_count": inspected_count,
+            "stale_record_count": stale_record_count,
+            "blocked_record_count": len(blocked_records),
+            "blocked_records": blocked_records[:32],
+            "missing_consumer_state_record_count": missing_consumer_state_record_count,
+            "fairness": fairness,
+            "diagnostics": list(fairness.get("diagnostics") or []),
+            "raw_bytes_read": 0,
+            "archive_manifest_scan_performed": False,
+            "truth_status": (
+                "projection_outbox_selection_blocked_by_scheduler_integrity"
+            ),
+        }
+    eligible_records = (
+        [
+            record
+            for record in all_records
+            if target_consumer in (record.get("pending_consumers") or [])
+        ]
+        if target_consumer
+        else all_records
+    )
+    cursor_key = (
+        target_consumer
+        if target_consumer
+        else "global"
+    )
+    cursor = (
+        str(
+            (
+                fairness.get("cursor_by_consumer")
+                if isinstance(fairness.get("cursor_by_consumer"), dict)
+                else {}
+            ).get(cursor_key)
+            or ""
+        )
+        if target_consumer
+        else str(fairness.get("global_cursor") or "")
+    )
+    rotated_records = projection_outbox_rotate_after_cursor(
+        eligible_records,
+        cursor,
+    )
+    bounded_limit = max(0, int_value(limit, 16))
+    records = rotated_records[:bounded_limit]
+    fairness_advance = projection_outbox_advance_fairness_state(
+        aoa_root,
+        consumer=target_consumer or None,
+        record_ids=[
+            str(record.get("outbox_record_id") or "")
+            for record in records
+        ],
+        apply=advance_cursor,
+    )
     return {
-        "schema_version": 1,
+        "schema_version": PROJECTION_OUTBOX_FAIRNESS_SCHEMA_VERSION,
         "artifact_type": "projection_outbox_ready_sessions",
         "generated_at": utc_now(),
         "status": "ready" if records else "empty",
@@ -29078,6 +29521,21 @@ def projection_outbox_ready_sessions(
         "ready_session_count": len(records),
         "inspected_record_count": inspected_count,
         "stale_record_count": stale_record_count,
+        "blocked_record_count": len(blocked_records),
+        "blocked_records": blocked_records[:32],
+        "missing_consumer_state_record_count": missing_consumer_state_record_count,
+        "fairness": {
+            "policy": PROJECTION_OUTBOX_FAIRNESS_POLICY,
+            "consumer": target_consumer or "global",
+            "cursor_before": cursor,
+            "cursor_after": (
+                str(records[-1].get("outbox_record_id") or "")
+                if advance_cursor and records
+                else cursor
+            ),
+            "advance_requested": bool(advance_cursor),
+            "advance": fairness_advance,
+        },
         "raw_bytes_read": 0,
         "archive_manifest_scan_performed": False,
         "truth_status": (
@@ -29180,6 +29638,8 @@ def complete_graph_outbox_consumers_from_ledger(
         aoa_root,
         limit=limit,
         session_id=session_id,
+        consumer="graph",
+        advance_cursor=True,
     )
     ledger = read_graph_source_state_ledger(aoa_root)
     entries = (
@@ -29319,6 +29779,8 @@ def complete_entity_registry_outbox_consumers(
         aoa_root,
         limit=limit,
         session_id=session_id,
+        consumer="entity_registry",
+        advance_cursor=True,
     )
     completions: list[dict[str, Any]] = []
     deferred: list[dict[str, Any]] = []
@@ -62134,6 +62596,7 @@ def maintain_indexes(
             complete_entity_registry_outbox_consumers(
                 aoa_root,
                 limit=32,
+                session_id=(target if target != "all" else None),
             )
         )
     elif payload["ok"] and bounded_discovery:
@@ -68772,15 +69235,13 @@ def automatic_outbox_convergence_postpass(
     target: str,
     launch_result_verified: bool,
 ) -> dict[str, Any]:
-    """Run only receipt-gated consumer acknowledgements after child work."""
-    if not launch_result_verified:
-        return {
-            "status": "deferred_child_result_unverified",
-            "graph": {},
-            "entity": {},
-            "retirement": {},
-            "mutates": False,
-        }
+    """Reconcile exact receipts even when the child return was interrupted.
+
+    Each consumer helper below re-reads its authoritative generated artifact
+    and current publication before writing a receipt.  Re-running this
+    metadata-only pass after an unverified child therefore recovers a durable
+    commit without treating transport or a process result as semantic proof.
+    """
     diagnostics: list[str] = []
     graph: dict[str, Any] = {}
     entity: dict[str, Any] = {}
@@ -68817,7 +69278,14 @@ def automatic_outbox_convergence_postpass(
             f"outbox_convergence_retirement_postpass_failed:{exc.__class__.__name__}:{exc}"
         )
     return {
-        "status": "completed" if not diagnostics else "completed_with_diagnostics",
+        "status": (
+            "completed_after_verified_child"
+            if launch_result_verified and not diagnostics
+            else "completed_after_unverified_child"
+            if not launch_result_verified and not diagnostics
+            else "completed_with_diagnostics"
+        ),
+        "child_result_verified": bool(launch_result_verified),
         "graph": graph,
         "entity": entity,
         "retirement": retirement,
@@ -69263,7 +69731,6 @@ def auto_maintenance_retry_dispatch(
             outbox_postpass: dict[str, Any] = {}
             if (
                 outbox_convergence_required
-                and convergence_stage_for_launch == "downstream"
                 and not (
                     launch_payload.get("status")
                     == "outbox_convergence_already_satisfied"
@@ -74862,6 +75329,7 @@ def auto_maintenance(
         projection_outbox_ready_sessions(
             aoa_root,
             limit=max(1, effective_discovery_limit or 16),
+            advance_cursor=apply,
         )
         if target == "all"
         else {
@@ -158789,6 +159257,7 @@ def graph_maintenance(
             complete_graph_outbox_consumers_from_ledger(
                 aoa_root,
                 limit=max(batch_limit * 2, 16),
+                session_id=(target if target != "all" else None),
             )
         )
     else:

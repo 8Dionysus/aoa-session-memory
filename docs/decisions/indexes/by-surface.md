@@ -222,6 +222,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0027 Evidence-Specific Sparse Anchors in Hybrid Fusion](../AOA-SM-D-0027-evidence-specific-sparse-anchors-in-hybrid-fusion.md) | 2026-07-20 | Accepted | `docs/decisions/AOA-SM-D-0027-evidence-specific-sparse-anchors-in-hybrid-fusion.md` |
 
+## evidence boundary
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0100 Bounded Fair Consumer Retirement Admission](../AOA-SM-D-0100-bounded-fair-consumer-retirement-admission.md) | 2026-08-26 | Accepted | `docs/decisions/AOA-SM-D-0100-bounded-fair-consumer-retirement-admission.md` |
+
 ## evidence granularity
 
 | Decision | Date | Status | Path |
@@ -333,6 +339,7 @@
 | [AOA-SM-D-0095 Capture-Bound Retry Obligation Supersession](../AOA-SM-D-0095-capture-bound-retry-obligation-supersession.md) | 2026-08-24 | Accepted | `docs/decisions/AOA-SM-D-0095-capture-bound-retry-obligation-supersession.md` |
 | [AOA-SM-D-0096 Source-Owned Persistent Retry Dispatch Activation](../AOA-SM-D-0096-source-owned-persistent-retry-dispatch-activation.md) | 2026-08-24 | Accepted | `docs/decisions/AOA-SM-D-0096-source-owned-persistent-retry-dispatch-activation.md` |
 | [AOA-SM-D-0099 Terminal Outbox Retirement and Staged Freshness Retry](../AOA-SM-D-0099-terminal-outbox-retirement-and-staged-freshness-retry.md) | 2026-08-26 | Accepted | `docs/decisions/AOA-SM-D-0099-terminal-outbox-retirement-and-staged-freshness-retry.md` |
+| [AOA-SM-D-0100 Bounded Fair Consumer Retirement Admission](../AOA-SM-D-0100-bounded-fair-consumer-retirement-admission.md) | 2026-08-26 | Accepted | `docs/decisions/AOA-SM-D-0100-bounded-fair-consumer-retirement-admission.md` |
 
 ## generated projection preservation
 
@@ -726,6 +733,7 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0099 Terminal Outbox Retirement and Staged Freshness Retry](../AOA-SM-D-0099-terminal-outbox-retirement-and-staged-freshness-retry.md) | 2026-08-26 | Accepted | `docs/decisions/AOA-SM-D-0099-terminal-outbox-retirement-and-staged-freshness-retry.md` |
+| [AOA-SM-D-0100 Bounded Fair Consumer Retirement Admission](../AOA-SM-D-0100-bounded-fair-consumer-retirement-admission.md) | 2026-08-26 | Accepted | `docs/decisions/AOA-SM-D-0100-bounded-fair-consumer-retirement-admission.md` |
 
 ## projection publication
 
@@ -970,6 +978,7 @@
 | [AOA-SM-D-0090 Session Freshness Obligations Close on Watermark Proof](../AOA-SM-D-0090-session-freshness-obligations-close-on-watermark-proof.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0090-session-freshness-obligations-close-on-watermark-proof.md` |
 | [AOA-SM-D-0094 Logical Registry Coverage and Capture-Only Ingress Separation](../AOA-SM-D-0094-logical-registry-coverage-and-capture-only-ingress.md) | 2026-08-22 | Accepted | `docs/decisions/AOA-SM-D-0094-logical-registry-coverage-and-capture-only-ingress.md` |
 | [AOA-SM-D-0096 Source-Owned Persistent Retry Dispatch Activation](../AOA-SM-D-0096-source-owned-persistent-retry-dispatch-activation.md) | 2026-08-24 | Accepted | `docs/decisions/AOA-SM-D-0096-source-owned-persistent-retry-dispatch-activation.md` |
+| [AOA-SM-D-0100 Bounded Fair Consumer Retirement Admission](../AOA-SM-D-0100-bounded-fair-consumer-retirement-admission.md) | 2026-08-26 | Accepted | `docs/decisions/AOA-SM-D-0100-bounded-fair-consumer-retirement-admission.md` |
 
 ## search
 

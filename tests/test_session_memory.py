@@ -2190,6 +2190,217 @@ def test_entity_outbox_ack_requires_exact_search_completion_receipt(
     ).exists()
 
 
+def test_outbox_consumer_lanes_are_fair_restart_safe_and_fail_closed(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+
+    def write_task_episode_record(
+        session_id: str,
+        publish_id: str,
+        created_at: str,
+    ) -> tuple[Path, dict[str, Any]]:
+        session_dir = aoa_root / "sessions" / session_id
+        session_dir.mkdir(parents=True)
+        module.write_json(
+            session_dir / "session.manifest.json",
+            {
+                "session_id": session_id,
+                "archive_status": "indexed",
+                "index_schema": {
+                    "projection_publish": {"publish_id": publish_id}
+                },
+            },
+        )
+        record = module.session_projection_outbox_record(
+            session_dir=session_dir,
+            old_snapshot={},
+            new_snapshot={
+                "task_episode:episode-1": {
+                    "component_type": "task_episode",
+                    "digest": f"digest-{session_id}",
+                    "source_ref": "session-index-shards/task-episodes/episode-1.json",
+                    "generation_identity": {"generation_id": "episode-v1"},
+                }
+            },
+            old_publish_id="",
+            new_publish_id=publish_id,
+            session_id=session_id,
+        )
+        record["created_at"] = created_at
+        module.write_projection_outbox_record(session_dir, record)
+        return session_dir, record
+
+    sessions = [
+        write_task_episode_record(
+            "fair-a", "a" * 64, "2026-08-26T00:00:01Z"
+        ),
+        write_task_episode_record(
+            "fair-b", "b" * 64, "2026-08-26T00:00:02Z"
+        ),
+        write_task_episode_record(
+            "fair-c", "c" * 64, "2026-08-26T00:00:03Z"
+        ),
+    ]
+    records_by_session = {record["session_id"]: record for _, record in sessions}
+
+    first = module.projection_outbox_ready_sessions(
+        aoa_root,
+        limit=1,
+        consumer="graph",
+        advance_cursor=True,
+    )
+    assert first["records"][0]["session_id"] == "fair-a"
+    assert first["missing_consumer_state_record_count"] == 3
+    assert first["blocked_record_count"] == 0
+
+    second = module.projection_outbox_ready_sessions(
+        aoa_root,
+        limit=1,
+        consumer="graph",
+        advance_cursor=True,
+    )
+    third = module.projection_outbox_ready_sessions(
+        aoa_root,
+        limit=1,
+        consumer="graph",
+        advance_cursor=True,
+    )
+    fourth_after_restart = module.projection_outbox_ready_sessions(
+        aoa_root,
+        limit=1,
+        consumer="graph",
+        advance_cursor=True,
+    )
+    assert [
+        second["records"][0]["session_id"],
+        third["records"][0]["session_id"],
+        fourth_after_restart["records"][0]["session_id"],
+    ] == ["fair-b", "fair-c", "fair-a"]
+    fairness_state = module.projection_outbox_fairness_state(aoa_root)
+    assert fairness_state["ok"] is True
+    assert fairness_state["cursor_by_consumer"]["graph"] == records_by_session[
+        "fair-a"
+    ]["record_id"]
+
+    entity_lane = module.projection_outbox_ready_sessions(
+        aoa_root,
+        limit=3,
+        consumer="entity_registry",
+    )
+    assert [
+        item["session_id"] for item in entity_lane["records"]
+    ] == ["fair-a", "fair-b", "fair-c"]
+
+    invalid_session_dir, invalid_record = sessions[0]
+    invalid_path = Path(
+        module.projection_outbox_record_path(
+            invalid_session_dir,
+            invalid_record["record_id"],
+        )
+    )
+    invalid_payload = module.read_json(invalid_path, {})
+    invalid_payload["created_at"] = ""
+    module.write_json(invalid_path, invalid_payload)
+    invalid_bytes = invalid_path.read_bytes()
+    after_invalid = module.projection_outbox_ready_sessions(
+        aoa_root,
+        limit=3,
+        consumer="graph",
+    )
+    assert after_invalid["blocked_record_count"] == 1
+    assert after_invalid["blocked_records"][0]["diagnostics"] == [
+        "outbox_record_invalid"
+    ]
+    assert "fair-a" not in {
+        item["session_id"] for item in after_invalid["records"]
+    }
+    assert invalid_path.read_bytes() == invalid_bytes
+
+    fairness_path = module.projection_outbox_fairness_state_path(aoa_root)
+    module.write_json(fairness_path, {"schema_version": 999})
+    fairness_bytes = fairness_path.read_bytes()
+    scheduler_blocked = module.projection_outbox_ready_sessions(
+        aoa_root,
+        limit=3,
+        consumer="graph",
+    )
+    assert scheduler_blocked["status"] == "scheduler_state_invalid"
+    assert scheduler_blocked["records"] == []
+    assert fairness_path.read_bytes() == fairness_bytes
+
+
+def test_outbox_receipt_identity_and_unverified_child_reconcile_are_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    session_dir = aoa_root / "sessions" / "receipt-identity"
+    session_dir.mkdir(parents=True)
+    publish_id = "d" * 64
+    module.write_json(
+        session_dir / "session.manifest.json",
+        {
+            "session_id": "receipt-identity",
+            "archive_status": "indexed",
+            "index_schema": {"projection_publish": {"publish_id": publish_id}},
+        },
+    )
+    record = module.session_projection_outbox_record(
+        session_dir=session_dir,
+        old_snapshot={},
+        new_snapshot={
+            "task_episode:episode-1": {
+                "component_type": "task_episode",
+                "digest": "e" * 64,
+                "source_ref": "episode.json",
+                "generation_identity": {"generation_id": "episode-v1"},
+            }
+        },
+        old_publish_id="",
+        new_publish_id=publish_id,
+        session_id="receipt-identity",
+    )
+    with pytest.raises(
+        ValueError,
+        match="projection_outbox_completion_receipt_identity_mismatch",
+    ):
+        module.write_projection_outbox_consumer_state(
+            session_dir,
+            record=record,
+            consumer="graph",
+            status="complete",
+            reason="wrong receipt identity",
+            completion_receipt={"consumer": "entity_registry"},
+        )
+
+    calls: list[str] = []
+
+    def graph(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        calls.append("graph")
+        return {"completed_count": 0}
+
+    def entity(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        calls.append("entity")
+        return {"completed_count": 0}
+
+    def retirement(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        calls.append("retirement")
+        return {"written_count": 0}
+
+    monkeypatch.setattr(module, "complete_graph_outbox_consumers_from_ledger", graph)
+    monkeypatch.setattr(module, "complete_entity_registry_outbox_consumers", entity)
+    monkeypatch.setattr(module, "reconcile_projection_outbox_retirements", retirement)
+    reconciled = module.automatic_outbox_convergence_postpass(
+        aoa_root=aoa_root,
+        target="receipt-identity",
+        launch_result_verified=False,
+    )
+    assert reconciled["status"] == "completed_after_unverified_child"
+    assert reconciled["child_result_verified"] is False
+    assert calls == ["graph", "entity", "retirement"]
+
+
 def test_retry_dispatch_hands_projection_to_downstream_and_closes_only_after_retirement(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

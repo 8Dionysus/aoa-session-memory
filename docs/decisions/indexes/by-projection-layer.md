@@ -195,6 +195,7 @@
 | [AOA-SM-D-0083 Additive Registry Repair Replaces Full Layer Reconstruction](../AOA-SM-D-0083-additive-registry-repair-replaces-full-layer-reconstruction.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0083-additive-registry-repair-replaces-full-layer-reconstruction.md` |
 | [AOA-SM-D-0084 Predecessor Proof Preserves Stored Dependency Generations](../AOA-SM-D-0084-predecessor-proof-preserves-stored-dependency-generations.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0084-predecessor-proof-preserves-stored-dependency-generations.md` |
 | [AOA-SM-D-0099 Terminal Outbox Retirement and Staged Freshness Retry](../AOA-SM-D-0099-terminal-outbox-retirement-and-staged-freshness-retry.md) | 2026-08-26 | Accepted | `docs/decisions/AOA-SM-D-0099-terminal-outbox-retirement-and-staged-freshness-retry.md` |
+| [AOA-SM-D-0100 Bounded Fair Consumer Retirement Admission](../AOA-SM-D-0100-bounded-fair-consumer-retirement-admission.md) | 2026-08-26 | Accepted | `docs/decisions/AOA-SM-D-0100-bounded-fair-consumer-retirement-admission.md` |
 
 ## entity usage chain
 
@@ -264,6 +265,7 @@
 | [AOA-SM-D-0051 Transactional Component Outbox and Vector Freshness](../AOA-SM-D-0051-transactional-component-outbox-and-vector-freshness.md) | 2026-08-10 | Accepted | `docs/decisions/AOA-SM-D-0051-transactional-component-outbox-and-vector-freshness.md` |
 | [AOA-SM-D-0091 Projection Generations Follow Materializer Boundaries](../AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md` |
 | [AOA-SM-D-0099 Terminal Outbox Retirement and Staged Freshness Retry](../AOA-SM-D-0099-terminal-outbox-retirement-and-staged-freshness-retry.md) | 2026-08-26 | Accepted | `docs/decisions/AOA-SM-D-0099-terminal-outbox-retirement-and-staged-freshness-retry.md` |
+| [AOA-SM-D-0100 Bounded Fair Consumer Retirement Admission](../AOA-SM-D-0100-bounded-fair-consumer-retirement-admission.md) | 2026-08-26 | Accepted | `docs/decisions/AOA-SM-D-0100-bounded-fair-consumer-retirement-admission.md` |
 
 ## episode semantic evidence packet
 
@@ -337,6 +339,7 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0030 Projection-Scoped Producer Generation Identity](../AOA-SM-D-0030-projection-scoped-producer-generation-identity.md) | 2026-07-26 | Accepted | `docs/decisions/AOA-SM-D-0030-projection-scoped-producer-generation-identity.md` |
 | [AOA-SM-D-0099 Terminal Outbox Retirement and Staged Freshness Retry](../AOA-SM-D-0099-terminal-outbox-retirement-and-staged-freshness-retry.md) | 2026-08-26 | Accepted | `docs/decisions/AOA-SM-D-0099-terminal-outbox-retirement-and-staged-freshness-retry.md` |
+| [AOA-SM-D-0100 Bounded Fair Consumer Retirement Admission](../AOA-SM-D-0100-bounded-fair-consumer-retirement-admission.md) | 2026-08-26 | Accepted | `docs/decisions/AOA-SM-D-0100-bounded-fair-consumer-retirement-admission.md` |
 
 ## exact session index
 
@@ -379,6 +382,7 @@
 | [AOA-SM-D-0084 Predecessor Proof Preserves Stored Dependency Generations](../AOA-SM-D-0084-predecessor-proof-preserves-stored-dependency-generations.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0084-predecessor-proof-preserves-stored-dependency-generations.md` |
 | [AOA-SM-D-0091 Projection Generations Follow Materializer Boundaries](../AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md` |
 | [AOA-SM-D-0099 Terminal Outbox Retirement and Staged Freshness Retry](../AOA-SM-D-0099-terminal-outbox-retirement-and-staged-freshness-retry.md) | 2026-08-26 | Accepted | `docs/decisions/AOA-SM-D-0099-terminal-outbox-retirement-and-staged-freshness-retry.md` |
+| [AOA-SM-D-0100 Bounded Fair Consumer Retirement Admission](../AOA-SM-D-0100-bounded-fair-consumer-retirement-admission.md) | 2026-08-26 | Accepted | `docs/decisions/AOA-SM-D-0100-bounded-fair-consumer-retirement-admission.md` |
 
 ## graph anchor resolution
 

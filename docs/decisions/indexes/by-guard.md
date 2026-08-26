@@ -941,6 +941,7 @@
 | [AOA-SM-D-0088 Independent Validation Nodes and Bounded Proof Kernels](../AOA-SM-D-0088-independent-validation-nodes-and-bounded-proof-kernels.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0088-independent-validation-nodes-and-bounded-proof-kernels.md` |
 | [AOA-SM-D-0091 Projection Generations Follow Materializer Boundaries](../AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md` |
 | [AOA-SM-D-0095 Capture-Bound Retry Obligation Supersession](../AOA-SM-D-0095-capture-bound-retry-obligation-supersession.md) | 2026-08-24 | Accepted | `docs/decisions/AOA-SM-D-0095-capture-bound-retry-obligation-supersession.md` |
+| [AOA-SM-D-0100 Bounded Fair Consumer Retirement Admission](../AOA-SM-D-0100-bounded-fair-consumer-retirement-admission.md) | 2026-08-26 | Accepted | `docs/decisions/AOA-SM-D-0100-bounded-fair-consumer-retirement-admission.md` |
 
 ## fail-closed child validation
 
@@ -991,6 +992,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0070 Coalesced Hook Intent and Contention-Neutral Retry](../AOA-SM-D-0070-coalesced-hook-intent-and-contention-neutral-retry.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0070-coalesced-hook-intent-and-contention-neutral-retry.md` |
+
+## fair scheduling
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0100 Bounded Fair Consumer Retirement Admission](../AOA-SM-D-0100-bounded-fair-consumer-retirement-admission.md) | 2026-08-26 | Accepted | `docs/decisions/AOA-SM-D-0100-bounded-fair-consumer-retirement-admission.md` |
 
 ## filter-before-bound
 
@@ -1147,6 +1154,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0051 Transactional Component Outbox and Vector Freshness](../AOA-SM-D-0051-transactional-component-outbox-and-vector-freshness.md) | 2026-08-10 | Accepted | `docs/decisions/AOA-SM-D-0051-transactional-component-outbox-and-vector-freshness.md` |
+
+## immutable identity
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0100 Bounded Fair Consumer Retirement Admission](../AOA-SM-D-0100-bounded-fair-consumer-retirement-admission.md) | 2026-08-26 | Accepted | `docs/decisions/AOA-SM-D-0100-bounded-fair-consumer-retirement-admission.md` |
 
 ## immutable work intent
 
@@ -1770,6 +1783,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0096 Source-Owned Persistent Retry Dispatch Activation](../AOA-SM-D-0096-source-owned-persistent-retry-dispatch-activation.md) | 2026-08-24 | Accepted | `docs/decisions/AOA-SM-D-0096-source-owned-persistent-retry-dispatch-activation.md` |
 
+## restart safety
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0100 Bounded Fair Consumer Retirement Admission](../AOA-SM-D-0100-bounded-fair-consumer-retirement-admission.md) | 2026-08-26 | Accepted | `docs/decisions/AOA-SM-D-0100-bounded-fair-consumer-retirement-admission.md` |
+
 ## result transport
 
 | Decision | Date | Status | Path |
@@ -2065,6 +2084,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0093 Identity-Bound Session Telemetry Uses Owner Receipt Admission](../AOA-SM-D-0093-identity-bound-session-telemetry-admission.md) | 2026-08-22 | Accepted | `docs/decisions/AOA-SM-D-0093-identity-bound-session-telemetry-admission.md` |
+
+## terminal retirement
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0100 Bounded Fair Consumer Retirement Admission](../AOA-SM-D-0100-bounded-fair-consumer-retirement-admission.md) | 2026-08-26 | Accepted | `docs/decisions/AOA-SM-D-0100-bounded-fair-consumer-retirement-admission.md` |
 
 ## time scope
 
