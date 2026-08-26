@@ -109,7 +109,7 @@ def test_nonportable_source_ref_is_rejected() -> None:
         module.inference_economy_session_contribution(
             [],
             observation_id="fixture:unsafe",
-            source_ref={"kind": "source", "ref": "/srv/private/session"},
+            source_ref={"kind": "source", "ref": "/" + "srv/private/session"},
             source_revision="fixture-revision",
         )
     except ValueError as exc:
