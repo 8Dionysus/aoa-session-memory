@@ -27641,6 +27641,85 @@ def projection_outbox_record_path(
     )
 
 
+PROJECTION_OUTBOX_RECORD_IDENTITY_KEYS = (
+    "schema_version",
+    "artifact_type",
+    "record_id",
+    "session_id",
+    "old_publish_id",
+    "new_publish_id",
+    "changes",
+    "required_consumers",
+)
+
+
+def projection_outbox_record_identity_digest(record: dict[str, Any]) -> str:
+    identity_payload = {
+        key: record.get(key)
+        for key in (
+            "schema_version",
+            "session_id",
+            "old_publish_id",
+            "new_publish_id",
+            "changes",
+            "required_consumers",
+        )
+    }
+    return hashlib.sha256(
+        json.dumps(
+            identity_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def projection_outbox_record_identity_matches(
+    left: dict[str, Any],
+    right: dict[str, Any],
+) -> bool:
+    return all(
+        left.get(key) == right.get(key)
+        for key in PROJECTION_OUTBOX_RECORD_IDENTITY_KEYS
+    )
+
+
+def projection_outbox_record_integrity_valid(
+    record: dict[str, Any],
+) -> bool:
+    record_id = str(record.get("record_id") or "")
+    publication_receipt = record.get("publication_receipt")
+    required_consumers = record.get("required_consumers")
+    return bool(
+        record.get("schema_version") == PROJECTION_OUTBOX_SCHEMA_VERSION
+        and record.get("artifact_type")
+        == "session_projection_component_outbox"
+        and re.fullmatch(r"[a-f0-9]{64}", record_id)
+        and projection_outbox_record_identity_digest(record) == record_id
+        and record.get("status") == "pending"
+        and record.get("truth_status")
+        == "changed_component_work_intent_not_downstream_completion"
+        and isinstance(record.get("changes"), list)
+        and isinstance(required_consumers, list)
+        and all(
+            consumer in PROJECTION_OUTBOX_CONSUMERS
+            for consumer in required_consumers
+        )
+        and isinstance(publication_receipt, dict)
+        and bool(publication_receipt.get("session_dir"))
+        and str(publication_receipt.get("publish_id") or "")
+        == str(record.get("new_publish_id") or "")
+    )
+
+
+def projection_outbox_same_path(left: Path, right: Path) -> bool:
+    try:
+        return left.expanduser().resolve() == right.expanduser().resolve()
+    except OSError:
+        return str(left) == str(right)
+
+
 def write_projection_outbox_record(
     session_dir: Path,
     record: dict[str, Any],
@@ -27648,22 +27727,20 @@ def write_projection_outbox_record(
     record_id = str(record.get("record_id") or "")
     if not record_id:
         raise ValueError("projection_outbox_record_id_missing")
+    if not projection_outbox_record_integrity_valid(record):
+        raise ValueError("projection_outbox_record_invalid")
     path = projection_outbox_record_path(session_dir, record_id)
-    existing = read_json(path, {})
-    if isinstance(existing, dict) and existing:
-        comparable_keys = (
-            "schema_version",
-            "artifact_type",
-            "record_id",
-            "session_id",
-            "old_publish_id",
-            "new_publish_id",
-            "changes",
-            "required_consumers",
-        )
-        if any(
-            existing.get(key) != record.get(key)
-            for key in comparable_keys
+    if path.exists():
+        existing = read_json(path, {})
+        if (
+            not isinstance(existing, dict)
+            or not existing
+            or not projection_outbox_record_integrity_valid(existing)
+            or not projection_outbox_record_identity_matches(existing, record)
+            or not projection_outbox_same_path(
+                Path(str(existing.get("publication_receipt", {}).get("session_dir") or "")),
+                session_dir,
+            )
         ):
             raise ValueError("projection_outbox_record_collision")
         return {
@@ -28193,9 +28270,25 @@ def write_projection_outbox_consumer_state(
     )
     existing = read_json(path, {})
     if isinstance(existing, dict) and existing.get("status") == "complete":
+        existing_receipt = existing.get("completion_receipt")
+        existing_is_exact = bool(
+            existing.get("semantic_completion") is True
+            and str(existing.get("record_id") or "") == record_id
+            and str(existing.get("session_id") or "")
+            == str(record.get("session_id") or "")
+            and str(existing.get("consumer") or "") == consumer
+            and str(existing.get("source_publish_id") or "")
+            == str(record.get("new_publish_id") or "")
+            and isinstance(existing_receipt, dict)
+            and existing_receipt
+        )
+        if not existing_is_exact:
+            raise ValueError(
+                "projection_outbox_completion_receipt_conflict"
+            )
         if status != "complete" or (
             isinstance(completion_receipt, dict)
-            and existing.get("completion_receipt")
+            and existing_receipt
             == completion_receipt
             and existing.get("source_publish_id")
             == record.get("new_publish_id")
@@ -28374,6 +28467,9 @@ def projection_outbox_retirement_status(
             "consumer_completions": {},
         }
     manifest = read_json(session_dir / "session.manifest.json", {})
+    manifest_session_id = str(
+        manifest.get("session_id") if isinstance(manifest, dict) else ""
+    )
     current_publish_id = projection_publish_id(
         manifest.get("index_schema")
         if isinstance(manifest, dict)
@@ -28389,9 +28485,10 @@ def projection_outbox_retirement_status(
             if str(item)
         }
     )
-    retirement_path = projection_outbox_retirement_path(
-        aoa_root,
-        record_id,
+    retirement_path = (
+        projection_outbox_retirement_path(aoa_root, record_id)
+        if record_id
+        else Path()
     )
     completions = {
         consumer: projection_outbox_consumer_completion(
@@ -28406,14 +28503,59 @@ def projection_outbox_retirement_status(
         for consumer in required_consumers
         if not completions[consumer]["ok"]
     ]
-    current = bool(
-        str(selected_record.get("session_id") or "")
-        and current_publish_id == publish_id
+    binding_diagnostics: list[str] = []
+    expected_record_path = (
+        projection_outbox_record_path(session_dir, record_id)
+        if record_id
+        else Path()
     )
+    if not projection_outbox_record_integrity_valid(selected_record):
+        binding_diagnostics.append("outbox_record_invalid")
+    if not record_id:
+        binding_diagnostics.append("outbox_record_id_missing")
+    if selected_path is None:
+        binding_diagnostics.append("outbox_record_path_missing")
+    elif not projection_outbox_same_path(
+        Path(selected_path),
+        expected_record_path,
+    ):
+        binding_diagnostics.append("outbox_record_path_not_authoritative")
+    publication_receipt = (
+        selected_record.get("publication_receipt")
+        if isinstance(selected_record.get("publication_receipt"), dict)
+        else {}
+    )
+    publication_session_dir = str(
+        publication_receipt.get("session_dir") or ""
+    )
+    if not publication_session_dir or not projection_outbox_same_path(
+        Path(publication_session_dir),
+        session_dir,
+    ):
+        binding_diagnostics.append("outbox_publication_session_dir_mismatch")
+    if not manifest_session_id:
+        binding_diagnostics.append("session_manifest_id_missing")
+    elif str(selected_record.get("session_id") or "") != manifest_session_id:
+        binding_diagnostics.append("outbox_record_session_id_mismatch")
+    authoritative_record = read_json(expected_record_path, {})
+    if not isinstance(authoritative_record, dict) or not authoritative_record:
+        binding_diagnostics.append("authoritative_outbox_record_missing")
+    elif not projection_outbox_record_integrity_valid(authoritative_record):
+        binding_diagnostics.append("authoritative_outbox_record_invalid")
+    elif not projection_outbox_record_identity_matches(
+        authoritative_record,
+        selected_record,
+    ):
+        binding_diagnostics.append("authoritative_outbox_record_mismatch")
+    if selected_record.get("status") != "pending":
+        binding_diagnostics.append("outbox_record_status_not_pending")
+    if current_publish_id != publish_id:
+        binding_diagnostics.append("outbox_record_publish_id_not_current")
+    current = not binding_diagnostics
     base = {
         "ok": False,
-        "status": "outbox_record_not_current_publication"
-        if not current
+        "status": "outbox_record_binding_invalid"
+        if binding_diagnostics
         else "consumer_completion_pending"
         if pending_consumers
         else "retirement_pending",
@@ -28424,12 +28566,19 @@ def projection_outbox_retirement_status(
         "record_ref": str(selected_path) if selected_path else "",
         "required_consumers": required_consumers,
         "pending_consumers": pending_consumers,
-        "retirement_path": str(retirement_path),
+        "retirement_path": str(retirement_path) if record_id else "",
         "consumer_completions": completions,
+        "binding_diagnostics": binding_diagnostics,
     }
     if not current or pending_consumers:
         return base
     retirement = read_json(retirement_path, {})
+    recorded_completions = (
+        retirement.get("consumer_completions")
+        if isinstance(retirement, dict)
+        and isinstance(retirement.get("consumer_completions"), dict)
+        else {}
+    )
     retirement_valid = bool(
         isinstance(retirement, dict)
         and retirement.get("schema_version")
@@ -28441,15 +28590,16 @@ def projection_outbox_retirement_status(
         == str(selected_record.get("session_id") or "")
         and retirement.get("source_publish_id") == publish_id
         and retirement.get("status") == "retired"
+        and isinstance(retirement.get("retired_at"), str)
+        and bool(retirement.get("retired_at"))
+        and projection_outbox_same_path(
+            Path(str(retirement.get("outbox_record_ref") or "")),
+            expected_record_path,
+        )
         and retirement.get("required_consumers") == required_consumers
+        and set(recorded_completions) == set(required_consumers)
         and retirement.get("truth_status")
         == "all_required_consumer_completion_receipts_verified"
-    )
-    recorded_completions = (
-        retirement.get("consumer_completions")
-        if isinstance(retirement, dict)
-        and isinstance(retirement.get("consumer_completions"), dict)
-        else {}
     )
     if retirement_valid:
         for consumer in required_consumers:
@@ -28460,7 +28610,10 @@ def projection_outbox_retirement_status(
             )
             observed = completions[consumer]
             if (
-                item.get("state_ref") != observed.get("path")
+                not projection_outbox_same_path(
+                    Path(str(item.get("state_ref") or "")),
+                    Path(str(observed.get("path") or "")),
+                )
                 or item.get("completion_receipt_digest")
                 != observed.get("completion_receipt_digest")
             ):
@@ -28490,6 +28643,14 @@ def write_projection_outbox_retirement(
     record: dict[str, Any],
 ) -> dict[str, Any]:
     """Write one immutable terminal receipt after exact consumer verification."""
+    preexisting_path = projection_outbox_retirement_path(
+        aoa_root,
+        str(record.get("record_id") or ""),
+    )
+    if preexisting_path.exists():
+        preexisting = read_json(preexisting_path, {})
+        if not isinstance(preexisting, dict) or not preexisting:
+            raise ValueError("projection_outbox_retirement_collision")
     before = projection_outbox_retirement_status(
         aoa_root,
         session_dir=session_dir,
@@ -28539,8 +28700,10 @@ def write_projection_outbox_retirement(
             "all_required_consumer_completion_receipts_verified"
         ),
     }
-    existing = read_json(path, {})
-    if isinstance(existing, dict) and existing:
+    if path.exists():
+        existing = read_json(path, {})
+        if not isinstance(existing, dict) or not existing:
+            raise ValueError("projection_outbox_retirement_collision")
         existing_status = projection_outbox_retirement_status(
             aoa_root,
             session_dir=session_dir,
@@ -28841,17 +29004,15 @@ def projection_outbox_ready_sessions(
             record_path=path,
             record=record,
         )
+        if retirement_status.get("status") == "outbox_record_binding_invalid":
+            stale_record_count += 1
+            continue
         pending_consumers: list[str] = []
-        for consumer in record.get("required_consumers", []):
-            state = read_json(
-                projection_outbox_consumer_state_path(
-                    session_dir,
-                    consumer=str(consumer),
-                    record_id=str(record.get("record_id") or ""),
-                ),
-                {},
-            )
-            if str(state.get("status") or "") != "complete":
+        for consumer in retirement_status.get("required_consumers", []):
+            completion = retirement_status.get(
+                "consumer_completions", {}
+            ).get(str(consumer), {})
+            if not isinstance(completion, dict) or completion.get("ok") is not True:
                 pending_consumers.append(str(consumer))
         if (
             not pending_consumers
@@ -28967,23 +29128,17 @@ def complete_projection_outbox_consumers_for_session(
         consumer_name = str(consumer)
         if consumer_name not in required:
             continue
-        existing_state_path = projection_outbox_consumer_state_path(
-            session_dir,
+        existing_completion = projection_outbox_consumer_completion(
+            session_dir=session_dir,
+            record=record,
             consumer=consumer_name,
-            record_id=str(record.get("record_id") or ""),
         )
-        existing_state = read_json(existing_state_path, {})
-        if (
-            isinstance(existing_state, dict)
-            and existing_state.get("status") == "complete"
-            and existing_state.get("source_publish_id") == publish_id
-            and existing_state.get("record_id") == record.get("record_id")
-        ):
+        if existing_completion.get("ok") is True:
             completed.append(consumer_name)
             states.append(
                 {
                     "status": "already_complete",
-                    "path": str(existing_state_path),
+                    "path": existing_completion.get("path"),
                     "consumer": consumer_name,
                     "record_id": record.get("record_id"),
                 }
@@ -29178,23 +29333,24 @@ def complete_entity_registry_outbox_consumers(
             {},
         )
         record_id = str(record.get("record_id") or "")
-        search_state = read_json(
-            projection_outbox_consumer_state_path(
-                session_dir,
-                consumer="exact_and_lexical_search",
-                record_id=record_id,
-            ),
-            {},
+        search_completion = projection_outbox_consumer_completion(
+            session_dir=session_dir,
+            record=record,
+            consumer="exact_and_lexical_search",
         )
-        if str(search_state.get("status") or "") != "complete":
+        if search_completion.get("ok") is not True:
             deferred.append(
                 {
                     "session_id": candidate.get("session_id"),
                     "record_id": record_id,
                     "reason": "exact_search_predecessor_not_complete",
+                    "predecessor_diagnostic": search_completion.get(
+                        "reason"
+                    ),
                 }
             )
             continue
+        search_state = search_completion.get("state", {})
         completion = complete_projection_outbox_consumers_for_session(
             aoa_root=aoa_root,
             session_dir=session_dir,
@@ -29341,29 +29497,45 @@ def session_projection_freshness_vector(
         outbox_path, outbox_record = outbox_record_override
     downstream: dict[str, Any] = {}
     for consumer in PROJECTION_OUTBOX_CONSUMERS:
-        state_path: Path | None = (
-            projection_outbox_consumer_state_path(
-                session_dir,
+        completion = (
+            projection_outbox_consumer_completion(
+                session_dir=session_dir,
+                record=outbox_record,
                 consumer=consumer,
-                record_id=str(outbox_record.get("record_id") or ""),
             )
             if outbox_record
-            else None
+            else {
+                "ok": False,
+                "path": "",
+                "state": {},
+                "completion_receipt_digest": "",
+                "reason": "no_current_outbox_record",
+            }
         )
-        state = read_json(state_path, {}) if state_path is not None else {}
+        state = (
+            completion.get("state")
+            if isinstance(completion.get("state"), dict)
+            else {}
+        )
+        state_path = str(completion.get("path") or "")
         observed_status = str(state.get("status") or "unresolved")
         downstream[consumer] = {
             "status": observed_status,
-            "current": observed_status == "complete",
-            "semantic_completion": bool(
-                state.get("semantic_completion")
-            ),
+            "current": completion.get("ok") is True,
+            "semantic_completion": completion.get("ok") is True,
             "source_publish_id": str(
                 state.get("source_publish_id") or publish_id
             ),
             "record_id": str(outbox_record.get("record_id") or ""),
-            "state_ref": str(state_path) if state_path is not None else "",
-            "reason": str(state.get("reason") or ""),
+            "state_ref": state_path,
+            "completion_receipt_digest": str(
+                completion.get("completion_receipt_digest") or ""
+            ),
+            "reason": str(
+                completion.get("reason")
+                or state.get("reason")
+                or ""
+            ),
         }
     returned = dict(returned_evidence or {})
     returned_status = str(returned.get("status") or "not_returned")

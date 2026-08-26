@@ -1950,6 +1950,20 @@ def test_outbox_completion_crash_replay_is_durable_and_idempotent(
             reason="conflicting replay",
             completion_receipt={"db_commit": "different"},
         )
+    state["semantic_completion"] = False
+    module.write_json(state_path, state)
+    with pytest.raises(
+        ValueError,
+        match="projection_outbox_completion_receipt_conflict",
+    ):
+        module.write_projection_outbox_consumer_state(
+            session_dir,
+            record=record,
+            consumer="exact_and_lexical_search",
+            status="complete",
+            reason="malformed replay",
+            completion_receipt={"db_commit": "commit-1"},
+        )
 
 
 def test_outbox_terminal_retirement_requires_all_exact_receipts_and_is_replayable(
@@ -1983,11 +1997,21 @@ def test_outbox_terminal_retirement_requires_all_exact_receipts_and_is_replayabl
         session_id="outbox-retirement",
     )
     record_write = module.write_projection_outbox_record(session_dir, record)
+    record_path = Path(record_write["path"])
+    original_record_bytes = record_path.read_bytes()
+    record_path.write_text("{malformed outbox", encoding="utf-8")
+    with pytest.raises(
+        ValueError,
+        match="projection_outbox_record_collision",
+    ):
+        module.write_projection_outbox_record(session_dir, record)
+    assert record_path.read_bytes() == b"{malformed outbox"
+    record_path.write_bytes(original_record_bytes)
 
     partial = module.projection_outbox_retirement_status(
         aoa_root,
         session_dir=session_dir,
-        record_path=Path(record_write["path"]),
+        record_path=record_path,
         record=record,
     )
     assert partial["status"] == "consumer_completion_pending"
@@ -1997,7 +2021,7 @@ def test_outbox_terminal_retirement_requires_all_exact_receipts_and_is_replayabl
     assert module.write_projection_outbox_retirement(
         aoa_root,
         session_dir=session_dir,
-        record_path=Path(record_write["path"]),
+        record_path=record_path,
         record=record,
     )["status"] == "deferred"
     assert not list(
@@ -2013,6 +2037,25 @@ def test_outbox_terminal_retirement_requires_all_exact_receipts_and_is_replayabl
             reason="test_exact_commit",
             completion_receipt={"consumer": consumer, "commit": "exact"},
         )
+    retirement_path = module.projection_outbox_retirement_path(
+        aoa_root,
+        record["record_id"],
+    )
+    retirement_path.parent.mkdir(parents=True, exist_ok=True)
+    retirement_path.write_text("{malformed retirement", encoding="utf-8")
+    malformed_retirement_bytes = retirement_path.read_bytes()
+    with pytest.raises(
+        ValueError,
+        match="projection_outbox_retirement_collision",
+    ):
+        module.write_projection_outbox_retirement(
+            aoa_root,
+            session_dir=session_dir,
+            record_path=record_path,
+            record=record,
+        )
+    assert retirement_path.read_bytes() == malformed_retirement_bytes
+    retirement_path.unlink()
     ready_before_retirement = module.projection_outbox_ready_sessions(aoa_root)
     assert ready_before_retirement["ready_session_count"] == 1
     assert ready_before_retirement["records"][0]["pending_consumers"] == []
@@ -2021,21 +2064,37 @@ def test_outbox_terminal_retirement_requires_all_exact_receipts_and_is_replayabl
     written = module.write_projection_outbox_retirement(
         aoa_root,
         session_dir=session_dir,
-        record_path=Path(record_write["path"]),
+        record_path=record_path,
         record=record,
     )
     replay = module.write_projection_outbox_retirement(
         aoa_root,
         session_dir=session_dir,
-        record_path=Path(record_write["path"]),
+        record_path=record_path,
         record=record,
     )
     assert written["status"] == "written"
     assert replay["status"] == "reused"
+    retirement_payload = module.read_json(retirement_path, {})
+    module.write_json(
+        retirement_path,
+        {
+            **retirement_payload,
+            "outbox_record_ref": str(tmp_path / "wrong-outbox-record.json"),
+        },
+    )
+    invalid_ref = module.projection_outbox_retirement_status(
+        aoa_root,
+        session_dir=session_dir,
+        record_path=record_path,
+        record=record,
+    )
+    assert invalid_ref["status"] == "retirement_invalid"
+    module.write_json(retirement_path, retirement_payload)
     retired = module.projection_outbox_retirement_status(
         aoa_root,
         session_dir=session_dir,
-        record_path=Path(record_write["path"]),
+        record_path=record_path,
         record=record,
     )
     assert retired["ok"] is True
@@ -2044,6 +2103,91 @@ def test_outbox_terminal_retirement_requires_all_exact_receipts_and_is_replayabl
     assert module.projection_outbox_ready_sessions(aoa_root)[
         "ready_session_count"
     ] == 0
+
+
+def test_entity_outbox_ack_requires_exact_search_completion_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    session_dir = aoa_root / "sessions" / "entity-predecessor"
+    session_dir.mkdir(parents=True)
+    publish_id = "c" * 64
+    module.write_json(
+        session_dir / "session.manifest.json",
+        {
+            "session_id": "entity-predecessor",
+            "archive_status": "indexed",
+            "index_schema": {
+                "projection_publish": {"publish_id": publish_id}
+            },
+        },
+    )
+    record = module.session_projection_outbox_record(
+        session_dir=session_dir,
+        old_snapshot={},
+        new_snapshot={
+            "raw_block:block-1": {
+                "component_type": "raw_block",
+                "digest": "d" * 64,
+                "source_ref": "raw/blocks/block-1.jsonl",
+                "generation_identity": {},
+            }
+        },
+        old_publish_id="",
+        new_publish_id=publish_id,
+        session_id="entity-predecessor",
+    )
+    module.write_projection_outbox_record(session_dir, record)
+    search_state_path = module.projection_outbox_consumer_state_path(
+        session_dir,
+        consumer="exact_and_lexical_search",
+        record_id=record["record_id"],
+    )
+    module.write_json(
+        search_state_path,
+        {
+            "schema_version": 1,
+            "artifact_type": "projection_outbox_consumer_state",
+            "record_id": record["record_id"],
+            "session_id": "entity-predecessor",
+            "consumer": "exact_and_lexical_search",
+            "source_publish_id": publish_id,
+            "status": "complete",
+            "semantic_completion": False,
+            "completion_receipt": {},
+        },
+    )
+    search_db = module.search_db_path(aoa_root)
+    search_db.parent.mkdir(parents=True, exist_ok=True)
+    search_db.touch()
+    monkeypatch.setattr(
+        module,
+        "entity_registry_maintenance_status",
+        lambda _aoa_root: {
+            "status": "current",
+            "observed_route_source": "archived_route_terms",
+            "path": str(aoa_root / "entity-registry.json"),
+            "generated_at": "2026-08-26T00:00:00Z",
+            "semantic_digest": "registry-digest",
+        },
+    )
+
+    result = module.complete_entity_registry_outbox_consumers(aoa_root)
+
+    assert result["status"] == "no_completion"
+    assert result["completed_count"] == 0
+    assert result["deferred"][0]["reason"] == (
+        "exact_search_predecessor_not_complete"
+    )
+    assert result["deferred"][0]["predecessor_diagnostic"] == (
+        "consumer_completion_receipt_missing_or_mismatched"
+    )
+    assert not module.projection_outbox_consumer_state_path(
+        session_dir,
+        consumer="entity_registry",
+        record_id=record["record_id"],
+    ).exists()
 
 
 def test_retry_dispatch_hands_projection_to_downstream_and_closes_only_after_retirement(
@@ -56614,11 +56758,10 @@ def test_auto_maintenance_resource_launch_recovers_persisted_publication_progres
     module.write_json(session_dir / "session.manifest.json", fixture["manifest"])
     publish_identity = fixture["projection_publish"]
     publish_id = str(publish_identity["publish_id"])
-    record_id = "c" * 64
     outbox_record = {
         "schema_version": module.PROJECTION_OUTBOX_SCHEMA_VERSION,
         "artifact_type": "session_projection_component_outbox",
-        "record_id": record_id,
+        "record_id": "",
         "session_id": "session-1",
         "old_publish_id": "",
         "new_publish_id": publish_id,
@@ -56644,6 +56787,8 @@ def test_auto_maintenance_resource_launch_recovers_persisted_publication_progres
         },
         "truth_status": "changed_component_work_intent_not_downstream_completion",
     }
+    record_id = module.projection_outbox_record_identity_digest(outbox_record)
+    outbox_record["record_id"] = record_id
     outbox_write = module.write_projection_outbox_record(
         session_dir,
         outbox_record,
@@ -56812,11 +56957,10 @@ def test_persistent_freshness_retry_preserves_execution_id_through_timeout_recov
         )
         publish_identity = completed_fixture["projection_publish"]
         publish_id = str(publish_identity["publish_id"])
-        record_id = "f" * 64
         outbox_record = {
             "schema_version": module.PROJECTION_OUTBOX_SCHEMA_VERSION,
             "artifact_type": "session_projection_component_outbox",
-            "record_id": record_id,
+            "record_id": "",
             "session_id": session_id,
             "old_publish_id": str(initial_fixture["projection_publish"]["publish_id"]),
             "new_publish_id": publish_id,
@@ -56831,6 +56975,8 @@ def test_persistent_freshness_retry_preserves_execution_id_through_timeout_recov
             },
             "truth_status": "changed_component_work_intent_not_downstream_completion",
         }
+        record_id = module.projection_outbox_record_identity_digest(outbox_record)
+        outbox_record["record_id"] = record_id
         outbox_write = module.write_projection_outbox_record(
             session_dir,
             outbox_record,
