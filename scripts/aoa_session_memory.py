@@ -12,6 +12,7 @@ import difflib
 import fcntl
 import gc
 import gzip
+import importlib.util
 import hashlib
 import inspect
 import json
@@ -45,6 +46,108 @@ from typing import Any, Callable, Iterable, Sequence
 
 
 _DEFAULT_SQLITE_CONNECT = sqlite3.connect
+
+def _load_epistemic_action_event_chain_module() -> Any:
+    """Load the owner-local action-chain source without making it a package dependency."""
+    module_name = "_aoa_epistemic_action_event_chain_source"
+    loaded = sys.modules.get(module_name)
+    if loaded is not None:
+        return loaded
+    source_path = Path(__file__).with_name(
+        "aoa_epistemic_action_event_chain.py"
+    )
+    spec = importlib.util.spec_from_file_location(module_name, source_path)
+    if spec is None or spec.loader is None:
+        raise ImportError("aoa epistemic action source is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_EPISTEMIC_ACTION_EVENT_CHAIN = _load_epistemic_action_event_chain_module()
+EPISTEMIC_ACTION_SCHEMA_VERSION = (
+    _EPISTEMIC_ACTION_EVENT_CHAIN.EPISTEMIC_ACTION_SCHEMA_VERSION
+)
+EPISTEMIC_ACTION_EVENT_SCHEMA_VERSION = (
+    _EPISTEMIC_ACTION_EVENT_CHAIN.EPISTEMIC_ACTION_EVENT_SCHEMA_VERSION
+)
+EPISTEMIC_ACTION_ARTIFACT_TYPE = (
+    _EPISTEMIC_ACTION_EVENT_CHAIN.EPISTEMIC_ACTION_ARTIFACT_TYPE
+)
+EPISTEMIC_ACTION_CLAIM_CEILING = (
+    _EPISTEMIC_ACTION_EVENT_CHAIN.EPISTEMIC_ACTION_CLAIM_CEILING
+)
+EPISTEMIC_ACTION_CANDIDATE_CLAIM_CEILING = (
+    _EPISTEMIC_ACTION_EVENT_CHAIN.EPISTEMIC_ACTION_CANDIDATE_CLAIM_CEILING
+)
+EPISTEMIC_ACTION_EVENT_TYPES = (
+    _EPISTEMIC_ACTION_EVENT_CHAIN.EPISTEMIC_ACTION_EVENT_TYPES
+)
+EPISTEMIC_ACTION_STATES = _EPISTEMIC_ACTION_EVENT_CHAIN.EPISTEMIC_ACTION_STATES
+EPISTEMIC_ACTION_OBSERVATION_STATUSES = (
+    _EPISTEMIC_ACTION_EVENT_CHAIN.EPISTEMIC_ACTION_OBSERVATION_STATUSES
+)
+EPISTEMIC_ACTION_DISCREPANCY_KINDS = (
+    _EPISTEMIC_ACTION_EVENT_CHAIN.EPISTEMIC_ACTION_DISCREPANCY_KINDS
+)
+EPISTEMIC_ACTION_UPDATE_KINDS = (
+    _EPISTEMIC_ACTION_EVENT_CHAIN.EPISTEMIC_ACTION_UPDATE_KINDS
+)
+EPISTEMIC_ACTION_REASON_CODES = (
+    _EPISTEMIC_ACTION_EVENT_CHAIN.EPISTEMIC_ACTION_REASON_CODES
+)
+EpistemicActionChain = _EPISTEMIC_ACTION_EVENT_CHAIN.EpistemicActionChain
+EpistemicActionError = _EPISTEMIC_ACTION_EVENT_CHAIN.EpistemicActionError
+EpistemicActionPrivacyError = (
+    _EPISTEMIC_ACTION_EVENT_CHAIN.EpistemicActionPrivacyError
+)
+EpistemicActionOrderingError = (
+    _EPISTEMIC_ACTION_EVENT_CHAIN.EpistemicActionOrderingError
+)
+EpistemicActionConflictError = (
+    _EPISTEMIC_ACTION_EVENT_CHAIN.EpistemicActionConflictError
+)
+EpistemicActionConcurrencyError = (
+    _EPISTEMIC_ACTION_EVENT_CHAIN.EpistemicActionConcurrencyError
+)
+EpistemicActionIntegrityError = (
+    _EPISTEMIC_ACTION_EVENT_CHAIN.EpistemicActionIntegrityError
+)
+epistemic_digest = _EPISTEMIC_ACTION_EVENT_CHAIN.epistemic_digest
+epistemic_public_id = _EPISTEMIC_ACTION_EVENT_CHAIN.epistemic_public_id
+create_epistemic_action_chain = (
+    _EPISTEMIC_ACTION_EVENT_CHAIN.create_epistemic_action_chain
+)
+load_epistemic_action_chain = (
+    _EPISTEMIC_ACTION_EVENT_CHAIN.load_epistemic_action_chain
+)
+replay_epistemic_action_events = (
+    _EPISTEMIC_ACTION_EVENT_CHAIN.replay_epistemic_action_events
+)
+validate_epistemic_action_chain = (
+    _EPISTEMIC_ACTION_EVENT_CHAIN.validate_epistemic_action_chain
+)
+validate_epistemic_action_chain_artifact = (
+    _EPISTEMIC_ACTION_EVENT_CHAIN.validate_epistemic_action_chain_artifact
+)
+record_prediction_commitment = (
+    _EPISTEMIC_ACTION_EVENT_CHAIN.record_prediction_commitment
+)
+commit_prediction = _EPISTEMIC_ACTION_EVENT_CHAIN.commit_prediction
+bind_epistemic_action = _EPISTEMIC_ACTION_EVENT_CHAIN.bind_epistemic_action
+bind_action = _EPISTEMIC_ACTION_EVENT_CHAIN.bind_action
+record_epistemic_observation = (
+    _EPISTEMIC_ACTION_EVENT_CHAIN.record_epistemic_observation
+)
+record_observation = _EPISTEMIC_ACTION_EVENT_CHAIN.record_observation
+derive_epistemic_discrepancy = (
+    _EPISTEMIC_ACTION_EVENT_CHAIN.derive_epistemic_discrepancy
+)
+derive_discrepancy = _EPISTEMIC_ACTION_EVENT_CHAIN.derive_discrepancy
+inspect_model_update_candidate = (
+    _EPISTEMIC_ACTION_EVENT_CHAIN.inspect_model_update_candidate
+)
 
 try:
     import tomllib

@@ -25,6 +25,9 @@ or naming semantics by themselves.
   validation-owner receipts, session-memory identity packets, and
   admission-only pair results. It does not grant validation or evaluation
   authority.
+- `epistemic-action-event-chain.schema.json` describes the append-only,
+  digest-bound prediction/action/observation chain and its shadow-only
+  model-update candidate. It contains no raw prompt or tool payload fields.
 - `session.manifest.schema.json` describes session archive manifests.
 - `skill-usage-receipt.schema.json` describes one immutable, owner-reviewed
   positive skill-use evidence packet. It may admit invocation, verification,

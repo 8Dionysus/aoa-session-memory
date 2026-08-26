@@ -106508,3 +106508,553 @@ def test_entity_registry_semantic_digest_canonicalizes_logical_root(
     )
 
     assert absolute["sha256"] == relative["sha256"]
+
+
+def _epistemic_prediction_kwargs(label: str) -> dict[str, object]:
+    return {
+        "request_id": f"request-{label}",
+        "attempt_id": f"attempt-{label}",
+        "pre_action_marker": module.epistemic_digest(f"pre-action-{label}"),
+        "observation_window_digest": module.epistemic_digest(
+            f"window-{label}"
+        ),
+        "hypothesis_digest": module.epistemic_digest(f"hypothesis-{label}"),
+        "expected_change_digest": module.epistemic_digest(
+            f"expected-change-{label}"
+        ),
+        "falsifier_digest": module.epistemic_digest(f"falsifier-{label}"),
+        "confidence": 0.75,
+        "action_plan_digest": module.epistemic_digest(f"plan-{label}"),
+        "tool_use_id": f"tool-{label}",
+    }
+
+
+def _epistemic_action_kwargs(label: str) -> dict[str, object]:
+    return {
+        "attempt_id": f"attempt-{label}",
+        "tool_use_id": f"tool-{label}",
+        "action_kind": "bounded_action",
+        "effect_class": "repo_mutation",
+        "action_started_at": "9999-12-31T23:59:59Z",
+    }
+
+
+def _epistemic_observation_kwargs(label: str) -> dict[str, object]:
+    return {
+        "attempt_id": f"attempt-{label}",
+        "tool_use_id": f"tool-{label}",
+        "evidence_ref_ids": [f"evidence-{label}"],
+    }
+
+
+def test_epistemic_action_chain_replays_prediction_action_observation_and_candidate(
+    tmp_path: Path,
+) -> None:
+    store = tmp_path / "epistemic-action.jsonl"
+    chain = module.EpistemicActionChain.create(
+        store,
+        session_id="session-epistemic-1",
+        turn_id="turn-epistemic-1",
+    )
+    expected = module.epistemic_digest("expected-observation-1")
+    action_digest = module.epistemic_digest("action-1")
+    observed = module.epistemic_digest("actual-observation-1")
+
+    prediction = chain.commit_prediction(
+        "action-epistemic-1",
+        expected,
+        **_epistemic_prediction_kwargs("epistemic-1"),
+        prediction_id="prediction-epistemic-1",
+        created_at="2026-08-26T00:00:00Z",
+    )
+    action = chain.bind_action(
+        "action-epistemic-1",
+        action_digest,
+        **_epistemic_action_kwargs("epistemic-1"),
+        created_at="2026-08-26T00:00:01Z",
+    )
+    observation = chain.record_observation(
+        "action-epistemic-1",
+        observed,
+        **_epistemic_observation_kwargs("epistemic-1"),
+        observation_id="observation-epistemic-1",
+        created_at="2026-08-26T00:00:02Z",
+    )
+    derived = chain.derive_discrepancy(
+        "action-epistemic-1",
+        alternative_explanation_digest=module.epistemic_digest(
+            "alternative-epistemic-1"
+        ),
+        model_update_digest=module.epistemic_digest("model-update-epistemic-1"),
+        next_distinguishing_action_digest=module.epistemic_digest(
+            "next-action-epistemic-1"
+        ),
+        created_at="2026-08-26T00:00:03Z",
+    )
+
+    assert [
+        prediction["sequence"],
+        action["sequence"],
+        observation["sequence"],
+    ] == [1, 2, 3]
+    assert derived["discrepancy"]["kind"] == "mismatch"
+    assert derived["model_update_candidate"]["status"] == "shadow_only"
+    assert derived["model_update_candidate"]["update_kind"] == "review_prediction"
+
+    replayed = module.EpistemicActionChain.load(store)
+    assert replayed.commit_prediction(
+        "action-epistemic-1",
+        expected,
+        **_epistemic_prediction_kwargs("epistemic-1"),
+        prediction_id="prediction-epistemic-1",
+    )["event_id"] == prediction["event_id"]
+    assert replayed.bind_action(
+        "action-epistemic-1",
+        action_digest,
+        **_epistemic_action_kwargs("epistemic-1"),
+    )["event_id"] == action["event_id"]
+    assert replayed.record_observation(
+        "action-epistemic-1",
+        observed,
+        **_epistemic_observation_kwargs("epistemic-1"),
+        observation_id="observation-epistemic-1",
+    )["event_id"] == observation["event_id"]
+    replayed_derived = replayed.derive_discrepancy("action-epistemic-1")
+    artifact = replayed.inspect()
+
+    assert replayed_derived["event"]["event_id"] == derived["event"]["event_id"]
+    assert artifact["event_count"] == 5
+    assert [event["sequence"] for event in artifact["events"]] == [1, 2, 3, 4, 5]
+    assert module.validate_epistemic_action_chain_artifact(artifact)["ok"] is True
+    from jsonschema import Draft202012Validator
+
+    schema = json.loads(
+        (
+            SCRIPT.parents[1]
+            / "schemas"
+            / "epistemic-action-event-chain.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    Draft202012Validator.check_schema(schema)
+    Draft202012Validator(schema).validate(artifact)
+    forbidden_fields = {"prompt", "payload", "tool_input", "tool_output", "transcript"}
+    for event in artifact["events"]:
+        assert not forbidden_fields.intersection(event)
+        assert "PRIVATE_EPISTEMIC_RAW_SENTINEL" not in json.dumps(event)
+
+
+def test_epistemic_action_chain_rejects_ordering_post_hoc_and_immutable_prediction_conflicts(
+    tmp_path: Path,
+) -> None:
+    before_store = tmp_path / "before-prediction.jsonl"
+    before = module.EpistemicActionChain.create(
+        before_store,
+        session_id="session-ordering",
+        turn_id="turn-ordering",
+    )
+    with pytest.raises(module.EpistemicActionOrderingError) as ordering:
+        before.bind_action(
+            "action-ordering",
+            module.epistemic_digest("action"),
+            **_epistemic_action_kwargs("ordering"),
+        )
+    assert ordering.value.reason_code == "action_before_prediction"
+    assert ordering.value.state == "refused"
+    assert json.loads(json.dumps(before.inspect()))["chain_status"] == "refused"
+
+    store = tmp_path / "immutable-prediction.jsonl"
+    chain = module.EpistemicActionChain.create(
+        store,
+        session_id="session-immutable",
+        turn_id="turn-immutable",
+    )
+    first = chain.commit_prediction(
+        "action-immutable",
+        module.epistemic_digest("expected-a"),
+        **_epistemic_prediction_kwargs("immutable"),
+        prediction_id="prediction-immutable",
+    )
+    chain.bind_action(
+        "action-immutable",
+        module.epistemic_digest("action"),
+        **_epistemic_action_kwargs("immutable"),
+    )
+    with pytest.raises(module.EpistemicActionOrderingError) as post_hoc:
+        chain.commit_prediction(
+            "action-immutable",
+            module.epistemic_digest("expected-b"),
+            **_epistemic_prediction_kwargs("immutable"),
+            prediction_id="prediction-late",
+        )
+    assert post_hoc.value.reason_code == "post_hoc_prediction"
+    with pytest.raises(module.EpistemicActionConflictError) as immutable:
+        chain.commit_prediction(
+            "action-immutable",
+            module.epistemic_digest("expected-b"),
+            **_epistemic_prediction_kwargs("immutable"),
+            prediction_id="prediction-immutable",
+        )
+    assert immutable.value.reason_code == "prediction_immutable_conflict"
+    assert immutable.value.state == "ambiguous"
+    assert first["sequence"] == 1
+
+
+def test_epistemic_action_chain_preserves_interruption_missing_and_shadow_only_candidate(
+    tmp_path: Path,
+) -> None:
+    store = tmp_path / "epistemic-interruption.jsonl"
+    chain = module.EpistemicActionChain.create(
+        store,
+        session_id="session-interruption",
+        turn_id="turn-interruption",
+    )
+    chain.commit_prediction(
+        "action-interruption",
+        module.epistemic_digest("expected"),
+        **_epistemic_prediction_kwargs("interruption"),
+        prediction_id="prediction-interruption",
+    )
+    chain.bind_action(
+        "action-interruption",
+        module.epistemic_digest("action"),
+        **_epistemic_action_kwargs("interruption"),
+    )
+    missing = chain.record_observation(
+        "action-interruption",
+        **_epistemic_observation_kwargs("interruption"),
+        observation_id="observation-interruption",
+        observation_status="unknown",
+        reason_code="interrupted",
+    )
+    derived = chain.derive_discrepancy("action-interruption")
+    candidate = chain.inspect_model_update_candidate("action-interruption")
+
+    assert missing["state"] == "unknown"
+    assert missing["observation_status"] == "unknown"
+    assert derived["state"] == "unknown"
+    assert derived["discrepancy"]["kind"] == "unknown"
+    assert derived["model_update_candidate"]["status"] == "shadow_only"
+    assert derived["model_update_candidate"]["update_kind"] == "withhold_update"
+    assert candidate["state"] == "shadow_only"
+    assert chain.inspect()["chain_status"] == "unknown"
+    assert module.validate_epistemic_action_chain(store)["ok"] is True
+
+    compaction_store = tmp_path / "epistemic-compaction.jsonl"
+    compaction = module.EpistemicActionChain.create(
+        compaction_store,
+        session_id="session-compaction",
+        turn_id="turn-compaction",
+    )
+    compaction.commit_prediction(
+        "action-compaction",
+        module.epistemic_digest("expected-compaction"),
+        **_epistemic_prediction_kwargs("compaction"),
+        prediction_id="prediction-compaction",
+    )
+    compaction.bind_action(
+        "action-compaction",
+        module.epistemic_digest("action-compaction"),
+        **_epistemic_action_kwargs("compaction"),
+    )
+    compaction.record_observation(
+        "action-compaction",
+        **_epistemic_observation_kwargs("compaction"),
+        observation_id="observation-compaction",
+        observation_status="missing",
+        reason_code="compaction_boundary",
+    )
+    compaction_result = compaction.derive_discrepancy("action-compaction")
+    assert compaction_result["state"] == "unknown"
+    assert compaction_result["discrepancy"]["kind"] == "unknown"
+    assert module.validate_epistemic_action_chain(compaction_store)["ok"] is True
+
+
+def test_epistemic_action_chain_rejects_conflicting_observations_as_ambiguous(
+    tmp_path: Path,
+) -> None:
+    store = tmp_path / "epistemic-conflict.jsonl"
+    chain = module.EpistemicActionChain.create(
+        store,
+        session_id="session-conflict",
+        turn_id="turn-conflict",
+    )
+    chain.commit_prediction(
+        "action-conflict",
+        module.epistemic_digest("expected"),
+        **_epistemic_prediction_kwargs("conflict"),
+        prediction_id="prediction-conflict",
+    )
+    chain.bind_action(
+        "action-conflict",
+        module.epistemic_digest("action"),
+        **_epistemic_action_kwargs("conflict"),
+    )
+    first = chain.record_observation(
+        "action-conflict",
+        module.epistemic_digest("actual-a"),
+        **_epistemic_observation_kwargs("conflict"),
+        observation_id="observation-a",
+    )
+    assert chain.record_observation(
+        "action-conflict",
+        module.epistemic_digest("actual-a"),
+        **_epistemic_observation_kwargs("conflict"),
+        observation_id="observation-a",
+    )["event_id"] == first["event_id"]
+    with pytest.raises(module.EpistemicActionConflictError) as conflict:
+        chain.record_observation(
+            "action-conflict",
+            module.epistemic_digest("actual-b"),
+            **_epistemic_observation_kwargs("conflict"),
+            observation_id="observation-b",
+        )
+    assert conflict.value.reason_code == "conflicting_observation"
+    assert conflict.value.state == "ambiguous"
+    derived = chain.derive_discrepancy("action-conflict")
+    assert derived["discrepancy"]["kind"] == "ambiguous"
+    assert chain.inspect()["chain_status"] == "ambiguous"
+    assert any(
+        event["event_type"] == "observation_conflict"
+        for event in chain.inspect()["events"]
+    )
+
+
+def test_epistemic_action_chain_enforces_public_safe_identifiers_and_digests(
+    tmp_path: Path,
+) -> None:
+    store = tmp_path / "epistemic-privacy.jsonl"
+    public_session = module.epistemic_public_id(
+        "session",
+        "private session coordinate",
+    )
+    public_turn = module.epistemic_public_id("turn", "private turn coordinate")
+    chain = module.EpistemicActionChain.create(
+        store,
+        session_id=public_session,
+        turn_id=public_turn,
+    )
+    with pytest.raises(module.EpistemicActionPrivacyError) as unsafe_id:
+        chain.commit_prediction(
+            "raw action coordinate with spaces",
+            module.epistemic_digest("expected"),
+            **_epistemic_prediction_kwargs("privacy"),
+        )
+    assert unsafe_id.value.reason_code == "safe_identifier_invalid"
+    with pytest.raises(module.EpistemicActionPrivacyError) as unsafe_digest:
+        chain.record_observation(
+            "action-safe",
+            "raw tool output is not a digest",
+            **_epistemic_observation_kwargs("privacy"),
+        )
+    assert unsafe_digest.value.reason_code == "digest_invalid"
+    assert not store.exists()
+    assert public_session.startswith("id:")
+    assert public_turn.startswith("id:")
+    assert "private session coordinate" not in json.dumps(chain.inspect())
+    assert "raw tool output is not a digest" not in json.dumps(chain.inspect())
+
+
+def test_epistemic_action_chain_detects_stale_writers_and_tampered_replay(
+    tmp_path: Path,
+) -> None:
+    store = tmp_path / "epistemic-concurrency.jsonl"
+    writer = module.EpistemicActionChain.create(
+        store,
+        session_id="session-concurrency",
+        turn_id="turn-concurrency",
+    )
+    stale = module.EpistemicActionChain.load(
+        store,
+        session_id="session-concurrency",
+        turn_id="turn-concurrency",
+    )
+    writer.commit_prediction(
+        "action-concurrency-a",
+        module.epistemic_digest("expected-a"),
+        **_epistemic_prediction_kwargs("concurrency-a"),
+    )
+    with pytest.raises(module.EpistemicActionConcurrencyError) as concurrency:
+        stale.commit_prediction(
+            "action-concurrency-b",
+            module.epistemic_digest("expected-b"),
+            **_epistemic_prediction_kwargs("concurrency-b"),
+        )
+    assert concurrency.value.reason_code == "concurrency_conflict"
+    current = module.EpistemicActionChain.load(store)
+    with pytest.raises(module.EpistemicActionConcurrencyError) as sequence:
+        current.commit_prediction(
+            "action-concurrency-c",
+            module.epistemic_digest("expected-c"),
+            **_epistemic_prediction_kwargs("concurrency-c"),
+            expected_sequence=0,
+        )
+    assert sequence.value.reason_code == "concurrency_conflict"
+
+    lines = store.read_text(encoding="utf-8").splitlines()
+    tampered = json.loads(lines[0])
+    tampered["state"] = "ready"
+    store.write_text(
+        json.dumps(tampered, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(module.EpistemicActionIntegrityError) as integrity:
+        module.EpistemicActionChain.load(store)
+    assert integrity.value.reason_code in {
+        "event_digest_mismatch",
+        "event_shape_invalid",
+    }
+
+
+def test_epistemic_action_chain_binds_attempt_and_tool_use_identity(
+    tmp_path: Path,
+) -> None:
+    store = tmp_path / "epistemic-tool-use.jsonl"
+    chain = module.EpistemicActionChain.create(
+        store,
+        session_id="session-tool-use",
+        turn_id="turn-tool-use",
+    )
+    chain.commit_prediction(
+        "action-tool-use",
+        module.epistemic_digest("expected"),
+        **_epistemic_prediction_kwargs("tool-use"),
+    )
+    mismatched_action = _epistemic_action_kwargs("tool-use")
+    mismatched_action["tool_use_id"] = "tool-other"
+    with pytest.raises(module.EpistemicActionConflictError) as mismatch:
+        chain.bind_action(
+            "action-tool-use",
+            module.epistemic_digest("action"),
+            **mismatched_action,
+        )
+    assert mismatch.value.reason_code == "tool_use_identity_conflict"
+    assert not any(
+        event["event_type"] == "action_binding"
+        for event in chain.inspect()["events"]
+    )
+
+
+def test_epistemic_action_chain_rejects_timestamp_post_hoc_commitment(
+    tmp_path: Path,
+) -> None:
+    store = tmp_path / "epistemic-timestamp.jsonl"
+    chain = module.EpistemicActionChain.create(
+        store,
+        session_id="session-timestamp",
+        turn_id="turn-timestamp",
+    )
+    chain.commit_prediction(
+        "action-timestamp",
+        module.epistemic_digest("expected"),
+        **_epistemic_prediction_kwargs("timestamp"),
+        created_at="2026-08-26T00:00:02Z",
+    )
+    action_kwargs = _epistemic_action_kwargs("timestamp")
+    action_kwargs["action_started_at"] = "2026-08-26T00:00:01Z"
+    with pytest.raises(module.EpistemicActionOrderingError) as post_hoc:
+        chain.bind_action(
+            "action-timestamp",
+            module.epistemic_digest("action"),
+            **action_kwargs,
+        )
+    assert post_hoc.value.reason_code == "post_hoc_prediction"
+    assert not any(
+        event["event_type"] == "action_binding"
+        for event in chain.inspect()["events"]
+    )
+
+
+def test_epistemic_action_chain_exposes_partial_update_candidate_and_conflict(
+    tmp_path: Path,
+) -> None:
+    store = tmp_path / "epistemic-partial.jsonl"
+    chain = module.EpistemicActionChain.create(
+        store,
+        session_id="session-partial",
+        turn_id="turn-partial",
+    )
+    chain.commit_prediction(
+        "action-partial",
+        module.epistemic_digest("expected"),
+        **_epistemic_prediction_kwargs("partial"),
+    )
+    chain.bind_action(
+        "action-partial",
+        module.epistemic_digest("action"),
+        **_epistemic_action_kwargs("partial"),
+    )
+    chain.record_observation(
+        "action-partial",
+        module.epistemic_digest("actual"),
+        **_epistemic_observation_kwargs("partial"),
+    )
+    candidate = chain.derive_discrepancy(
+        "action-partial",
+        discrepancy_kind="partial_match",
+        alternative_explanation_digest=module.epistemic_digest("alternative"),
+        model_update_digest=module.epistemic_digest("update"),
+        next_distinguishing_action_digest=module.epistemic_digest("next"),
+    )["model_update_candidate"]
+    assert candidate["discrepancy_kind"] == "partial_match"
+    assert candidate["model_update_digest"] == module.epistemic_digest("update")
+    with pytest.raises(module.EpistemicActionConflictError) as candidate_conflict:
+        chain.derive_discrepancy(
+            "action-partial",
+            discrepancy_kind="partial_match",
+            model_update_digest=module.epistemic_digest("different-update"),
+        )
+    assert candidate_conflict.value.reason_code == "model_update_conflict"
+
+
+def test_epistemic_action_chain_serializes_concurrent_writers_and_duplicate_json(
+    tmp_path: Path,
+) -> None:
+    store = tmp_path / "epistemic-race.jsonl"
+    first = module.EpistemicActionChain.create(
+        store,
+        session_id="session-race",
+        turn_id="turn-race",
+    )
+    second = module.EpistemicActionChain.load(
+        store,
+        session_id="session-race",
+        turn_id="turn-race",
+    )
+    barrier = threading.Barrier(2)
+    results: list[str] = []
+
+    def commit(chain: object, label: str) -> None:
+        barrier.wait()
+        try:
+            chain.commit_prediction(
+                f"action-{label}",
+                module.epistemic_digest(f"expected-{label}"),
+                **_epistemic_prediction_kwargs(label),
+            )
+            results.append("committed")
+        except module.EpistemicActionConcurrencyError:
+            results.append("concurrency_conflict")
+
+    workers = [
+        threading.Thread(target=commit, args=(first, "race-a")),
+        threading.Thread(target=commit, args=(second, "race-b")),
+    ]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join()
+    assert sorted(results) == ["committed", "concurrency_conflict"]
+
+    line = store.read_text(encoding="utf-8").splitlines()[0]
+    store.write_text(
+        line.replace(
+            '"state":"committed"',
+            '"state":"committed","state":"unknown"',
+            1,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(module.EpistemicActionIntegrityError) as duplicate:
+        module.EpistemicActionChain.load(store)
+    assert duplicate.value.reason_code == "event_shape_invalid"
