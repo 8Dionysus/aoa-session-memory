@@ -106510,7 +106510,13 @@ def test_entity_registry_semantic_digest_canonicalizes_logical_root(
     assert absolute["sha256"] == relative["sha256"]
 
 
-def _epistemic_prediction_kwargs(label: str) -> dict[str, object]:
+def _epistemic_prediction_kwargs(
+    label: str,
+    *,
+    expected_facets: list[str] | None = None,
+    window_start: str = "9999-12-31T23:59:59Z",
+    window_end: str = "9999-12-31T23:59:59.999999Z",
+) -> dict[str, object]:
     return {
         "request_id": f"request-{label}",
         "attempt_id": f"attempt-{label}",
@@ -106518,6 +106524,9 @@ def _epistemic_prediction_kwargs(label: str) -> dict[str, object]:
         "observation_window_digest": module.epistemic_digest(
             f"window-{label}"
         ),
+        "observation_window_start_at": window_start,
+        "observation_window_end_at": window_end,
+        "expected_observation_facet_ids": list(expected_facets or []),
         "hypothesis_digest": module.epistemic_digest(f"hypothesis-{label}"),
         "expected_change_digest": module.epistemic_digest(
             f"expected-change-{label}"
@@ -106539,11 +106548,18 @@ def _epistemic_action_kwargs(label: str) -> dict[str, object]:
     }
 
 
-def _epistemic_observation_kwargs(label: str) -> dict[str, object]:
+def _epistemic_observation_kwargs(
+    label: str,
+    *,
+    observed_at: str | None = "9999-12-31T23:59:59.500000Z",
+    observed_facets: list[str] | None = None,
+) -> dict[str, object]:
     return {
         "attempt_id": f"attempt-{label}",
         "tool_use_id": f"tool-{label}",
         "evidence_ref_ids": [f"evidence-{label}"],
+        "observed_at": observed_at,
+        "observed_observation_facet_ids": list(observed_facets or []),
     }
 
 
@@ -106576,6 +106592,13 @@ def _epistemic_prediction_commitment_digest(event: dict[str, object]) -> str:
         ],
         "pre_action_marker": event["pre_action_marker"],
         "observation_window_digest": event["observation_window_digest"],
+        "observation_window_start_at": event[
+            "observation_window_start_at"
+        ],
+        "observation_window_end_at": event["observation_window_end_at"],
+        "expected_observation_facet_ids": event[
+            "expected_observation_facet_ids"
+        ],
         "hypothesis_digest": event["hypothesis_digest"],
         "expected_change_digest": event["expected_change_digest"],
         "falsifier_digest": event["falsifier_digest"],
@@ -106820,7 +106843,7 @@ def test_epistemic_action_chain_preserves_interruption_missing_and_shadow_only_c
     )
     missing = chain.record_observation(
         "action-interruption",
-        **_epistemic_observation_kwargs("interruption"),
+        **_epistemic_observation_kwargs("interruption", observed_at=None),
         observation_id="observation-interruption",
         observation_status="unknown",
         reason_code="interrupted",
@@ -106857,7 +106880,7 @@ def test_epistemic_action_chain_preserves_interruption_missing_and_shadow_only_c
     )
     compaction.record_observation(
         "action-compaction",
-        **_epistemic_observation_kwargs("compaction"),
+        **_epistemic_observation_kwargs("compaction", observed_at=None),
         observation_id="observation-compaction",
         observation_status="missing",
         reason_code="compaction_boundary",
@@ -107063,7 +107086,127 @@ def test_epistemic_action_chain_rejects_timestamp_post_hoc_commitment(
     )
 
 
-def test_epistemic_action_chain_rejects_caller_discrepancy_classification(
+def test_epistemic_action_chain_enforces_strict_time_and_observation_window(
+    tmp_path: Path,
+) -> None:
+    equal_store = tmp_path / "epistemic-equal-time.jsonl"
+    equal = module.EpistemicActionChain.create(
+        equal_store,
+        session_id="session-equal-time",
+        turn_id="turn-equal-time",
+    )
+    equal.commit_prediction(
+        "action-equal-time",
+        module.epistemic_digest("expected-equal-time"),
+        **_epistemic_prediction_kwargs("equal-time"),
+        created_at="2026-08-26T00:00:00.000000Z",
+    )
+    equal_action = _epistemic_action_kwargs("equal-time")
+    equal_action["action_started_at"] = "2026-08-26T00:00:00.000000Z"
+    with pytest.raises(module.EpistemicActionOrderingError) as equal_error:
+        equal.bind_action(
+            "action-equal-time",
+            module.epistemic_digest("action-equal-time"),
+            **equal_action,
+        )
+    assert equal_error.value.reason_code == "post_hoc_prediction"
+
+    def build_windowed(label: str) -> module.EpistemicActionChain:
+        chain = module.EpistemicActionChain.create(
+            tmp_path / f"epistemic-window-{label}.jsonl",
+            session_id=f"session-window-{label}",
+            turn_id=f"turn-window-{label}",
+        )
+        chain.commit_prediction(
+            f"action-window-{label}",
+            module.epistemic_digest(f"expected-window-{label}"),
+            **_epistemic_prediction_kwargs(
+                label,
+                window_start="2026-08-26T00:00:01.000000Z",
+                window_end="2026-08-26T00:00:04.000000Z",
+            ),
+            created_at="2026-08-26T00:00:00.000000Z",
+        )
+        action = _epistemic_action_kwargs(label)
+        action["action_started_at"] = "2026-08-26T00:00:01.000000Z"
+        chain.bind_action(
+            f"action-window-{label}",
+            module.epistemic_digest(f"action-window-{label}"),
+            **action,
+        )
+        return chain
+
+    early = build_windowed("early")
+    early_observation = _epistemic_observation_kwargs(
+        "early",
+        observed_at="2026-08-26T00:00:00.500000Z",
+    )
+    with pytest.raises(module.EpistemicActionOrderingError) as early_error:
+        early.record_observation(
+            "action-window-early",
+            module.epistemic_digest("actual-early"),
+            **early_observation,
+        )
+    assert early_error.value.reason_code == "observation_outside_window"
+
+    late = build_windowed("late")
+    late_observation = _epistemic_observation_kwargs(
+        "late",
+        observed_at="2026-08-26T00:00:05.000000Z",
+    )
+    with pytest.raises(module.EpistemicActionOrderingError) as late_error:
+        late.record_observation(
+            "action-window-late",
+            module.epistemic_digest("actual-late"),
+            **late_observation,
+        )
+    assert late_error.value.reason_code == "observation_outside_window"
+
+
+def test_epistemic_action_chain_requires_observed_evidence_and_timestamp(
+    tmp_path: Path,
+) -> None:
+    store = tmp_path / "epistemic-observation-admission.jsonl"
+    chain = module.EpistemicActionChain.create(
+        store,
+        session_id="session-observation-admission",
+        turn_id="turn-observation-admission",
+    )
+    chain.commit_prediction(
+        "action-observation-admission",
+        module.epistemic_digest("expected-observation-admission"),
+        **_epistemic_prediction_kwargs("observation-admission"),
+    )
+    chain.bind_action(
+        "action-observation-admission",
+        module.epistemic_digest("action-observation-admission"),
+        **_epistemic_action_kwargs("observation-admission"),
+    )
+    with pytest.raises(module.EpistemicActionPrivacyError) as evidence_error:
+        chain.record_observation(
+            "action-observation-admission",
+            module.epistemic_digest("actual-observation-admission"),
+            attempt_id="attempt-observation-admission",
+            tool_use_id="tool-observation-admission",
+            evidence_ref_ids=[],
+            observed_at="9999-12-31T23:59:59.500000Z",
+        )
+    assert evidence_error.value.reason_code == "observation_evidence_required"
+    with pytest.raises(module.EpistemicActionPrivacyError) as timestamp_error:
+        chain.record_observation(
+            "action-observation-admission",
+            module.epistemic_digest("actual-observation-admission"),
+            attempt_id="attempt-observation-admission",
+            tool_use_id="tool-observation-admission",
+            evidence_ref_ids=["evidence-observation-admission"],
+        )
+    assert timestamp_error.value.reason_code == "observation_timestamp_required"
+    assert not any(
+        event["event_type"] == "observation" for event in chain.inspect()["events"]
+    )
+
+
+def test_epistemic_action_chain_derives_partial_and_rejects_conflicting_classification(
     tmp_path: Path,
 ) -> None:
     store = tmp_path / "epistemic-partial.jsonl"
@@ -107075,7 +107218,10 @@ def test_epistemic_action_chain_rejects_caller_discrepancy_classification(
     chain.commit_prediction(
         "action-partial",
         module.epistemic_digest("expected"),
-        **_epistemic_prediction_kwargs("partial"),
+        **_epistemic_prediction_kwargs(
+            "partial",
+            expected_facets=["facet-partial-a", "facet-partial-b"],
+        ),
     )
     chain.bind_action(
         "action-partial",
@@ -107085,23 +107231,21 @@ def test_epistemic_action_chain_rejects_caller_discrepancy_classification(
     chain.record_observation(
         "action-partial",
         module.epistemic_digest("actual"),
-        **_epistemic_observation_kwargs("partial"),
+        **_epistemic_observation_kwargs(
+            "partial",
+            observed_facets=["facet-partial-a"],
+        ),
     )
-    with pytest.raises(module.EpistemicActionConflictError) as classification:
-        chain.derive_discrepancy(
-            "action-partial",
-            discrepancy_kind="partial_match",
-        )
-    assert classification.value.reason_code == (
-        "discrepancy_classification_conflict"
-    )
-    assert classification.value.state == "ambiguous"
-    candidate = chain.derive_discrepancy(
+    derived = chain.derive_discrepancy(
         "action-partial",
+        discrepancy_kind="partial_match",
         model_update_digest=module.epistemic_digest("update"),
-    )["model_update_candidate"]
-    assert candidate["discrepancy_kind"] == "ambiguous"
-    assert candidate["update_kind"] == "withhold_update"
+    )
+    assert derived["discrepancy"]["kind"] == "partial_match"
+    assert derived["model_update_candidate"]["update_kind"] == "review_prediction"
+    candidate = derived["model_update_candidate"]
+    assert candidate["discrepancy_kind"] == "partial_match"
+    assert candidate["update_kind"] == "review_prediction"
     assert candidate["model_update_digest"] == module.epistemic_digest("update")
     with pytest.raises(module.EpistemicActionConflictError) as candidate_conflict:
         chain.derive_discrepancy(
@@ -107109,6 +107253,12 @@ def test_epistemic_action_chain_rejects_caller_discrepancy_classification(
             model_update_digest=module.epistemic_digest("different-update"),
         )
     assert candidate_conflict.value.reason_code == "model_update_conflict"
+    with pytest.raises(module.EpistemicActionConflictError) as classification:
+        chain.derive_discrepancy(
+            "action-partial",
+            discrepancy_kind="mismatch",
+        )
+    assert classification.value.reason_code == "discrepancy_classification_conflict"
 
 
 def test_epistemic_action_chain_rejects_conflicting_rederivation(
@@ -107303,3 +107453,85 @@ def test_epistemic_action_chain_malformed_enum_values_return_diagnostics(
     payload = json.loads(completed.stdout)
     assert payload["ok"] is False
     assert payload["diagnostics"] == ["event_type_invalid"]
+
+
+def test_epistemic_action_chain_rejects_rehashed_refusal_state_tampering(
+    tmp_path: Path,
+) -> None:
+    store = tmp_path / "rehashed-refusal-state.jsonl"
+    chain = module.EpistemicActionChain.create(
+        store,
+        session_id="session-refusal-state",
+        turn_id="turn-refusal-state",
+    )
+    with pytest.raises(module.EpistemicActionOrderingError):
+        chain.bind_action(
+            "action-refusal-state",
+            module.epistemic_digest("action-refusal-state"),
+            **_epistemic_action_kwargs("refusal-state"),
+        )
+    events = _rehash_epistemic_store(store)
+    assert events[0]["event_type"] == "refusal"
+    events[0]["state"] = "ready"
+    _rehash_epistemic_store(store, events)
+
+    result = module.validate_epistemic_action_chain(store)
+
+    assert result["ok"] is False
+    assert result["diagnostics"] == ["event_shape_invalid"]
+
+
+def test_epistemic_action_chain_serializes_same_instance_concurrency(
+    tmp_path: Path,
+) -> None:
+    store = tmp_path / "epistemic-same-instance-race.jsonl"
+    chain = module.EpistemicActionChain.create(
+        store,
+        session_id="session-same-instance-race",
+        turn_id="turn-same-instance-race",
+    )
+    barrier = threading.Barrier(2)
+    results: list[str] = []
+
+    def commit(label: str) -> None:
+        barrier.wait()
+        try:
+            chain.commit_prediction(
+                f"action-same-instance-{label}",
+                module.epistemic_digest(f"expected-same-instance-{label}"),
+                **_epistemic_prediction_kwargs(f"same-instance-{label}"),
+            )
+            results.append("committed")
+        except module.EpistemicActionError as exc:
+            results.append(exc.reason_code)
+
+    workers = [
+        threading.Thread(target=commit, args=("a",)),
+        threading.Thread(target=commit, args=("b",)),
+    ]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join()
+
+    assert sorted(results) == ["committed", "committed"]
+    artifact = chain.inspect()
+    assert artifact["event_count"] == 2
+    assert [event["sequence"] for event in artifact["events"]] == [1, 2]
+    assert module.validate_epistemic_action_chain(store)["ok"] is True
+
+
+def test_epistemic_action_chain_rejects_store_symlink_alias(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "real-store.jsonl"
+    alias = tmp_path / "alias-store.jsonl"
+    alias.symlink_to(target)
+
+    with pytest.raises(module.EpistemicActionIntegrityError) as error:
+        module.EpistemicActionChain.create(
+            alias,
+            session_id="session-symlink",
+            turn_id="turn-symlink",
+        )
+    assert error.value.reason_code == "store_not_regular"

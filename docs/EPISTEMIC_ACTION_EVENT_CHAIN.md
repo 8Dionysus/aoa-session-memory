@@ -24,22 +24,30 @@ prediction_commitment -> action_binding -> observation -> discrepancy -> model_u
 The prediction commitment is immutable and must exist before action binding.
 It carries a request/attempt identity, a pre-action marker, opaque digests for
 the hypothesis, expected change, falsifier, bounded plan, and observation
-window, plus bounded confidence. A hook-bound action also carries the actual
+window, plus explicit UTC window boundaries, optional public-safe expected
+facet IDs, and bounded confidence. A hook-bound action also carries the actual
 PreToolUse tool_use_id; action and observation events must repeat the same
-attempt and tool identity.
-The append path uses a file lock, an optimistic observed-head check, a
-predecessor digest, and an event digest. An identical logical append is a
-replay-safe no-op. A different record with the same logical identity is
-rejected.
+attempt and tool identity. The action binding carries the prediction sequence
+and requires a strictly later timestamp than the commitment; the append
+sequence remains the authoritative causal fence.
+The append path uses a file lock, no-follow regular-file opens, an optimistic
+observed-head check, a predecessor digest, and an event digest. An identical
+logical append is a storage-layer replay-safe no-op; the skill ABI maps that
+to its exact-replay `refused`/no-new-record case. A different record with the
+same logical identity is rejected as ambiguous. A stale writer is refused as
+a concurrency conflict, while two active records that claim one logical
+action are ambiguous.
 
 Replay also recomputes the prediction commitment, predecessor-derived
 discrepancy, and shadow-candidate fields. Logical identities are unique across
 the chain, so recomputing the outer hash chain cannot make duplicate or
-cross-field-inconsistent records admissible. For an observed result, an exact
-expected/observed digest equality derives `match`; a different digest derives
-`mismatch`. `partial_match` remains a schema value for compatibility, but an
-opaque digest cannot establish it and a caller-supplied conflicting value is
-recorded as `ambiguous` and refused.
+cross-field-inconsistent records admissible. Observed evidence must carry a
+public-safe evidence ref and an observation timestamp inside the committed
+window. An exact expected/observed digest equality derives `match`; a
+different digest derives `mismatch` unless committed and observed facet IDs
+show a non-empty proper overlap, which derives `partial_match`. Opaque
+digests alone cannot establish `partial_match`, and a caller-supplied
+conflicting value is recorded as `ambiguous` and refused.
 
 Missing or interrupted observations are recorded as `unknown`. Conflicting
 observations and immutable-identity conflicts are recorded or returned as

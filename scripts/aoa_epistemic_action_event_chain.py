@@ -22,6 +22,7 @@ import json
 import os
 import re
 import sys
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -39,7 +40,7 @@ EPISTEMIC_ACTION_GENESIS = "genesis"
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _TIMESTAMP_RE = re.compile(
-    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?Z$"
 )
 
 EPISTEMIC_ACTION_EVENT_TYPES = frozenset(
@@ -115,6 +116,13 @@ EPISTEMIC_ACTION_REASON_CODES = frozenset(
         "tool_use_identity_conflict",
         "duplicate_logical_identity",
         "prediction_commitment_mismatch",
+        "observation_window_invalid",
+        "observation_outside_window",
+        "observation_before_action",
+        "observation_evidence_required",
+        "observation_timestamp_required",
+        "observation_facets_required",
+        "action_outside_observation_window",
         "discrepancy_classification_conflict",
         "discrepancy_derivation_mismatch",
         "candidate_derivation_mismatch",
@@ -142,6 +150,9 @@ _EVENT_FIELDS = frozenset(
         "prediction_commitment_digest",
         "pre_action_marker",
         "observation_window_digest",
+        "observation_window_start_at",
+        "observation_window_end_at",
+        "expected_observation_facet_ids",
         "hypothesis_digest",
         "expected_change_digest",
         "falsifier_digest",
@@ -152,10 +163,13 @@ _EVENT_FIELDS = frozenset(
         "action_kind",
         "effect_class",
         "action_started_at",
+        "prediction_sequence",
         "observation_id",
         "expected_observation_digest",
         "observation_digest",
         "observed_observation_digest",
+        "observed_at",
+        "observed_observation_facet_ids",
         "observation_status",
         "evidence_ref_ids",
         "reason_code",
@@ -198,6 +212,9 @@ _EVENT_TYPE_FIELDS = {
         "prediction_commitment_digest",
         "pre_action_marker",
         "observation_window_digest",
+        "observation_window_start_at",
+        "observation_window_end_at",
+        "expected_observation_facet_ids",
         "hypothesis_digest",
         "expected_change_digest",
         "falsifier_digest",
@@ -218,6 +235,7 @@ _EVENT_TYPE_FIELDS = {
         "action_kind",
         "effect_class",
         "action_started_at",
+        "prediction_sequence",
         "related_event_ids",
     },
     "observation": _EVENT_COMMON_FIELDS
@@ -230,6 +248,8 @@ _EVENT_TYPE_FIELDS = {
         "observation_digest",
         "observation_status",
         "evidence_ref_ids",
+        "observed_at",
+        "observed_observation_facet_ids",
         "reason_code",
         "related_event_ids",
     },
@@ -243,6 +263,8 @@ _EVENT_TYPE_FIELDS = {
         "observation_digest",
         "observation_status",
         "evidence_ref_ids",
+        "observed_at",
+        "observed_observation_facet_ids",
         "reason_code",
         "related_event_ids",
     },
@@ -453,7 +475,9 @@ def _safe_discrepancy_kind(value: Any) -> str | None:
 
 def _safe_timestamp(value: Any = None) -> str:
     if value is None:
-        return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace(
+            "+00:00", "Z"
+        )
     if not isinstance(value, str) or not _TIMESTAMP_RE.fullmatch(value):
         raise EpistemicActionPrivacyError("timestamp_invalid")
     try:
@@ -462,11 +486,47 @@ def _safe_timestamp(value: Any = None) -> str:
         raise EpistemicActionPrivacyError("timestamp_invalid") from exc
     if parsed.tzinfo is None:
         raise EpistemicActionPrivacyError("timestamp_invalid")
-    normalized = parsed.astimezone(timezone.utc).replace(microsecond=0)
-    result = normalized.strftime("%Y-%m-%dT%H:%M:%SZ")
-    if result != value:
+    normalized = parsed.astimezone(timezone.utc)
+    if "." in value:
+        result = normalized.isoformat(timespec="microseconds").replace(
+            "+00:00", "Z"
+        )
+    else:
+        if normalized.microsecond:
+            raise EpistemicActionPrivacyError("timestamp_invalid")
+        result = normalized.strftime("%Y-%m-%dT%H:%M:%SZ")
+    if "." not in value and result != value:
+        raise EpistemicActionPrivacyError("timestamp_invalid")
+    if "." in value and not result.startswith(value[:-1]):
         raise EpistemicActionPrivacyError("timestamp_invalid")
     return result
+
+
+def _timestamp_value(value: str) -> datetime:
+    """Parse a validated UTC timestamp for causal/window comparisons."""
+
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def _validate_observation_window(
+    start_at: str,
+    end_at: str,
+) -> tuple[str, str]:
+    safe_start = _safe_timestamp(start_at)
+    safe_end = _safe_timestamp(end_at)
+    if _timestamp_value(safe_start) >= _timestamp_value(safe_end):
+        raise EpistemicActionPrivacyError("observation_window_invalid")
+    return safe_start, safe_end
+
+
+def _observation_in_window(
+    observed_at: str,
+    *,
+    start_at: str,
+    end_at: str,
+) -> bool:
+    observed = _timestamp_value(observed_at)
+    return _timestamp_value(start_at) <= observed <= _timestamp_value(end_at)
 
 
 def _derived_id(prefix: str, value: Any) -> str:
@@ -506,6 +566,15 @@ def _prediction_commitment_digest(event: dict[str, Any]) -> str:
                 "observation_window_digest": event[
                     "observation_window_digest"
                 ],
+                "observation_window_start_at": event[
+                    "observation_window_start_at"
+                ],
+                "observation_window_end_at": event[
+                    "observation_window_end_at"
+                ],
+                "expected_observation_facet_ids": list(
+                    event.get("expected_observation_facet_ids", [])
+                ),
                 "hypothesis_digest": event["hypothesis_digest"],
                 "expected_change_digest": event["expected_change_digest"],
                 "falsifier_digest": event["falsifier_digest"],
@@ -545,6 +614,10 @@ def _expected_event_id(event: dict[str, Any]) -> str | None:
             "observation_digest": event.get("observation_digest"),
             "observation_status": event["observation_status"],
             "evidence_ref_ids": list(event["evidence_ref_ids"]),
+            "observed_at": event.get("observed_at"),
+            "observed_observation_facet_ids": list(
+                event.get("observed_observation_facet_ids", [])
+            ),
             "related_event_ids": list(event.get("related_event_ids", [])),
         }
     elif event_type == "discrepancy":
@@ -704,6 +777,19 @@ def _discrepancy_context(
         "expected_observation_digest"
     ):
         discrepancy_kind = "match"
+    elif prediction.get("expected_observation_facet_ids"):
+        expected_facets = set(
+            prediction.get("expected_observation_facet_ids", [])
+        )
+        observed_facets = set(
+            observation.get("observed_observation_facet_ids", [])
+        )
+        discrepancy_kind = (
+            "partial_match"
+            if expected_facets.intersection(observed_facets)
+            and observed_facets != expected_facets
+            else "mismatch"
+        )
     else:
         discrepancy_kind = "mismatch"
     return {
@@ -818,15 +904,23 @@ def _validate_event_shape(
         "falsifier_digest",
         "action_plan_digest",
         "action_digest",
+        "observation_window_start_at",
+        "observation_window_end_at",
         "action_started_at",
         "expected_observation_digest",
         "observation_digest",
         "observed_observation_digest",
+        "observed_at",
         "alternative_explanation_digest",
         "model_update_digest",
         "next_distinguishing_action_digest",
     ):
-        if field == "action_started_at":
+        if field in {
+            "observation_window_start_at",
+            "observation_window_end_at",
+            "action_started_at",
+            "observed_at",
+        }:
             if field in event:
                 _safe_timestamp(event[field])
         elif field in event:
@@ -846,7 +940,13 @@ def _validate_event_shape(
             or event["reason_code"] not in EPISTEMIC_ACTION_REASON_CODES
         ):
             raise EpistemicActionIntegrityError("unsupported_reason_code")
-    for field in ("related_event_ids", "source_event_ids", "evidence_ref_ids"):
+    for field in (
+        "related_event_ids",
+        "source_event_ids",
+        "evidence_ref_ids",
+        "expected_observation_facet_ids",
+        "observed_observation_facet_ids",
+    ):
         if field in event:
             _unique_safe_ids(event[field], field)
     if "discrepancy_kind" in event and (
@@ -881,6 +981,9 @@ def _validate_event_shape(
         "falsifier_digest",
         "confidence",
         "action_plan_digest",
+        "observation_window_start_at",
+        "observation_window_end_at",
+        "expected_observation_facet_ids",
     } <= set(event):
         raise EpistemicActionIntegrityError("event_shape_invalid")
     if event_type == "action_binding" and not {
@@ -892,6 +995,7 @@ def _validate_event_shape(
         "action_kind",
         "effect_class",
         "action_started_at",
+        "prediction_sequence",
     } <= set(event):
         raise EpistemicActionIntegrityError("event_shape_invalid")
     if event_type in {"observation", "observation_conflict"} and not {
@@ -901,6 +1005,7 @@ def _validate_event_shape(
         "observation_id",
         "observation_status",
         "evidence_ref_ids",
+        "observed_observation_facet_ids",
     } <= set(event):
         raise EpistemicActionIntegrityError("event_shape_invalid")
     if event_type == "discrepancy" and not {
@@ -930,13 +1035,21 @@ def _validate_event_shape(
         "pre_action_marker",
     } <= set(event):
         raise EpistemicActionIntegrityError("event_shape_invalid")
-    if event_type == "refusal" and "reason_code" not in event:
-        raise EpistemicActionIntegrityError("event_shape_invalid")
+    if event_type == "refusal":
+        if "reason_code" not in event:
+            raise EpistemicActionIntegrityError("event_shape_invalid")
+        if event.get("state") not in {"refused", "ambiguous"}:
+            raise EpistemicActionIntegrityError("event_shape_invalid")
     status = event.get("observation_status")
     if status is not None:
         if status == "observed" and "observation_digest" not in event:
             raise EpistemicActionIntegrityError("event_shape_invalid")
         if status != "observed" and "observation_digest" in event:
+            raise EpistemicActionIntegrityError("event_shape_invalid")
+        if status == "observed":
+            if "observed_at" not in event or not event.get("evidence_ref_ids"):
+                raise EpistemicActionIntegrityError("event_shape_invalid")
+        elif "observed_at" in event:
             raise EpistemicActionIntegrityError("event_shape_invalid")
     expected_state = {
         "prediction_commitment": "committed",
@@ -1027,6 +1140,10 @@ def _replay_records(
                 raise EpistemicActionIntegrityError(
                     "prediction_commitment_mismatch"
                 )
+            _validate_observation_window(
+                event["observation_window_start_at"],
+                event["observation_window_end_at"],
+            )
             if event["action_id"] in seen_prediction_actions:
                 raise EpistemicActionIntegrityError(
                     "duplicate_logical_identity"
@@ -1059,10 +1176,20 @@ def _replay_records(
                 != [str(predictions[0]["event_id"])]
             ):
                 raise EpistemicActionIntegrityError("event_predecessor_mismatch")
-            if event.get("action_started_at", "") < predictions[0].get(
-                "created_at", ""
+            if event.get("prediction_sequence") != predictions[0].get(
+                "sequence"
             ):
                 raise EpistemicActionIntegrityError("event_predecessor_mismatch")
+            if _timestamp_value(event["action_started_at"]) <= _timestamp_value(
+                predictions[0]["created_at"]
+            ):
+                raise EpistemicActionIntegrityError("event_predecessor_mismatch")
+            if _timestamp_value(event["action_started_at"]) >= _timestamp_value(
+                predictions[0]["observation_window_end_at"]
+            ):
+                raise EpistemicActionIntegrityError(
+                    "action_outside_observation_window"
+                )
         elif event_type == "observation":
             related_events = [
                 prior_by_id[item]
@@ -1089,6 +1216,40 @@ def _replay_records(
                     "duplicate_logical_identity"
                 )
             seen_observation_actions.add(event["action_id"])
+            prediction = next(
+                (
+                    item
+                    for item in result
+                    if item.get("event_type") == "prediction_commitment"
+                    and item.get("action_id") == event.get("action_id")
+                ),
+                None,
+            )
+            if prediction is None:
+                raise EpistemicActionIntegrityError("event_predecessor_mismatch")
+            if event.get("observation_status") == "observed":
+                observed_at = event.get("observed_at")
+                if not isinstance(observed_at, str) or not _observation_in_window(
+                    observed_at,
+                    start_at=prediction["observation_window_start_at"],
+                    end_at=prediction["observation_window_end_at"],
+                ):
+                    raise EpistemicActionIntegrityError(
+                        "observation_outside_window"
+                    )
+                action = actions[0]
+                if _timestamp_value(observed_at) < _timestamp_value(
+                    action["action_started_at"]
+                ):
+                    raise EpistemicActionIntegrityError(
+                        "observation_before_action"
+                    )
+                if prediction.get("expected_observation_facet_ids") and not event.get(
+                    "observed_observation_facet_ids"
+                ):
+                    raise EpistemicActionIntegrityError(
+                        "observation_facets_required"
+                    )
         elif event_type == "observation_conflict":
             related_events = [
                 prior_by_id[item]
@@ -1218,6 +1379,14 @@ def _replay_records(
     return result
 
 
+def _reject_symlink_ancestors(path: Path) -> None:
+    current = path
+    while current != current.parent:
+        if current.is_symlink():
+            raise EpistemicActionIntegrityError("store_not_regular")
+        current = current.parent
+
+
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
@@ -1265,14 +1434,16 @@ class _StoreLock:
         self.handle: Any = None
 
     def __enter__(self) -> "_StoreLock":
-        if self.path.is_symlink():
-            raise EpistemicActionIntegrityError("store_not_regular")
+        _reject_symlink_ancestors(self.path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        descriptor = os.open(
-            self.path,
-            os.O_CREAT | os.O_RDWR,
-            0o600,
-        )
+        _reject_symlink_ancestors(self.path)
+        flags = os.O_CREAT | os.O_RDWR
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            descriptor = os.open(self.path, flags, 0o600)
+        except OSError as exc:
+            raise EpistemicActionIntegrityError("store_not_regular") from exc
         os.fchmod(descriptor, 0o600)
         self.handle = os.fdopen(descriptor, "r+")
         fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX)
@@ -1296,8 +1467,7 @@ class EpistemicActionChain:
         turn_id: str | None = None,
     ) -> None:
         self.store_path = Path(store_path)
-        if self.store_path.is_symlink():
-            raise EpistemicActionIntegrityError("store_not_regular")
+        _reject_symlink_ancestors(self.store_path)
         supplied_session = (
             _safe_identifier(session_id, "session_id")
             if session_id is not None
@@ -1332,6 +1502,7 @@ class EpistemicActionChain:
             "chain",
             {"session_id": self.session_id, "turn_id": self.turn_id},
         )
+        self._append_lock = threading.RLock()
 
     @classmethod
     def create(
@@ -1409,7 +1580,7 @@ class EpistemicActionChain:
             "turn_id": self.turn_id,
         }
         logical.update(fields)
-        with _StoreLock(self._lock_path()):
+        with self._append_lock, _StoreLock(self._lock_path()):
             current_records = _read_jsonl(self.store_path)
             current = _replay_records(
                 current_records,
@@ -1444,7 +1615,7 @@ class EpistemicActionChain:
                 )
             observed_sequence = len(current)
             required_sequence = (
-                observed_sequence
+                self._observed_sequence
                 if expected_sequence is None
                 else expected_sequence
             )
@@ -1472,7 +1643,14 @@ class EpistemicActionChain:
                 self.store_path.is_symlink() or not self.store_path.is_file()
             ):
                 raise EpistemicActionIntegrityError("store_not_regular")
-            with self.store_path.open("a", encoding="utf-8") as handle:
+            store_flags = os.O_CREAT | os.O_WRONLY | os.O_APPEND
+            if hasattr(os, "O_NOFOLLOW"):
+                store_flags |= os.O_NOFOLLOW
+            try:
+                store_descriptor = os.open(self.store_path, store_flags, 0o600)
+            except OSError as exc:
+                raise EpistemicActionIntegrityError("store_not_regular") from exc
+            with os.fdopen(store_descriptor, "a", encoding="utf-8") as handle:
                 handle.write(_canonical_json(event) + "\n")
                 handle.flush()
                 os.fchmod(handle.fileno(), 0o600)
@@ -1555,6 +1733,9 @@ class EpistemicActionChain:
         falsifier_digest: str,
         confidence: float,
         action_plan_digest: str,
+        observation_window_start_at: str,
+        observation_window_end_at: str,
+        expected_observation_facet_ids: Iterable[str] = (),
         tool_use_id: str | None = None,
         expected_digest: str | None = None,
         prediction_id: str | None = None,
@@ -1587,6 +1768,14 @@ class EpistemicActionChain:
         safe_falsifier = _safe_digest(falsifier_digest, "falsifier_digest")
         safe_confidence = _safe_confidence(confidence)
         safe_action_plan = _safe_digest(action_plan_digest, "action_plan_digest")
+        safe_window_start, safe_window_end = _validate_observation_window(
+            observation_window_start_at,
+            observation_window_end_at,
+        )
+        safe_expected_facets = _unique_safe_ids(
+            list(expected_observation_facet_ids),
+            "expected_observation_facet_ids",
+        )
         assert (
             safe_pre_action_marker is not None
             and safe_window is not None
@@ -1622,6 +1811,9 @@ class EpistemicActionChain:
                     "falsifier_digest": safe_falsifier,
                     "confidence": safe_confidence,
                     "action_plan_digest": safe_action_plan,
+                    "observation_window_start_at": safe_window_start,
+                    "observation_window_end_at": safe_window_end,
+                    "expected_observation_facet_ids": safe_expected_facets,
                 },
             )
         )
@@ -1647,6 +1839,9 @@ class EpistemicActionChain:
                 "falsifier_digest": safe_falsifier,
                 "confidence": safe_confidence,
                 "action_plan_digest": safe_action_plan,
+                "observation_window_start_at": safe_window_start,
+                "observation_window_end_at": safe_window_end,
+                "expected_observation_facet_ids": safe_expected_facets,
                 "prediction_id": safe_prediction_id,
             }
             actual_semantics = {
@@ -1726,6 +1921,9 @@ class EpistemicActionChain:
                 "falsifier_digest": safe_falsifier,
                 "confidence": safe_confidence,
                 "action_plan_digest": safe_action_plan,
+                "observation_window_start_at": safe_window_start,
+                "observation_window_end_at": safe_window_end,
+                "expected_observation_facet_ids": safe_expected_facets,
             }
         )
         event, _created = self._append_event(
@@ -1743,6 +1941,9 @@ class EpistemicActionChain:
                 "falsifier_digest": safe_falsifier,
                 "confidence": safe_confidence,
                 "action_plan_digest": safe_action_plan,
+                "observation_window_start_at": safe_window_start,
+                "observation_window_end_at": safe_window_end,
+                "expected_observation_facet_ids": safe_expected_facets,
                 "action_id": safe_action_id,
                 "expected_observation_digest": safe_expected,
                 **(
@@ -1869,7 +2070,9 @@ class EpistemicActionChain:
                 state="ambiguous",
                 event=refusal,
             )
-        if str(prediction["created_at"]) > safe_action_started_at:
+        if _timestamp_value(safe_action_started_at) <= _timestamp_value(
+            prediction["created_at"]
+        ):
             refusal = self._record_refusal(
                 "post_hoc_prediction",
                 related_event_ids=[str(prediction["event_id"])],
@@ -1877,6 +2080,18 @@ class EpistemicActionChain:
             )
             raise EpistemicActionOrderingError(
                 "post_hoc_prediction",
+                event=refusal,
+            )
+        if _timestamp_value(safe_action_started_at) >= _timestamp_value(
+            prediction["observation_window_end_at"]
+        ):
+            refusal = self._record_refusal(
+                "action_outside_observation_window",
+                related_event_ids=[str(prediction["event_id"])],
+                fields={"action_id": safe_action_id},
+            )
+            raise EpistemicActionOrderingError(
+                "action_outside_observation_window",
                 event=refusal,
             )
         if prediction_id is not None:
@@ -1911,6 +2126,7 @@ class EpistemicActionChain:
                 "action_kind": safe_action_kind,
                 "effect_class": safe_effect_class,
                 "action_started_at": safe_action_started_at,
+                "prediction_sequence": prediction["sequence"],
                 "prediction_commitment_digest": prediction[
                     "prediction_commitment_digest"
                 ],
@@ -1936,6 +2152,8 @@ class EpistemicActionChain:
         tool_use_id: str | None = None,
         evidence_ref_ids: Iterable[str] = (),
         observed_digest: str | None = None,
+        observed_at: str | None = None,
+        observed_observation_facet_ids: Iterable[str] = (),
         observation_id: str | None = None,
         observation_status: str = "observed",
         reason_code: str | None = None,
@@ -1955,6 +2173,10 @@ class EpistemicActionChain:
             list(evidence_ref_ids),
             "evidence_ref_ids",
         )
+        safe_observed_facets = _unique_safe_ids(
+            list(observed_observation_facet_ids),
+            "observed_observation_facet_ids",
+        )
         if observation_digest is None:
             observation_digest = observed_digest
         elif observed_digest is not None and observed_digest != observation_digest:
@@ -1969,10 +2191,22 @@ class EpistemicActionChain:
                 observation_digest,
                 "observation_digest",
             )
+            if not safe_evidence_ref_ids:
+                raise EpistemicActionPrivacyError(
+                    "observation_evidence_required"
+                )
+            if observed_at is None:
+                raise EpistemicActionPrivacyError(
+                    "observation_timestamp_required"
+                )
+            safe_observed_at = _safe_timestamp(observed_at)
         else:
             if observation_digest is not None:
                 raise EpistemicActionPrivacyError("observation_digest_forbidden")
             safe_observation_digest = None
+            if observed_at is not None:
+                raise EpistemicActionPrivacyError("observation_outside_window")
+            safe_observed_at = None
         action_event = next(
             (
                 event
@@ -2017,6 +2251,45 @@ class EpistemicActionChain:
                 state="ambiguous",
                 event=refusal,
             )
+        prediction_event = next(
+            (
+                event
+                for event in self._prediction_events()
+                if event.get("action_id") == safe_action_id
+            ),
+            None,
+        )
+        if prediction_event is None:
+            raise EpistemicActionIntegrityError("event_predecessor_mismatch")
+        if observation_status == "observed":
+            if not _observation_in_window(
+                safe_observed_at,
+                start_at=prediction_event["observation_window_start_at"],
+                end_at=prediction_event["observation_window_end_at"],
+            ):
+                refusal = self._record_refusal(
+                    "observation_outside_window",
+                    related_event_ids=[str(action_event["event_id"])],
+                    fields={"action_id": safe_action_id},
+                )
+                raise EpistemicActionOrderingError(
+                    "observation_outside_window",
+                    event=refusal,
+                )
+            if _timestamp_value(safe_observed_at) < _timestamp_value(
+                action_event["action_started_at"]
+            ):
+                refusal = self._record_refusal(
+                    "observation_before_action",
+                    related_event_ids=[str(action_event["event_id"])],
+                    fields={"action_id": safe_action_id},
+                )
+                raise EpistemicActionOrderingError(
+                    "observation_before_action",
+                    event=refusal,
+                )
+            if prediction_event.get("expected_observation_facet_ids") and not safe_observed_facets:
+                raise EpistemicActionPrivacyError("observation_facets_required")
         safe_reason = _safe_reason_code(
             reason_code,
             default=(
@@ -2054,6 +2327,9 @@ class EpistemicActionChain:
                 and same_id.get("attempt_id") == safe_attempt_id
                 and same_id.get("tool_use_id") == safe_tool_use_id
                 and same_id.get("evidence_ref_ids", []) == safe_evidence_ref_ids
+                and same_id.get("observed_at") == safe_observed_at
+                and same_id.get("observed_observation_facet_ids", [])
+                == safe_observed_facets
             )
             if same:
                 return dict(same_id)
@@ -2067,6 +2343,8 @@ class EpistemicActionChain:
                 safe_attempt_id,
                 safe_tool_use_id,
                 safe_evidence_ref_ids,
+                safe_observed_at,
+                safe_observed_facets,
                 [str(same_id["event_id"])],
             )
             raise EpistemicActionConflictError(
@@ -2086,6 +2364,8 @@ class EpistemicActionChain:
                 safe_attempt_id,
                 safe_tool_use_id,
                 safe_evidence_ref_ids,
+                safe_observed_at,
+                safe_observed_facets,
                 [str(event["event_id"]) for event in prior_observations],
             )
             raise EpistemicActionConflictError(
@@ -2101,12 +2381,15 @@ class EpistemicActionChain:
             "observation_status": observation_status,
             "reason_code": safe_reason,
             "evidence_ref_ids": safe_evidence_ref_ids,
+            "observed_observation_facet_ids": safe_observed_facets,
             "related_event_ids": [str(action_event["event_id"])],
         }
         if safe_tool_use_id is not None:
             fields["tool_use_id"] = safe_tool_use_id
         if safe_observation_digest is not None:
             fields["observation_digest"] = safe_observation_digest
+        if safe_observed_at is not None:
+            fields["observed_at"] = safe_observed_at
         state = {
             "observed": "observed",
             "missing": "unknown",
@@ -2135,6 +2418,8 @@ class EpistemicActionChain:
         attempt_id: str,
         tool_use_id: str | None,
         evidence_ref_ids: list[str],
+        observed_at: str | None,
+        observed_observation_facet_ids: list[str],
         related_event_ids: list[str],
     ) -> dict[str, Any]:
         fields: dict[str, Any] = {
@@ -2145,12 +2430,15 @@ class EpistemicActionChain:
             "observation_status": observation_status,
             "reason_code": reason_code,
             "evidence_ref_ids": evidence_ref_ids,
+            "observed_observation_facet_ids": observed_observation_facet_ids,
             "related_event_ids": related_event_ids,
         }
         if tool_use_id is not None:
             fields["tool_use_id"] = tool_use_id
         if observation_digest is not None:
             fields["observation_digest"] = observation_digest
+        if observed_at is not None:
+            fields["observed_at"] = observed_at
         event, _created = self._append_event(
             event_type="observation_conflict",
             state="ambiguous",
@@ -2164,6 +2452,8 @@ class EpistemicActionChain:
                 "observation_digest": observation_digest,
                 "observation_status": observation_status,
                 "evidence_ref_ids": evidence_ref_ids,
+                "observed_at": observed_at,
+                "observed_observation_facet_ids": observed_observation_facet_ids,
                 "related_event_ids": related_event_ids,
             },
         )
@@ -2795,6 +3085,13 @@ def _build_parser() -> argparse.ArgumentParser:
     commit.add_argument("--tool-use-id")
     commit.add_argument("--pre-action-marker", required=True)
     commit.add_argument("--observation-window-digest", required=True)
+    commit.add_argument("--observation-window-start-at", required=True)
+    commit.add_argument("--observation-window-end-at", required=True)
+    commit.add_argument(
+        "--expected-observation-facet-id",
+        action="append",
+        default=[],
+    )
     commit.add_argument("--hypothesis-digest", required=True)
     commit.add_argument("--expected-change-digest", required=True)
     commit.add_argument("--falsifier-digest", required=True)
@@ -2821,6 +3118,12 @@ def _build_parser() -> argparse.ArgumentParser:
     observe.add_argument("--evidence-ref-id", action="append", default=[])
     observe.add_argument("--observation-id")
     observe.add_argument("--observation-digest")
+    observe.add_argument("--observed-at")
+    observe.add_argument(
+        "--observed-observation-facet-id",
+        action="append",
+        default=[],
+    )
     observe.add_argument(
         "--observation-status",
         choices=sorted(EPISTEMIC_ACTION_OBSERVATION_STATUSES),
@@ -2884,6 +3187,11 @@ def main(argv: list[str] | None = None) -> int:
                     tool_use_id=args.tool_use_id,
                     pre_action_marker=args.pre_action_marker,
                     observation_window_digest=args.observation_window_digest,
+                    observation_window_start_at=args.observation_window_start_at,
+                    observation_window_end_at=args.observation_window_end_at,
+                    expected_observation_facet_ids=(
+                        args.expected_observation_facet_id
+                    ),
                     hypothesis_digest=args.hypothesis_digest,
                     expected_change_digest=args.expected_change_digest,
                     falsifier_digest=args.falsifier_digest,
@@ -2909,6 +3217,10 @@ def main(argv: list[str] | None = None) -> int:
                     attempt_id=args.attempt_id,
                     tool_use_id=args.tool_use_id,
                     evidence_ref_ids=args.evidence_ref_id,
+                    observed_at=args.observed_at,
+                    observed_observation_facet_ids=(
+                        args.observed_observation_facet_id
+                    ),
                     observation_id=args.observation_id,
                     observation_status=args.observation_status,
                     reason_code=args.reason_code,
