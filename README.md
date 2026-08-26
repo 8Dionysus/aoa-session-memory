@@ -90,6 +90,12 @@ session-memory mechanics. They exercise skill routing, evidence packets,
 lifecycle boundaries, recovery behavior, attribution limits, and Codex adapter
 handling.
 
+The optional `inference_economy_session_contribution` source function exposes
+only count-only token ledgers and raw compaction-boundary refs for the shared
+provider-neutral inference-economy ABI. It is default-off, keeps provider-
+reported and estimated counts separate, and does not claim runtime outcome,
+eval, closeout, promotion, or owner acceptance.
+
 Behavioral-sandbox cases run in isolated temporary environments. They cannot
 make an in-process network connection or modify the authored source tree. One
 router-integration case additionally uses the separately owned `aoa-skills`

@@ -30,6 +30,10 @@ or naming semantics by themselves.
   positive skill-use evidence packet. It may admit invocation, verification,
   deflection, and an effect-attribution candidate, but never a benefit or
   promotion verdict; those remain with `aoa-evals`.
+- `inference-economy-session-contribution.schema.json` describes an opt-in,
+  count-only session-memory contribution for token and compaction evidence.
+  It is adapted into the central `aoa-stats` economy observation and carries
+  no lifecycle or acceptance authority.
 - `token-accounting.schema.json` describes count-only token observations and
   aggregate ledgers. Provider-reported, exact-tokenizer, and estimated counts
   are separate ledgers.

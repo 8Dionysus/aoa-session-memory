@@ -778,6 +778,17 @@ TOKEN_ACCOUNTING_SCHEMA_VERSION = 1
 TOKEN_ACCOUNTING_GENERATOR_VERSION = 2
 TOKEN_ACCOUNTING_CONTRACT = "abyss_token_accounting_v1"
 TOKEN_ACCOUNTING_ESTIMATOR_ID = "aoa_estimator_v1:unicode_word_punct"
+INFERENCE_ECONOMY_SESSION_CONTRIBUTION_SCHEMA = (
+    "aoa_session_memory_inference_economy_contribution_v1"
+)
+INFERENCE_ECONOMY_CENTRAL_CONTRACT_REF = (
+    "aoa-stats:stats/measurement-contract/"
+    "inference-economy-observation.schema.json"
+)
+INFERENCE_ECONOMY_SESSION_AUTHORITY_CEILING = (
+    "Session-memory owner evidence only; it does not authorize activation, "
+    "promotion, proof, policy, routing, eval, closeout, or owner acceptance."
+)
 TOKEN_ACCOUNTING_BACKFILL_DEFAULT_MAX_RAW_MB = 512
 ATLAS_SCHEMA_VERSION = 2
 ATLAS_PUBLISH_IDENTITY_VERSION = 2
@@ -20340,6 +20351,222 @@ def token_accounting_merge_summaries(summaries: Iterable[dict[str, Any]], *, sco
         "count_by_basis": dict(sorted(count_by_basis.items())),
         "totals_by_basis": {basis: dict(sorted(values.items())) for basis, values in sorted(totals_by_basis.items())},
         "basis_rule": "provider_reported and estimated counts are separate ledgers; estimates are never promoted to exact.",
+    }
+
+
+def _inference_economy_portable_ref(value: Any) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    lowered = value.lower()
+    return not (
+        value.startswith(("/", "~"))
+        or "/home/" in lowered
+        or "/srv/" in lowered
+        or ".aoa/sessions" in lowered
+        or "transcript" in lowered
+    )
+
+
+def _inference_economy_evidence_ref(
+    *,
+    kind: str,
+    ref: str,
+) -> dict[str, str]:
+    if not kind or not _inference_economy_portable_ref(ref):
+        raise ValueError("inference_economy_evidence_ref_must_be_portable")
+    return {"kind": kind, "ref": ref}
+
+
+def _inference_economy_event_ref(event: RawEvent) -> dict[str, str]:
+    if event.line_no < 1:
+        raise ValueError("inference_economy_raw_event_line_must_be_positive")
+    return _inference_economy_evidence_ref(
+        kind="raw-event",
+        ref=f"raw:line:{event.line_no}",
+    )
+
+
+def _inference_economy_metric(
+    *,
+    status: str,
+    basis: str,
+    uncertainty: str,
+    value: int | None,
+    evidence_refs: list[dict[str, str]],
+    reason: str | None,
+) -> dict[str, Any]:
+    return {
+        "status": status,
+        "basis": basis,
+        "uncertainty": uncertainty,
+        "value": value,
+        "evidence_refs": evidence_refs,
+        "reason": reason,
+    }
+
+
+def inference_economy_session_contribution(
+    events: list[RawEvent],
+    *,
+    observation_id: str,
+    source_ref: dict[str, str],
+    source_revision: str,
+    token_count_basis: str = "provider_reported",
+) -> dict[str, Any]:
+    """Build one opt-in, count-only contribution to the central economy ABI.
+
+    This function is deliberately not called by the default capture or index
+    paths. It exposes only the session-memory-owned token ledger and raw
+    compaction boundaries; lifecycle, runtime, eval, and acceptance claims
+    remain outside this owner contribution.
+    """
+    valid_bases = {
+        "provider_reported",
+        "exact_tokenizer",
+        "estimated",
+        "unknown",
+        "not_applicable",
+    }
+    if not isinstance(observation_id, str) or not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9_.:-]*", observation_id
+    ):
+        raise ValueError("inference_economy_observation_id_invalid")
+    if not isinstance(source_ref, dict) or set(source_ref) != {"kind", "ref"}:
+        raise ValueError("inference_economy_source_ref_invalid")
+    source_ref = _inference_economy_evidence_ref(
+        kind=str(source_ref.get("kind") or ""),
+        ref=str(source_ref.get("ref") or ""),
+    )
+    if not isinstance(source_revision, str) or not source_revision:
+        raise ValueError("inference_economy_source_revision_required")
+    if token_count_basis not in valid_bases:
+        raise ValueError("inference_economy_token_count_basis_invalid")
+
+    token_observations: list[tuple[RawEvent, dict[str, Any]]] = []
+    for event in events:
+        for observation in token_accounting_for_event(event):
+            if observation.get("count_basis") == token_count_basis:
+                token_observations.append((event, observation))
+
+    basis_uncertainty = {
+        "provider_reported": "not_estimated",
+        "exact_tokenizer": "exact",
+        "estimated": "estimated",
+    }.get(token_count_basis, "not_applicable")
+    token_fields = {
+        "input": "input_tokens",
+        "cached_input": "cached_tokens",
+        "output": "output_tokens",
+    }
+    metrics: dict[str, dict[str, Any]] = {}
+    for output_name, source_name in token_fields.items():
+        field_observations = [
+            (event, observation)
+            for event, observation in token_observations
+            if token_accounting_int(observation.get(source_name)) is not None
+        ]
+        field_refs = [
+            _inference_economy_event_ref(event)
+            for event, _observation in field_observations
+        ]
+        if field_observations:
+            summary = token_accounting_summary_for_observations(
+                [observation for _event, observation in token_observations],
+                scope={"kind": "inference-economy-session-contribution"},
+            )
+            totals = summary.get("totals_by_basis", {}).get(token_count_basis, {})
+            value = token_accounting_int(totals.get(source_name))
+            if value is not None:
+                metrics[output_name] = _inference_economy_metric(
+                    status="observed",
+                    basis=token_count_basis,
+                    uncertainty=basis_uncertainty,
+                    value=value,
+                    evidence_refs=field_refs,
+                    reason=None,
+                )
+                continue
+        if token_observations:
+            metrics[output_name] = _inference_economy_metric(
+                status="missing",
+                basis=token_count_basis,
+                uncertainty="not_applicable",
+                value=None,
+                evidence_refs=[
+                    _inference_economy_event_ref(event)
+                    for event, _observation in token_observations
+                ],
+                reason=f"no {source_name} value is present in the selected token ledger",
+            )
+        else:
+            metrics[output_name] = _inference_economy_metric(
+                status="unknown",
+                basis="unknown",
+                uncertainty="not_applicable",
+                value=None,
+                evidence_refs=[source_ref],
+                reason=f"no {token_count_basis} token observation is present",
+            )
+
+    compaction_events = [event for event in events if event.compaction_boundary]
+    compaction_refs = [
+        _inference_economy_event_ref(event) for event in compaction_events
+    ] or [source_ref]
+    metrics["compactions"] = _inference_economy_metric(
+        status="observed",
+        basis="not_applicable",
+        uncertainty="not_applicable",
+        value=len(compaction_events),
+        evidence_refs=compaction_refs,
+        reason=None,
+    )
+
+    unknown_fields = sorted(
+        path
+        for path, metric in (
+            (f"tokens.{name}", metrics[name])
+            for name in ("input", "cached_input", "output")
+        )
+        if metric["status"] != "observed"
+    )
+    observation_status = "complete" if not unknown_fields else "partial"
+    all_refs: list[dict[str, str]] = [source_ref]
+    for metric in metrics.values():
+        for ref in metric["evidence_refs"]:
+            if ref not in all_refs:
+                all_refs.append(ref)
+    return {
+        "schema_version": INFERENCE_ECONOMY_SESSION_CONTRIBUTION_SCHEMA,
+        "central_contract_ref": INFERENCE_ECONOMY_CENTRAL_CONTRACT_REF,
+        "contract_version": "1.0.0",
+        "observation_id": observation_id,
+        "source_ref": source_ref,
+        "source_revision": source_revision,
+        "observation_status": observation_status,
+        "token_count_basis": token_count_basis,
+        "tokens": {
+            "input": metrics["input"],
+            "cached_input": metrics["cached_input"],
+            "output": metrics["output"],
+        },
+        "compactions": metrics["compactions"],
+        "provenance": {
+            "evidence_refs": all_refs,
+            "derivation_ref": (
+                "scripts/aoa_session_memory.py#"
+                "inference_economy_session_contribution"
+            ),
+            "source_revision": source_revision,
+        },
+        "progress": {
+            "state": "terminal",
+            "completed": len(events),
+            "total": len(events),
+        },
+        "unknown_fields": unknown_fields,
+        "default_off": True,
+        "activation_allowed": False,
+        "authority_ceiling": INFERENCE_ECONOMY_SESSION_AUTHORITY_CEILING,
     }
 
 
