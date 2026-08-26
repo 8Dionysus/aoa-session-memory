@@ -263,6 +263,12 @@
 | [AOA-SM-D-0016 Quantitative Comparisons Require Correlated Count Evidence](../AOA-SM-D-0016-quantitative-comparisons-require-correlated-count-evidence.md) | 2026-07-17 | Accepted | `docs/decisions/AOA-SM-D-0016-quantitative-comparisons-require-correlated-count-evidence.md` |
 | [AOA-SM-D-0017 Bounded Temporal Interval Reading Before Answer Admission](../AOA-SM-D-0017-bounded-temporal-interval-reading-before-answer-admission.md) | 2026-07-18 | Accepted | `docs/decisions/AOA-SM-D-0017-bounded-temporal-interval-reading-before-answer-admission.md` |
 
+## exact fallback
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0098 Bounded Generated-Reader Process Boundary](../AOA-SM-D-0098-bounded-generated-reader-process-boundary.md) | 2026-08-26 | Accepted | `docs/decisions/AOA-SM-D-0098-bounded-generated-reader-process-boundary.md` |
+
 ## exact retrieval
 
 | Decision | Date | Status | Path |
@@ -739,6 +745,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0051 Transactional Component Outbox and Vector Freshness](../AOA-SM-D-0051-transactional-component-outbox-and-vector-freshness.md) | 2026-08-10 | Accepted | `docs/decisions/AOA-SM-D-0051-transactional-component-outbox-and-vector-freshness.md` |
 
+## query admission
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0098 Bounded Generated-Reader Process Boundary](../AOA-SM-D-0098-bounded-generated-reader-process-boundary.md) | 2026-08-26 | Accepted | `docs/decisions/AOA-SM-D-0098-bounded-generated-reader-process-boundary.md` |
+
 ## query fallback
 
 | Decision | Date | Status | Path |
@@ -928,6 +940,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0026 Best-Effort Progress Transport](../AOA-SM-D-0026-best-effort-progress-transport.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0026-best-effort-progress-transport.md` |
 
+## runtime safety
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0098 Bounded Generated-Reader Process Boundary](../AOA-SM-D-0098-bounded-generated-reader-process-boundary.md) | 2026-08-26 | Accepted | `docs/decisions/AOA-SM-D-0098-bounded-generated-reader-process-boundary.md` |
+
 ## scheduling
 
 | Decision | Date | Status | Path |
@@ -1066,6 +1084,12 @@
 | [AOA-SM-D-0046 Content-Addressed Session-Index Components With Compatibility View](../AOA-SM-D-0046-content-addressed-session-index-components-with-compatibility-view.md) | 2026-08-09 | Accepted | `docs/decisions/AOA-SM-D-0046-content-addressed-session-index-components-with-compatibility-view.md` |
 | [AOA-SM-D-0049 Append-Only Raw Capture Ledger and Persistent Live-Tail Overlay](../AOA-SM-D-0049-append-only-raw-capture-ledger-and-persistent-live-tail-overlay.md) | 2026-08-10 | Accepted | `docs/decisions/AOA-SM-D-0049-append-only-raw-capture-ledger-and-persistent-live-tail-overlay.md` |
 | [AOA-SM-D-0050 Manifest-First Session Components and Lazy Review Rendering](../AOA-SM-D-0050-manifest-first-session-components-and-lazy-review-rendering.md) | 2026-08-10 | Accepted | `docs/decisions/AOA-SM-D-0050-manifest-first-session-components-and-lazy-review-rendering.md` |
+
+## storage isolation
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0098 Bounded Generated-Reader Process Boundary](../AOA-SM-D-0098-bounded-generated-reader-process-boundary.md) | 2026-08-26 | Accepted | `docs/decisions/AOA-SM-D-0098-bounded-generated-reader-process-boundary.md` |
 
 ## systemd contract
 

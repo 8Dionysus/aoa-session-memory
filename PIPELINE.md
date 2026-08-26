@@ -629,6 +629,16 @@ This route writes no index, suppresses generated compaction-history copies, and
 always reports `global_scope_complete=false`: a bounded miss is never a global
 absence claim or a freshness upgrade.
 
+When a timed `portable_sqlite` search is admitted, generated-storage acquisition,
+the query/result read, and reader cleanup run behind one isolated reader-process
+boundary. The serving parent owns the hard deadline and verifies that the reader
+has been reaped before reporting cleanup success; a parent-death guard prevents a
+normal serving-process exit from leaving the reader behind. A timeout or reader
+failure returns to the parent-owned session raw or global source-only fallback,
+which never reopens the generated store. An unverified cleanup remains failed
+even when bounded source evidence is available; a normally completed generated
+read preserves its ordinary refs and freshness fields.
+
 Episode query normalization retains the exact token. A bounded Russian
 instrumental-form expansion may use an FTS prefix to obtain candidates, but a
 sparse candidate receives semantic term credit only when the query and source

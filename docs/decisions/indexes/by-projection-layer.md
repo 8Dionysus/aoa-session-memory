@@ -70,6 +70,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0041 Incompatible Atlas Generations Use the Deep Clean-Rebuild Route](../AOA-SM-D-0041-incompatible-atlas-generations-use-the-deep-clean-rebuild-route.md) | 2026-07-31 | Accepted | `docs/decisions/AOA-SM-D-0041-incompatible-atlas-generations-use-the-deep-clean-rebuild-route.md` |
 
+## bounded archived/live raw navigation
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0098 Bounded Generated-Reader Process Boundary](../AOA-SM-D-0098-bounded-generated-reader-process-boundary.md) | 2026-08-26 | Accepted | `docs/decisions/AOA-SM-D-0098-bounded-generated-reader-process-boundary.md` |
+
 ## bounded raw navigation
 
 | Decision | Date | Status | Path |
@@ -687,6 +693,7 @@
 | [AOA-SM-D-0059 Transactional Dirty Marker for Observed Route Dependency](../AOA-SM-D-0059-transactional-dirty-marker-for-observed-route-dependency.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0059-transactional-dirty-marker-for-observed-route-dependency.md` |
 | [AOA-SM-D-0060 Bounded Process Digest Reuse and Resource Epochs](../AOA-SM-D-0060-bounded-process-digest-reuse-and-resource-epochs.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0060-bounded-process-digest-reuse-and-resource-epochs.md` |
 | [AOA-SM-D-0097 Source Install Provenance and Bounded Global Exact Recovery](../AOA-SM-D-0097-source-install-provenance-and-bounded-global-exact-recovery.md) | 2026-08-25 | Accepted | `docs/decisions/AOA-SM-D-0097-source-install-provenance-and-bounded-global-exact-recovery.md` |
+| [AOA-SM-D-0098 Bounded Generated-Reader Process Boundary](../AOA-SM-D-0098-bounded-generated-reader-process-boundary.md) | 2026-08-26 | Accepted | `docs/decisions/AOA-SM-D-0098-bounded-generated-reader-process-boundary.md` |
 
 ## post-hoc stage projection
 

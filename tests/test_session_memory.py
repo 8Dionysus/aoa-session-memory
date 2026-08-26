@@ -86216,15 +86216,7 @@ def test_agent_event_route_skips_heavy_hydration_without_text_query(tmp_path: Pa
     def fail_body_hydration(*_args: Any, **_kwargs: Any) -> dict[int, str]:
         raise AssertionError("agent event structured route must not read document_bodies")
 
-    raw_preview_calls = 0
-
-    def counted_raw_preview(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
-        nonlocal raw_preview_calls
-        raw_preview_calls += 1
-        return {"status": "raw_semantic_text", "text": "Agent response route stays lightweight."}
-
     monkeypatch.setattr(module, "search_document_bodies_for_rows", fail_body_hydration)
-    monkeypatch.setattr(module, "route_raw_semantic_preview", counted_raw_preview)
     route = module.agent_event_route_search(
         aoa_root=aoa_root,
         agent_events=["assistant_answer"],
@@ -86239,7 +86231,8 @@ def test_agent_event_route_skips_heavy_hydration_without_text_query(tmp_path: Pa
     assert route["cost_profile"]["hydrates_body"] is False
     assert route["cost_profile"]["semantic_preview"] is False
     assert route["cost_profile"]["raw_ref_preview"] is True
-    assert raw_preview_calls == 1
+    assert route["quality"]["raw_preview_result_count"] == 1
+    assert route["results"][0]["preview_source"].startswith("raw")
     assert route["results"][0]["preview_source"] == "raw_semantic_text"
     assert route["results"][0]["bounded_preview"] == "Agent response route stays lightweight."
     assert route["results"][0]["explain"]["semantic_preview"] == "skipped_for_lightweight_route"
@@ -90705,6 +90698,246 @@ def test_structured_search_timeout_returns_bounded_route_packet(tmp_path: Path, 
     assert module.SEARCH_FTS_QUERY_PROGRESS_OPCODES in {step for _handler, step in fake_conn.progress_handlers}
     assert fake_conn.progress_handlers[-1] == (None, 0)
     assert fake_conn.closed is True
+
+
+def test_generated_search_reader_hard_deadline_reaps_noncooperative_reader(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """A reader that ignores Python deadlines cannot hold the serving query."""
+
+    aoa_root = tmp_path / ".aoa"
+
+    def noncooperative_reader(**_kwargs: Any) -> dict[str, Any]:
+        time.sleep(5)
+        return {}
+
+    monkeypatch.setattr(module, "_search_sessions_in_process", noncooperative_reader)
+    started = time.monotonic()
+    payload = module.search_sessions(
+        aoa_root=aoa_root,
+        query="noncooperative reader anchor",
+        query_timeout_ms=75,
+        include_archived_raw_fallback=False,
+    )
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+
+    attempt = payload["generated_storage_attempt"]
+    assert payload["ok"] is False
+    assert attempt["status"] == "timed_out"
+    assert attempt["enforcement"] == "isolated_generated_reader_process"
+    assert attempt["fallback_independent_of_reader"] is True
+    assert attempt["cleanup"]["status"] == "reaped"
+    assert attempt["cleanup"]["verified"] is True
+    assert attempt["reader_pid"] > 0
+    assert elapsed_ms < 1500
+
+
+def test_generated_search_reader_hard_deadline_bounds_storage_acquisition(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """Storage acquisition that never returns is contained by the reader boundary."""
+
+    aoa_root = tmp_path / ".aoa"
+    db_path = module.search_db_path(aoa_root)
+    db_path.parent.mkdir(parents=True)
+    db_path.touch()
+
+    def blocked_storage_acquisition(*_args: Any, **_kwargs: Any) -> Any:
+        time.sleep(5)
+        raise sqlite3.OperationalError("simulated storage wait")
+
+    monkeypatch.setattr(
+        module,
+        "connect_existing_search_db",
+        blocked_storage_acquisition,
+    )
+    payload = module._search_sessions_with_isolated_generated_reader(
+        {
+            "aoa_root": aoa_root,
+            "query": "blocked storage anchor",
+            "limit": 1,
+            "provider": "portable_sqlite",
+            "query_timeout_ms": 75,
+            "include_archived_raw_fallback": False,
+        }
+    )
+
+    attempt = payload["generated_storage_attempt"]
+    assert payload["ok"] is False
+    assert attempt["status"] == "timed_out"
+    assert attempt["deadline_scope"] == (
+        "generated_storage_connection_query_result_and_reader_cleanup"
+    )
+    assert attempt["cleanup"]["status"] == "reaped"
+    assert attempt["cleanup"]["verified"] is True
+    assert attempt["reader_pid"] > 0
+
+
+def test_generated_search_reader_timeout_reaches_session_raw_fallback(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """A timed generated reader cannot prevent the bounded source fallback."""
+
+    workspace = tmp_path / "workspace"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "natural-successor.jsonl"
+    session_id = "hard-deadline-fallback-session"
+    anchor = "HARD_FALLBACK_ANCHOR_9D2C"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-08-26T00:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": session_id, "cwd": str(workspace)},
+            },
+            {
+                "timestamp": "2026-08-26T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": anchor}],
+                },
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": session_id,
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    def noncooperative_reader(**_kwargs: Any) -> dict[str, Any]:
+        time.sleep(5)
+        return {}
+
+    monkeypatch.setattr(module, "_search_sessions_in_process", noncooperative_reader)
+    payload = module.search_sessions(
+        aoa_root=aoa_root,
+        query=anchor,
+        session=session_id,
+        limit=1,
+        query_timeout_ms=75,
+        explain=True,
+    )
+
+    assert payload["ok"] is True
+    assert payload["generated_storage_attempt"]["status"] == "timed_out"
+    assert payload["generated_storage_attempt"]["cleanup"]["verified"] is True
+    assert payload["archived_raw_fallback"]["status"] == (
+        "applied_verified_after_index_timeout"
+    )
+    assert payload["results"][0]["raw_ref"] == "raw:line:2"
+
+
+def test_generated_search_reader_timeout_reaches_global_source_only_fallback(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """Global fallback must not reopen the generated store after a reader timeout."""
+
+    workspace = tmp_path / "workspace"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "natural-global-successor.jsonl"
+    session_id = "global-hard-deadline-fallback-session"
+    anchor = "GLOBAL_HARD_FALLBACK_ANCHOR_3A71"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-08-26T00:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": session_id, "cwd": str(workspace)},
+            },
+            {
+                "timestamp": "2026-08-26T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": anchor}],
+                },
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": session_id,
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    def noncooperative_reader(**_kwargs: Any) -> dict[str, Any]:
+        time.sleep(5)
+        return {}
+
+    monkeypatch.setattr(module, "_search_sessions_in_process", noncooperative_reader)
+    payload = module._search_sessions_with_isolated_generated_reader(
+        {
+            "aoa_root": aoa_root,
+            "query": anchor,
+            "limit": 1,
+            "provider": "portable_sqlite",
+            "query_timeout_ms": 75,
+            "explain": True,
+        }
+    )
+
+    assert payload["ok"] is True
+    assert payload["generated_storage_attempt"]["status"] == "timed_out"
+    assert payload["generated_storage_attempt"]["cleanup"]["verified"] is True
+    fallback = payload["global_recent_fallback"]
+    assert fallback["status"] == "applied"
+    assert fallback["candidate_selection"]["generated_reader_accessed"] is False
+    assert "generated_search_reader_not_reopened_for_global_fallback" in payload[
+        "diagnostics"
+    ]
+    assert payload["results"][0]["raw_ref"] == "raw:line:2"
+
+
+def test_generated_search_reader_result_transport_handles_large_payload(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """Result transport must not reintroduce an unbounded pipe write/read."""
+
+    def large_success(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "result_count": 1,
+            "results": [{"body": "large-result-" * 100_000}],
+        }
+
+    monkeypatch.setattr(module, "_search_sessions_in_process", large_success)
+    payload = module.search_sessions(
+        aoa_root=tmp_path / ".aoa",
+        query="large result transport",
+        query_timeout_ms=1000,
+        include_archived_raw_fallback=False,
+    )
+
+    assert payload["ok"] is True
+    assert payload["result_count"] == 1
+    assert payload["generated_storage_attempt"]["status"] == "completed"
+    assert payload["generated_storage_attempt"]["transport"] == (
+        "atomic_child_result_file"
+    )
+    assert payload["generated_storage_attempt"]["cleanup"]["verified"] is True
 
 
 def test_agent_event_raw_fts_timeout_preserves_route_diagnostic(tmp_path: Path, monkeypatch: Any) -> None:

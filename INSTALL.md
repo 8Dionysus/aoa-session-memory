@@ -144,3 +144,10 @@ index is followed by the same bounded recent live/raw fallback used by the
 ordinary search route. Recovered refs are usable bounded navigation evidence,
 not a global absence claim or proof that every downstream consumer is current;
 the fallback never edits queues, indexes, or raw evidence.
+
+Timed `portable_sqlite` search places generated-storage acquisition, the read,
+result transport, and reader cleanup inside an isolated process boundary. The
+normal generated result remains the preferred path; when the boundary times out
+or fails, the serving parent uses the bounded session raw or global recent
+source-only route without reopening the generated store. A cleanup that cannot
+be verified is a failed search result, not an admitted success.

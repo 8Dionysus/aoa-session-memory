@@ -23,6 +23,7 @@ import random
 import re
 import shlex
 import shutil
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -41,6 +42,9 @@ from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
+
+
+_DEFAULT_SQLITE_CONNECT = sqlite3.connect
 
 try:
     import tomllib
@@ -50477,6 +50481,9 @@ def connect_existing_search_db(db_path: Path, *, timeout: float = 1.0) -> sqlite
     conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True, timeout=timeout, factory=SearchSqliteConnection)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+_DEFAULT_CONNECT_EXISTING_SEARCH_DB = connect_existing_search_db
 
 
 def projection_generation_storage(
@@ -113843,6 +113850,9 @@ def clear_search_fts_query_deadline(conn: sqlite3.Connection) -> None:
         pass
 
 
+_DEFAULT_INSTALL_SEARCH_FTS_QUERY_DEADLINE = install_search_fts_query_deadline
+
+
 def search_fts_timeout_next_command(
     command: str,
     *,
@@ -113999,7 +114009,11 @@ def recover_search_projection_failure_with_archived_raw_exact(
     failure_kind: str,
     failure_scope: str = "",
 ) -> dict[str, Any]:
-    if failure_kind not in {"index_missing", "index_timeout"}:
+    if failure_kind not in {
+        "index_missing",
+        "index_timeout",
+        "index_unavailable",
+    }:
         raise ValueError(f"unsupported search projection failure kind: {failure_kind}")
     exact_session_fallback_eligible = bool(
         session and exact_literal_postings_query_eligible(query)
@@ -114063,20 +114077,23 @@ def recover_search_projection_failure_with_archived_raw_exact(
             }
         return failure_payload
     if (
-        (failure_kind == "index_timeout" and failure_scope != "fts")
+        (
+            failure_kind == "index_timeout"
+            and failure_scope != "fts"
+        )
         or not exact_session_fallback_eligible
     ):
         return failure_payload
-    failure_suffix = (
-        "after_index_timeout"
-        if failure_kind == "index_timeout"
-        else "after_index_missing"
-    )
-    failure_reason = (
-        "the index timed out"
-        if failure_kind == "index_timeout"
-        else "the published index was unavailable"
-    )
+    failure_suffix = {
+        "index_missing": "after_index_missing",
+        "index_timeout": "after_index_timeout",
+        "index_unavailable": "after_index_unavailable",
+    }[failure_kind]
+    failure_reason = {
+        "index_missing": "the published index was unavailable",
+        "index_timeout": "the index timed out",
+        "index_unavailable": "the generated reader process was unavailable",
+    }[failure_kind]
     blockers = search_live_tail_exact_filter_blockers(
         query=query,
         session=session,
@@ -125986,6 +126003,79 @@ def global_recent_exact_fallback_candidates(
     }
 
 
+def global_recent_exact_fallback_candidates_source_only(
+    aoa_root: Path,
+) -> dict[str, Any]:
+    """Select recent source sessions without reopening the generated store.
+
+    This route is used only after the generated reader has crossed its hard
+    deadline.  The registry and transcript clocks are sufficient to choose a
+    bounded navigation window; they are not sufficient to claim projection
+    freshness or global absence.
+    """
+
+    started = time.monotonic()
+    candidates: list[dict[str, Any]] = []
+    registry_probe_count = 0
+    for record in registry_sessions(aoa_root):
+        if registry_probe_count >= GLOBAL_RECENT_EXACT_FALLBACK_MAX_REGISTRY_PROBES:
+            break
+        session_id = str(record.get("session_id") or "")
+        transcript_path = str(record.get("transcript_path") or "")
+        if not session_id or not transcript_path:
+            continue
+        registry_probe_count += 1
+        observed_mtime = 0.0
+        try:
+            path = Path(transcript_path).expanduser()
+            if path.is_file():
+                observed_mtime = path.stat().st_mtime
+        except OSError:
+            observed_mtime = 0.0
+        if observed_mtime <= 0.0:
+            continue
+        candidates.append(
+            {
+                "session_id": session_id,
+                "session_label": str(record.get("session_label") or ""),
+                "status": "source_only_recent",
+                "document_count": 0,
+                "scan_mode": "live_tail_then_archived",
+                "selection_reason": (
+                    "bounded_recent_registry_probe_without_generated_reader"
+                ),
+                "observed_transcript_mtime": observed_mtime,
+                "activity_at": str(record.get("updated_at") or ""),
+            }
+        )
+
+    def activity_key(item: dict[str, Any]) -> tuple[float, str, str]:
+        return (
+            float(item.get("observed_transcript_mtime") or 0.0),
+            str(item.get("activity_at") or ""),
+            str(item.get("session_id") or ""),
+        )
+
+    candidates.sort(key=activity_key, reverse=True)
+    selected = candidates[:GLOBAL_RECENT_EXACT_FALLBACK_MAX_SESSIONS]
+    return {
+        "ok": True,
+        "candidate_source": "bounded_recent_registry_without_generated_reader",
+        "freshness_state_count": 0,
+        "deferred_candidate_count": 0,
+        "actionable_candidate_count": 0,
+        "registry_probe_count": registry_probe_count,
+        "registry_candidate_count": len(candidates),
+        "selected_candidate_count": len(selected),
+        "candidates": selected,
+        "generated_reader_accessed": False,
+        "elapsed_ms": int((time.monotonic() - started) * 1000),
+        "diagnostics": [
+            "generated_search_reader_not_reopened_for_global_fallback"
+        ],
+    }
+
+
 def apply_global_recent_exact_fallback(
     payload: dict[str, Any],
     *,
@@ -126012,6 +126102,7 @@ def apply_global_recent_exact_fallback(
     explain: bool,
     exclude_agent_event_stream_copies: bool,
     enabled: bool,
+    candidate_packet: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Enrich one global exact query with bounded recent raw evidence."""
     if session or "global_recent_fallback" in payload:
@@ -126062,7 +126153,11 @@ def apply_global_recent_exact_fallback(
         return payload
 
     started = time.monotonic()
-    candidate_packet = global_recent_exact_fallback_candidates(aoa_root)
+    candidate_packet = (
+        candidate_packet
+        if isinstance(candidate_packet, dict)
+        else global_recent_exact_fallback_candidates(aoa_root)
+    )
     candidates = (
         candidate_packet.get("candidates")
         if isinstance(candidate_packet.get("candidates"), list)
@@ -126094,7 +126189,11 @@ def apply_global_recent_exact_fallback(
     )
     recovered: list[dict[str, Any]] = []
     attempts: list[dict[str, Any]] = []
-    diagnostics: list[str] = []
+    diagnostics: list[str] = [
+        str(item)
+        for item in candidate_packet.get("diagnostics", [])
+        if item
+    ]
     budget_exhausted = False
     stopped_after_first_matching_session = False
     effective_limit = max(1, min(100, int_value(limit, 20)))
@@ -126410,7 +126509,646 @@ def search_structured_route_document_order_index(
     return ""
 
 
-def search_sessions(
+_SEARCH_GENERATED_READER_CHILD = False
+
+
+def _set_search_reader_parent_death_signal() -> None:
+    """Make an isolated reader die with its serving process if the parent exits."""
+
+    try:
+        libc_name = ctypes.util.find_library("c")
+        libc = ctypes.CDLL(libc_name or None, use_errno=True)
+        prctl = getattr(libc, "prctl")
+        prctl.argtypes = [
+            ctypes.c_int,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+        ]
+        prctl.restype = ctypes.c_int
+        prctl(1, signal.SIGKILL, 0, 0, 0)
+    except (AttributeError, OSError, TypeError, ValueError):
+        # The serving parent still owns and reaps the child on supported Linux.
+        return
+
+
+def _search_reader_cleanup_budget_seconds(query_timeout_ms: int) -> float:
+    """Return a small derived grace window for terminating a reader process."""
+
+    return max(
+        0.05,
+        min(1.0, max(1, int_value(query_timeout_ms, 1)) / 1000.0 * 0.1),
+    )
+
+
+def _stop_search_reader_process(
+    process: multiprocessing.Process,
+    *,
+    query_timeout_ms: int,
+    reason: str,
+) -> dict[str, Any]:
+    """Terminate, reap, and verify one generated-reader child."""
+
+    pid = int(process.pid or 0)
+    grace_seconds = _search_reader_cleanup_budget_seconds(query_timeout_ms)
+    signals_sent: list[str] = []
+    try:
+        if process.is_alive():
+            process.terminate()
+            signals_sent.append("terminate")
+        process.join(timeout=grace_seconds)
+        if process.is_alive():
+            process.kill()
+            signals_sent.append("kill")
+            process.join(timeout=grace_seconds)
+    except (AssertionError, OSError, ValueError) as exc:
+        return {
+            "status": "cleanup_failed",
+            "verified": False,
+            "pid": pid,
+            "reason": reason,
+            "signals_sent": signals_sent,
+            "diagnostics": [f"search_reader_cleanup_error:{exc.__class__.__name__}"],
+        }
+    alive = False
+    try:
+        alive = process.is_alive()
+    except (AssertionError, OSError, ValueError):
+        alive = True
+    exitcode = process.exitcode
+    if not alive:
+        try:
+            process.close()
+        except (AssertionError, OSError, ValueError):
+            pass
+    return {
+        "status": "reaped" if not alive else "unreaped",
+        "verified": not alive,
+        "pid": pid,
+        "reason": reason,
+        "signals_sent": signals_sent,
+        "exitcode": exitcode,
+        "cleanup_grace_seconds": grace_seconds,
+    }
+
+
+def _search_generated_reader_process_entry(
+    output_path: str,
+    search_kwargs: dict[str, Any],
+) -> None:
+    """Run the ordinary generated search implementation in an isolated child."""
+
+    global _SEARCH_GENERATED_READER_CHILD
+    _SEARCH_GENERATED_READER_CHILD = True
+    _set_search_reader_parent_death_signal()
+
+    def write_message(message: dict[str, Any]) -> None:
+        partial_path = Path(f"{output_path}.partial")
+        try:
+            with partial_path.open("w", encoding="utf-8") as handle:
+                json.dump(message, handle, ensure_ascii=False, separators=(",", ":"))
+                handle.flush()
+            os.replace(partial_path, output_path)
+        except (OSError, TypeError, ValueError):
+            try:
+                partial_path.unlink()
+            except OSError:
+                pass
+
+    try:
+        payload = _search_sessions_in_process(**search_kwargs)
+        write_message({"status": "result", "payload": payload})
+    except BaseException as exc:
+        write_message(
+            {
+                "status": "error",
+                "error_type": exc.__class__.__name__,
+                "error": short_text(str(exc), max_chars=500),
+            }
+        )
+
+
+def _read_search_generated_reader_message(
+    output_path: Path,
+) -> dict[str, Any] | None:
+    """Read a completed child result after the child has exited."""
+
+    try:
+        with output_path.open("r", encoding="utf-8") as handle:
+            message = json.load(handle)
+    except (OSError, UnicodeError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return message if isinstance(message, dict) else None
+
+
+def _remove_search_generated_reader_output(output_path: Path) -> None:
+    for candidate in (output_path, Path(f"{output_path}.partial")):
+        try:
+            candidate.unlink()
+        except OSError:
+            pass
+
+
+def _search_generated_reader_should_isolate(search_kwargs: dict[str, Any]) -> bool:
+    """Keep every supported timed generated read behind a process boundary."""
+
+    if _SEARCH_GENERATED_READER_CHILD:
+        return False
+    if str(search_kwargs.get("provider") or "portable_sqlite") != "portable_sqlite":
+        return False
+    effective_timeout_ms = normalized_search_fts_query_timeout_ms(
+        search_kwargs.get("query_timeout_ms")
+    )
+    if effective_timeout_ms <= 0:
+        return False
+    # Test doubles and owner-provided connection factories are deliberately left
+    # on the synchronous path.  They cannot represent a real kernel reader and
+    # retaining that seam keeps the existing contract tests observable.
+    return bool(
+        connect_existing_search_db is _DEFAULT_CONNECT_EXISTING_SEARCH_DB
+        and sqlite3.connect is _DEFAULT_SQLITE_CONNECT
+        and install_search_fts_query_deadline
+        is _DEFAULT_INSTALL_SEARCH_FTS_QUERY_DEADLINE
+    )
+
+
+def _search_generated_reader_options(search_kwargs: dict[str, Any]) -> list[tuple[str, Any]]:
+    return [
+        ("--session", search_kwargs.get("session")),
+        ("--before-event-id", search_kwargs.get("event_id_before")),
+        ("--doc-type", search_kwargs.get("doc_type")),
+        ("--event-type", search_kwargs.get("event_type")),
+        ("--family", search_kwargs.get("family")),
+        ("--outcome", search_kwargs.get("outcome")),
+        ("--conversation-act", search_kwargs.get("conversation_act")),
+        ("--session-act", search_kwargs.get("session_act")),
+        ("--agent-event", search_kwargs.get("agent_event")),
+        ("--usage-role", search_kwargs.get("usage_role")),
+        ("--task-episode-id", search_kwargs.get("task_episode_id")),
+        ("--route-layer", search_kwargs.get("route_layer")),
+        ("--route-signal", search_kwargs.get("route_signal")),
+        ("--archive-status", search_kwargs.get("archive_status")),
+        ("--freshness-status", search_kwargs.get("freshness_status")),
+        ("--date-from", search_kwargs.get("date_from")),
+        ("--date-to", search_kwargs.get("date_to")),
+        ("--explain", bool(search_kwargs.get("explain"))),
+    ]
+
+
+def _search_generated_reader_cost_profile(
+    search_kwargs: dict[str, Any],
+) -> dict[str, Any]:
+    query = str(search_kwargs.get("query") or "")
+    fts_query = fts_query_from_user(query)
+    structured_route_filter = any(
+        bool(search_kwargs.get(key))
+        for key in (
+            "doc_type",
+            "event_type",
+            "family",
+            "outcome",
+            "conversation_act",
+            "session_act",
+            "agent_event",
+            "usage_role",
+            "task_episode_id",
+            "event_id_before",
+            "route_layer",
+            "route_signal",
+        )
+    )
+    lightweight_route = bool(
+        search_kwargs.get("literal_postings_only")
+        or (
+            structured_route_filter
+            and not fts_query
+            and not search_kwargs.get("include_host_context")
+            and not search_kwargs.get("include_semantic_context")
+            and not search_kwargs.get("rerank_local")
+        )
+    )
+    effective_timeout_ms = normalized_search_fts_query_timeout_ms(
+        search_kwargs.get("query_timeout_ms")
+    )
+    return {
+        "lightweight_route": lightweight_route,
+        "structured_route_filter": structured_route_filter,
+        "uses_fts": bool(fts_query),
+        "hydrates_body": bool(search_kwargs.get("hydrate_body", True) and not lightweight_route),
+        "semantic_preview": bool(search_kwargs.get("semantic_preview", True) and not lightweight_route),
+        "raw_ref_preview": bool(search_kwargs.get("raw_ref_preview", True)),
+        "uses_shards": bool(search_kwargs.get("use_shards")),
+        "literal_postings_eligible": exact_literal_postings_query_eligible(query),
+        "literal_postings_only": bool(search_kwargs.get("literal_postings_only")),
+        "query_timeout_ms": effective_timeout_ms,
+        "bounded_query_timeout": bool(effective_timeout_ms),
+        "rank_mode": (
+            "bounded_date_order_no_bm25"
+            if fts_query and effective_timeout_ms
+            else ("bm25" if fts_query else "none")
+        ),
+    }
+
+
+def _search_generated_reader_timeout_payload(
+    search_kwargs: dict[str, Any],
+    *,
+    elapsed_ms: int,
+    reader_pid: int,
+    cleanup: dict[str, Any],
+) -> dict[str, Any]:
+    aoa_root = Path(search_kwargs["aoa_root"])
+    query = str(search_kwargs.get("query") or "")
+    effective_timeout_ms = normalized_search_fts_query_timeout_ms(
+        search_kwargs.get("query_timeout_ms")
+    )
+    fts_query = fts_query_from_user(query)
+    timeout_scope = "fts" if fts_query else "structured_filter"
+    provider_config = search_provider_config(aoa_root)
+    payload = search_fts_timeout_payload(
+        aoa_root=aoa_root,
+        query=query,
+        normalized_query=fts_query,
+        db_path=Path(
+            search_kwargs.get("db_path_override") or search_db_path(aoa_root)
+        ),
+        provider="portable_sqlite",
+        projection_mode=str(
+            search_kwargs.get("projection_mode")
+            or (
+                SEARCH_ACTIVE_PROJECTION_SHARD
+                if search_kwargs.get("db_path_override") is not None
+                else SEARCH_ACTIVE_PROJECTION_MONOLITH
+            )
+        ),
+        query_timeout_ms=effective_timeout_ms,
+        elapsed_ms=elapsed_ms,
+        command="search",
+        limit=int_value(search_kwargs.get("limit"), 20),
+        options=_search_generated_reader_options(search_kwargs),
+        cost_profile=_search_generated_reader_cost_profile(search_kwargs),
+        provider_config=provider_config,
+        exc=sqlite3.OperationalError(
+            "interrupted: isolated generated reader hard deadline exceeded"
+        ),
+        timeout_scope=timeout_scope,
+    )
+    attempt = {
+        "status": "timed_out",
+        "enforcement": "isolated_generated_reader_process",
+        "transport": "atomic_child_result_file",
+        "deadline_scope": (
+            "generated_storage_connection_query_result_and_reader_cleanup"
+        ),
+        "query_timeout_ms": effective_timeout_ms,
+        "elapsed_ms": elapsed_ms,
+        "reader_pid": reader_pid,
+        "cleanup": cleanup,
+        "fallback_independent_of_reader": True,
+        "mutates": False,
+    }
+    payload["generated_storage_attempt"] = attempt
+    payload.setdefault("cost_profile", {})["generated_storage_attempt"] = attempt
+    payload.setdefault("diagnostics", []).append(
+        "generated_search_isolated_reader_hard_timeout"
+    )
+    return payload
+
+
+def _search_generated_reader_failure_payload(
+    search_kwargs: dict[str, Any],
+    *,
+    status: str,
+    diagnostics: list[str],
+) -> dict[str, Any]:
+    aoa_root = Path(search_kwargs["aoa_root"])
+    db_path = Path(
+        search_kwargs.get("db_path_override") or search_db_path(aoa_root)
+    )
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "search_results",
+        "search_schema_version": SEARCH_SCHEMA_VERSION,
+        "generated_at": utc_now(),
+        "ok": False,
+        "mutates": False,
+        "truth_status": "generated_search_reader_process_unavailable_no_source_truth",
+        "query": str(search_kwargs.get("query") or ""),
+        "normalized_query": fts_query_from_user(str(search_kwargs.get("query") or "")),
+        "db_path": str(db_path),
+        "aoa_root": str(aoa_root),
+        "result_count": 0,
+        "results": [],
+        "search_projection": {
+            "mode": str(search_kwargs.get("projection_mode") or SEARCH_ACTIVE_PROJECTION_MONOLITH),
+            "db_path": str(db_path),
+            "fallback_db_path": str(search_db_path(aoa_root)),
+        },
+        "provider": {
+            "selected": "portable_sqlite",
+            "authoritative_result_provider": "portable_sqlite",
+            "status": status,
+        },
+        "cost_profile": _search_generated_reader_cost_profile(search_kwargs),
+        "diagnostics": diagnostics,
+    }
+
+
+def _search_generated_reader_fallback(
+    payload: dict[str, Any],
+    search_kwargs: dict[str, Any],
+    *,
+    failure_kind: str,
+    failure_scope: str,
+) -> dict[str, Any]:
+    """Run source/raw fallback in the serving parent after a child deadline."""
+
+    aoa_root = Path(search_kwargs["aoa_root"])
+    session = search_kwargs.get("session")
+    normalized_agent_event = (
+        normalize_agent_event_route_class(str(search_kwargs.get("agent_event")))
+        if search_kwargs.get("agent_event")
+        else None
+    )
+    recovered = recover_search_projection_failure_with_archived_raw_exact(
+        payload,
+        aoa_root=aoa_root,
+        query=str(search_kwargs.get("query") or ""),
+        session=str(session) if session else None,
+        limit=int_value(search_kwargs.get("limit"), 20),
+        event_id_before=search_kwargs.get("event_id_before"),
+        doc_type=search_kwargs.get("doc_type"),
+        event_type=search_kwargs.get("event_type"),
+        family=search_kwargs.get("family"),
+        outcome=search_kwargs.get("outcome"),
+        conversation_act=search_kwargs.get("conversation_act"),
+        session_act=search_kwargs.get("session_act"),
+        agent_event=normalized_agent_event,
+        usage_role=search_kwargs.get("usage_role"),
+        task_episode_id=search_kwargs.get("task_episode_id"),
+        route_layer=search_kwargs.get("route_layer"),
+        route_signal=search_kwargs.get("route_signal"),
+        archive_status=search_kwargs.get("archive_status"),
+        freshness_status=search_kwargs.get("freshness_status"),
+        date_from=search_kwargs.get("date_from"),
+        date_to=search_kwargs.get("date_to"),
+        exclude_agent_event_stream_copies=bool(
+            search_kwargs.get("exclude_agent_event_stream_copies")
+        ),
+        explain=bool(search_kwargs.get("explain")),
+        enabled=bool(search_kwargs.get("include_archived_raw_fallback", True)),
+        failure_kind=failure_kind,
+        failure_scope=failure_scope,
+    )
+    if not session:
+        recovered = apply_global_recent_exact_fallback(
+            recovered,
+            aoa_root=aoa_root,
+            query=str(search_kwargs.get("query") or ""),
+            limit=int_value(search_kwargs.get("limit"), 20),
+            session=None,
+            event_id_before=search_kwargs.get("event_id_before"),
+            doc_type=search_kwargs.get("doc_type"),
+            event_type=search_kwargs.get("event_type"),
+            family=search_kwargs.get("family"),
+            outcome=search_kwargs.get("outcome"),
+            conversation_act=search_kwargs.get("conversation_act"),
+            session_act=search_kwargs.get("session_act"),
+            agent_event=normalized_agent_event,
+            usage_role=search_kwargs.get("usage_role"),
+            task_episode_id=search_kwargs.get("task_episode_id"),
+            route_layer=search_kwargs.get("route_layer"),
+            route_signal=search_kwargs.get("route_signal"),
+            archive_status=search_kwargs.get("archive_status"),
+            freshness_status=search_kwargs.get("freshness_status"),
+            date_from=search_kwargs.get("date_from"),
+            date_to=search_kwargs.get("date_to"),
+            explain=bool(search_kwargs.get("explain")),
+            exclude_agent_event_stream_copies=bool(
+                search_kwargs.get("exclude_agent_event_stream_copies")
+            ),
+            enabled=bool(search_kwargs.get("include_archived_raw_fallback", True)),
+            candidate_packet=global_recent_exact_fallback_candidates_source_only(
+                aoa_root
+            ),
+        )
+    return recovered
+
+
+def _search_sessions_with_isolated_generated_reader(
+    search_kwargs: dict[str, Any],
+) -> dict[str, Any]:
+    effective_timeout_ms = normalized_search_fts_query_timeout_ms(
+        search_kwargs.get("query_timeout_ms")
+    )
+    query_is_fts = bool(
+        fts_query_from_user(str(search_kwargs.get("query") or ""))
+    )
+    started = time.monotonic()
+    context = multiprocessing.get_context("fork")
+    try:
+        output_fd, output_name = tempfile.mkstemp(
+            prefix="aoa-session-memory-search-reader-",
+            suffix=".json",
+        )
+        os.close(output_fd)
+    except OSError as exc:
+        payload = _search_generated_reader_failure_payload(
+            search_kwargs,
+            status="generated_reader_transport_start_failed",
+            diagnostics=[
+                f"generated_search_reader_transport_start_failed:{exc.__class__.__name__}"
+            ],
+        )
+        return _search_generated_reader_fallback(
+            payload,
+            search_kwargs,
+            failure_kind="index_unavailable",
+            failure_scope="fts" if query_is_fts else "structured_filter",
+        )
+    output_path = Path(output_name)
+    process = context.Process(
+        target=_search_generated_reader_process_entry,
+        args=(str(output_path), dict(search_kwargs)),
+        name="aoa-session-memory-generated-search-reader",
+    )
+    process.daemon = False
+    try:
+        process.start()
+    except (OSError, RuntimeError, ValueError) as exc:
+        _remove_search_generated_reader_output(output_path)
+        payload = _search_generated_reader_failure_payload(
+            search_kwargs,
+            status="generated_reader_process_start_failed",
+            diagnostics=[
+                f"generated_search_reader_process_start_failed:{exc.__class__.__name__}"
+            ],
+        )
+        return _search_generated_reader_fallback(
+            payload,
+            search_kwargs,
+            failure_kind="index_unavailable",
+            failure_scope="fts" if query_is_fts else "structured_filter",
+        )
+    reader_pid = int(process.pid or 0)
+    message: dict[str, Any] | None = None
+    timed_out = False
+    deadline = started + (effective_timeout_ms / 1000.0)
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                break
+            if not process.is_alive():
+                process.join(timeout=0)
+                message = _read_search_generated_reader_message(output_path)
+                break
+            time.sleep(min(remaining, 0.05))
+
+        if timed_out:
+            cleanup = _stop_search_reader_process(
+                process,
+                query_timeout_ms=effective_timeout_ms,
+                reason="generated_storage_deadline",
+            )
+            payload = _search_generated_reader_timeout_payload(
+                search_kwargs,
+                elapsed_ms=int((time.monotonic() - started) * 1000),
+                reader_pid=reader_pid,
+                cleanup=cleanup,
+            )
+            payload = _search_generated_reader_fallback(
+                payload,
+                search_kwargs,
+                failure_kind="index_timeout",
+                failure_scope=(
+                    "fts" if fts_query_from_user(str(search_kwargs.get("query") or "")) else "structured_filter"
+                ),
+            )
+            if not cleanup.get("verified"):
+                payload["ok"] = False
+                payload.setdefault("diagnostics", []).append(
+                    "generated_search_reader_cleanup_unverified"
+                )
+            return payload
+
+        if isinstance(message, dict) and message.get("status") == "result":
+            payload = message.get("payload")
+            cleanup = _stop_search_reader_process(
+                process,
+                query_timeout_ms=effective_timeout_ms,
+                reason="generated_storage_result",
+            )
+            if not isinstance(payload, dict):
+                payload = _search_generated_reader_failure_payload(
+                    search_kwargs,
+                    status="generated_reader_invalid_result",
+                    diagnostics=["generated_search_reader_returned_non_object"],
+                )
+                payload["generated_storage_attempt"] = {
+                    "status": "failed",
+                    "enforcement": "isolated_generated_reader_process",
+                    "transport": "atomic_child_result_file",
+                    "deadline_scope": (
+                        "generated_storage_connection_query_result_and_reader_cleanup"
+                    ),
+                    "query_timeout_ms": effective_timeout_ms,
+                    "elapsed_ms": int((time.monotonic() - started) * 1000),
+                    "reader_pid": reader_pid,
+                    "cleanup": cleanup,
+                    "fallback_independent_of_reader": True,
+                    "mutates": False,
+                }
+                payload["cost_profile"]["generated_storage_attempt"] = payload[
+                    "generated_storage_attempt"
+                ]
+                return _search_generated_reader_fallback(
+                    payload,
+                    search_kwargs,
+                    failure_kind="index_unavailable",
+                    failure_scope="fts" if query_is_fts else "structured_filter",
+                )
+            attempt = {
+                "status": "completed" if cleanup.get("verified") else "cleanup_unverified",
+                "enforcement": "isolated_generated_reader_process",
+                "transport": "atomic_child_result_file",
+                "deadline_scope": (
+                    "generated_storage_connection_query_result_and_reader_cleanup"
+                ),
+                "query_timeout_ms": effective_timeout_ms,
+                "elapsed_ms": int((time.monotonic() - started) * 1000),
+                "reader_pid": reader_pid,
+                "cleanup": cleanup,
+                "fallback_independent_of_reader": True,
+                "mutates": False,
+            }
+        payload["generated_storage_attempt"] = attempt
+        payload.setdefault("cost_profile", {})["generated_storage_attempt"] = attempt
+        if not cleanup.get("verified"):
+            payload.setdefault("diagnostics", []).append(
+                "generated_search_reader_cleanup_unverified"
+            )
+            payload["ok"] = False
+        return payload
+
+        cleanup = _stop_search_reader_process(
+            process,
+            query_timeout_ms=effective_timeout_ms,
+            reason="generated_storage_process_exit_without_result",
+        )
+        diagnostics = ["generated_search_reader_process_exited_without_result"]
+        if message and message.get("status") == "error":
+            diagnostics.append(
+                "generated_search_reader_error:"
+                f"{message.get('error_type') or 'unknown'}:{message.get('error') or ''}"
+            )
+        if not cleanup.get("verified"):
+            diagnostics.append("generated_search_reader_cleanup_unverified")
+        payload = _search_generated_reader_failure_payload(
+            search_kwargs,
+            status="generated_reader_process_failed",
+            diagnostics=diagnostics,
+        )
+        payload["generated_storage_attempt"] = {
+            "status": "failed",
+            "enforcement": "isolated_generated_reader_process",
+            "transport": "atomic_child_result_file",
+            "deadline_scope": (
+                "generated_storage_connection_query_result_and_reader_cleanup"
+            ),
+            "query_timeout_ms": effective_timeout_ms,
+            "elapsed_ms": int((time.monotonic() - started) * 1000),
+            "reader_pid": reader_pid,
+            "cleanup": cleanup,
+            "fallback_independent_of_reader": True,
+            "mutates": False,
+        }
+        payload["cost_profile"]["generated_storage_attempt"] = payload[
+            "generated_storage_attempt"
+        ]
+        return _search_generated_reader_fallback(
+            payload,
+            search_kwargs,
+            failure_kind="index_unavailable",
+            failure_scope="fts" if query_is_fts else "structured_filter",
+        )
+    finally:
+        _remove_search_generated_reader_output(output_path)
+
+
+def search_sessions(*args: Any, **search_kwargs: Any) -> dict[str, Any]:
+    """Search through a bounded generated-reader process when a deadline is set."""
+
+    if args:
+        raise TypeError("search_sessions accepts keyword arguments only")
+    if _search_generated_reader_should_isolate(search_kwargs):
+        return _search_sessions_with_isolated_generated_reader(search_kwargs)
+    return _search_sessions_in_process(**search_kwargs)
+
+
+def _search_sessions_in_process(
     *,
     aoa_root: Path,
     query: str = "",

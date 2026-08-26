@@ -145,6 +145,12 @@ Ready when:
 - route selection and cost are inspectable;
 - hard negatives do not become positive claims.
 
+For a timed portable SQLite query, the deadline must cover generated-storage
+acquisition, query/result transport, and reader cleanup through an isolated
+process boundary. A blocked reader must not suppress the bounded session or
+global raw fallback; a normal generated success retains its refs and freshness.
+Unverified reader cleanup remains failed and cannot be admitted as success.
+
 ### 6. Semantic and hybrid retrieval
 
 Ready when:
@@ -269,7 +275,7 @@ Use the narrowest sufficient route.
 | Config or schema | focused tests, schema validation, affected projection rebuild path |
 | Capture or hooks | focused tests, adapter grounding, hook status, live lifecycle probe |
 | Classifier or taxonomy | reindex/catch-up, manual positive/negative samples, freshness |
-| Exact search | fixed gold refs, collision and fallback cases, latency |
+| Exact search | fixed gold refs, collision and fallback cases, storage-boundary cleanup, latency |
 | Semantic/rerank | unchanged gold corpus, per-lane and production-auto A/B, cold/warm provider gates, exact-recall guard |
 | Episode formation | manually adjudicated boundaries and cross-compaction cases |
 | Graph semantics | relation/path review, hybrid-only comparison, cardinality |

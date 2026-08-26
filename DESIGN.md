@@ -694,6 +694,13 @@ should begin from exact or hybrid anchors. Broad raw-text fallback should be
 bounded but remain available until a replacement proves equal or better
 recall.
 
+The timed portable SQLite lane isolates generated-storage acquisition, query and
+result transport, and reader cleanup in a child process owned by the serving
+parent. The parent deadline therefore remains effective when SQLite is blocked
+below the cooperative progress handler. A timed-out or failed child returns to
+the bounded source/raw route without reopening the generated store; cleanup that
+cannot be verified is failed and cannot be upgraded by fallback evidence.
+
 The evidence-reading stage should:
 
 - identify the supporting refs for every important claim;
