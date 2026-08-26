@@ -263,6 +263,14 @@ a successful mutation and a source-ledger entry carrying the exact outbox
 publish identity. Other consumers remain pending until their own receipts are
 proved.
 
+An outbox record is not terminal merely because all mutable consumer states
+say `complete`. After every required state has an exact completion receipt, the
+owner writes one append-only terminal-retirement receipt bound to the record,
+session, current publish identity, required-consumer set, and receipt digests.
+The immutable outbox intent remains pending and is never edited or deleted;
+readiness and retry release require that retirement receipt. A malformed,
+missing, or publication-mismatched retirement keeps the obligation visible.
+
 `freshness-vector <session>` reports capture, live overlay, stable projection,
 search, episode-semantic, entity, graph, returned-evidence, and global-recall
 axes separately. A current positive live-tail result does not admit an

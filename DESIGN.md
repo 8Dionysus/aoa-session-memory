@@ -544,6 +544,15 @@ recall are independent axes. Current returned raw evidence never promotes a
 stale graph, and a current graph never proves an uncaptured tail. Exhaustive
 negative claims require proven completeness for the requested recall scope.
 
+Terminal outbox retirement is a separate source-owned proof. Once every
+required consumer has a current exact completion receipt, an append-only
+retirement artifact records the record identity, current publish identity,
+required-consumer set, and digests of those receipts. The original immutable
+outbox intent remains pending as historical work intent; consumer completion or
+launcher success alone cannot release a persistent freshness obligation. A
+retirement artifact is invalid if any bound identity, required consumer, or
+receipt digest changes.
+
 Atomic publication does not require monolithic computation. The umbrella work
 directory is content-addressed by raw publish identity and the publication
 contract; classification, correlation, segment index, review rendering, task
@@ -814,6 +823,14 @@ debounce controls only heavier projection assembly. Resource-heavy work needs
 backpressure, bounded retry, priority, and starvation visibility. A timer or
 systemd success proves only that a launcher ran; it does not prove semantic
 freshness.
+
+When a persistent freshness obligation has a current component outbox, retry
+owns a projection stage followed by a downstream stage. Projection completion
+hands the same queue item forward rather than clearing it. Downstream work may
+acknowledge entity and graph only through their existing registry/search and
+source-ledger guards, then writes terminal retirement only after all required
+receipts are verified. This staged route keeps admission, consumer capacity,
+and terminal proof visible as separate pressures.
 
 Fairness admission and locked-scope eligibility are separate decisions. A
 cycle may admit only one oversized session to its resumable build lane, but it

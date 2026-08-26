@@ -194,6 +194,7 @@
 | [AOA-SM-D-0082 Proved Materialization Drift Admits Exact Source Refresh](../AOA-SM-D-0082-proved-materialization-drift-admits-exact-source-refresh.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0082-proved-materialization-drift-admits-exact-source-refresh.md` |
 | [AOA-SM-D-0083 Additive Registry Repair Replaces Full Layer Reconstruction](../AOA-SM-D-0083-additive-registry-repair-replaces-full-layer-reconstruction.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0083-additive-registry-repair-replaces-full-layer-reconstruction.md` |
 | [AOA-SM-D-0084 Predecessor Proof Preserves Stored Dependency Generations](../AOA-SM-D-0084-predecessor-proof-preserves-stored-dependency-generations.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0084-predecessor-proof-preserves-stored-dependency-generations.md` |
+| [AOA-SM-D-0099 Terminal Outbox Retirement and Staged Freshness Retry](../AOA-SM-D-0099-terminal-outbox-retirement-and-staged-freshness-retry.md) | 2026-08-26 | Accepted | `docs/decisions/AOA-SM-D-0099-terminal-outbox-retirement-and-staged-freshness-retry.md` |
 
 ## entity usage chain
 
@@ -262,6 +263,7 @@
 | [AOA-SM-D-0042 Complete Registry Source Sets Gate Projection Retirement](../AOA-SM-D-0042-complete-registry-source-sets-gate-projection-retirement.md) | 2026-08-01 | Accepted | `docs/decisions/AOA-SM-D-0042-complete-registry-source-sets-gate-projection-retirement.md` |
 | [AOA-SM-D-0051 Transactional Component Outbox and Vector Freshness](../AOA-SM-D-0051-transactional-component-outbox-and-vector-freshness.md) | 2026-08-10 | Accepted | `docs/decisions/AOA-SM-D-0051-transactional-component-outbox-and-vector-freshness.md` |
 | [AOA-SM-D-0091 Projection Generations Follow Materializer Boundaries](../AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md` |
+| [AOA-SM-D-0099 Terminal Outbox Retirement and Staged Freshness Retry](../AOA-SM-D-0099-terminal-outbox-retirement-and-staged-freshness-retry.md) | 2026-08-26 | Accepted | `docs/decisions/AOA-SM-D-0099-terminal-outbox-retirement-and-staged-freshness-retry.md` |
 
 ## episode semantic evidence packet
 
@@ -334,6 +336,7 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0030 Projection-Scoped Producer Generation Identity](../AOA-SM-D-0030-projection-scoped-producer-generation-identity.md) | 2026-07-26 | Accepted | `docs/decisions/AOA-SM-D-0030-projection-scoped-producer-generation-identity.md` |
+| [AOA-SM-D-0099 Terminal Outbox Retirement and Staged Freshness Retry](../AOA-SM-D-0099-terminal-outbox-retirement-and-staged-freshness-retry.md) | 2026-08-26 | Accepted | `docs/decisions/AOA-SM-D-0099-terminal-outbox-retirement-and-staged-freshness-retry.md` |
 
 ## exact session index
 
@@ -375,6 +378,7 @@
 | [AOA-SM-D-0083 Additive Registry Repair Replaces Full Layer Reconstruction](../AOA-SM-D-0083-additive-registry-repair-replaces-full-layer-reconstruction.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0083-additive-registry-repair-replaces-full-layer-reconstruction.md` |
 | [AOA-SM-D-0084 Predecessor Proof Preserves Stored Dependency Generations](../AOA-SM-D-0084-predecessor-proof-preserves-stored-dependency-generations.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0084-predecessor-proof-preserves-stored-dependency-generations.md` |
 | [AOA-SM-D-0091 Projection Generations Follow Materializer Boundaries](../AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md` |
+| [AOA-SM-D-0099 Terminal Outbox Retirement and Staged Freshness Retry](../AOA-SM-D-0099-terminal-outbox-retirement-and-staged-freshness-retry.md) | 2026-08-26 | Accepted | `docs/decisions/AOA-SM-D-0099-terminal-outbox-retirement-and-staged-freshness-retry.md` |
 
 ## graph anchor resolution
 

@@ -1952,6 +1952,247 @@ def test_outbox_completion_crash_replay_is_durable_and_idempotent(
         )
 
 
+def test_outbox_terminal_retirement_requires_all_exact_receipts_and_is_replayable(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    session_dir = aoa_root / "sessions" / "outbox-retirement"
+    session_dir.mkdir(parents=True)
+    publish_id = "a" * 64
+    module.write_json(
+        session_dir / "session.manifest.json",
+        {
+            "session_id": "outbox-retirement",
+            "archive_status": "indexed",
+            "index_schema": {"projection_publish": {"publish_id": publish_id}},
+        },
+    )
+    record = module.session_projection_outbox_record(
+        session_dir=session_dir,
+        old_snapshot={},
+        new_snapshot={
+            "task_episode:episode-1": {
+                "component_type": "task_episode",
+                "digest": "b" * 64,
+                "source_ref": "session-index-shards/task-episodes/episode-1.json",
+                "generation_identity": {"generation_id": "episode-v1"},
+            }
+        },
+        old_publish_id="",
+        new_publish_id=publish_id,
+        session_id="outbox-retirement",
+    )
+    record_write = module.write_projection_outbox_record(session_dir, record)
+
+    partial = module.projection_outbox_retirement_status(
+        aoa_root,
+        session_dir=session_dir,
+        record_path=Path(record_write["path"]),
+        record=record,
+    )
+    assert partial["status"] == "consumer_completion_pending"
+    assert set(partial["pending_consumers"]) == set(
+        module.PROJECTION_OUTBOX_CONSUMERS
+    )
+    assert module.write_projection_outbox_retirement(
+        aoa_root,
+        session_dir=session_dir,
+        record_path=Path(record_write["path"]),
+        record=record,
+    )["status"] == "deferred"
+    assert not list(
+        (aoa_root / module.PROJECTION_OUTBOX_RETIREMENTS_DIR).glob("*.json")
+    )
+
+    for consumer in record["required_consumers"]:
+        module.write_projection_outbox_consumer_state(
+            session_dir,
+            record=record,
+            consumer=consumer,
+            status="complete",
+            reason="test_exact_commit",
+            completion_receipt={"consumer": consumer, "commit": "exact"},
+        )
+    ready_before_retirement = module.projection_outbox_ready_sessions(aoa_root)
+    assert ready_before_retirement["ready_session_count"] == 1
+    assert ready_before_retirement["records"][0]["pending_consumers"] == []
+    assert ready_before_retirement["records"][0]["outbox_retirement_pending"] is True
+
+    written = module.write_projection_outbox_retirement(
+        aoa_root,
+        session_dir=session_dir,
+        record_path=Path(record_write["path"]),
+        record=record,
+    )
+    replay = module.write_projection_outbox_retirement(
+        aoa_root,
+        session_dir=session_dir,
+        record_path=Path(record_write["path"]),
+        record=record,
+    )
+    assert written["status"] == "written"
+    assert replay["status"] == "reused"
+    retired = module.projection_outbox_retirement_status(
+        aoa_root,
+        session_dir=session_dir,
+        record_path=Path(record_write["path"]),
+        record=record,
+    )
+    assert retired["ok"] is True
+    assert retired["status"] == "retired"
+    assert module.read_json(Path(record_write["path"]), {})["status"] == "pending"
+    assert module.projection_outbox_ready_sessions(aoa_root)[
+        "ready_session_count"
+    ] == 0
+
+
+def test_retry_dispatch_hands_projection_to_downstream_and_closes_only_after_retirement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    session_id = "outbox-stage-session"
+    options = {
+        "persistent_obligation": True,
+        "obligation_kind": module.SESSION_PROJECTION_FRESHNESS_OBLIGATION_KIND,
+        "session_id": session_id,
+        "session_dir": str(aoa_root / "sessions" / session_id),
+        "required_stable_projection": True,
+        "required_search_consumer": True,
+        "outbox_convergence_required": True,
+        "convergence_stage": "projection",
+    }
+
+    def schedule(queue_payload: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        return (
+            module.auto_maintenance_retry_upsert_item(
+                queue_payload,
+                profile="backlog",
+                target=session_id,
+                reason="timer_backlog",
+                launch_status="freshness_obligation_enqueued",
+                options=options,
+                now_epoch=1_000.0,
+                initial_delay_seconds=0,
+            ),
+            True,
+        )
+
+    module.mutate_auto_maintenance_retry_queue(
+        aoa_root,
+        schedule,
+        now_epoch=1_000.0,
+    )
+    phase = 1
+    obligation_calls = 0
+    convergence_calls = 0
+    launches: list[dict[str, Any]] = []
+
+    def fake_obligation(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        nonlocal obligation_calls
+        obligation_calls += 1
+        satisfied = phase == 2 or obligation_calls >= 2
+        return {
+            "ok": satisfied,
+            "status": "satisfied" if satisfied else "remaining",
+            "projected_capture_bytes": 20 if satisfied else 10,
+            "satisfied_axes": ["capture", "stable_session_projection", "search"]
+            if satisfied
+            else [],
+            "remaining_axes": [] if satisfied else ["capture"],
+        }
+
+    def fake_convergence(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        nonlocal convergence_calls
+        convergence_calls += 1
+        if phase == 1:
+            return {
+                "ok": False,
+                "status": "remaining",
+                "outbox_present": True,
+                "pending_consumers": ["entity_registry", "graph"],
+            }
+        return {
+            "ok": convergence_calls >= 2,
+            "status": "converged" if convergence_calls >= 2 else "remaining",
+            "outbox_present": True,
+            "pending_consumers": []
+            if convergence_calls >= 2
+            else ["graph"],
+        }
+
+    def fake_launch(**kwargs: Any) -> dict[str, Any]:
+        launches.append(kwargs)
+        return {
+            "schema_version": 1,
+            "artifact_type": "auto_maintenance_resource_launch",
+            "ok": True,
+            "status": "completed",
+            "child_result_verified": True,
+        }
+
+    monkeypatch.setattr(module, "session_projection_freshness_obligation_status", fake_obligation)
+    monkeypatch.setattr(module, "session_projection_outbox_convergence_status", fake_convergence)
+    monkeypatch.setattr(module, "auto_maintenance_resource_launch", fake_launch)
+    monkeypatch.setattr(
+        module,
+        "automatic_outbox_convergence_postpass",
+        lambda **_kwargs: {
+            "status": "completed",
+            "graph": {"completed_count": 1},
+            "entity": {"completed_count": 1},
+            "retirement": {"written_count": 1},
+        },
+    )
+
+    first = module.auto_maintenance_retry_dispatch(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        apply=True,
+        limit=1,
+        now_epoch=1_001.0,
+    )
+    first_result = first["results"][0]
+    assert first_result["disposition"] == (
+        "projection_stage_completed_downstream_pending"
+    )
+    assert first_result["convergence_stage_after"] == "downstream"
+    assert "projection-catchup" in launches[0]["child_command_override"]
+    assert launches[0]["repair_indexes"] is False
+    assert launches[0]["repair_graph"] is False
+    staged = module.auto_maintenance_retry_queue_status(
+        aoa_root,
+        now_epoch=1_001.0,
+    )
+    assert staged["items"]["backlog:" + session_id]["options"][
+        "convergence_stage"
+    ] == "downstream"
+
+    phase = 2
+    obligation_calls = 0
+    convergence_calls = 0
+    second = module.auto_maintenance_retry_dispatch(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        apply=True,
+        limit=1,
+        now_epoch=1_003.0,
+    )
+    second_result = second["results"][0]
+    assert second_result["launch_status"] == "outbox_convergence_satisfied"
+    assert second_result["disposition"] == "completed"
+    assert second_result["convergence_stage_before"] == "downstream"
+    assert "auto-maintenance" in launches[1]["child_command_override"]
+    assert session_id in launches[1]["child_command_override"]
+    assert launches[1]["repair_indexes"] is True
+    assert launches[1]["repair_graph"] is True
+    assert module.auto_maintenance_retry_queue_status(aoa_root)[
+        "queued_count"
+    ] == 0
+
+
 def test_agent_event_taxonomy_task_episodes_and_search_routes(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"

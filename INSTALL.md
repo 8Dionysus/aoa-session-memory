@@ -138,6 +138,12 @@ capture, live-overlay, stable-projection, and downstream-consumer progress.
 `auto-maintenance hot --apply` remains the bounded event-driven queue producer;
 the source-rendered retry timer invokes `auto-maintenance-retry`, while
 `projection-catchup` and deep maintenance remain explicit child/repair routes.
+When a persistent freshness item owns a current projection outbox, the retry
+dispatcher keeps it through a projection stage and an automatic downstream
+stage. The item is releasable only after exact entity, graph, and other
+required-consumer receipts are bound by the append-only terminal-retirement
+receipt; the immutable outbox record itself remains pending historical work
+intent.
 
 For a supported global exact query, a SQLite projection timeout or missing
 index is followed by the same bounded recent live/raw fallback used by the

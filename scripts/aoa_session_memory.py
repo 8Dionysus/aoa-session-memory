@@ -564,7 +564,11 @@ PROJECTION_OUTBOX_RECORDS_DIR = PROJECTION_OUTBOX_ROOT / "records"
 PROJECTION_OUTBOX_CONSUMER_STATE_DIR = (
     PROJECTION_OUTBOX_ROOT / "consumer-state"
 )
+PROJECTION_OUTBOX_RETIREMENTS_DIR = (
+    PROJECTION_OUTBOX_ROOT / "retirements"
+)
 PROJECTION_OUTBOX_SCHEMA_VERSION = 1
+PROJECTION_OUTBOX_RETIREMENT_SCHEMA_VERSION = 1
 SESSION_PROJECTION_PROGRESS_RECEIPTS_ROOT = (
     DIAGNOSTICS_ROOT / "session-projection-progress"
 )
@@ -18791,6 +18795,8 @@ def session_projection_freshness_obligation_options(
         # remaining capture-only compatibility mode.
         "required_stable_projection": True,
         "required_search_consumer": True,
+        "outbox_convergence_required": True,
+        "convergence_stage": "projection",
         "freshness_reason": freshness_reason,
     }
 
@@ -19049,6 +19055,48 @@ def session_projection_freshness_obligation_child_command(
         "1",
         "--apply",
         "--write-report",
+    ]
+    append_child_arg(command, "--execution-id", execution_id)
+    return command
+
+
+def session_projection_outbox_convergence_child_command(
+    *,
+    workspace_root: Path,
+    aoa_root: Path,
+    profile: str,
+    target: str,
+    execution_id: str | None = None,
+) -> list[str]:
+    """Build the automatic second-stage command for one current outbox item."""
+    child_profile = "deep" if profile == "deep" else "backlog"
+    settings = auto_maintenance_profile(child_profile)
+    budget_seconds = max(
+        1.0,
+        min(
+            900.0,
+            float(settings.get("budget_seconds") or 900.0),
+        ),
+    )
+    command = [
+        "python3",
+        str(Path(__file__).resolve()),
+        "auto-maintenance",
+        child_profile,
+        target,
+        "--workspace-root",
+        str(workspace_root),
+        "--aoa-root",
+        str(aoa_root),
+        "--budget-seconds",
+        f"{budget_seconds:g}",
+        "--repair-indexes",
+        "--repair-graph",
+        "--no-sample-audit",
+        "--apply",
+        "--write-report",
+        "--reason",
+        "automatic_retry_outbox_convergence",
     ]
     append_child_arg(command, "--execution-id", execution_id)
     return command
@@ -28213,6 +28261,406 @@ def write_projection_outbox_consumer_state(
     }
 
 
+def projection_outbox_retirement_path(
+    aoa_root: Path,
+    record_id: str,
+) -> Path:
+    """Return the append-only terminal receipt path for one outbox record."""
+    return (
+        aoa_root
+        / PROJECTION_OUTBOX_RETIREMENTS_DIR
+        / f"{record_id}.json"
+    )
+
+
+def projection_outbox_receipt_digest(receipt: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            receipt if isinstance(receipt, dict) else {},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def projection_outbox_consumer_completion(
+    *,
+    session_dir: Path,
+    record: dict[str, Any],
+    consumer: str,
+) -> dict[str, Any]:
+    """Validate one consumer state without promoting operational status."""
+    record_id = str(record.get("record_id") or "")
+    publish_id = str(record.get("new_publish_id") or "")
+    state_path = projection_outbox_consumer_state_path(
+        session_dir,
+        consumer=consumer,
+        record_id=record_id,
+    )
+    state = read_json(state_path, {})
+    receipt = (
+        state.get("completion_receipt")
+        if isinstance(state, dict)
+        and isinstance(state.get("completion_receipt"), dict)
+        else {}
+    )
+    valid = bool(
+        isinstance(state, dict)
+        and state.get("status") == "complete"
+        and state.get("semantic_completion") is True
+        and str(state.get("record_id") or "") == record_id
+        and str(state.get("session_id") or "")
+        == str(record.get("session_id") or "")
+        and str(state.get("consumer") or "") == consumer
+        and str(state.get("source_publish_id") or "") == publish_id
+        and receipt
+    )
+    return {
+        "consumer": consumer,
+        "ok": valid,
+        "path": str(state_path),
+        "state": state if isinstance(state, dict) else {},
+        "completion_receipt_digest": (
+            projection_outbox_receipt_digest(receipt) if valid else ""
+        ),
+        "reason": "exact_completion_receipt_verified"
+        if valid
+        else "consumer_completion_receipt_missing_or_mismatched",
+    }
+
+
+def projection_outbox_retirement_status(
+    aoa_root: Path,
+    *,
+    session_dir: Path,
+    record_path: Path | None = None,
+    record: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Report exact terminal-retirement state for a current publication.
+
+    The original immutable outbox record is never changed or removed.  A
+    separate receipt is valid only when every consumer state is bound to the
+    same current publication and carries an exact completion receipt.
+    """
+    selected_record = record if isinstance(record, dict) else {}
+    selected_path = record_path
+    if not selected_record:
+        manifest = read_json(session_dir / "session.manifest.json", {})
+        session_id = str(
+            manifest.get("session_id") if isinstance(manifest, dict) else ""
+        )
+        publish_id = projection_publish_id(
+            manifest.get("index_schema")
+            if isinstance(manifest, dict)
+            and isinstance(manifest.get("index_schema"), dict)
+            else {}
+        )
+        selected_path, selected_record = (
+            session_projection_outbox_record_for_publish(
+                aoa_root,
+                session_id=session_id,
+                publish_id=publish_id,
+            )
+        )
+    if not isinstance(selected_record, dict) or not selected_record:
+        return {
+            "ok": True,
+            "status": "no_current_outbox_record",
+            "record_id": "",
+            "required_consumers": [],
+            "pending_consumers": [],
+            "retirement_path": "",
+            "consumer_completions": {},
+        }
+    manifest = read_json(session_dir / "session.manifest.json", {})
+    current_publish_id = projection_publish_id(
+        manifest.get("index_schema")
+        if isinstance(manifest, dict)
+        and isinstance(manifest.get("index_schema"), dict)
+        else {}
+    )
+    record_id = str(selected_record.get("record_id") or "")
+    publish_id = str(selected_record.get("new_publish_id") or "")
+    required_consumers = sorted(
+        {
+            str(item)
+            for item in selected_record.get("required_consumers", [])
+            if str(item)
+        }
+    )
+    retirement_path = projection_outbox_retirement_path(
+        aoa_root,
+        record_id,
+    )
+    completions = {
+        consumer: projection_outbox_consumer_completion(
+            session_dir=session_dir,
+            record=selected_record,
+            consumer=consumer,
+        )
+        for consumer in required_consumers
+    }
+    pending_consumers = [
+        consumer
+        for consumer in required_consumers
+        if not completions[consumer]["ok"]
+    ]
+    current = bool(
+        str(selected_record.get("session_id") or "")
+        and current_publish_id == publish_id
+    )
+    base = {
+        "ok": False,
+        "status": "outbox_record_not_current_publication"
+        if not current
+        else "consumer_completion_pending"
+        if pending_consumers
+        else "retirement_pending",
+        "record_id": record_id,
+        "session_id": str(selected_record.get("session_id") or ""),
+        "source_publish_id": publish_id,
+        "current_publish_id": current_publish_id,
+        "record_ref": str(selected_path) if selected_path else "",
+        "required_consumers": required_consumers,
+        "pending_consumers": pending_consumers,
+        "retirement_path": str(retirement_path),
+        "consumer_completions": completions,
+    }
+    if not current or pending_consumers:
+        return base
+    retirement = read_json(retirement_path, {})
+    retirement_valid = bool(
+        isinstance(retirement, dict)
+        and retirement.get("schema_version")
+        == PROJECTION_OUTBOX_RETIREMENT_SCHEMA_VERSION
+        and retirement.get("artifact_type")
+        == "projection_outbox_terminal_retirement"
+        and retirement.get("record_id") == record_id
+        and retirement.get("session_id")
+        == str(selected_record.get("session_id") or "")
+        and retirement.get("source_publish_id") == publish_id
+        and retirement.get("status") == "retired"
+        and retirement.get("required_consumers") == required_consumers
+        and retirement.get("truth_status")
+        == "all_required_consumer_completion_receipts_verified"
+    )
+    recorded_completions = (
+        retirement.get("consumer_completions")
+        if isinstance(retirement, dict)
+        and isinstance(retirement.get("consumer_completions"), dict)
+        else {}
+    )
+    if retirement_valid:
+        for consumer in required_consumers:
+            item = (
+                recorded_completions.get(consumer)
+                if isinstance(recorded_completions.get(consumer), dict)
+                else {}
+            )
+            observed = completions[consumer]
+            if (
+                item.get("state_ref") != observed.get("path")
+                or item.get("completion_receipt_digest")
+                != observed.get("completion_receipt_digest")
+            ):
+                retirement_valid = False
+                break
+    if retirement_valid:
+        return {
+            **base,
+            "ok": True,
+            "status": "retired",
+            "retirement": retirement,
+        }
+    if retirement_path.exists():
+        return {
+            **base,
+            "status": "retirement_invalid",
+            "retirement": retirement if isinstance(retirement, dict) else {},
+        }
+    return base
+
+
+def write_projection_outbox_retirement(
+    aoa_root: Path,
+    *,
+    session_dir: Path,
+    record_path: Path,
+    record: dict[str, Any],
+) -> dict[str, Any]:
+    """Write one immutable terminal receipt after exact consumer verification."""
+    before = projection_outbox_retirement_status(
+        aoa_root,
+        session_dir=session_dir,
+        record_path=record_path,
+        record=record,
+    )
+    if before.get("status") == "retired":
+        return {
+            "status": "reused",
+            "path": before.get("retirement_path"),
+            "record_id": before.get("record_id"),
+        }
+    if before.get("status") != "retirement_pending":
+        return {
+            "status": "deferred",
+            "path": before.get("retirement_path"),
+            "record_id": before.get("record_id"),
+            "reason": before.get("status"),
+            "pending_consumers": before.get("pending_consumers", []),
+        }
+    path = Path(str(before.get("retirement_path") or ""))
+    payload = {
+        "schema_version": PROJECTION_OUTBOX_RETIREMENT_SCHEMA_VERSION,
+        "artifact_type": "projection_outbox_terminal_retirement",
+        "record_id": str(record.get("record_id") or ""),
+        "session_id": str(record.get("session_id") or ""),
+        "source_publish_id": str(record.get("new_publish_id") or ""),
+        "status": "retired",
+        "retired_at": utc_now(),
+        "outbox_record_ref": str(record_path),
+        "required_consumers": list(before.get("required_consumers", [])),
+        "consumer_completions": {
+            consumer: {
+                "state_ref": str(item.get("path") or ""),
+                "completion_receipt_digest": str(
+                    item.get("completion_receipt_digest") or ""
+                ),
+            }
+            for consumer, item in (
+                before.get("consumer_completions", {}).items()
+                if isinstance(before.get("consumer_completions"), dict)
+                else []
+            )
+            if isinstance(item, dict)
+        },
+        "truth_status": (
+            "all_required_consumer_completion_receipts_verified"
+        ),
+    }
+    existing = read_json(path, {})
+    if isinstance(existing, dict) and existing:
+        existing_status = projection_outbox_retirement_status(
+            aoa_root,
+            session_dir=session_dir,
+            record_path=record_path,
+            record=record,
+        )
+        if existing_status.get("status") == "retired":
+            return {
+                "status": "reused",
+                "path": str(path),
+                "record_id": record.get("record_id"),
+            }
+        raise ValueError("projection_outbox_retirement_collision")
+    write_json_durable(path, payload)
+    return {
+        "status": "written",
+        "path": str(path),
+        "record_id": record.get("record_id"),
+    }
+
+
+def reconcile_projection_outbox_retirements(
+    aoa_root: Path,
+    *,
+    limit: int = 32,
+    session_id: str | None = None,
+    apply: bool = False,
+) -> dict[str, Any]:
+    """Bounded metadata-only retirement reconciliation for current records."""
+    records_dir = aoa_root / PROJECTION_OUTBOX_RECORDS_DIR
+    inspected = 0
+    candidates = 0
+    written: list[dict[str, Any]] = []
+    deferred: list[dict[str, Any]] = []
+    for path in sorted(
+        records_dir.glob("*.json"),
+        key=lambda item: item.stat().st_mtime_ns,
+        reverse=True,
+    ):
+        record = read_json(path, {})
+        if not isinstance(record, dict) or not record:
+            continue
+        record_session_id = str(record.get("session_id") or "")
+        if session_id and record_session_id != session_id:
+            continue
+        if inspected >= max(0, int_value(limit, 32)):
+            break
+        inspected += 1
+        session_dir = Path(
+            str(
+                (
+                    record.get("publication_receipt")
+                    if isinstance(record.get("publication_receipt"), dict)
+                    else {}
+                ).get("session_dir")
+                or ""
+            )
+        )
+        if not session_dir.is_dir():
+            deferred.append(
+                {
+                    "record_id": record.get("record_id"),
+                    "status": "session_dir_missing",
+                }
+            )
+            continue
+        status = projection_outbox_retirement_status(
+            aoa_root,
+            session_dir=session_dir,
+            record_path=path,
+            record=record,
+        )
+        if status.get("status") == "retired":
+            continue
+        if status.get("status") != "retirement_pending":
+            deferred.append(
+                {
+                    "record_id": record.get("record_id"),
+                    "session_id": record_session_id,
+                    "status": status.get("status"),
+                    "pending_consumers": status.get("pending_consumers", []),
+                }
+            )
+            continue
+        candidates += 1
+        if not apply:
+            deferred.append(
+                {
+                    "record_id": record.get("record_id"),
+                    "session_id": record_session_id,
+                    "status": "retirement_pending_apply",
+                }
+            )
+            continue
+        written.append(
+            write_projection_outbox_retirement(
+                aoa_root,
+                session_dir=session_dir,
+                record_path=path,
+                record=record,
+            )
+        )
+    return {
+        "schema_version": PROJECTION_OUTBOX_RETIREMENT_SCHEMA_VERSION,
+        "artifact_type": "projection_outbox_retirement_reconciliation",
+        "generated_at": utc_now(),
+        "ok": True,
+        "apply": apply,
+        "session_id": session_id or "",
+        "inspected_record_count": inspected,
+        "candidate_count": candidates,
+        "written_count": len(written),
+        "written": written,
+        "deferred": deferred,
+        "truth_status": (
+            "metadata_only_retirement_receipts_after_exact_consumer_proofs"
+        ),
+    }
+
+
 def route_projection_outbox_record(
     session_dir: Path,
     *,
@@ -28340,7 +28788,9 @@ def projection_outbox_ready_sessions(
     aoa_root: Path,
     *,
     limit: int = 16,
+    session_id: str | None = None,
 ) -> dict[str, Any]:
+    target_session_id = str(session_id or "")
     records_dir = aoa_root / PROJECTION_OUTBOX_RECORDS_DIR
     selected_by_session: dict[str, tuple[str, dict[str, Any]]] = {}
     inspected_count = 0
@@ -28354,7 +28804,9 @@ def projection_outbox_ready_sessions(
         if not isinstance(record, dict) or not record:
             continue
         inspected_count += 1
-        session_id = str(record.get("session_id") or "")
+        record_session_id = str(record.get("session_id") or "")
+        if target_session_id and target_session_id != record_session_id:
+            continue
         session_dir = Path(
             str(
                 (
@@ -28367,7 +28819,7 @@ def projection_outbox_ready_sessions(
                 or ""
             )
         )
-        if not session_id or not session_dir.is_dir():
+        if not record_session_id or not session_dir.is_dir():
             stale_record_count += 1
             continue
         manifest = read_json(
@@ -28383,6 +28835,12 @@ def projection_outbox_ready_sessions(
         if publish_id != str(record.get("new_publish_id") or ""):
             stale_record_count += 1
             continue
+        retirement_status = projection_outbox_retirement_status(
+            aoa_root,
+            session_dir=session_dir,
+            record_path=path,
+            record=record,
+        )
         pending_consumers: list[str] = []
         for consumer in record.get("required_consumers", []):
             state = read_json(
@@ -28395,7 +28853,10 @@ def projection_outbox_ready_sessions(
             )
             if str(state.get("status") or "") != "complete":
                 pending_consumers.append(str(consumer))
-        if not pending_consumers:
+        if (
+            not pending_consumers
+            and retirement_status.get("status") == "retired"
+        ):
             continue
         display = (
             manifest.get("display")
@@ -28405,7 +28866,7 @@ def projection_outbox_ready_sessions(
         )
         candidate = {
             "path": str(session_dir),
-            "session_id": session_id,
+            "session_id": record_session_id,
             "projection_outbox_ready": True,
             "session_label": str(
                 display.get("label")
@@ -28425,12 +28886,15 @@ def projection_outbox_ready_sessions(
             "outbox_created_at": str(record.get("created_at") or ""),
             "outbox_mtime_ns": path.stat().st_mtime_ns,
             "pending_consumers": pending_consumers,
+            "outbox_retirement_pending": retirement_status.get("status")
+            != "retired",
+            "outbox_retirement_status": retirement_status.get("status"),
             "changed_component_count": len(record.get("changes", [])),
         }
-        existing = selected_by_session.get(session_id)
+        existing = selected_by_session.get(record_session_id)
         ordering = str(record.get("created_at") or "")
         if existing is None or ordering > existing[0]:
-            selected_by_session[session_id] = (ordering, candidate)
+            selected_by_session[record_session_id] = (ordering, candidate)
         if len(selected_by_session) >= max(1, limit):
             break
     records = [
@@ -28555,8 +29019,13 @@ def complete_graph_outbox_consumers_from_ledger(
     aoa_root: Path,
     *,
     limit: int = 32,
+    session_id: str | None = None,
 ) -> dict[str, Any]:
-    ready = projection_outbox_ready_sessions(aoa_root, limit=limit)
+    ready = projection_outbox_ready_sessions(
+        aoa_root,
+        limit=limit,
+        session_id=session_id,
+    )
     ledger = read_graph_source_state_ledger(aoa_root)
     entries = (
         ledger.get("sources")
@@ -28646,6 +29115,7 @@ def complete_entity_registry_outbox_consumers(
     aoa_root: Path,
     *,
     limit: int = 32,
+    session_id: str | None = None,
 ) -> dict[str, Any]:
     """Acknowledge entity work only from an exact persisted registry view."""
     registry_state = entity_registry_maintenance_status(aoa_root)
@@ -28690,7 +29160,11 @@ def complete_entity_registry_outbox_consumers(
             ],
         }
 
-    ready = projection_outbox_ready_sessions(aoa_root, limit=limit)
+    ready = projection_outbox_ready_sessions(
+        aoa_root,
+        limit=limit,
+        session_id=session_id,
+    )
     completions: list[dict[str, Any]] = []
     deferred: list[dict[str, Any]] = []
     for candidate in ready.get("records", []):
@@ -28954,6 +29428,106 @@ def session_projection_freshness_vector(
         },
         "truth_status": (
             "independent_freshness_axes_no_cross_axis_promotion"
+        ),
+    }
+
+
+def session_projection_outbox_convergence_status(
+    aoa_root: Path,
+    options: dict[str, Any],
+    *,
+    freshness_status: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Prove one persistent obligation reached every required consumer.
+
+    This is deliberately stricter than the capture/stable/search obligation:
+    a queue item is releasable only after the current immutable outbox record
+    has exact receipts for all of its declared consumers and an append-only
+    retirement receipt binds those states to the same publication.
+    """
+    session_id = str(options.get("session_id") or "")
+    configured_dir = Path(str(options.get("session_dir") or ""))
+    resolved_dir = session_dir_for_id(aoa_root, session_id)
+    session_dir = resolved_dir if resolved_dir.is_dir() else configured_dir
+    freshness = (
+        dict(freshness_status)
+        if isinstance(freshness_status, dict)
+        else session_projection_freshness_obligation_status(aoa_root, options)
+    )
+    manifest = read_json(session_dir / "session.manifest.json", {})
+    if not isinstance(manifest, dict) or not manifest:
+        return {
+            "ok": False,
+            "status": "session_manifest_unavailable",
+            "session_id": session_id,
+            "freshness_obligation": freshness,
+            "outbox_present": False,
+            "pending_consumers": list(PROJECTION_OUTBOX_CONSUMERS),
+            "truth_status": "current_outbox_convergence_not_proven",
+        }
+    publish_id = projection_publish_id(
+        manifest.get("index_schema")
+        if isinstance(manifest.get("index_schema"), dict)
+        else {}
+    )
+    record_path, record = session_projection_outbox_record_for_publish(
+        aoa_root,
+        session_id=str(manifest.get("session_id") or session_id),
+        publish_id=publish_id,
+    )
+    if record_path is None or not record:
+        # A session with no changed-component outbox has no downstream work
+        # to retire.  Its capture/stable/search obligation remains explicit.
+        return {
+            "ok": freshness.get("ok") is True,
+            "status": "no_current_outbox_record",
+            "session_id": str(manifest.get("session_id") or session_id),
+            "source_publish_id": publish_id,
+            "freshness_obligation": freshness,
+            "outbox_present": False,
+            "required_consumers": [],
+            "pending_consumers": [],
+            "terminal_retirement": {
+                "status": "not_required",
+                "ok": True,
+            },
+            "truth_status": (
+                "freshness_proven_and_no_current_changed_component_work"
+                if freshness.get("ok") is True
+                else "current_outbox_convergence_not_proven"
+            ),
+        }
+    retirement = projection_outbox_retirement_status(
+        aoa_root,
+        session_dir=session_dir,
+        record_path=record_path,
+        record=record,
+    )
+    return {
+        "ok": bool(
+            freshness.get("ok") is True and retirement.get("ok") is True
+        ),
+        "status": (
+            "converged"
+            if freshness.get("ok") is True and retirement.get("ok") is True
+            else "remaining"
+        ),
+        "session_id": str(manifest.get("session_id") or session_id),
+        "source_publish_id": publish_id,
+        "freshness_obligation": freshness,
+        "outbox_present": True,
+        "record_id": record.get("record_id"),
+        "record_ref": str(record_path),
+        "required_consumers": retirement.get("required_consumers", []),
+        "pending_consumers": retirement.get("pending_consumers", []),
+        "consumer_completions": retirement.get(
+            "consumer_completions", {}
+        ),
+        "terminal_retirement": retirement,
+        "truth_status": (
+            "all_required_consumers_and_terminal_retirement_proven"
+            if freshness.get("ok") is True and retirement.get("ok") is True
+            else "current_outbox_consumer_or_retirement_proof_remaining"
         ),
     }
 
@@ -67393,6 +67967,8 @@ def _reconcile_session_projection_freshness_obligation_in_payload(
             "freshness_reason": freshness_reason,
             "required_stable_projection": True,
             "required_search_consumer": True,
+            "outbox_convergence_required": True,
+            "convergence_stage": "projection",
             "current_epoch_priority": (
                 current_epoch_priority
                 or existing_options.get("current_epoch_priority") is True
@@ -67732,6 +68308,48 @@ def auto_maintenance_retry_reconcile(
                         },
                         True,
                     )
+                if auto_maintenance_retry_outbox_convergence_required(
+                    aoa_root,
+                    existing_options,
+                ):
+                    convergence = session_projection_outbox_convergence_status(
+                        aoa_root,
+                        existing_options,
+                        freshness_status=obligation,
+                    )
+                    if convergence.get("ok") is not True:
+                        existing["options"] = {
+                            **existing_options,
+                            "outbox_convergence_required": True,
+                            "convergence_stage": (
+                                "downstream"
+                                if obligation.get("ok") is True
+                                else auto_maintenance_retry_convergence_stage(
+                                    existing_options
+                                )
+                            ),
+                        }
+                        existing["last_status"] = (
+                            "freshness_obligation_satisfied_"
+                            "downstream_pending"
+                            if obligation.get("ok") is True
+                            else "outbox_convergence_remaining"
+                        )
+                        existing["updated_at"] = auto_maintenance_retry_iso(
+                            effective_now
+                        )
+                        items[queue_key] = existing
+                        return (
+                            {
+                                "status": (
+                                    "success_not_cleared_outbox_"
+                                    "convergence_remaining"
+                                ),
+                                "obligation": obligation,
+                                "convergence": convergence,
+                            },
+                            True,
+                        )
             items.pop(queue_key, None)
             auto_maintenance_retry_add_history(
                 queue_payload,
@@ -67936,6 +68554,110 @@ AUTO_MAINTENANCE_RETRY_OPTION_KEYS = {
 }
 
 
+def auto_maintenance_retry_outbox_convergence_required(
+    aoa_root: Path,
+    options: dict[str, Any],
+) -> bool:
+    """Determine whether a persistent retry owns a current outbox record."""
+    if options.get("outbox_convergence_required") is False:
+        return False
+    if options.get("outbox_convergence_required") is True:
+        return True
+    if not (
+        options.get("persistent_obligation") is True
+        and options.get("obligation_kind")
+        == SESSION_PROJECTION_FRESHNESS_OBLIGATION_KIND
+    ):
+        return False
+    session_id = str(options.get("session_id") or "")
+    session_dir = session_dir_for_id(aoa_root, session_id)
+    manifest = read_json(session_dir / "session.manifest.json", {})
+    if not isinstance(manifest, dict) or not manifest:
+        return False
+    publish_id = projection_publish_id(
+        manifest.get("index_schema")
+        if isinstance(manifest.get("index_schema"), dict)
+        else {}
+    )
+    record_path, record = session_projection_outbox_record_for_publish(
+        aoa_root,
+        session_id=str(manifest.get("session_id") or session_id),
+        publish_id=publish_id,
+    )
+    return bool(record_path and record)
+
+
+def auto_maintenance_retry_convergence_stage(
+    options: dict[str, Any],
+) -> str:
+    stage = str(options.get("convergence_stage") or "projection")
+    return stage if stage in {"projection", "downstream"} else "projection"
+
+
+def automatic_outbox_convergence_postpass(
+    *,
+    aoa_root: Path,
+    target: str,
+    launch_result_verified: bool,
+) -> dict[str, Any]:
+    """Run only receipt-gated consumer acknowledgements after child work."""
+    if not launch_result_verified:
+        return {
+            "status": "deferred_child_result_unverified",
+            "graph": {},
+            "entity": {},
+            "retirement": {},
+            "mutates": False,
+        }
+    diagnostics: list[str] = []
+    graph: dict[str, Any] = {}
+    entity: dict[str, Any] = {}
+    retirement: dict[str, Any] = {}
+    try:
+        graph = complete_graph_outbox_consumers_from_ledger(
+            aoa_root,
+            limit=1,
+            session_id=target,
+        )
+    except Exception as exc:  # pragma: no cover - defensive runtime boundary
+        diagnostics.append(
+            f"outbox_convergence_graph_postpass_failed:{exc.__class__.__name__}:{exc}"
+        )
+    try:
+        entity = complete_entity_registry_outbox_consumers(
+            aoa_root,
+            limit=1,
+            session_id=target,
+        )
+    except Exception as exc:  # pragma: no cover - defensive runtime boundary
+        diagnostics.append(
+            f"outbox_convergence_entity_postpass_failed:{exc.__class__.__name__}:{exc}"
+        )
+    try:
+        retirement = reconcile_projection_outbox_retirements(
+            aoa_root,
+            limit=1,
+            session_id=target,
+            apply=True,
+        )
+    except Exception as exc:  # pragma: no cover - defensive runtime boundary
+        diagnostics.append(
+            f"outbox_convergence_retirement_postpass_failed:{exc.__class__.__name__}:{exc}"
+        )
+    return {
+        "status": "completed" if not diagnostics else "completed_with_diagnostics",
+        "graph": graph,
+        "entity": entity,
+        "retirement": retirement,
+        "mutates": bool(
+            int_value(graph.get("completed_count"))
+            or int_value(entity.get("completed_count"))
+            or int_value(retirement.get("written_count"))
+        ),
+        "diagnostics": diagnostics,
+    }
+
+
 def auto_maintenance_retry_dispatch(
     *,
     workspace_root: Path,
@@ -68102,6 +68824,31 @@ def auto_maintenance_retry_dispatch(
                     item = items.get(key)
                     if not isinstance(item, dict):
                         return None, changed
+                item_options = (
+                    item.get("options")
+                    if isinstance(item.get("options"), dict)
+                    else {}
+                )
+                if (
+                    persistent_item
+                    and item_options.get("outbox_convergence_required")
+                    is not False
+                    and auto_maintenance_retry_outbox_convergence_required(
+                        aoa_root,
+                        item_options,
+                    )
+                    and item_options.get("outbox_convergence_required")
+                    is not True
+                ):
+                    item["options"] = {
+                        **item_options,
+                        "outbox_convergence_required": True,
+                        "convergence_stage": auto_maintenance_retry_convergence_stage(
+                            item_options
+                        ),
+                    }
+                    item_options = item["options"]
+                    changed = True
                 item["attempts_started"] = max(0, int_value(item.get("attempts_started"))) + 1
                 item["in_flight"] = True
                 item["status"] = "in_flight"
@@ -68198,12 +68945,46 @@ def auto_maintenance_retry_dispatch(
                 if persistent_freshness_obligation
                 else {}
             )
+            outbox_convergence_required = bool(
+                persistent_freshness_obligation
+                and auto_maintenance_retry_outbox_convergence_required(
+                    aoa_root,
+                    stored_options,
+                )
+            )
+            convergence_stage_before = (
+                auto_maintenance_retry_convergence_stage(stored_options)
+                if outbox_convergence_required
+                else ""
+            )
+            convergence_stage_for_launch = convergence_stage_before
+            convergence_before = (
+                session_projection_outbox_convergence_status(
+                    aoa_root,
+                    stored_options,
+                    freshness_status=obligation_before,
+                )
+                if outbox_convergence_required
+                else {}
+            )
+            if (
+                outbox_convergence_required
+                and convergence_stage_for_launch == "projection"
+                and obligation_before.get("ok") is True
+                and convergence_before.get("outbox_present") is True
+            ):
+                # The local freshness stage has already succeeded; the next
+                # automatic cycle owns the global consumer stage.
+                convergence_stage_for_launch = "downstream"
             launch_options = {
                 key: value
                 for key, value in stored_options.items()
                 if key in AUTO_MAINTENANCE_RETRY_OPTION_KEYS
             }
-            if persistent_freshness_obligation:
+            if persistent_freshness_obligation and (
+                not outbox_convergence_required
+                or convergence_stage_for_launch == "projection"
+            ):
                 launch_options.update(
                     {
                         "index_drip_on_block": False,
@@ -68221,10 +69002,40 @@ def auto_maintenance_retry_dispatch(
                         ),
                     }
                 )
-            if obligation_before.get("ok") is True:
+            elif persistent_freshness_obligation:
+                launch_options.update(
+                    {
+                        "index_drip_on_block": False,
+                        "graph_drip_on_block": False,
+                        "repair_indexes": True,
+                        "repair_graph": True,
+                        "child_command_override": (
+                            session_projection_outbox_convergence_child_command(
+                                workspace_root=workspace_root,
+                                aoa_root=aoa_root,
+                                profile=profile,
+                                target=target,
+                                execution_id=execution_id,
+                            )
+                        ),
+                    }
+                )
+            if (
+                persistent_freshness_obligation
+                and outbox_convergence_required
+                and convergence_before.get("ok") is True
+            ) or (
+                persistent_freshness_obligation
+                and not outbox_convergence_required
+                and obligation_before.get("ok") is True
+            ):
                 launch_payload = {
                     "ok": True,
-                    "status": "freshness_obligation_already_satisfied",
+                    "status": (
+                        "outbox_convergence_already_satisfied"
+                        if outbox_convergence_required
+                        else "freshness_obligation_already_satisfied"
+                    ),
                     "result_verified": True,
                     "mutates": False,
                 }
@@ -68277,6 +69088,29 @@ def auto_maintenance_retry_dispatch(
                 if persistent_freshness_obligation
                 else {}
             )
+            outbox_postpass: dict[str, Any] = {}
+            if (
+                outbox_convergence_required
+                and convergence_stage_for_launch == "downstream"
+                and not (
+                    launch_payload.get("status")
+                    == "outbox_convergence_already_satisfied"
+                )
+            ):
+                outbox_postpass = automatic_outbox_convergence_postpass(
+                    aoa_root=aoa_root,
+                    target=target,
+                    launch_result_verified=launch_result_verified,
+                )
+            convergence_after = (
+                session_projection_outbox_convergence_status(
+                    aoa_root,
+                    stored_options,
+                    freshness_status=obligation_after,
+                )
+                if outbox_convergence_required
+                else {}
+            )
             obligation_progressed = bool(
                 persistent_freshness_obligation
                 and int_value(
@@ -68313,17 +69147,59 @@ def auto_maintenance_retry_dispatch(
                     > len(before_satisfied_axes)
                 )
             if persistent_freshness_obligation:
-                launch_result_verified = True
-                if obligation_after.get("ok") is True:
-                    launch_status = "freshness_obligation_satisfied"
-                    launch_ok = True
-                else:
-                    launch_status = (
-                        "freshness_obligation_progressed"
-                        if obligation_progressed
-                        else "freshness_obligation_remaining"
+                if outbox_convergence_required:
+                    before_pending_count = len(
+                        convergence_before.get("pending_consumers", [])
                     )
-                    launch_ok = False
+                    after_pending_count = len(
+                        convergence_after.get("pending_consumers", [])
+                    )
+                    convergence_progressed = bool(
+                        convergence_after.get("ok") is True
+                        or after_pending_count < before_pending_count
+                        or int_value(
+                            outbox_postpass.get("retirement", {}).get(
+                                "written_count"
+                            )
+                        )
+                        > 0
+                    )
+                    if convergence_after.get("ok") is True:
+                        launch_result_verified = True
+                        launch_status = "outbox_convergence_satisfied"
+                        launch_ok = True
+                    elif (
+                        convergence_stage_before == "projection"
+                        and obligation_after.get("ok") is True
+                    ):
+                        launch_status = (
+                            "freshness_obligation_satisfied_"
+                            "downstream_pending"
+                        )
+                        launch_ok = False
+                        convergence_progressed = True
+                    else:
+                        launch_status = (
+                            "outbox_convergence_progressed"
+                            if convergence_progressed
+                            else "outbox_convergence_remaining"
+                        )
+                        launch_ok = False
+                    obligation_progressed = bool(
+                        obligation_progressed or convergence_progressed
+                    )
+                else:
+                    launch_result_verified = True
+                    if obligation_after.get("ok") is True:
+                        launch_status = "freshness_obligation_satisfied"
+                        launch_ok = True
+                    else:
+                        launch_status = (
+                            "freshness_obligation_progressed"
+                            if obligation_progressed
+                            else "freshness_obligation_remaining"
+                        )
+                        launch_ok = False
             completion_semantics = (
                 launch_payload.get("completion_semantics")
                 if isinstance(launch_payload.get("completion_semantics"), dict)
@@ -68380,6 +69256,16 @@ def auto_maintenance_retry_dispatch(
                     "persistent_freshness_obligation": (
                         persistent_freshness_obligation
                     ),
+                    "outbox_convergence_required": (
+                        outbox_convergence_required
+                    ),
+                    "convergence_stage_before": convergence_stage_before,
+                    "convergence_stage_for_launch": (
+                        convergence_stage_for_launch
+                    ),
+                    "convergence_before": convergence_before,
+                    "convergence_after": convergence_after,
+                    "outbox_postpass": outbox_postpass,
                     "freshness_obligation_before": obligation_before,
                     "freshness_obligation_after": obligation_after,
                     "dispatch_selection": dispatch_selection,
@@ -68471,6 +69357,57 @@ def auto_maintenance_retry_dispatch(
                 current["status"] = "pending"
                 current["last_attempt_finished_epoch"] = attempt_finished_epoch
                 current["last_attempt_finished_at"] = auto_maintenance_retry_iso(attempt_finished_epoch)
+                convergence_handoff = bool(
+                    outbox_convergence_required
+                    and convergence_stage_before == "projection"
+                    and convergence_stage_for_launch == "projection"
+                    and obligation_after.get("ok") is True
+                    and convergence_after.get("ok") is not True
+                )
+                if outbox_convergence_required:
+                    next_convergence_stage = (
+                        "downstream"
+                        if convergence_stage_for_launch == "downstream"
+                        or convergence_handoff
+                        else "projection"
+                    )
+                    current["options"] = {
+                        **current_options,
+                        "outbox_convergence_required": True,
+                        "convergence_stage": next_convergence_stage,
+                    }
+                    result_row["convergence_stage_after"] = (
+                        next_convergence_stage
+                    )
+                if convergence_handoff:
+                    current["last_status"] = launch_status
+                    current["last_report_json"] = launch_payload.get("report_json")
+                    current["attempts_started"] = 0
+                    current["progress_cycles"] = max(
+                        0,
+                        int_value(current.get("progress_cycles")),
+                    ) + 1
+                    current["next_delay_seconds"] = 1
+                    current["next_attempt_epoch"] = (
+                        attempt_finished_epoch + 1
+                    )
+                    current["next_attempt_at"] = auto_maintenance_retry_iso(
+                        attempt_finished_epoch + 1
+                    )
+                    current["updated_at"] = auto_maintenance_retry_iso(
+                        attempt_finished_epoch
+                    )
+                    items[queue_key] = current
+                    result_row["disposition"] = (
+                        "projection_stage_completed_downstream_pending"
+                    )
+                    result_row["next_attempt_at"] = current["next_attempt_at"]
+                    result_row["next_delay_seconds"] = 1
+                    auto_maintenance_retry_add_history(
+                        queue_payload,
+                        result_row,
+                    )
+                    return result_row, True
                 if launch_ok:
                     current["last_status"] = launch_status
                     current["last_report_json"] = launch_payload.get("report_json")
@@ -218545,6 +219482,7 @@ REQUIRED_ROOT_FILES = [
     "schemas/raw-capture-state.schema.json",
     "schemas/segment.index.schema.json",
     "schemas/session.manifest.schema.json",
+    "schemas/projection-outbox-retirement.schema.json",
     "schemas/skill-usage-receipt.schema.json",
     "schemas/token-accounting.schema.json",
     "maps/AGENTS.md",

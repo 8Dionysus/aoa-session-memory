@@ -212,6 +212,15 @@ Ready when:
   fair cursor, and fail-closed identity refusals do not consume or advance
   either scheduling opportunity;
 - no heavy necessary projection starves indefinitely;
+- a current projection outbox remains visible until every required consumer
+  has an exact receipt and an append-only terminal-retirement receipt binds
+  those receipts to the same publication;
+- projection retry hands the same persistent obligation to downstream entity
+  and graph work instead of clearing it on capture/search progress, launcher
+  success, or a timer result;
+- bounded arrival and retirement measurements show consumer capacity above the
+  observed arrival rate with explicit headroom, current-work service, and a
+  non-positive or actionable backlog slope;
 - readers see honest stale/fallback state;
 - graph readers distinguish global recall freshness from bounded returned-
   evidence freshness without letting either scope hide the other;
