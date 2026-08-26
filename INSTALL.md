@@ -113,9 +113,13 @@ doctor evaluates the selected installation; audit can still report missing
 live grounding.
 
 An install created with `--no-tests` is a supported runtime shape. The owner
-installer records that choice in a runtime-only install profile. `doctor`
+installer records that choice in a runtime-only install profile. The profile
+also records the source root, local source commit and tree, producer-script
+SHA-256, install timestamp, and a deterministic install identity. `doctor`
 accepts an absent test tree only when that profile is valid and bound to the
-selected workspace and AoA root; accidental test-tree loss still fails.
+selected workspace and AoA root; missing or incomplete source provenance is
+not admitted. A `working_tree` source status is explicit branch-trial
+evidence; current production activation must use a clean canonical checkout.
 Source/export completion and standalone release proof require the full
 portable test suite.
 
@@ -134,3 +138,9 @@ capture, live-overlay, stable-projection, and downstream-consumer progress.
 `auto-maintenance hot --apply` remains the bounded event-driven queue producer;
 the source-rendered retry timer invokes `auto-maintenance-retry`, while
 `projection-catchup` and deep maintenance remain explicit child/repair routes.
+
+For a supported global exact query, a SQLite projection timeout or missing
+index is followed by the same bounded recent live/raw fallback used by the
+ordinary search route. Recovered refs are usable bounded navigation evidence,
+not a global absence claim or proof that every downstream consumer is current;
+the fallback never edits queues, indexes, or raw evidence.

@@ -307,6 +307,7 @@
 | [AOA-SM-D-0092 Durable Publication Progress Receipts Survive Timeout](../AOA-SM-D-0092-durable-publication-progress-receipts-under-timeout.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0092-durable-publication-progress-receipts-under-timeout.md` |
 | [AOA-SM-D-0093 Identity-Bound Session Telemetry Uses Owner Receipt Admission](../AOA-SM-D-0093-identity-bound-session-telemetry-admission.md) | 2026-08-22 | Accepted | `docs/decisions/AOA-SM-D-0093-identity-bound-session-telemetry-admission.md` |
 | [AOA-SM-D-0094 Logical Registry Coverage and Capture-Only Ingress Separation](../AOA-SM-D-0094-logical-registry-coverage-and-capture-only-ingress.md) | 2026-08-22 | Accepted | `docs/decisions/AOA-SM-D-0094-logical-registry-coverage-and-capture-only-ingress.md` |
+| [AOA-SM-D-0097 Source Install Provenance and Bounded Global Exact Recovery](../AOA-SM-D-0097-source-install-provenance-and-bounded-global-exact-recovery.md) | 2026-08-25 | Accepted | `docs/decisions/AOA-SM-D-0097-source-install-provenance-and-bounded-global-exact-recovery.md` |
 
 ## freshness contract
 
@@ -508,6 +509,7 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0094 Logical Registry Coverage and Capture-Only Ingress Separation](../AOA-SM-D-0094-logical-registry-coverage-and-capture-only-ingress.md) | 2026-08-22 | Accepted | `docs/decisions/AOA-SM-D-0094-logical-registry-coverage-and-capture-only-ingress.md` |
 | [AOA-SM-D-0096 Source-Owned Persistent Retry Dispatch Activation](../AOA-SM-D-0096-source-owned-persistent-retry-dispatch-activation.md) | 2026-08-24 | Accepted | `docs/decisions/AOA-SM-D-0096-source-owned-persistent-retry-dispatch-activation.md` |
+| [AOA-SM-D-0097 Source Install Provenance and Bounded Global Exact Recovery](../AOA-SM-D-0097-source-install-provenance-and-bounded-global-exact-recovery.md) | 2026-08-25 | Accepted | `docs/decisions/AOA-SM-D-0097-source-install-provenance-and-bounded-global-exact-recovery.md` |
 
 ## instrumentation
 
@@ -736,6 +738,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0051 Transactional Component Outbox and Vector Freshness](../AOA-SM-D-0051-transactional-component-outbox-and-vector-freshness.md) | 2026-08-10 | Accepted | `docs/decisions/AOA-SM-D-0051-transactional-component-outbox-and-vector-freshness.md` |
+
+## query fallback
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0097 Source Install Provenance and Bounded Global Exact Recovery](../AOA-SM-D-0097-source-install-provenance-and-bounded-global-exact-recovery.md) | 2026-08-25 | Accepted | `docs/decisions/AOA-SM-D-0097-source-install-provenance-and-bounded-global-exact-recovery.md` |
 
 ## query plan
 
@@ -1029,6 +1037,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0018 Owner Capability Home And Skill Evidence Lifecycle](../AOA-SM-D-0018-owner-capability-home-and-skill-evidence-lifecycle.md) | 2026-07-18 | Accepted | `docs/decisions/AOA-SM-D-0018-owner-capability-home-and-skill-evidence-lifecycle.md` |
+
+## source lineage
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0097 Source Install Provenance and Bounded Global Exact Recovery](../AOA-SM-D-0097-source-install-provenance-and-bounded-global-exact-recovery.md) | 2026-08-25 | Accepted | `docs/decisions/AOA-SM-D-0097-source-install-provenance-and-bounded-global-exact-recovery.md` |
 
 ## source-aware admission
 

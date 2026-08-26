@@ -90008,6 +90008,107 @@ def test_raw_fts_search_timeout_returns_bounded_route_packet(tmp_path: Path, mon
     assert fake_conn.closed is True
 
 
+def test_global_exact_search_timeout_uses_bounded_recent_fallback(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    db_path = module.search_db_path(aoa_root)
+    db_path.parent.mkdir(parents=True)
+    db_path.touch()
+    session_id = "11111111-2222-4333-8444-555555555555"
+
+    class TimeoutConnection:
+        def set_progress_handler(self, _handler: Any, _n: int) -> None:
+            return None
+
+        def execute(self, _sql: str, *_args: Any, **_kwargs: Any) -> Any:
+            raise sqlite3.OperationalError("interrupted")
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        module,
+        "connect_existing_search_db",
+        lambda *_args, **_kwargs: TimeoutConnection(),
+    )
+    monkeypatch.setattr(
+        module,
+        "global_recent_exact_fallback_candidates",
+        lambda _root: {
+            "ok": True,
+            "candidates": [
+                {
+                    "session_id": session_id,
+                    "session_label": "fresh-successor",
+                    "status": "deferred",
+                    "scan_mode": "live_tail",
+                    "document_count": 1,
+                    "selection_reason": "recent_registry_transcript_ahead_of_freshness_state",
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "live_tail_exact_search",
+        lambda **_kwargs: {
+            "ok": True,
+            "scan": {"status": "complete_verified"},
+            "result_count": 1,
+            "results": [
+                {
+                    "doc_id": "fresh-successor-event",
+                    "session_id": session_id,
+                    "session_label": "fresh-successor",
+                    "doc_type": "event",
+                    "event_type": "FILE_READ",
+                    "raw_ref": "raw:line:7",
+                    "raw_line": 7,
+                    "match_score": 100.0,
+                }
+            ],
+            "elapsed_ms": 1,
+        },
+    )
+
+    payload = module.search_sessions(
+        aoa_root=aoa_root,
+        query="timeout-anchor-7F9A2C",
+        limit=5,
+        query_timeout_ms=1,
+        explain=True,
+    )
+
+    assert payload["ok"] is True
+    assert payload["provider"]["status"] == module.SEARCH_FTS_QUERY_TIMEOUT_STATUS
+    assert payload["result_count"] == 1
+    assert payload["results"][0]["raw_ref"] == "raw:line:7"
+    assert payload["global_recent_fallback"]["status"] == "applied"
+    assert payload["bounded_timeout"]["recovered_by"] == (
+        "bounded_global_recent_raw_exact_fallback"
+    )
+    assert payload["bounded_timeout"]["recovery_status"] == "applied"
+    assert payload["route_selection"]["selected_route"] == (
+        "bounded_global_recent_raw_exact_fallback"
+    )
+
+    db_path.unlink()
+    missing_payload = module.search_sessions(
+        aoa_root=aoa_root,
+        query="timeout-anchor-7F9A2C",
+        limit=5,
+        explain=True,
+    )
+
+    assert missing_payload["ok"] is True
+    assert missing_payload["search_projection"]["status"] == "missing"
+    assert missing_payload["result_count"] == 1
+    assert missing_payload["results"][0]["raw_ref"] == "raw:line:7"
+    assert missing_payload["global_recent_fallback"]["status"] == "applied"
+
+
 def test_structured_route_filter_stays_within_posting_first_work_budget(
     tmp_path: Path,
     monkeypatch: Any,
@@ -97252,6 +97353,31 @@ def test_install_portable_bundle_creates_clean_target(tmp_path: Path) -> None:
     assert str(module.default_source_aoa_root()) not in rendered_hooks
     assert str(workspace) in rendered_hooks
     assert str(aoa_root) in rendered_hooks
+    install_profile = payload["install_profile"]
+    assert install_profile["schema_version"] == module.INSTALL_PROFILE_SCHEMA_VERSION
+    assert install_profile["source_ref"] == install_profile["source_commit"]
+    assert install_profile["source_commit_ref"] == install_profile["source_commit"]
+    assert install_profile["source_root"] == str(source_aoa.resolve())
+    assert install_profile["source_tree"] == subprocess.check_output(
+        ["git", "-C", str(source_aoa), "rev-parse", "--verify", "HEAD^{tree}"],
+        text=True,
+    ).strip()
+    assert install_profile["source_script"] == "scripts/aoa_session_memory.py"
+    assert install_profile["source_script_sha256"] == (
+        "sha256:" + module.sha256_file_exact(source_aoa / "scripts" / "aoa_session_memory.py")
+    )
+    source_provenance = module.runtime_install_source_provenance(source_aoa)
+    assert install_profile["source_worktree_clean"] == (
+        source_provenance["source_worktree_clean"]
+    )
+    assert install_profile["source_identity_status"] == (
+        source_provenance["identity_status"]
+    )
+    assert install_profile["source_identity"]["status"] == (
+        source_provenance["identity_status"]
+    )
+    assert install_profile["installed_at"] == install_profile["generated_at"]
+    assert install_profile["install_id"].startswith("sha256:")
 
     validation = module.validate_pipeline(workspace_root=workspace, aoa_root=aoa_root)
     assert validation["ok"] is True
@@ -97488,6 +97614,46 @@ def test_doctor_accepts_runtime_install_without_local_tests(
     assert lost_tests_payload["runtime_optional_absent_root_files"] == []
     assert "missing required root file: tests/AGENTS.md" in (
         lost_tests_payload["problems"]
+    )
+
+
+def test_doctor_rejects_runtime_install_without_source_provenance(
+    tmp_path: Path,
+) -> None:
+    source_aoa = SCRIPT.parents[1]
+    workspace = tmp_path / "RuntimeWorkspace"
+    aoa_root = workspace / ".aoa"
+    install_payload = module.install_portable_bundle(
+        source_aoa_root=source_aoa,
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        overwrite=True,
+    )
+    profile = dict(install_payload["install_profile"])
+    profile.pop("source_commit")
+    module.write_json(aoa_root / module.INSTALL_PROFILE_PATH, profile)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "doctor",
+            "--workspace-root",
+            str(workspace),
+            "--aoa-root",
+            str(aoa_root),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+
+    assert result.returncode == 1
+    assert payload["ok"] is False
+    assert payload["runtime_install_profile"]["valid"] is False
+    assert "runtime_install_profile_source_commit_missing" in (
+        payload["runtime_install_profile"]["diagnostics"]
     )
 
 

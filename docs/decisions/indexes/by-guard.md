@@ -209,6 +209,7 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0010 Natural-Language Intent Before Literal Length](../AOA-SM-D-0010-natural-language-intent-before-literal-length.md) | 2026-07-16 | Accepted | `docs/decisions/AOA-SM-D-0010-natural-language-intent-before-literal-length.md` |
 | [AOA-SM-D-0073 Verified Fallback Completion Retires Retry](../AOA-SM-D-0073-verified-fallback-completion-retires-retry.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0073-verified-fallback-completion-retires-retry.md` |
+| [AOA-SM-D-0097 Source Install Provenance and Bounded Global Exact Recovery](../AOA-SM-D-0097-source-install-provenance-and-bounded-global-exact-recovery.md) | 2026-08-25 | Accepted | `docs/decisions/AOA-SM-D-0097-source-install-provenance-and-bounded-global-exact-recovery.md` |
 
 ## bounded follow-up
 
@@ -1159,6 +1160,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0013 Indexed Graph Seed Before Retrieval Fallback](../AOA-SM-D-0013-indexed-graph-seed-before-retrieval-fallback.md) | 2026-07-17 | Accepted | `docs/decisions/AOA-SM-D-0013-indexed-graph-seed-before-retrieval-fallback.md` |
 
+## install admission
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0097 Source Install Provenance and Bounded Global Exact Recovery](../AOA-SM-D-0097-source-install-provenance-and-bounded-global-exact-recovery.md) | 2026-08-25 | Accepted | `docs/decisions/AOA-SM-D-0097-source-install-provenance-and-bounded-global-exact-recovery.md` |
+
 ## intent coalescing
 
 | Decision | Date | Status | Path |
@@ -1214,6 +1221,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0058 Persisted Live-Tail State Precedes Resource Admission](../AOA-SM-D-0058-persisted-live-tail-state-precedes-resource-admission.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0058-persisted-live-tail-state-precedes-resource-admission.md` |
+
+## local source identity
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0097 Source Install Provenance and Bounded Global Exact Recovery](../AOA-SM-D-0097-source-install-provenance-and-bounded-global-exact-recovery.md) | 2026-08-25 | Accepted | `docs/decisions/AOA-SM-D-0097-source-install-provenance-and-bounded-global-exact-recovery.md` |
 
 ## local work attribution
 
@@ -1582,6 +1595,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0003 Session-Scoped Archived Raw Exact Fallback](../AOA-SM-D-0003-session-scoped-archived-raw-exact-fallback.md) | 2026-07-15 | Accepted | `docs/decisions/AOA-SM-D-0003-session-scoped-archived-raw-exact-fallback.md` |
+
+## query timeout
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0097 Source Install Provenance and Bounded Global Exact Recovery](../AOA-SM-D-0097-source-install-provenance-and-bounded-global-exact-recovery.md) | 2026-08-25 | Accepted | `docs/decisions/AOA-SM-D-0097-source-install-provenance-and-bounded-global-exact-recovery.md` |
 
 ## query-demand priority
 

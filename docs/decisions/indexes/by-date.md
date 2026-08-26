@@ -4,6 +4,7 @@
 
 | Date | Decision | Status | Path |
 | --- | --- | --- | --- |
+| 2026-08-25 | [AOA-SM-D-0097 Source Install Provenance and Bounded Global Exact Recovery](../AOA-SM-D-0097-source-install-provenance-and-bounded-global-exact-recovery.md) | Accepted | `docs/decisions/AOA-SM-D-0097-source-install-provenance-and-bounded-global-exact-recovery.md` |
 | 2026-08-24 | [AOA-SM-D-0096 Source-Owned Persistent Retry Dispatch Activation](../AOA-SM-D-0096-source-owned-persistent-retry-dispatch-activation.md) | Accepted | `docs/decisions/AOA-SM-D-0096-source-owned-persistent-retry-dispatch-activation.md` |
 | 2026-08-24 | [AOA-SM-D-0095 Capture-Bound Retry Obligation Supersession](../AOA-SM-D-0095-capture-bound-retry-obligation-supersession.md) | Accepted | `docs/decisions/AOA-SM-D-0095-capture-bound-retry-obligation-supersession.md` |
 | 2026-08-22 | [AOA-SM-D-0094 Logical Registry Coverage and Capture-Only Ingress Separation](../AOA-SM-D-0094-logical-registry-coverage-and-capture-only-ingress.md) | Accepted | `docs/decisions/AOA-SM-D-0094-logical-registry-coverage-and-capture-only-ingress.md` |

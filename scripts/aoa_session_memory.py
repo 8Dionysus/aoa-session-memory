@@ -538,7 +538,17 @@ class SearchSqliteConnection(sqlite3.Connection):
 SESSION_ROOT = Path("sessions")
 DIAGNOSTICS_ROOT = Path("diagnostics")
 INSTALL_PROFILE_PATH = DIAGNOSTICS_ROOT / "install-profile.json"
-INSTALL_PROFILE_SCHEMA_VERSION = "aoa_session_memory_install_profile_v1"
+INSTALL_PROFILE_SCHEMA_VERSION = "aoa_session_memory_install_profile_v2"
+INSTALL_PROFILE_SOURCE_SCRIPT = Path("scripts/aoa_session_memory.py")
+INSTALL_PROFILE_SOURCE_IDENTITY_FIELDS = (
+    "source_ref",
+    "source_root",
+    "source_commit",
+    "source_tree",
+    "source_script",
+    "source_script_sha256",
+    "source_worktree_clean",
+)
 MAINTENANCE_COORDINATOR_STATE_JSON = "maintenance-coordinator.json"
 MAINTENANCE_BULK_MODES = {"catchup", "backlog", "deep", "manual-bulk"}
 HOOK_JOBS_ROOT = DIAGNOSTICS_ROOT / "hook-jobs"
@@ -3694,6 +3704,26 @@ def install_portable_bundle(
     backup_hooks: bool = True,
     systemd_unit_dir: Path | None = None,
 ) -> dict[str, Any]:
+    source_provenance = runtime_install_source_provenance(source_aoa_root)
+    if source_provenance["status"] != "current":
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "ok": False,
+            "status": "source_install_provenance_unresolved",
+            "workspace_root": str(workspace_root),
+            "aoa_root": str(aoa_root),
+            "source_identity": source_provenance,
+            "diagnostics": [
+                "runtime install refused before mutation: source identity is "
+                "not a clean, locally addressable Git source"
+            ],
+            "systemd_units": {
+                "ok": False,
+                "status": "not_written",
+                "unit_dir": str(systemd_unit_dir) if systemd_unit_dir else None,
+                "written": [],
+            },
+        }
     rendered_systemd_units: dict[str, str] | None = None
     systemd_target = Path(systemd_unit_dir).expanduser() if systemd_unit_dir else None
     if systemd_target is not None:
@@ -3730,16 +3760,51 @@ def install_portable_bundle(
     )
     hook_config = build_user_hooks_config(workspace_root, aoa_root)
     write_json(aoa_root / "hooks" / "codex-hooks.user.example.json", hook_config)
+    installed_at = utc_now()
+    install_id_basis = {
+        "source_ref": source_provenance["source_ref"],
+        "source_tree": source_provenance["source_tree"],
+        "source_script_sha256": source_provenance["source_script_sha256"],
+        "aoa_root": str(aoa_root.resolve()),
+        "installed_at": installed_at,
+    }
+    install_id = "sha256:" + hashlib.sha256(
+        json.dumps(
+            install_id_basis,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    source_identity = {
+        "status": source_provenance["identity_status"],
+        **{
+            key: source_provenance[key]
+            for key in INSTALL_PROFILE_SOURCE_IDENTITY_FIELDS
+        },
+    }
     install_profile = {
         "schema_version": INSTALL_PROFILE_SCHEMA_VERSION,
         "artifact_type": "runtime_install_profile",
-        "generated_at": utc_now(),
+        "generated_at": installed_at,
+        "installed_at": installed_at,
         "installation_kind": "workspace_runtime",
         "workspace_root": str(workspace_root.resolve()),
         "aoa_root": str(aoa_root.resolve()),
         "include_sessions": bool(include_sessions),
         "include_tests": bool(include_tests),
         "producer": "aoa-session-memory install",
+        "install_id": install_id,
+        "source_identity_status": source_provenance["identity_status"],
+        "source_identity": source_identity,
+        "source_ref": source_provenance["source_ref"],
+        "source_root": source_provenance["source_root"],
+        "source_commit": source_provenance["source_commit"],
+        "source_commit_ref": source_provenance["source_commit"],
+        "source_tree": source_provenance["source_tree"],
+        "source_script": source_provenance["source_script"],
+        "source_script_sha256": source_provenance["source_script_sha256"],
+        "source_worktree_clean": source_provenance["source_worktree_clean"],
     }
     if systemd_target is not None:
         install_profile["systemd_unit_dir"] = str(systemd_target.resolve(strict=False))
@@ -4376,6 +4441,130 @@ def sha256_file_exact(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def install_profile_git_revision(
+    source_root: Path,
+    revision: str,
+) -> tuple[str | None, str | None]:
+    """Read one local Git object identity without consulting a remote."""
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(source_root), "rev-parse", "--verify", revision],
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None, "git_revision_unavailable"
+    value = (completed.stdout or "").strip().lower()
+    if completed.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", value):
+        return None, "git_revision_unavailable"
+    return value, None
+
+
+def install_profile_git_clean(
+    source_root: Path,
+) -> tuple[bool, str | None]:
+    """Require the recorded commit/tree to describe the bytes being installed."""
+    try:
+        completed = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(source_root),
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+            ],
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False, "git_worktree_status_unavailable"
+    if completed.returncode != 0:
+        return False, "git_worktree_status_unavailable"
+    if (completed.stdout or "").strip():
+        return False, "source_worktree_dirty"
+    return True, None
+
+
+def runtime_install_source_provenance(source_aoa_root: Path) -> dict[str, Any]:
+    """Return the local source identity required for a trusted runtime install."""
+    source_root = Path(source_aoa_root).expanduser().resolve()
+    source_script_path = source_root / INSTALL_PROFILE_SOURCE_SCRIPT
+    diagnostics: list[str] = []
+    source_script_sha256 = ""
+    try:
+        source_script_sha256 = f"sha256:{sha256_file_exact(source_script_path)}"
+    except OSError:
+        diagnostics.append("source_script_unreadable")
+    source_commit, commit_diagnostic = install_profile_git_revision(
+        source_root,
+        "HEAD^{commit}",
+    )
+    if commit_diagnostic:
+        diagnostics.append("source_commit_unresolved")
+    source_tree, tree_diagnostic = install_profile_git_revision(
+        source_root,
+        "HEAD^{tree}",
+    )
+    if tree_diagnostic:
+        diagnostics.append("source_tree_unresolved")
+    source_worktree_clean, clean_diagnostic = install_profile_git_clean(source_root)
+    if clean_diagnostic:
+        diagnostics.append(clean_diagnostic)
+    if not source_script_sha256:
+        diagnostics.append("source_script_sha256_unresolved")
+    fatal_diagnostics = [
+        diagnostic
+        for diagnostic in diagnostics
+        if diagnostic != "source_worktree_dirty"
+    ]
+    status = "current" if not fatal_diagnostics else "unresolved"
+    identity_status = (
+        "working_tree"
+        if status == "current" and not source_worktree_clean
+        else status
+    )
+    return {
+        "status": status,
+        "identity_status": identity_status,
+        "source_ref": source_commit or "",
+        "source_root": str(source_root),
+        "source_commit": source_commit or "",
+        "source_tree": source_tree or "",
+        "source_script": INSTALL_PROFILE_SOURCE_SCRIPT.as_posix(),
+        "source_script_sha256": source_script_sha256,
+        "source_worktree_clean": source_worktree_clean,
+        "diagnostics": sorted(set(diagnostics)),
+    }
+
+
+def runtime_install_profile_source_identity(
+    profile: dict[str, Any],
+) -> dict[str, Any]:
+    """Project only non-secret install provenance into doctor/read-model output."""
+    nested = profile.get("source_identity")
+    nested_identity = nested if isinstance(nested, dict) else {}
+    return {
+        "status": str(profile.get("source_identity_status") or "unresolved"),
+        "source_ref": profile.get("source_ref"),
+        "source_root": profile.get("source_root"),
+        "source_commit": profile.get("source_commit"),
+        "source_tree": profile.get("source_tree"),
+        "source_script": profile.get("source_script"),
+        "source_script_sha256": profile.get("source_script_sha256"),
+        "source_worktree_clean": profile.get("source_worktree_clean"),
+        "nested_status": nested_identity.get("status"),
+    }
 
 
 def session_memory_loaded_producer_source_state() -> dict[str, Any]:
@@ -126147,6 +126336,18 @@ def apply_global_recent_exact_fallback(
         )
     )
     if recovered:
+        if payload.get("ok") is False:
+            payload["ok"] = True
+            payload["truth_status"] = (
+                "bounded_recent_raw_evidence_supplemented_generated_search"
+                "_not_source_truth"
+            )
+        bounded_timeout = payload.get("bounded_timeout")
+        if isinstance(bounded_timeout, dict):
+            bounded_timeout["recovered_by"] = (
+                "bounded_global_recent_raw_exact_fallback"
+            )
+            bounded_timeout["recovery_status"] = "applied"
         route_selection = (
             payload.get("route_selection")
             if isinstance(payload.get("route_selection"), dict)
@@ -126516,35 +126717,37 @@ def search_sessions(
             },
             "diagnostics": ["search index missing; run search-index"],
         }
-        return recover_search_projection_failure_with_archived_raw_exact(
-            missing_payload,
-            aoa_root=aoa_root,
-            query=query,
-            session=session,
-            limit=limit,
-            event_id_before=event_id_before,
-            doc_type=doc_type,
-            event_type=event_type,
-            family=family,
-            outcome=outcome,
-            conversation_act=conversation_act,
-            session_act=session_act,
-            agent_event=normalized_agent_event,
-            usage_role=usage_role,
-            task_episode_id=task_episode_id,
-            route_layer=route_layer,
-            route_signal=route_signal,
-            archive_status=archive_status,
-            freshness_status=freshness_status,
-            date_from=date_from,
-            date_to=date_to,
-            exclude_agent_event_stream_copies=(
-                exclude_agent_event_stream_copies
-            ),
-            explain=explain,
-            enabled=include_archived_raw_fallback,
-            failure_kind="index_missing",
-            failure_scope="published_projection",
+        return with_global_recent_exact_fallback(
+            recover_search_projection_failure_with_archived_raw_exact(
+                missing_payload,
+                aoa_root=aoa_root,
+                query=query,
+                session=session,
+                limit=limit,
+                event_id_before=event_id_before,
+                doc_type=doc_type,
+                event_type=event_type,
+                family=family,
+                outcome=outcome,
+                conversation_act=conversation_act,
+                session_act=session_act,
+                agent_event=normalized_agent_event,
+                usage_role=usage_role,
+                task_episode_id=task_episode_id,
+                route_layer=route_layer,
+                route_signal=route_signal,
+                archive_status=archive_status,
+                freshness_status=freshness_status,
+                date_from=date_from,
+                date_to=date_to,
+                exclude_agent_event_stream_copies=(
+                    exclude_agent_event_stream_copies
+                ),
+                explain=explain,
+                enabled=include_archived_raw_fallback,
+                failure_kind="index_missing",
+                failure_scope="published_projection",
+            )
         )
     filters: list[str] = []
     params: list[Any] = []
@@ -127397,7 +127600,7 @@ def search_sessions(
             )
             if session_segment_route is not None:
                 return session_segment_route
-            return recovered_timeout_payload
+            return with_global_recent_exact_fallback(recovered_timeout_payload)
         return {
             "schema_version": SCHEMA_VERSION,
             "artifact_type": "search_results",
@@ -217714,6 +217917,7 @@ def runtime_install_profile_status(
             "present": False,
             "valid": False,
             "include_tests": None,
+            "source_identity": {"status": "absent"},
             "diagnostics": ["runtime_install_profile_absent"],
         }
     diagnostics: list[str] = []
@@ -217744,6 +217948,60 @@ def runtime_install_profile_status(
             observed = None
         if observed != expected:
             diagnostics.append(f"runtime_install_profile_{field}_mismatch")
+    source_identity = runtime_install_profile_source_identity(payload)
+    if source_identity["status"] not in {"current", "working_tree"}:
+        diagnostics.append("runtime_install_profile_source_identity_status_unresolved")
+    if not str(payload.get("source_ref") or ""):
+        diagnostics.append("runtime_install_profile_source_ref_missing")
+    if not str(payload.get("source_root") or ""):
+        diagnostics.append("runtime_install_profile_source_root_missing")
+    if not re.fullmatch(
+        r"[0-9a-f]{40}|[0-9a-f]{64}",
+        str(payload.get("source_commit") or "").lower(),
+    ):
+        diagnostics.append("runtime_install_profile_source_commit_missing")
+    if payload.get("source_ref") != payload.get("source_commit"):
+        diagnostics.append("runtime_install_profile_source_ref_mismatch")
+    if payload.get("source_commit_ref") != payload.get("source_commit"):
+        diagnostics.append("runtime_install_profile_source_commit_ref_mismatch")
+    if not re.fullmatch(
+        r"[0-9a-f]{40}|[0-9a-f]{64}",
+        str(payload.get("source_tree") or "").lower(),
+    ):
+        diagnostics.append("runtime_install_profile_source_tree_missing")
+    if payload.get("source_script") != INSTALL_PROFILE_SOURCE_SCRIPT.as_posix():
+        diagnostics.append("runtime_install_profile_source_script_mismatch")
+    if not re.fullmatch(
+        r"sha256:[0-9a-f]{64}",
+        str(payload.get("source_script_sha256") or "").lower(),
+    ):
+        diagnostics.append("runtime_install_profile_source_script_sha256_missing")
+    if not isinstance(payload.get("source_worktree_clean"), bool):
+        diagnostics.append("runtime_install_profile_source_worktree_clean_not_boolean")
+    installed_at = str(payload.get("installed_at") or "")
+    if not installed_at:
+        diagnostics.append("runtime_install_profile_installed_at_missing")
+    else:
+        try:
+            datetime.fromisoformat(installed_at.replace("Z", "+00:00"))
+        except ValueError:
+            diagnostics.append("runtime_install_profile_installed_at_invalid")
+    if not re.fullmatch(
+        r"sha256:[0-9a-f]{64}",
+        str(payload.get("install_id") or "").lower(),
+    ):
+        diagnostics.append("runtime_install_profile_install_id_missing")
+    nested = payload.get("source_identity")
+    if not isinstance(nested, dict):
+        diagnostics.append("runtime_install_profile_source_identity_missing")
+    else:
+        if nested.get("status") not in {"current", "working_tree"}:
+            diagnostics.append("runtime_install_profile_nested_source_identity_unresolved")
+        for field in INSTALL_PROFILE_SOURCE_IDENTITY_FIELDS:
+            if nested.get(field) != payload.get(field):
+                diagnostics.append(
+                    f"runtime_install_profile_nested_{field}_mismatch"
+                )
     return {
         "path": str(path),
         "present": True,
@@ -217751,6 +218009,14 @@ def runtime_install_profile_status(
         "include_tests": payload.get("include_tests"),
         "include_sessions": payload.get("include_sessions"),
         "generated_at": payload.get("generated_at"),
+        "installed_at": payload.get("installed_at"),
+        "install_id": payload.get("install_id"),
+        "source_ref": payload.get("source_ref"),
+        "source_root": payload.get("source_root"),
+        "source_commit": payload.get("source_commit"),
+        "source_tree": payload.get("source_tree"),
+        "source_script_sha256": payload.get("source_script_sha256"),
+        "source_identity": source_identity,
         "diagnostics": diagnostics,
     }
 
