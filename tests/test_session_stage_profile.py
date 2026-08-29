@@ -685,6 +685,141 @@ def test_unresolved_call_does_not_become_zero_duration(tmp_path: Path) -> None:
     assert stage["span_seconds"] is None
 
 
+@pytest.mark.parametrize(
+    "mutation, expected_error",
+    [
+        ("hole", "bounded_prefix_segment_coverage_incomplete"),
+        ("duplicate", "bounded_prefix_segment_event_duplicate"),
+        ("generation", "bounded_prefix_segment_generation_mismatch"),
+        ("publish", "bounded_prefix_segment_projection_mismatch"),
+    ],
+)
+def test_normal_profile_rejects_holes_duplicates_and_stale_source_identity(
+    tmp_path: Path,
+    mutation: str,
+    expected_error: str,
+) -> None:
+    aoa_root = write_fixture_session(tmp_path)
+    segment_path = (
+        aoa_root
+        / "sessions"
+        / "2026-08-20__001__fixture"
+        / "segments"
+        / "000__initial-to-latest.index.json"
+    )
+    segment = json.loads(segment_path.read_text(encoding="utf-8"))
+    if mutation == "hole":
+        segment["events"] = [event for event in segment["events"] if event.get("line") != 4]
+    elif mutation == "duplicate":
+        segment["events"].append(dict(segment["events"][-1]))
+    elif mutation == "generation":
+        segment["generation_id"] = "9" * 64
+    elif mutation == "publish":
+        segment["projection_publish"]["publish_id"] = "9" * 64
+    write_json(segment_path, segment)
+    refresh_segment_receipt(
+        aoa_root / "sessions" / "2026-08-20__001__fixture",
+        segment_path,
+    )
+    report = MODULE.build_report(aoa_root, ["2026-08-20__001__fixture"], max_episodes=10)
+    assert report["sessions"] == []
+    assert report["corpus"]["failed_selectors"][0]["error"] == expected_error
+
+
+@pytest.mark.parametrize(
+    "mutation, expected_error",
+    [
+        ("escape", "source_raw_snapshot_path_outside_session"),
+        ("symlink", "source_raw_snapshot_symlink"),
+        ("missing", "source_raw_snapshot_missing"),
+    ],
+)
+def test_normal_profile_rejects_raw_path_escape_symlink_and_fallback(
+    tmp_path: Path,
+    mutation: str,
+    expected_error: str,
+) -> None:
+    aoa_root = write_fixture_session(tmp_path)
+    session_dir = aoa_root / "sessions" / "2026-08-20__001__fixture"
+    manifest_path = session_dir / "session.manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    raw_path = session_dir / "raw" / "session.raw.jsonl"
+    if mutation == "escape":
+        escaped = tmp_path / "escaped.raw.jsonl"
+        escaped.write_bytes(raw_path.read_bytes())
+        manifest["raw"]["path"] = str(escaped)
+    elif mutation == "symlink":
+        target = tmp_path / "symlink-target.raw.jsonl"
+        target.write_bytes(raw_path.read_bytes())
+        raw_path.unlink()
+        raw_path.symlink_to(target)
+        manifest["raw"]["path"] = str(raw_path)
+    else:
+        manifest["raw"]["path"] = str(session_dir / "raw" / "missing.raw.jsonl")
+    write_json(manifest_path, manifest)
+
+    report = MODULE.build_report(aoa_root, ["2026-08-20__001__fixture"], max_episodes=10)
+    assert report["sessions"] == []
+    assert report["corpus"]["failed_selectors"][0]["error"] == expected_error
+
+
+def test_normal_profile_uses_generated_indexes_without_opening_raw_body(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aoa_root = write_fixture_session(tmp_path)
+    raw_path = (
+        aoa_root
+        / "sessions"
+        / "2026-08-20__001__fixture"
+        / "raw"
+        / "session.raw.jsonl"
+    )
+    original_open = Path.open
+
+    def forbid_raw_open(self: Path, *args: object, **kwargs: object):
+        if self == raw_path:
+            raise AssertionError("normal profiler attempted to open transcript body")
+        return original_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", forbid_raw_open)
+    report = MODULE.build_report(aoa_root, ["2026-08-20__001__fixture"], max_episodes=10)
+    assert report["sessions"]
+
+
+@pytest.mark.parametrize(
+    "mutation, expected_error",
+    [
+        ("missing", "episode_component_missing"),
+        ("empty", "episode_component_payload_missing"),
+    ],
+)
+def test_normal_profile_fails_closed_on_incomplete_task_episode_components(
+    tmp_path: Path,
+    mutation: str,
+    expected_error: str,
+) -> None:
+    aoa_root = write_fixture_session(tmp_path)
+    session_dir = aoa_root / "sessions" / "2026-08-20__001__fixture"
+    manifest_path = session_dir / "session-index-shards" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    entry = manifest["components"]["task_episodes"][0]
+    if mutation == "missing":
+        entry["ref"] = "session-index-shards/task-episodes/missing.json"
+        manifest["component_order"]["task_episodes"] = [entry["ref"]]
+    else:
+        episode_path = session_dir / entry["ref"]
+        episode = json.loads(episode_path.read_text(encoding="utf-8"))
+        episode["payload"] = {}
+        write_json(episode_path, episode)
+        entry["artifact_sha256"] = hashlib.sha256(episode_path.read_bytes()).hexdigest()
+    write_json(manifest_path, manifest)
+
+    report = MODULE.build_report(aoa_root, ["2026-08-20__001__fixture"], max_episodes=10)
+    assert report["sessions"] == []
+    assert report["corpus"]["failed_selectors"][0]["error"] == expected_error
+
+
 def test_bounded_prefix_is_identity_bound_and_excludes_a_moving_tail(tmp_path: Path) -> None:
     aoa_root, session_dir, pin = write_bounded_prefix_fixture(tmp_path)
     report = MODULE.build_bounded_report(

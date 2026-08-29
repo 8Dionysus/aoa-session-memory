@@ -253,6 +253,16 @@ Ready for promotion only when:
 Finding a candidate is not promotion. A session-memory packet never grants
 training, skill, automation, policy, or owner-write authority.
 
+For experience metabolism, mechanical readiness additionally requires a
+closed/reviewed eligibility gate, privacy-safe bounded refs, explicit
+counterevidence, and a reversible lifecycle packet. A recurring motif may
+enter review, but it cannot enter eval without independent review, cannot enter
+shadow without the eval route, and cannot be accepted without paired,
+held-out, ablation, baseline, trajectory-cost, owner, and live-canary
+evidence. Owner acceptance yields an adoption-review state; a separate
+adoption receipt is required before any adoption flag. A directional shadow
+delta is measurement, not a benefit verdict.
+
 ### 12. Portability
 
 Ready when:

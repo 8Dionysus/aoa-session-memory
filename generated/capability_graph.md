@@ -2,7 +2,7 @@
 
 Derived from `capabilities/families/*.yaml`. This file is a read model, not capability authority.
 
-Source content hash: `611282572c3c966e5c7ca14b15d100980e0a7169f3d22ee81c0cce0b092b5eab`
+Source content hash: `f6d51e2a0f348f2444f337fa652440d931296924119cd3b503d3d25da1c3a74a`
 
 ## Semantic tree
 
@@ -23,6 +23,7 @@ Source content hash: `611282572c3c966e5c7ca14b15d100980e0a7169f3d22ee81c0cce0b09
       - `skill.aoa-session-raw-diagnostic` (skill, deferred, challenger)
     - `session-memory.stewardship.curate` (capability, internal, healthy)
       - `skill.aoa-session-batch-distill` (skill, deferred, challenger)
+      - `skill.aoa-session-experience-metabolism` (skill, deferred, challenger)
       - `skill.aoa-session-first-pass-distill` (skill, deferred, challenger)
       - `skill.aoa-session-manual-review` (skill, deferred, challenger)
     - `session-memory.stewardship.name` (capability, internal, healthy)
@@ -73,6 +74,7 @@ Source content hash: `611282572c3c966e5c7ca14b15d100980e0a7169f3d22ee81c0cce0b09
 | primary-parent | `skill.aoa-codex-session-segment-archive` | `session-memory.adapters.codex` | - |
 | primary-parent | `skill.aoa-session-archive-init` | `session-memory.stewardship.capture` | - |
 | primary-parent | `skill.aoa-session-batch-distill` | `session-memory.stewardship.curate` | - |
+| primary-parent | `skill.aoa-session-experience-metabolism` | `session-memory.stewardship.curate` | - |
 | primary-parent | `skill.aoa-session-first-pass-distill` | `session-memory.stewardship.curate` | - |
 | primary-parent | `skill.aoa-session-history-import` | `session-memory.stewardship.capture` | - |
 | primary-parent | `skill.aoa-session-manual-review` | `session-memory.stewardship.curate` | - |

@@ -2,7 +2,7 @@
 
 Generated from owner capability contracts. This card is a retrieval read model, not procedure or proof authority.
 
-Source graph hash: `611282572c3c966e5c7ca14b15d100980e0a7169f3d22ee81c0cce0b092b5eab`
+Source graph hash: `f6d51e2a0f348f2444f337fa652440d931296924119cd3b503d3d25da1c3a74a`
 Federation: `aoa-session-memory` specializes `aoa-skills:sessions`.
 
 | skill | visibility | use when | do not use when | version | fingerprint |
@@ -14,6 +14,7 @@ Federation: `aoa-session-memory` specializes `aoa-skills:sessions`.
 | `aoa-codex-session-segment-archive` | deferred | A concrete Codex transcript must be archived or a missed archive event must be replayed. | The source is not a Codex transcript or the raw source cannot be read and verified. | 1.0.0 | `06f718756dbb22dd` |
 | `aoa-session-archive-init` | deferred | A workspace lacks a valid session-memory root or requires an explicit install or repair. | The selected root is already healthy and no install or repair was requested. | 1.0.0 | `87fec5f9466556ab` |
 | `aoa-session-batch-distill` | deferred | A reviewed set of indexed sessions needs a bounded provisional distillation wave. | Exactly one indexed session is in scope; use first-pass distill.; The operator expects automatic promotion. | 1.0.0 | `653ff014b7b39c0f` |
+| `aoa-session-experience-metabolism` | deferred | A bounded set of closed; reviewed; aligned stage profiles needs privacy-safe recurring-motif candidates. | The evidence is raw; live; provisional; or asks for an eval verdict or automatic adoption. | 1.0.0 | `c7b79fab929414cd` |
 | `aoa-session-first-pass-distill` | deferred | One indexed session needs provisional candidate extraction. | The task asks for reviewed truth; final promotion; or a multi-session conveyor. | 1.0.0 | `2b577834951dd51f` |
 | `aoa-session-history-import` | deferred | Historical Codex JSONL sources must be discovered and imported into one selected root. | Only the current live transcript needs archiving or the history source is not explicitly bound. | 1.0.0 | `9aa0e6b23b0a92fa` |
 | `aoa-session-manual-review` | deferred | Provisional candidates require bounded human review and owner resolution. | No provisional candidate or evidence packet exists. | 1.0.0 | `2f8c40371a91adf6` |

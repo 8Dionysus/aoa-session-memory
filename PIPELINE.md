@@ -1304,6 +1304,16 @@ First-pass distillation and review waves create candidate packets. They are
 append-only work queues, not promotion. Durable memory, skill, automation, and
 policy changes return to their owning repositories.
 
+Experience metabolism is a separate generated-profile consumer. Its
+`aoa-session-experience-metabolism` skill admits only closed, explicitly
+reviewed, source-aligned stage profiles and emits privacy-safe recurring
+motifs with provenance, counterevidence, causal abstention, and trajectory
+cost. Same-session frequency is not recurrence. Candidate, independent
+review, eval, paired/held-out/ablation comparison, live shadow, owner
+acceptance, and adoption remain separate receipts; an absent or conflicting
+receipt routes to review or rejection and never silently changes a skill or
+policy.
+
 ## 14. Portable export and install
 
 Portable export copies authored kernel files and source fixtures while

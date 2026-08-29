@@ -190,6 +190,64 @@ def _owner_current_context(
     }
 
 
+def _verify_published_source_identity(
+    session_dir: Path,
+    manifest: Mapping[str, Any],
+    source: Mapping[str, Any],
+) -> None:
+    """Validate an optional published raw-source anchor without reading it."""
+
+    raw = manifest.get("raw") if isinstance(manifest.get("raw"), Mapping) else None
+    if raw is None:
+        raise ProfileError("source_raw_identity_receipt_missing")
+    declared_path = raw.get("path")
+    if declared_path is not None:
+        if not isinstance(declared_path, str) or not declared_path.strip():
+            raise ProfileError("source_raw_snapshot_path_missing")
+        raw_path = Path(declared_path)
+        if any(part == ".." for part in raw_path.parts):
+            raise ProfileError("source_raw_snapshot_path_invalid")
+        try:
+            session_root = session_dir.resolve(strict=True)
+        except OSError as exc:
+            raise ProfileError("source_session_root_unreadable") from exc
+        if raw_path.is_absolute():
+            try:
+                relative_path = raw_path.relative_to(session_root)
+            except ValueError as exc:
+                raise ProfileError("source_raw_snapshot_path_outside_session") from exc
+            anchored_path = raw_path
+        else:
+            relative_path = raw_path
+            anchored_path = session_root / relative_path
+        if not relative_path.parts or any(part in {"", "."} for part in relative_path.parts):
+            raise ProfileError("source_raw_snapshot_path_invalid")
+        current = session_root
+        try:
+            for part in relative_path.parts:
+                current = current / part
+                if current.is_symlink():
+                    raise ProfileError("source_raw_snapshot_symlink")
+            if not anchored_path.is_file():
+                raise ProfileError("source_raw_snapshot_missing")
+            resolved_path = anchored_path.resolve(strict=True)
+            resolved_path.relative_to(session_root)
+            if not resolved_path.is_file():
+                raise ProfileError("source_raw_snapshot_missing")
+        except ProfileError:
+            raise
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise ProfileError("source_raw_snapshot_unreadable") from exc
+
+    for key, manifest_key in (
+        ("raw_sha256", "sha256"),
+        ("raw_bytes", "bytes"),
+        ("raw_line_count", "line_count"),
+    ):
+        if raw.get(manifest_key) != source.get(key):
+            raise ProfileError(f"source_raw_snapshot_identity_mismatch:{key}")
+
+
 def int_value(value: Any) -> int | None:
     if isinstance(value, bool):
         return None
@@ -378,11 +436,28 @@ def result_status(events: Iterable[dict[str, Any]]) -> str | None:
     return next((value for value in values if value), None)
 
 
+def _profile_session_ref(
+    session_label: str,
+    owner_root_witness: identity_telemetry.OwnerRootWitness | None,
+) -> str:
+    if owner_root_witness is None:
+        # Direct in-memory episode profiling has no owner root to bind. This
+        # fallback is content-free; persisted/report paths always provide the
+        # owner-issued witness at their call boundary.
+        return "session:sha256:" + hashlib.sha256(
+            str(session_label).encode("utf-8")
+        ).hexdigest()[:16]
+    return identity_telemetry.public_session_ref(
+        session_label,
+        owner_root_witness=owner_root_witness,
+    )
+
+
 def logical_ref(
     session_label: str,
     event: dict[str, Any],
     *,
-    owner_root_witness: identity_telemetry.OwnerRootWitness,
+    owner_root_witness: identity_telemetry.OwnerRootWitness | None = None,
 ) -> dict[str, str]:
     line = int_value(event.get("line"))
     segment_id = "unknown"
@@ -390,10 +465,7 @@ def logical_ref(
     if anchor:
         segment_id = anchor.split("__", 1)[0]
     raw = f"raw:line:{line}" if line is not None else "raw:line:unknown"
-    session_ref = identity_telemetry.public_session_ref(
-        session_label,
-        owner_root_witness=owner_root_witness,
-    )
+    session_ref = _profile_session_ref(session_label, owner_root_witness)
     return {
         "session": session_ref,
         "raw": raw,
@@ -723,7 +795,7 @@ def episode_ref(
     episode: dict[str, Any],
     event_key: str,
     *,
-    owner_root_witness: identity_telemetry.OwnerRootWitness,
+    owner_root_witness: identity_telemetry.OwnerRootWitness | None = None,
 ) -> dict[str, str] | None:
     value = episode.get(event_key)
     if not isinstance(value, list) or not value:
@@ -731,10 +803,7 @@ def episode_ref(
     first = value[0] if isinstance(value[0], dict) else {}
     line = int_value(first.get("line"))
     event_id = str(first.get("event_id") or "")
-    session_ref = identity_telemetry.public_session_ref(
-        session_label,
-        owner_root_witness=owner_root_witness,
-    )
+    session_ref = _profile_session_ref(session_label, owner_root_witness)
     return {
         "session": session_ref,
         "raw": f"raw:line:{line}" if line is not None else "raw:line:unknown",
@@ -795,7 +864,7 @@ def profile_episode(
     session_label: str,
     episode: dict[str, Any],
     events_by_line: dict[int, dict[str, Any]],
-    owner_root_witness: identity_telemetry.OwnerRootWitness,
+    owner_root_witness: identity_telemetry.OwnerRootWitness | None = None,
 ) -> dict[str, Any]:
     line_range = event_range(episode)
     if line_range is None:
@@ -875,8 +944,11 @@ def profile_episode(
     attempts.sort(key=lambda item: (item.get("line") is None, item.get("line") or 0))
     operation_counts: Counter[str] = Counter()
     failure_seen = False
-    repair_seen = False
-    validation_seen = False
+    repair_epoch = 0
+    last_failure_epoch: int | None = None
+    validation_count = 0
+    repair_validation_baseline = 0
+    repair_had_prior_validation = False
     for attempt in attempts:
         digest = str(attempt["operation_digest"])
         operation_counts[digest] += 1
@@ -885,12 +957,15 @@ def profile_episode(
         after_failure = failure_seen
         validation_after_repair = (
             attempt["stage"] == "tests_validators"
-            and repair_seen
-            and validation_seen
+            and repair_epoch > 0
+            and repair_had_prior_validation
+            and validation_count >= repair_validation_baseline
         )
         rerun_after_fix = (
             repeat
             and after_failure
+            and last_failure_epoch is not None
+            and repair_epoch > last_failure_epoch
             and attempt["stage"] in RERUN_ELIGIBLE_STAGES
         )
         attempt["repeat_index"] = repeat_index
@@ -900,10 +975,17 @@ def profile_episode(
         attempt["validation_rerun_after_repair"] = validation_after_repair
         if attempt.get("result_status") == "failed":
             failure_seen = True
-        if attempt["stage"] == "diagnosis_repair":
-            repair_seen = True
+            last_failure_epoch = repair_epoch
         if attempt["stage"] == "tests_validators":
-            validation_seen = True
+            validation_count += 1
+        if (
+            attempt["stage"] == "diagnosis_repair"
+            and safe_text(attempt.get("result_status"))
+            in {"succeeded", "passed", "observed", "completed"}
+        ):
+            repair_epoch += 1
+            repair_validation_baseline = validation_count
+            repair_had_prior_validation = validation_count > 0
 
     observed_spans = [
         (attempt["stage"], float(attempt["span_seconds"]))
@@ -1026,17 +1108,11 @@ def profile_episode(
                 owner_root_witness=owner_root_witness,
             )
             or {
-                "session": identity_telemetry.public_session_ref(
-                    session_label,
-                    owner_root_witness=owner_root_witness,
-                ),
+                "session": _profile_session_ref(session_label, owner_root_witness),
                 "raw": f"raw:line:{start_line}",
             },
             "end": {
-                "session": identity_telemetry.public_session_ref(
-                    session_label,
-                    owner_root_witness=owner_root_witness,
-                ),
+                "session": _profile_session_ref(session_label, owner_root_witness),
                 "raw": f"raw:line:{end_line}",
             },
         },
@@ -1746,6 +1822,7 @@ def profile_session(
     }
     projection_source = identity_source if isinstance(identity_source, dict) else source_identity
     session_id = str(manifest.get("session_id") or index.get("session_id") or "unknown")
+    _verify_published_source_identity(session_dir, manifest, projection_source)
     owner_context = _owner_current_context(manifest, index, projection_source)
     events_by_line = load_segment_events(
         session_dir,
@@ -1872,10 +1949,15 @@ def profile_session(
         "session_id": session_id,
         "archive_status": safe_text(manifest.get("archive_status") or index.get("archive_status")) or "unknown",
         "review_status": safe_text(manifest.get("review_status")) or "unknown",
+        "review_binding": {
+            "status": safe_text(manifest.get("review_status")) or "unknown",
+            "review_ref": manifest.get("review_ref"),
+        },
         "scope_status": "usable_closed_episode_slice" if selected else "unknown",
         "freshness": {
             "status": "bounded_readable_snapshot",
             "source_alignment": source_alignment,
+            "currentness_scope": "bounded_source_snapshot",
             "global_currentness": None,
             "currentness_claimed": False,
             "basis": "manifest, session index, segment indexes, and raw line-count alignment; open tails remain excluded",
@@ -1904,6 +1986,12 @@ def profile_session(
                 "status": identity_cohort["admission_cardinality"]["status"],
             },
             "closed_episode_duration_seconds": round(closed_duration, 6) if selected else None,
+            "episode_status_counts": {
+                status: count
+                for status, count in sorted(
+                    Counter(closed_episode_status(record["payload"]) for record in episode_records).items()
+                )
+            },
             "skipped_episode_counts": dict(sorted(skipped.items())) or None,
         },
         "stage_spans": stage_spans,

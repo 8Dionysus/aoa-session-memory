@@ -973,6 +973,18 @@ eval. An eval may justify a skill or automation change. A reviewed corpus and
 model-development owner may justify training. None of those transitions is
 automatic.
 
+The owner-local `experience_metabolism.py` route is the bounded bridge for
+recurrence. It consumes only aligned, bounded-readable `stage_profile_v1`
+outputs whose sessions and task episodes are explicitly reviewed and closed.
+It emits content-free motif shapes, digests, privacy-hashed logical refs,
+counterevidence, alternative explanations, and trajectory-cost measurements.
+Same-session repetition is watch evidence rather than recurrence. Unknown or
+conflicting outcomes remain visible and block acceptance. Candidate, review,
+eval, shadow, owner acceptance, and adoption are separate lifecycle events;
+paired, held-out, and ablation evidence is required before an eval acceptance,
+and a live canary is required before an owner benefit claim. The route does
+not read raw transcripts, mutate hooks, install skills, or schedule work.
+
 Training-oriented exports, when they exist, must preserve provenance,
 selection criteria, privacy and licensing posture, model/runtime lineage,
 negative examples, rejected hypotheses, and eval results. The memory organ may

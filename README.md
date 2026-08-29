@@ -27,6 +27,8 @@ The current production adapter is Codex.
 - trace conclusions back to the session evidence they came from
 - connect development history with the current state of a repository
 - prepare reviewed candidates for evals, skills, automations, and datasets
+- derive privacy-safe recurring-motif candidates from reviewed stage profiles
+  without adopting them as policy
 
 The portable implementation includes raw session preservation, readable
 segments, typed task episodes, stable session identity, structured entities,
@@ -50,6 +52,13 @@ agent session
   -> human or agent review
   -> improvement or eval candidate
 ```
+
+The `aoa-session-experience-metabolism` skill consumes only bounded,
+generated `stage_profile_v1` reports. It retains counterevidence and
+trajectory cost, then routes candidates through independent review, eval,
+shadow, owner acceptance, and a separate explicit adoption receipt, plus
+reversible rejection or rollback. Frequency and correlation never produce an
+automatic skill, policy, or benefit claim.
 
 Derived views are used for navigation. Important results keep references back to
 their sources:

@@ -259,7 +259,7 @@ def test_owner_inventory_tree_visibility_and_generated_projection_are_exact() ->
     }
 
     assert len(families) == 1
-    assert len(physical) == 20
+    assert len(physical) == 21
     assert physical == skill_nodes
     assert graph["roots"] == ["aoa-session-memory"]
     assert advertised == {
