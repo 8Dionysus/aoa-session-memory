@@ -267,9 +267,18 @@ DECLARED_GRAPH_PROJECTION_GENERATION_TRANSITIONS: dict[
     # append-only batch refreshes already-defined aggregates.  Admission is
     # still conditional on reconstructing the exact predecessor identity from
     # its source and on the complete graph materialization proof performed by
-    # graph-registry-rebind.
-    "73d41538e41479d91ce2be59033a6187bb606f3de7fb95b003ef222db7c36dd6": (
+    # graph-registry-rebind.  The outbox consumer contract changes the
+    # graph producer range, so the target must be the current generation;
+    # retain the immediately preceding integration generation with its exact
+    # source snapshot as a declared, source-verified predecessor.
+    "5f7a149fbef6c6f605e7d5eb387bacc023eef3a98f87c81dc6758660ab828e06": (
         {
+            # The source immediately before the outbox consumer contract was
+            # integrated is the current integration parent.  Its whole-file
+            # digest is the admission proof for the prior 73d generation.
+            "73d41538e41479d91ce2be59033a6187bb606f3de7fb95b003ef222db7c36dd6": (
+                "115d08f8e5ab2accef31a7428dffa308b02dfbbee808495bb473a6a1f7c179ac"
+            ),
             # The immediately preceding current graph was produced by the
             # accepted source-repair candidate.  Its full source bytes are
             # the predecessor proof; do not admit a caller-supplied alias.
