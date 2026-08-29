@@ -227,6 +227,7 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0100 Bounded Fair Consumer Retirement Admission](../AOA-SM-D-0100-bounded-fair-consumer-retirement-admission.md) | 2026-08-26 | Accepted | `docs/decisions/AOA-SM-D-0100-bounded-fair-consumer-retirement-admission.md` |
+| [AOA-SM-D-0101 Targeted Projection Outbox Consumers Reconcile One Exact Obligation](../AOA-SM-D-0101-targeted-outbox-consumer-reconciliation.md) | 2026-08-23 | Accepted | `docs/decisions/AOA-SM-D-0101-targeted-outbox-consumer-reconciliation.md` |
 
 ## evidence granularity
 
@@ -320,6 +321,7 @@
 | [AOA-SM-D-0093 Identity-Bound Session Telemetry Uses Owner Receipt Admission](../AOA-SM-D-0093-identity-bound-session-telemetry-admission.md) | 2026-08-22 | Accepted | `docs/decisions/AOA-SM-D-0093-identity-bound-session-telemetry-admission.md` |
 | [AOA-SM-D-0094 Logical Registry Coverage and Capture-Only Ingress Separation](../AOA-SM-D-0094-logical-registry-coverage-and-capture-only-ingress.md) | 2026-08-22 | Accepted | `docs/decisions/AOA-SM-D-0094-logical-registry-coverage-and-capture-only-ingress.md` |
 | [AOA-SM-D-0097 Source Install Provenance and Bounded Global Exact Recovery](../AOA-SM-D-0097-source-install-provenance-and-bounded-global-exact-recovery.md) | 2026-08-25 | Accepted | `docs/decisions/AOA-SM-D-0097-source-install-provenance-and-bounded-global-exact-recovery.md` |
+| [AOA-SM-D-0101 Targeted Projection Outbox Consumers Reconcile One Exact Obligation](../AOA-SM-D-0101-targeted-outbox-consumer-reconciliation.md) | 2026-08-23 | Accepted | `docs/decisions/AOA-SM-D-0101-targeted-outbox-consumer-reconciliation.md` |
 
 ## freshness contract
 
@@ -621,6 +623,7 @@
 | [AOA-SM-D-0047 Exclusive Heavy Projection Lane and Isolated Segment Workers](../AOA-SM-D-0047-exclusive-heavy-projection-lane-and-isolated-segment-workers.md) | 2026-08-09 | Accepted | `docs/decisions/AOA-SM-D-0047-exclusive-heavy-projection-lane-and-isolated-segment-workers.md` |
 | [AOA-SM-D-0058 Persisted Live-Tail State Precedes Resource Admission](../AOA-SM-D-0058-persisted-live-tail-state-precedes-resource-admission.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0058-persisted-live-tail-state-precedes-resource-admission.md` |
 | [AOA-SM-D-0092 Durable Publication Progress Receipts Survive Timeout](../AOA-SM-D-0092-durable-publication-progress-receipts-under-timeout.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0092-durable-publication-progress-receipts-under-timeout.md` |
+| [AOA-SM-D-0101 Targeted Projection Outbox Consumers Reconcile One Exact Obligation](../AOA-SM-D-0101-targeted-outbox-consumer-reconciliation.md) | 2026-08-23 | Accepted | `docs/decisions/AOA-SM-D-0101-targeted-outbox-consumer-reconciliation.md` |
 
 ## partial-failure recovery
 
@@ -712,6 +715,7 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0093 Identity-Bound Session Telemetry Uses Owner Receipt Admission](../AOA-SM-D-0093-identity-bound-session-telemetry-admission.md) | 2026-08-22 | Accepted | `docs/decisions/AOA-SM-D-0093-identity-bound-session-telemetry-admission.md` |
+| [AOA-SM-D-0101 Targeted Projection Outbox Consumers Reconcile One Exact Obligation](../AOA-SM-D-0101-targeted-outbox-consumer-reconciliation.md) | 2026-08-23 | Accepted | `docs/decisions/AOA-SM-D-0101-targeted-outbox-consumer-reconciliation.md` |
 
 ## projection freshness
 

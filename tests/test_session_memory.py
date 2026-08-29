@@ -1693,7 +1693,7 @@ def test_outbox_consumers_complete_only_from_exact_committed_dependencies(
     aoa_root = tmp_path / ".aoa"
     session_dir = aoa_root / "sessions" / "outbox-session"
     session_dir.mkdir(parents=True)
-    publish_id = "publish-current"
+    publish_id = "c" * 64
     module.write_json(
         session_dir / "session.manifest.json",
         {
@@ -1713,7 +1713,7 @@ def test_outbox_consumers_complete_only_from_exact_committed_dependencies(
         new_snapshot={
             "task_episode:episode-1": {
                 "component_type": "task_episode",
-                "digest": "episode-digest",
+                "digest": "d" * 64,
                 "source_ref": "session-index-shards/task-episodes/episode-1.json",
                 "generation_identity": {"generation_id": "episode-v1"},
             }
@@ -1733,8 +1733,8 @@ def test_outbox_consumers_complete_only_from_exact_committed_dependencies(
         session_dir,
         record=record,
         consumer="exact_and_lexical_search",
-        status="complete",
-        reason="test_exact_search_commit",
+        status="progress",
+        reason="legacy_progress_only",
         completion_receipt={"db_commit": "exact"},
     )
     monkeypatch.setattr(
@@ -1759,7 +1759,7 @@ def test_outbox_consumers_complete_only_from_exact_committed_dependencies(
     entity = module.complete_entity_registry_outbox_consumers(
         aoa_root
     )
-    assert entity["completed_count"] == 1
+    assert entity["completed_count"] == 0
 
     module.write_graph_source_state_ledger(
         aoa_root,
@@ -1780,7 +1780,10 @@ def test_outbox_consumers_complete_only_from_exact_committed_dependencies(
     assert graph["completed_count"] == 1
     ready = module.projection_outbox_ready_sessions(aoa_root)
     assert ready["records"][0]["pending_consumers"] == [
-        "episode_semantic"
+        "exact_and_lexical_search",
+        "episode_semantic",
+        "entity_registry",
+        "graph",
     ]
 
 
@@ -1852,7 +1855,7 @@ def test_outbox_completion_crash_replay_is_durable_and_idempotent(
     aoa_root = tmp_path / ".aoa"
     session_dir = aoa_root / "sessions" / "outbox-crash-session"
     session_dir.mkdir(parents=True)
-    publish_id = "outbox-crash-publish"
+    publish_id = "e" * 64
     module.write_json(
         session_dir / "session.manifest.json",
         {
@@ -1869,7 +1872,7 @@ def test_outbox_completion_crash_replay_is_durable_and_idempotent(
         new_snapshot={
             "segment:000": {
                 "component_type": "segment_index",
-                "digest": "segment-digest",
+                "digest": "f" * 64,
                 "source_ref": "segments/000.index.json",
                 "generation_identity": {"generation_id": "segment-v1"},
             }
@@ -1883,95 +1886,60 @@ def test_outbox_completion_crash_replay_is_durable_and_idempotent(
     )
     assert written["status"] == "written"
 
-    state_path = module.projection_outbox_consumer_state_path(
-        session_dir,
-        consumer="exact_and_lexical_search",
-        record_id=record["record_id"],
-    )
-    original_durable_write = module.write_json_durable
-
-    def crash_before_completion(path: Path, payload: Any) -> None:
-        if path == state_path:
-            raise OSError("injected consumer completion crash")
-        original_durable_write(path, payload)
-
-    monkeypatch.setattr(
-        module, "write_json_durable", crash_before_completion
-    )
     with pytest.raises(
-        OSError, match="injected consumer completion crash"
+        ValueError,
+        match="projection_outbox_authoritative_receipt_required",
     ):
         module.write_projection_outbox_consumer_state(
             session_dir,
             record=record,
             consumer="exact_and_lexical_search",
             status="complete",
-            reason="commit completed",
+            reason="generic completion is not authoritative",
             completion_receipt={"db_commit": "commit-1"},
         )
-    assert not state_path.exists()
-    assert module.projection_outbox_ready_sessions(aoa_root)[
-        "ready_session_count"
-    ] == 1
-
-    monkeypatch.setattr(
-        module, "write_json_durable", original_durable_write
-    )
-    first = module.write_projection_outbox_consumer_state(
+    monkeypatch.setattr(module, "utc_now", lambda: "2026-08-23T00:00:00Z")
+    progress = module.write_projection_outbox_consumer_state(
         session_dir,
         record=record,
         consumer="exact_and_lexical_search",
-        status="complete",
-        reason="commit completed",
+        status="progress",
+        reason="legacy progress after restart",
         completion_receipt={"db_commit": "commit-1"},
     )
     replay = module.write_projection_outbox_consumer_state(
         session_dir,
         record=record,
         consumer="exact_and_lexical_search",
-        status="complete",
-        reason="replayed after restart",
+        status="progress",
+        reason="replayed progress",
         completion_receipt={"db_commit": "commit-1"},
     )
+    state_path = module.projection_outbox_consumer_state_path(
+        session_dir,
+        consumer="exact_and_lexical_search",
+        record_id=record["record_id"],
+    )
     state = module.read_json(state_path, {})
-    assert first["status"] == "complete"
-    assert replay["status"] == "already_complete"
-    assert state["attempt_count"] == 1
-    assert state["completion_receipt"] == {"db_commit": "commit-1"}
-    with pytest.raises(
-        ValueError,
-        match="projection_outbox_completion_receipt_conflict",
-    ):
-        module.write_projection_outbox_consumer_state(
-            session_dir,
-            record=record,
-            consumer="exact_and_lexical_search",
-            status="complete",
-            reason="conflicting replay",
-            completion_receipt={"db_commit": "different"},
-        )
-    state["semantic_completion"] = False
-    module.write_json(state_path, state)
-    with pytest.raises(
-        ValueError,
-        match="projection_outbox_completion_receipt_conflict",
-    ):
-        module.write_projection_outbox_consumer_state(
-            session_dir,
-            record=record,
-            consumer="exact_and_lexical_search",
-            status="complete",
-            reason="malformed replay",
-            completion_receipt={"db_commit": "commit-1"},
-        )
+    assert progress["status"] == "progress"
+    assert replay["status"] == "progress"
+    assert state["attempt_count"] == 2
+    assert state["semantic_completion"] is False
+    assert state["progress_receipt"] == {"db_commit": "commit-1"}
 
 
 def test_outbox_terminal_retirement_requires_all_exact_receipts_and_is_replayable(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     aoa_root = tmp_path / ".aoa"
     session_dir = aoa_root / "sessions" / "outbox-retirement"
     session_dir.mkdir(parents=True)
+    monkeypatch.setattr(
+        module,
+        "_projection_outbox_completion_receipt_valid",
+        lambda *_args, **_kwargs: (True, ""),
+    )
     publish_id = "a" * 64
     module.write_json(
         session_dir / "session.manifest.json",
@@ -2036,6 +2004,7 @@ def test_outbox_terminal_retirement_requires_all_exact_receipts_and_is_replayabl
             status="complete",
             reason="test_exact_commit",
             completion_receipt={"consumer": consumer, "commit": "exact"},
+            authoritative=True,
         )
     retirement_path = module.projection_outbox_retirement_path(
         aoa_root,
@@ -2228,6 +2197,9 @@ def test_outbox_consumer_lanes_are_fair_restart_safe_and_fail_closed(
             session_id=session_id,
         )
         record["created_at"] = created_at
+        record["record_id"] = module._projection_outbox_record_recomputed_id(
+            record
+        )
         module.write_projection_outbox_record(session_dir, record)
         return session_dir, record
 
@@ -2309,8 +2281,8 @@ def test_outbox_consumer_lanes_are_fair_restart_safe_and_fail_closed(
         consumer="graph",
     )
     assert after_invalid["blocked_record_count"] == 1
-    assert after_invalid["blocked_records"][0]["diagnostics"] == [
-        "outbox_record_invalid"
+    assert "record_created_at_missing" in after_invalid["blocked_records"][0][
+        "diagnostics"
     ]
     assert "fair-a" not in {
         item["session_id"] for item in after_invalid["records"]
@@ -2363,7 +2335,7 @@ def test_outbox_receipt_identity_and_unverified_child_reconcile_are_fail_closed(
     )
     with pytest.raises(
         ValueError,
-        match="projection_outbox_completion_receipt_identity_mismatch",
+        match="projection_outbox_authoritative_receipt_invalid",
     ):
         module.write_projection_outbox_consumer_state(
             session_dir,
@@ -2372,6 +2344,7 @@ def test_outbox_receipt_identity_and_unverified_child_reconcile_are_fail_closed(
             status="complete",
             reason="wrong receipt identity",
             completion_receipt={"consumer": "entity_registry"},
+            authoritative=True,
         )
 
     calls: list[str] = []
@@ -56985,21 +56958,35 @@ def test_auto_maintenance_resource_launch_recovers_persisted_publication_progres
                 "new_digest": "b" * 64,
                 "source_ref": "session.index.json",
                 "generation_identity": {},
-                "required_consumers": ["exact_and_lexical_search"],
+                "required_consumers": [
+                    "exact_and_lexical_search",
+                    "episode_semantic",
+                    "entity_registry",
+                    "graph",
+                ],
             }
         ],
-        "required_consumers": ["exact_and_lexical_search"],
+        "required_consumers": [
+            "exact_and_lexical_search",
+            "episode_semantic",
+            "entity_registry",
+            "graph",
+        ],
         "created_at": "2026-08-22T00:00:00Z",
         "status": "pending",
-        "retry_policy": {},
+        "retry_policy": {
+            "mode": "bounded_idempotent_consumer_replay_v1",
+            "max_attempts_per_cycle": 3,
+        },
         "publication_receipt": {
             "session_dir": str(session_dir),
             "publish_id": publish_id,
         },
         "truth_status": "changed_component_work_intent_not_downstream_completion",
     }
-    record_id = module.projection_outbox_record_identity_digest(outbox_record)
-    outbox_record["record_id"] = record_id
+    outbox_record["record_id"] = module._projection_outbox_record_recomputed_id(
+        outbox_record
+    )
     outbox_write = module.write_projection_outbox_record(
         session_dir,
         outbox_record,
@@ -57168,26 +57155,23 @@ def test_persistent_freshness_retry_preserves_execution_id_through_timeout_recov
         )
         publish_identity = completed_fixture["projection_publish"]
         publish_id = str(publish_identity["publish_id"])
-        outbox_record = {
-            "schema_version": module.PROJECTION_OUTBOX_SCHEMA_VERSION,
-            "artifact_type": "session_projection_component_outbox",
-            "record_id": "",
-            "session_id": session_id,
-            "old_publish_id": str(initial_fixture["projection_publish"]["publish_id"]),
-            "new_publish_id": publish_id,
-            "changes": [],
-            "required_consumers": [],
-            "created_at": "2026-08-22T00:00:00Z",
-            "status": "pending",
-            "retry_policy": {},
-            "publication_receipt": {
-                "session_dir": str(session_dir),
-                "publish_id": publish_id,
+        outbox_record = module.session_projection_outbox_record(
+            session_dir=session_dir,
+            old_snapshot={},
+            new_snapshot={
+                "session:index": {
+                    "component_type": "session_index",
+                    "digest": "b" * 64,
+                    "source_ref": "session.index.json",
+                    "generation_identity": {},
+                }
             },
-            "truth_status": "changed_component_work_intent_not_downstream_completion",
-        }
-        record_id = module.projection_outbox_record_identity_digest(outbox_record)
-        outbox_record["record_id"] = record_id
+            old_publish_id=str(
+                initial_fixture["projection_publish"]["publish_id"]
+            ),
+            new_publish_id=publish_id,
+            session_id=session_id,
+        )
         outbox_write = module.write_projection_outbox_record(
             session_dir,
             outbox_record,
@@ -77958,7 +77942,10 @@ def test_hot_timer_recovers_missed_hook_without_archive_rediscovery(
     assert search["ok"] is True
     assert search["outbox_completions"]
     search_ready = module.projection_outbox_ready_sessions(aoa_root)
-    assert "episode_semantic" not in search_ready["records"][0][
+    # Search progress is not an episode-authority artifact.  With no
+    # source-owned episode completion receipt, the strict outbox contract
+    # keeps the consumer pending for the separate successor handler route.
+    assert "episode_semantic" in search_ready["records"][0][
         "pending_consumers"
     ]
     assert module.build_agent_atlas(

@@ -45,6 +45,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0055 Bounded Incremental Reuse Admission](../AOA-SM-D-0055-bounded-incremental-reuse-admission.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0055-bounded-incremental-reuse-admission.md` |
 
+## allowlisted route
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0101 Targeted Projection Outbox Consumers Reconcile One Exact Obligation](../AOA-SM-D-0101-targeted-outbox-consumer-reconciliation.md) | 2026-08-23 | Accepted | `docs/decisions/AOA-SM-D-0101-targeted-outbox-consumer-reconciliation.md` |
+
 ## answer abstention
 
 | Decision | Date | Status | Path |
@@ -314,6 +320,7 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0072 Evidence Absence Is Not Maintenance Backlog](../AOA-SM-D-0072-evidence-absence-is-not-maintenance-backlog.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0072-evidence-absence-is-not-maintenance-backlog.md` |
 | [AOA-SM-D-0090 Session Freshness Obligations Close on Watermark Proof](../AOA-SM-D-0090-session-freshness-obligations-close-on-watermark-proof.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0090-session-freshness-obligations-close-on-watermark-proof.md` |
+| [AOA-SM-D-0101 Targeted Projection Outbox Consumers Reconcile One Exact Obligation](../AOA-SM-D-0101-targeted-outbox-consumer-reconciliation.md) | 2026-08-23 | Accepted | `docs/decisions/AOA-SM-D-0101-targeted-outbox-consumer-reconciliation.md` |
 
 ## bounded scan
 
@@ -626,6 +633,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0091 Projection Generations Follow Materializer Boundaries](../AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0091-projection-generations-follow-materializer-boundaries.md` |
+
+## dependency order
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0101 Targeted Projection Outbox Consumers Reconcile One Exact Obligation](../AOA-SM-D-0101-targeted-outbox-consumer-reconciliation.md) | 2026-08-23 | Accepted | `docs/decisions/AOA-SM-D-0101-targeted-outbox-consumer-reconciliation.md` |
 
 ## dependency pinning
 
@@ -1160,6 +1173,7 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0100 Bounded Fair Consumer Retirement Admission](../AOA-SM-D-0100-bounded-fair-consumer-retirement-admission.md) | 2026-08-26 | Accepted | `docs/decisions/AOA-SM-D-0100-bounded-fair-consumer-retirement-admission.md` |
+| [AOA-SM-D-0101 Targeted Projection Outbox Consumers Reconcile One Exact Obligation](../AOA-SM-D-0101-targeted-outbox-consumer-reconciliation.md) | 2026-08-23 | Accepted | `docs/decisions/AOA-SM-D-0101-targeted-outbox-consumer-reconciliation.md` |
 
 ## immutable work intent
 
@@ -1764,6 +1778,7 @@
 | [AOA-SM-D-0076 Observed Route Refresh Is One Covering Pass](../AOA-SM-D-0076-observed-route-refresh-is-one-covering-pass.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0076-observed-route-refresh-is-one-covering-pass.md` |
 | [AOA-SM-D-0094 Logical Registry Coverage and Capture-Only Ingress Separation](../AOA-SM-D-0094-logical-registry-coverage-and-capture-only-ingress.md) | 2026-08-22 | Accepted | `docs/decisions/AOA-SM-D-0094-logical-registry-coverage-and-capture-only-ingress.md` |
 | [AOA-SM-D-0096 Source-Owned Persistent Retry Dispatch Activation](../AOA-SM-D-0096-source-owned-persistent-retry-dispatch-activation.md) | 2026-08-24 | Accepted | `docs/decisions/AOA-SM-D-0096-source-owned-persistent-retry-dispatch-activation.md` |
+| [AOA-SM-D-0101 Targeted Projection Outbox Consumers Reconcile One Exact Obligation](../AOA-SM-D-0101-targeted-outbox-consumer-reconciliation.md) | 2026-08-23 | Accepted | `docs/decisions/AOA-SM-D-0101-targeted-outbox-consumer-reconciliation.md` |
 
 ## resource demand epoch
 

@@ -1,0 +1,305 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AoA targeted projection outbox consumer committed receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "artifact_type",
+    "status",
+    "truth_status",
+    "consumer",
+    "consumer_aliases",
+    "session_id",
+    "record_id",
+    "outbox_record_id",
+    "source_publish_id",
+    "expected_publish_id",
+    "publication_identity",
+    "publication_aliases",
+    "operation",
+    "operation_aliases",
+    "operation_key",
+    "route_registry",
+    "route_id",
+    "handler_id",
+    "attempt",
+    "resource_admission",
+    "commit_ref",
+    "authority_ref",
+    "semantic_evidence",
+    "committed_at"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "artifact_type": {
+      "type": "string",
+      "pattern": "^projection_outbox_[a-z_]+_committed_receipt$"
+    },
+    "status": {"const": "committed"},
+    "truth_status": {
+      "const": "authoritative_consumer_commit_not_global_freshness"
+    },
+    "consumer": {
+      "enum": [
+        "exact_and_lexical_search",
+        "episode_semantic",
+        "entity_registry",
+        "graph"
+      ]
+    },
+    "consumer_aliases": {"$ref": "#/$defs/nonEmptyUniqueStrings"},
+    "session_id": {"type": "string", "minLength": 1},
+    "record_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "outbox_record_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "source_publish_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "expected_publish_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "publication_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session_id", "record_id", "publish_id"],
+      "properties": {
+        "session_id": {"type": "string", "minLength": 1},
+        "record_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "publish_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+      }
+    },
+    "publication_aliases": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "session_id",
+        "record_id",
+        "outbox_record_id",
+        "publish_id",
+        "source_publish_id",
+        "expected_publish_id"
+      ],
+      "properties": {
+        "session_id": {"type": "string", "minLength": 1},
+        "record_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "outbox_record_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "publish_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "source_publish_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "expected_publish_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+      }
+    },
+    "operation": {"const": "projection_outbox_consumer_reconcile"},
+    "operation_aliases": {"$ref": "#/$defs/nonEmptyUniqueStrings"},
+    "operation_key": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "route_registry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "registry_id",
+        "registry_version",
+        "registry_digest",
+        "entry_id",
+        "route_id",
+        "handler_id",
+        "source_ref",
+        "consumer_aliases",
+        "operation",
+        "operation_aliases"
+      ],
+      "properties": {
+        "registry_id": {"type": "string", "minLength": 1},
+        "registry_version": {"const": 1},
+        "registry_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "entry_id": {"type": "string", "minLength": 1},
+        "route_id": {"type": "string", "minLength": 1},
+        "handler_id": {"type": "string", "minLength": 1},
+        "source_ref": {"type": "string", "minLength": 1},
+        "consumer_aliases": {"$ref": "#/$defs/nonEmptyUniqueStrings"},
+        "operation": {"const": "projection_outbox_consumer_reconcile"},
+        "operation_aliases": {"$ref": "#/$defs/nonEmptyUniqueStrings"}
+      }
+    },
+    "route_id": {"type": "string", "minLength": 1},
+    "handler_id": {"type": "string", "minLength": 1},
+    "attempt": {"type": "integer", "minimum": 1},
+    "resource_admission": {"$ref": "#/$defs/resourceAdmission"},
+    "commit_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "reference", "sha256"],
+      "properties": {
+        "kind": {"const": "owner_committed_operation_receipt_v1"},
+        "reference": {"type": "string", "minLength": 1},
+        "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+      }
+    },
+    "authority_ref": {"$ref": "#/$defs/authorityRef"},
+    "semantic_evidence": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "generation_id",
+            "session_id",
+            "publish_id",
+            "changed_component_digests"
+          ],
+          "properties": {
+            "status": {"const": "committed"},
+            "generation_id": {"type": "string", "minLength": 1},
+            "session_id": {"type": "string", "minLength": 1},
+            "publish_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+            "changed_component_digests": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string",
+                "pattern": "^([a-f0-9]{64})?$"
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "generation_id", "session_id", "publish_id"],
+          "properties": {
+            "status": {
+              "enum": ["current", "no_task_episodes", "no_admitted_episode_text"]
+            },
+            "generation_id": {"type": "string", "minLength": 1},
+            "session_id": {"type": "string", "minLength": 1},
+            "publish_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "session_id", "publish_id", "search_receipt", "route_dependency"],
+          "properties": {
+            "status": {"const": "current"},
+            "session_id": {"type": "string", "minLength": 1},
+            "publish_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+            "search_receipt": {"$ref": "#/$defs/jsonValue"},
+            "route_dependency": {"$ref": "#/$defs/jsonValue"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "session_id", "publish_id", "source_ledger_publish_id", "mutation_id", "source_keys"],
+          "properties": {
+            "status": {"const": "committed"},
+            "session_id": {"type": "string", "minLength": 1},
+            "publish_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+            "source_ledger_publish_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+            "mutation_id": {"type": "string", "minLength": 1},
+            "source_keys": {"$ref": "#/$defs/nonEmptyUniqueStrings"}
+          }
+        }
+      ]
+    },
+    "committed_at": {"type": "string", "minLength": 1}
+  },
+  "$defs": {
+    "nonEmptyUniqueStrings": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "resourceAdmission": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "artifact_type",
+        "status",
+        "decision",
+        "admitted",
+        "admission_id",
+        "lease_id",
+        "resource_id",
+        "holder_id",
+        "session_id",
+        "record_id",
+        "publish_id",
+        "consumer",
+        "operation",
+        "operation_key",
+        "attempt",
+        "concurrency",
+        "lease",
+        "source_ref",
+        "authority_ref",
+        "receipt_sha256"
+      ],
+      "properties": {
+        "schema_version": {"const": 1},
+        "artifact_type": {"const": "projection_outbox_consumer_resource_admission"},
+        "status": {"const": "admitted"},
+        "decision": {"const": "allow"},
+        "admitted": {"const": true},
+        "admission_id": {"type": "string", "minLength": 1},
+        "lease_id": {"type": "string", "minLength": 1},
+        "resource_id": {"type": "string", "minLength": 1},
+        "holder_id": {"type": "string", "minLength": 1},
+        "session_id": {"type": "string", "minLength": 1},
+        "record_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "publish_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "consumer": {"type": "string", "minLength": 1},
+        "operation": {"type": "string", "minLength": 1},
+        "operation_key": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "attempt": {"type": "integer", "minimum": 1},
+        "concurrency": {"const": 1},
+        "lease": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["lease_id", "resource_id", "holder_id", "status", "expires_at"],
+          "properties": {
+            "lease_id": {"type": "string", "minLength": 1},
+            "resource_id": {"type": "string", "minLength": 1},
+            "holder_id": {"type": "string", "minLength": 1},
+            "status": {"const": "active"},
+            "expires_at": {"type": "string", "minLength": 1}
+          }
+        },
+        "source_ref": {"type": "string", "minLength": 1},
+        "authority_ref": {"$ref": "#/$defs/resourceAuthorityRef"},
+        "receipt_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+      }
+    },
+    "authorityRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "artifact_type", "source_ref", "authority_key", "sha256"],
+      "properties": {
+        "kind": {"const": "owner_authority_ref_v1"},
+        "artifact_type": {"type": "string", "minLength": 1},
+        "source_ref": {"type": "string", "minLength": 1},
+        "authority_key": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+      }
+    },
+    "resourceAuthorityRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "reference", "sha256"],
+      "properties": {
+        "kind": {"const": "owner_resource_authority_ref_v1"},
+        "reference": {"type": "string", "minLength": 1},
+        "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+      }
+    },
+    "jsonValue": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "string"},
+        {"type": "boolean"},
+        {"type": "number"},
+        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
+        {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/jsonValue"}
+        }
+      ]
+    }
+  }
+}

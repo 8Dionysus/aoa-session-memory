@@ -124,6 +124,7 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0092 Durable Publication Progress Receipts Survive Timeout](../AOA-SM-D-0092-durable-publication-progress-receipts-under-timeout.md) | 2026-08-21 | Accepted | `docs/decisions/AOA-SM-D-0092-durable-publication-progress-receipts-under-timeout.md` |
+| [AOA-SM-D-0101 Targeted Projection Outbox Consumers Reconcile One Exact Obligation](../AOA-SM-D-0101-targeted-outbox-consumer-reconciliation.md) | 2026-08-23 | Accepted | `docs/decisions/AOA-SM-D-0101-targeted-outbox-consumer-reconciliation.md` |
 
 ## decision lane
 
@@ -317,6 +318,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0021 Raw-Preserving Derived-Text Privacy Boundary](../AOA-SM-D-0021-raw-preserving-derived-text-privacy-boundary.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0021-raw-preserving-derived-text-privacy-boundary.md` |
+
+## exact consumer state
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0101 Targeted Projection Outbox Consumers Reconcile One Exact Obligation](../AOA-SM-D-0101-targeted-outbox-consumer-reconciliation.md) | 2026-08-23 | Accepted | `docs/decisions/AOA-SM-D-0101-targeted-outbox-consumer-reconciliation.md` |
 
 ## exact literal
 
@@ -833,6 +840,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0087 Resource-Gated Session Projection Cleanup Conveyor](../AOA-SM-D-0087-resource-gated-session-projection-cleanup-conveyor.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0087-resource-gated-session-projection-cleanup-conveyor.md` |
+
+## retirement
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0101 Targeted Projection Outbox Consumers Reconcile One Exact Obligation](../AOA-SM-D-0101-targeted-outbox-consumer-reconciliation.md) | 2026-08-23 | Accepted | `docs/decisions/AOA-SM-D-0101-targeted-outbox-consumer-reconciliation.md` |
 
 ## review rendering
 

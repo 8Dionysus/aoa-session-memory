@@ -270,6 +270,12 @@ DECLARED_GRAPH_PROJECTION_GENERATION_TRANSITIONS: dict[
     # graph-registry-rebind.
     "73d41538e41479d91ce2be59033a6187bb606f3de7fb95b003ef222db7c36dd6": (
         {
+            # The immediately preceding current graph was produced by the
+            # accepted source-repair candidate.  Its full source bytes are
+            # the predecessor proof; do not admit a caller-supplied alias.
+            "bd77b499869a016f1914298f5e49eb696e29fe90633cb95253b312575c298d6e": (
+                "cfacbf22923e4569c92c1a5cb828bfb96818542fdbfaa10b1f18958d5c10e94a"
+            ),
             # AOA-SM-D-0092: the previous current graph is admitted only when
             # the exact source-line bytes reconstruct its prior identity.
             "010165b3fce35a26f49a5ae03bb00747f424bc186a5142e3d7f9314ba484a706": (
@@ -682,6 +688,29 @@ PROJECTION_OUTBOX_FAIRNESS_STATE_JSON = (
 PROJECTION_OUTBOX_FAIRNESS_LOCK = (
     PROJECTION_OUTBOX_ROOT / "consumer-fairness.lock"
 )
+PROJECTION_OUTBOX_OPERATION_RECEIPTS_DIR = (
+    PROJECTION_OUTBOX_ROOT / "operation-receipts"
+)
+PROJECTION_OUTBOX_OPERATION_JOURNALS_DIR = (
+    PROJECTION_OUTBOX_ROOT / "operation-journals"
+)
+PROJECTION_OUTBOX_CONSUMER_RECONCILE_SCHEMA_VERSION = 1
+PROJECTION_OUTBOX_CONSUMER_RECONCILE_ARTIFACT_TYPE = (
+    "projection_outbox_consumer_reconcile"
+)
+PROJECTION_OUTBOX_CONSUMER_RECEIPT_SCHEMA_VERSION = 1
+PROJECTION_OUTBOX_CONSUMER_RECEIPT_SCHEMA_PATH = Path(
+    "schemas/projection-outbox-consumer-receipt.schema.json"
+)
+PROJECTION_OUTBOX_CONSUMER_COMPLETION_RECEIPT_SCHEMA_VERSION = 1
+PROJECTION_OUTBOX_CONSUMER_COMPLETION_RECEIPT_ARTIFACT_TYPE = (
+    "projection_outbox_consumer_completion_receipt"
+)
+PROJECTION_OUTBOX_CONSUMER_RETIREMENT_SCHEMA_VERSION = 1
+PROJECTION_OUTBOX_CONSUMER_RETIREMENT_ARTIFACT_TYPE = (
+    "projection_outbox_consumer_retirement"
+)
+PROJECTION_OUTBOX_CONSUMER_MAX_ATTEMPTS = 3
 SESSION_PROJECTION_PROGRESS_RECEIPTS_ROOT = (
     DIAGNOSTICS_ROOT / "session-projection-progress"
 )
@@ -695,6 +724,109 @@ PROJECTION_OUTBOX_CONSUMERS = (
     "episode_semantic",
     "entity_registry",
     "graph",
+)
+PROJECTION_OUTBOX_CONSUMER_RECONCILE_ORDER = (
+    "exact_and_lexical_search",
+    "episode_semantic",
+    "entity_registry",
+    "graph",
+)
+PROJECTION_OUTBOX_CONSUMER_RECONCILE_DEPENDENCIES = {
+    "exact_and_lexical_search": (),
+    "episode_semantic": ("exact_and_lexical_search",),
+    "entity_registry": ("exact_and_lexical_search",),
+    "graph": (
+        "exact_and_lexical_search",
+        "episode_semantic",
+        "entity_registry",
+    ),
+}
+PROJECTION_OUTBOX_CONSUMER_OPERATION = (
+    "projection_outbox_consumer_reconcile"
+)
+PROJECTION_OUTBOX_CONSUMER_ROUTE_REGISTRY_ID = (
+    "aoa-session-memory.projection-outbox-consumer-routes"
+)
+PROJECTION_OUTBOX_CONSUMER_ROUTE_REGISTRY_VERSION = 1
+PROJECTION_OUTBOX_CONSUMER_ROUTE_REGISTRY_SOURCE_REF = (
+    "scripts/aoa_session_memory.py#"
+    "PROJECTION_OUTBOX_CONSUMER_ROUTE_REGISTRY"
+)
+PROJECTION_OUTBOX_CONSUMER_ROUTE_REGISTRY = {
+    "exact_and_lexical_search": {
+        "entry_id": "exact_and_lexical_search.v1",
+        "route_id": "aoa-session-memory.consumer.exact_and_lexical_search.v1",
+        "handler_id": "aoa-session-memory.handler.exact_and_lexical_search.v1",
+        "source_ref": "DESIGN.md:535-536;PIPELINE.md:257-258",
+        "consumer_aliases": ["exact_and_lexical_search"],
+        "operation": PROJECTION_OUTBOX_CONSUMER_OPERATION,
+        "operation_aliases": [PROJECTION_OUTBOX_CONSUMER_OPERATION],
+    },
+    "episode_semantic": {
+        "entry_id": "episode_semantic.v1",
+        "route_id": "aoa-session-memory.consumer.episode_semantic.v1",
+        "handler_id": "aoa-session-memory.handler.episode_semantic.v1",
+        "source_ref": "DESIGN.md:536-537;PIPELINE.md:258-259",
+        "consumer_aliases": ["episode_semantic"],
+        "operation": PROJECTION_OUTBOX_CONSUMER_OPERATION,
+        "operation_aliases": [PROJECTION_OUTBOX_CONSUMER_OPERATION],
+    },
+    "entity_registry": {
+        "entry_id": "entity_registry.v1",
+        "route_id": "aoa-session-memory.consumer.entity_registry.v1",
+        "handler_id": "aoa-session-memory.handler.entity_registry.v1",
+        "source_ref": "DESIGN.md:538-539;PIPELINE.md:260-261",
+        "consumer_aliases": ["entity_registry"],
+        "operation": PROJECTION_OUTBOX_CONSUMER_OPERATION,
+        "operation_aliases": [PROJECTION_OUTBOX_CONSUMER_OPERATION],
+    },
+    "graph": {
+        "entry_id": "graph.v1",
+        "route_id": "aoa-session-memory.consumer.graph.v1",
+        "handler_id": "aoa-session-memory.handler.graph.v1",
+        "source_ref": "DESIGN.md:539-540;PIPELINE.md:261-263",
+        "consumer_aliases": ["graph"],
+        "operation": PROJECTION_OUTBOX_CONSUMER_OPERATION,
+        "operation_aliases": [PROJECTION_OUTBOX_CONSUMER_OPERATION],
+    },
+}
+PROJECTION_OUTBOX_CONSUMER_ROUTE_REGISTRY_DIGEST = hashlib.sha256(
+    json.dumps(
+        PROJECTION_OUTBOX_CONSUMER_ROUTE_REGISTRY,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+).hexdigest()
+PROJECTION_OUTBOX_CONSUMER_RESOURCE_ID = (
+    "aoa-session-memory.projection-outbox-consumer-reconcile"
+)
+PROJECTION_OUTBOX_CONSUMER_AUTHORITY_SCHEMA_VERSION = 1
+PROJECTION_OUTBOX_CONSUMER_AUTHORITY_OWNER_REPO = "aoa-session-memory"
+PROJECTION_OUTBOX_CONSUMER_RESOURCE_AUTHORITY_ARTIFACT_TYPE = (
+    "projection_outbox_consumer_resource_authority"
+)
+PROJECTION_OUTBOX_CONSUMER_RESOURCE_AUTHORITY_PATH = (
+    DIAGNOSTICS_ROOT / "projection-outbox-consumer-resource-authority"
+)
+PROJECTION_OUTBOX_CONSUMER_RESOURCE_AUTHORITY_SOURCE_REF = (
+    "scripts/aoa_session_memory.py#"
+    "PROJECTION_OUTBOX_CONSUMER_RESOURCE_AUTHORITY"
+)
+PROJECTION_OUTBOX_CONSUMER_AUTHORITY_SOURCE_REFS = {
+    "exact_and_lexical_search": "search/aoa-search.sqlite3#projection_outbox_consumer_authority",
+    "episode_semantic": "search/aoa-search.sqlite3#projection_outbox_consumer_authority",
+    "entity_registry": "maps/entity-registry.json#projection_authority",
+    "graph": "graph/source-state-ledger.json#projection_authority",
+}
+PROJECTION_OUTBOX_CONSUMER_AUTHORITY_ARTIFACT_TYPES = {
+    "exact_and_lexical_search": "projection_outbox_search_generation_authority",
+    "episode_semantic": "projection_outbox_episode_semantic_generation_authority",
+    "entity_registry": "projection_outbox_entity_registry_authority",
+    "graph": "projection_outbox_graph_mutation_authority",
+}
+PROJECTION_OUTBOX_CONSUMER_AUTHORITY_TABLE = (
+    "projection_outbox_consumer_authority"
 )
 SEARCH_ROOT = Path("search")
 SEARCH_DB_NAME = "aoa-search.sqlite3"
@@ -27934,26 +28066,19 @@ def session_projection_outbox_record(
                 "required_consumers": consumers,
             }
         )
-    identity_payload = {
+    ordered_required_consumers = [
+        consumer
+        for consumer in PROJECTION_OUTBOX_CONSUMER_RECONCILE_ORDER
+        if consumer in required_consumers
+    ]
+    record_payload = {
         "schema_version": PROJECTION_OUTBOX_SCHEMA_VERSION,
+        "artifact_type": "session_projection_component_outbox",
         "session_id": str(session_id or session_dir.name),
         "old_publish_id": old_publish_id,
         "new_publish_id": new_publish_id,
         "changes": changes,
-        "required_consumers": sorted(required_consumers),
-    }
-    record_id = hashlib.sha256(
-        json.dumps(
-            identity_payload,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
-    return {
-        **identity_payload,
-        "artifact_type": "session_projection_component_outbox",
-        "record_id": record_id,
+        "required_consumers": ordered_required_consumers,
         "created_at": utc_now(),
         "status": "pending",
         "retry_policy": {
@@ -27967,6 +28092,18 @@ def session_projection_outbox_record(
         "truth_status": (
             "changed_component_work_intent_not_downstream_completion"
         ),
+    }
+    record_id = hashlib.sha256(
+        json.dumps(
+            record_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return {
+        **record_payload,
+        "record_id": record_id,
     }
 
 
@@ -28068,7 +28205,10 @@ def projection_outbox_record_integrity_valid(
         and record.get("artifact_type")
         == "session_projection_component_outbox"
         and re.fullmatch(r"[a-f0-9]{64}", record_id)
-        and projection_outbox_record_identity_digest(record) == record_id
+        and (
+            projection_outbox_record_identity_digest(record) == record_id
+            or _projection_outbox_record_recomputed_id(record) == record_id
+        )
         and isinstance(session_id, str)
         and bool(session_id)
         and isinstance(old_publish_id, str)
@@ -28322,8 +28462,16 @@ def write_projection_outbox_record(
     record_id = str(record.get("record_id") or "")
     if not record_id:
         raise ValueError("projection_outbox_record_id_missing")
-    if not projection_outbox_record_integrity_valid(record):
-        raise ValueError("projection_outbox_record_invalid")
+    strict_valid, diagnostics = _projection_outbox_record_valid(
+        record,
+        aoa_root=session_dir.parent.parent,
+    )
+    legacy_valid = projection_outbox_record_integrity_valid(record)
+    if not strict_valid and not legacy_valid:
+        raise ValueError(
+            "projection_outbox_record_invalid:"
+            + ",".join(diagnostics)
+        )
     path = projection_outbox_record_path(session_dir, record_id)
     if path.exists():
         existing = read_json(path, {})
@@ -28828,6 +28976,1430 @@ def write_search_index_progress_checkpoint(
     }
 
 
+def _projection_outbox_json_digest(value: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _projection_outbox_record_identity_payload(
+    record: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        key: record.get(key)
+        for key in (
+            "schema_version",
+            "artifact_type",
+            "session_id",
+            "old_publish_id",
+            "new_publish_id",
+            "changes",
+            "required_consumers",
+            "created_at",
+            "status",
+            "retry_policy",
+            "publication_receipt",
+            "truth_status",
+        )
+    }
+
+
+def _projection_outbox_record_recomputed_id(record: dict[str, Any]) -> str:
+    return _projection_outbox_json_digest(
+        _projection_outbox_record_identity_payload(record)
+    )
+
+
+def _projection_outbox_sha256_or_empty(value: Any) -> bool:
+    return value == "" or bool(
+        isinstance(value, str)
+        and re.fullmatch(r"[a-f0-9]{64}", value)
+    )
+
+
+def _projection_outbox_unique_strings(value: Any) -> bool:
+    return isinstance(value, list) and all(
+        isinstance(item, str) and bool(item) for item in value
+    ) and len(value) == len(set(value))
+
+
+def _projection_outbox_record_valid(
+    record: Any,
+    *,
+    aoa_root: Path | None = None,
+) -> tuple[bool, list[str]]:
+    diagnostics: list[str] = []
+    if not isinstance(record, dict) or not record:
+        return False, ["record_not_object"]
+    required = {
+        "schema_version",
+        "artifact_type",
+        "record_id",
+        "session_id",
+        "old_publish_id",
+        "new_publish_id",
+        "changes",
+        "required_consumers",
+        "created_at",
+        "status",
+        "publication_receipt",
+        "truth_status",
+        "retry_policy",
+    }
+    allowed = required
+    diagnostics.extend(
+        f"record_unknown_field:{key}"
+        for key in sorted(set(record) - allowed)
+    )
+    diagnostics.extend(
+        f"record_required_field_missing:{key}"
+        for key in sorted(required - set(record))
+    )
+    if int_value(record.get("schema_version"), -1) != PROJECTION_OUTBOX_SCHEMA_VERSION:
+        diagnostics.append("record_schema_version_mismatch")
+    if record.get("artifact_type") != "session_projection_component_outbox":
+        diagnostics.append("record_artifact_type_mismatch")
+    record_id = record.get("record_id")
+    if not isinstance(record_id, str) or not re.fullmatch(
+        r"[a-f0-9]{64}", record_id
+    ):
+        diagnostics.append("record_id_must_be_sha256")
+    session_id = record.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        diagnostics.append("record_session_id_missing")
+    if not _projection_outbox_sha256_or_empty(record.get("old_publish_id")):
+        diagnostics.append("record_old_publish_id_invalid")
+    if not (
+        isinstance(record.get("new_publish_id"), str)
+        and re.fullmatch(r"[a-f0-9]{64}", record.get("new_publish_id"))
+    ):
+        diagnostics.append("record_new_publish_id_invalid")
+    if not isinstance(record.get("created_at"), str) or not record.get(
+        "created_at"
+    ):
+        diagnostics.append("record_created_at_missing")
+    if record.get("status") != "pending":
+        diagnostics.append("record_status_not_pending")
+    if not isinstance(record.get("retry_policy"), dict):
+        diagnostics.append("record_retry_policy_invalid")
+    elif set(record["retry_policy"]) != {
+        "mode",
+        "max_attempts_per_cycle",
+    }:
+        diagnostics.append("record_retry_policy_shape_invalid")
+    elif record["retry_policy"].get("mode") != (
+        "bounded_idempotent_consumer_replay_v1"
+    ) or not (
+        1
+        <= int_value(record["retry_policy"].get("max_attempts_per_cycle"), 0)
+        <= PROJECTION_OUTBOX_CONSUMER_MAX_ATTEMPTS
+    ):
+        diagnostics.append("record_retry_policy_value_invalid")
+    if record.get("truth_status") != (
+        "changed_component_work_intent_not_downstream_completion"
+    ):
+        diagnostics.append("record_truth_status_invalid")
+
+    required_consumers = record.get("required_consumers")
+    if not _projection_outbox_unique_strings(required_consumers):
+        diagnostics.append("record_required_consumers_not_unique_strings")
+        required_consumers = []
+    canonical_required = [
+        consumer
+        for consumer in PROJECTION_OUTBOX_CONSUMER_RECONCILE_ORDER
+        if consumer in required_consumers
+    ]
+    if required_consumers != canonical_required or not canonical_required:
+        diagnostics.append("record_required_consumers_not_canonical")
+    if any(
+        consumer not in PROJECTION_OUTBOX_CONSUMER_RECONCILE_ORDER
+        for consumer in required_consumers
+    ):
+        diagnostics.append("record_required_consumer_not_allowlisted")
+
+    changes = record.get("changes")
+    if not isinstance(changes, list) or not changes:
+        diagnostics.append("record_changes_missing")
+        changes = []
+    observed_consumers: set[str] = set()
+    component_ids: list[str] = []
+    for index, change in enumerate(changes):
+        prefix = f"record_change_{index}"
+        if not isinstance(change, dict):
+            diagnostics.append(f"{prefix}_not_object")
+            continue
+        change_required = {
+            "component_id",
+            "component_type",
+            "operation",
+            "old_digest",
+            "new_digest",
+            "source_ref",
+            "generation_identity",
+            "required_consumers",
+        }
+        diagnostics.extend(
+            f"{prefix}_unknown_field:{key}"
+            for key in sorted(set(change) - change_required)
+        )
+        diagnostics.extend(
+            f"{prefix}_required_field_missing:{key}"
+            for key in sorted(change_required - set(change))
+        )
+        component_id = change.get("component_id")
+        if not isinstance(component_id, str) or not component_id:
+            diagnostics.append(f"{prefix}_component_id_invalid")
+        else:
+            component_ids.append(component_id)
+        if not isinstance(change.get("component_type"), str) or not change.get(
+            "component_type"
+        ):
+            diagnostics.append(f"{prefix}_component_type_invalid")
+        if change.get("operation") not in {"publish", "replace", "tombstone"}:
+            diagnostics.append(f"{prefix}_operation_invalid")
+        if not _projection_outbox_sha256_or_empty(change.get("old_digest")):
+            diagnostics.append(f"{prefix}_old_digest_invalid")
+        if not _projection_outbox_sha256_or_empty(change.get("new_digest")):
+            diagnostics.append(f"{prefix}_new_digest_invalid")
+        if not isinstance(change.get("source_ref"), str):
+            diagnostics.append(f"{prefix}_source_ref_invalid")
+        if not isinstance(change.get("generation_identity"), dict):
+            diagnostics.append(f"{prefix}_generation_identity_invalid")
+        change_consumers = change.get("required_consumers")
+        if not _projection_outbox_unique_strings(change_consumers):
+            diagnostics.append(f"{prefix}_consumers_not_unique_strings")
+            change_consumers = []
+        expected_change_consumers = projection_component_required_consumers(
+            str(change.get("component_type") or "")
+        )
+        if change_consumers != expected_change_consumers:
+            diagnostics.append(f"{prefix}_consumers_not_owner_derived")
+        observed_consumers.update(change_consumers)
+    if len(component_ids) != len(set(component_ids)):
+        diagnostics.append("record_component_ids_not_unique")
+    if set(canonical_required) != observed_consumers:
+        diagnostics.append("record_consumers_do_not_cover_changes")
+
+    publication = record.get("publication_receipt")
+    if not isinstance(publication, dict):
+        diagnostics.append("record_publication_receipt_invalid")
+        publication = {}
+    if set(publication) != {"session_dir", "publish_id"}:
+        diagnostics.append("record_publication_receipt_shape_invalid")
+    publication_session_dir = publication.get("session_dir")
+    if not isinstance(publication_session_dir, str) or not publication_session_dir:
+        diagnostics.append("record_publication_session_dir_missing")
+    if publication.get("publish_id") != record.get("new_publish_id"):
+        diagnostics.append("record_publication_publish_id_mismatch")
+    if aoa_root is not None and isinstance(publication_session_dir, str):
+        session_dir = Path(publication_session_dir)
+        if not session_dir.is_absolute():
+            session_dir = aoa_root / session_dir
+        try:
+            under_root = session_dir.resolve().parent.parent == aoa_root.resolve()
+        except OSError:
+            under_root = False
+        if not under_root:
+            diagnostics.append("record_publication_session_dir_outside_root")
+        if isinstance(session_id, str):
+            manifest = read_json(session_dir / "session.manifest.json", {})
+            if not isinstance(manifest, dict) or not manifest:
+                diagnostics.append(
+                    "record_publication_session_manifest_missing"
+                )
+            elif str(manifest.get("session_id") or "") != session_id:
+                diagnostics.append(
+                    "record_publication_session_manifest_mismatch"
+                )
+
+    if isinstance(record_id, str) and re.fullmatch(r"[a-f0-9]{64}", record_id):
+        if _projection_outbox_record_recomputed_id(record) != record_id:
+            diagnostics.append("record_id_content_hash_mismatch")
+    return not diagnostics, unique_preserving_order(diagnostics)
+
+
+def _projection_outbox_route_entry(consumer: str) -> dict[str, Any]:
+    raw = PROJECTION_OUTBOX_CONSUMER_ROUTE_REGISTRY.get(consumer)
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def _projection_outbox_route_registry_identity(consumer: str) -> dict[str, Any]:
+    entry = _projection_outbox_route_entry(consumer)
+    return {
+        "registry_id": PROJECTION_OUTBOX_CONSUMER_ROUTE_REGISTRY_ID,
+        "registry_version": PROJECTION_OUTBOX_CONSUMER_ROUTE_REGISTRY_VERSION,
+        "registry_digest": PROJECTION_OUTBOX_CONSUMER_ROUTE_REGISTRY_DIGEST,
+        **entry,
+    }
+
+
+def _projection_outbox_publication_aliases(
+    *,
+    session_id: str,
+    record_id: str,
+    publish_id: str,
+) -> dict[str, Any]:
+    return {
+        "session_id": session_id,
+        "record_id": record_id,
+        "outbox_record_id": record_id,
+        "publish_id": publish_id,
+        "source_publish_id": publish_id,
+        "expected_publish_id": publish_id,
+    }
+
+
+def _projection_outbox_operation_key(
+    *,
+    session_id: str,
+    record_id: str,
+    publish_id: str,
+    consumer: str,
+    operation: str,
+    attempt: int,
+    route_id: str,
+) -> str:
+    return _projection_outbox_json_digest(
+        {
+            "registry_id": PROJECTION_OUTBOX_CONSUMER_ROUTE_REGISTRY_ID,
+            "registry_digest": PROJECTION_OUTBOX_CONSUMER_ROUTE_REGISTRY_DIGEST,
+            "route_id": route_id,
+            "session_id": session_id,
+            "record_id": record_id,
+            "publish_id": publish_id,
+            "consumer": consumer,
+            "operation": operation,
+            "attempt": attempt,
+        }
+    )
+
+
+def projection_outbox_consumer_operation_receipt_path(
+    aoa_root: Path,
+    operation_key: str,
+) -> Path:
+    return aoa_root / PROJECTION_OUTBOX_OPERATION_RECEIPTS_DIR / (
+        f"{operation_key}.json"
+    )
+
+
+def projection_outbox_consumer_operation_journal_path(
+    aoa_root: Path,
+    operation_key: str,
+) -> Path:
+    return aoa_root / PROJECTION_OUTBOX_OPERATION_JOURNALS_DIR / (
+        f"{operation_key}.json"
+    )
+
+
+def _projection_outbox_receipt_digest(receipt: dict[str, Any]) -> str:
+    digest_payload = dict(receipt)
+    digest_payload.pop("commit_ref", None)
+    return _projection_outbox_json_digest(digest_payload)
+
+
+def _projection_outbox_resource_admission_digest(
+    admission: dict[str, Any],
+) -> str:
+    digest_payload = dict(admission)
+    digest_payload.pop("receipt_sha256", None)
+    return _projection_outbox_json_digest(digest_payload)
+
+
+def _projection_outbox_resource_admission_core_digest(
+    admission: dict[str, Any],
+) -> str:
+    digest_payload = dict(admission)
+    digest_payload.pop("receipt_sha256", None)
+    digest_payload.pop("authority_ref", None)
+    return _projection_outbox_json_digest(digest_payload)
+
+
+def _projection_outbox_authority_key(
+    *,
+    consumer: str,
+    session_id: str,
+    record_id: str,
+    publish_id: str,
+    operation_key: str,
+    attempt: int,
+) -> str:
+    return _projection_outbox_json_digest(
+        {
+            "schema_version": PROJECTION_OUTBOX_CONSUMER_AUTHORITY_SCHEMA_VERSION,
+            "consumer": consumer,
+            "session_id": session_id,
+            "record_id": record_id,
+            "publish_id": publish_id,
+            "operation": PROJECTION_OUTBOX_CONSUMER_OPERATION,
+            "operation_key": operation_key,
+            "attempt": attempt,
+        }
+    )
+
+
+def _projection_outbox_authority_digest(
+    authority: dict[str, Any],
+) -> str:
+    digest_payload = dict(authority)
+    digest_payload.pop("authority_sha256", None)
+    return _projection_outbox_json_digest(digest_payload)
+
+
+def _projection_outbox_typed_json_diagnostics(
+    value: Any,
+    *,
+    path: str = "$",
+) -> list[str]:
+    if value is None or isinstance(value, (str, bool, int)):
+        return []
+    if isinstance(value, float):
+        return [] if math.isfinite(value) else [f"{path}:non_finite_number"]
+    if isinstance(value, list):
+        diagnostics: list[str] = []
+        for index, item in enumerate(value):
+            diagnostics.extend(
+                _projection_outbox_typed_json_diagnostics(
+                    item,
+                    path=f"{path}[{index}]",
+                )
+            )
+        return diagnostics
+    if isinstance(value, dict):
+        diagnostics = []
+        for key, item in value.items():
+            if not isinstance(key, str) or not key:
+                diagnostics.append(f"{path}:object_key_not_nonempty_string")
+                continue
+            diagnostics.extend(
+                _projection_outbox_typed_json_diagnostics(
+                    item,
+                    path=f"{path}.{key}",
+                )
+            )
+        return diagnostics
+    return [f"{path}:unsupported_json_type"]
+
+
+def _projection_outbox_authority_artifact_path(
+    aoa_root: Path,
+    consumer: str,
+) -> Path:
+    if consumer in {
+        "exact_and_lexical_search",
+        "episode_semantic",
+    }:
+        return search_db_path(aoa_root)
+    if consumer == "entity_registry":
+        return aoa_root / ENTITY_REGISTRY_PATH
+    if consumer == "graph":
+        return graph_paths(aoa_root)["source_state_ledger"]
+    return aoa_root
+
+
+def _projection_outbox_authority_artifact_type(
+    consumer: str,
+) -> str:
+    return str(PROJECTION_OUTBOX_CONSUMER_AUTHORITY_ARTIFACT_TYPES.get(consumer) or "")
+
+
+def _projection_outbox_resource_authority_path(
+    aoa_root: Path,
+    operation_key: str,
+) -> Path:
+    return (
+        aoa_root
+        / PROJECTION_OUTBOX_CONSUMER_RESOURCE_AUTHORITY_PATH
+        / f"{operation_key}.json"
+    )
+
+
+def _projection_outbox_authority_source_ref(consumer: str) -> str:
+    return str(PROJECTION_OUTBOX_CONSUMER_AUTHORITY_SOURCE_REFS.get(consumer) or "")
+
+
+def _projection_outbox_expected_changed_component_digests(
+    record: dict[str, Any],
+    consumer: str,
+) -> dict[str, str]:
+    return {
+        str(change.get("component_id") or ""): str(
+            change.get("new_digest") or ""
+        )
+        for change in record.get("changes", [])
+        if isinstance(change, dict)
+        and consumer
+        in (
+            change.get("required_consumers")
+            if isinstance(change.get("required_consumers"), list)
+            else []
+        )
+    }
+
+
+def _projection_outbox_authority_reference(
+    authority: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "kind": "owner_authority_ref_v1",
+        "artifact_type": authority.get("artifact_type"),
+        "source_ref": authority.get("source_ref"),
+        "authority_key": authority.get("authority_key"),
+        "sha256": authority.get("authority_sha256"),
+    }
+
+
+def _projection_outbox_authority_payload_valid(
+    authority: Any,
+    *,
+    consumer: str,
+    record: dict[str, Any],
+    context: dict[str, Any],
+) -> tuple[bool, list[str]]:
+    diagnostics: list[str] = []
+    if not isinstance(authority, dict) or not authority:
+        return False, ["consumer_authority_not_object"]
+    required = {
+        "schema_version",
+        "artifact_type",
+        "status",
+        "truth_status",
+        "consumer",
+        "session_id",
+        "record_id",
+        "publish_id",
+        "operation",
+        "operation_key",
+        "attempt",
+        "authority_key",
+        "generation_id",
+        "generation_identity",
+        "changed_component_digests",
+        "source_ref",
+        "owner_provenance",
+        "source_keys",
+        "mutation_id",
+        "source_ledger_ref",
+        "committed_at",
+        "authority_sha256",
+    }
+    diagnostics.extend(
+        f"consumer_authority_unknown_field:{key}"
+        for key in sorted(set(authority) - required)
+    )
+    diagnostics.extend(
+        f"consumer_authority_required_field_missing:{key}"
+        for key in sorted(required - set(authority))
+    )
+    if int_value(authority.get("schema_version"), -1) != (
+        PROJECTION_OUTBOX_CONSUMER_AUTHORITY_SCHEMA_VERSION
+    ):
+        diagnostics.append("consumer_authority_schema_version_mismatch")
+    if authority.get("artifact_type") != _projection_outbox_authority_artifact_type(
+        consumer
+    ):
+        diagnostics.append("consumer_authority_artifact_type_mismatch")
+    expected_statuses = {
+        "exact_and_lexical_search": {"committed"},
+        "episode_semantic": {
+            "current",
+            "no_task_episodes",
+            "no_admitted_episode_text",
+        },
+        "entity_registry": {"current"},
+        "graph": {"committed"},
+    }.get(consumer, set())
+    if authority.get("status") not in expected_statuses:
+        diagnostics.append("consumer_authority_status_not_admitted")
+    if authority.get("truth_status") != (
+        "owner_authoritative_consumer_artifact_not_handler_output"
+    ):
+        diagnostics.append("consumer_authority_truth_status_invalid")
+    for key, expected in {
+        "consumer": consumer,
+        "session_id": context.get("session_id"),
+        "record_id": context.get("record_id"),
+        "publish_id": context.get("expected_publish_id"),
+        "operation": PROJECTION_OUTBOX_CONSUMER_OPERATION,
+        "operation_key": context.get("operation_key"),
+        "attempt": context.get("attempt"),
+    }.items():
+        if authority.get(key) != expected:
+            diagnostics.append(f"consumer_authority_{key}_mismatch")
+    expected_key = _projection_outbox_authority_key(
+        consumer=consumer,
+        session_id=str(context.get("session_id") or ""),
+        record_id=str(context.get("record_id") or ""),
+        publish_id=str(context.get("expected_publish_id") or ""),
+        operation_key=str(context.get("operation_key") or ""),
+        attempt=int_value(context.get("attempt"), 0),
+    )
+    if authority.get("authority_key") != expected_key:
+        diagnostics.append("consumer_authority_key_mismatch")
+    generation_identity = authority.get("generation_identity")
+    if not isinstance(generation_identity, dict) or not generation_identity:
+        diagnostics.append("consumer_authority_generation_identity_invalid")
+    else:
+        generation_id = str(authority.get("generation_id") or "")
+        if not generation_id:
+            diagnostics.append("consumer_authority_generation_id_missing")
+        if str(generation_identity.get("generation_id") or "") != generation_id:
+            diagnostics.append("consumer_authority_generation_id_not_nested")
+        if str(
+            generation_identity.get("publish_id")
+            or generation_identity.get("source_publish_id")
+            or ""
+        ) != str(context.get("expected_publish_id") or ""):
+            diagnostics.append("consumer_authority_generation_publish_mismatch")
+    expected_changes = _projection_outbox_expected_changed_component_digests(
+        record,
+        consumer,
+    )
+    changed = authority.get("changed_component_digests")
+    if not isinstance(changed, dict) or changed != expected_changes:
+        diagnostics.append("consumer_authority_changed_components_mismatch")
+    if authority.get("source_ref") != _projection_outbox_authority_source_ref(
+        consumer
+    ):
+        diagnostics.append("consumer_authority_source_ref_mismatch")
+    expected_provenance = {
+        "owner_repo": PROJECTION_OUTBOX_CONSUMER_AUTHORITY_OWNER_REPO,
+        "source_ref": _projection_outbox_authority_source_ref(consumer),
+        "authority_kind": _projection_outbox_authority_artifact_type(consumer),
+        "authority_version": PROJECTION_OUTBOX_CONSUMER_AUTHORITY_SCHEMA_VERSION,
+    }
+    if authority.get("owner_provenance") != expected_provenance:
+        diagnostics.append("consumer_authority_owner_provenance_mismatch")
+    source_keys = authority.get("source_keys")
+    if not _projection_outbox_unique_strings(source_keys) and source_keys != []:
+        diagnostics.append("consumer_authority_source_keys_invalid")
+    if consumer == "graph" and not source_keys:
+        diagnostics.append("consumer_authority_graph_source_keys_missing")
+    if consumer != "graph" and source_keys != []:
+        diagnostics.append("consumer_authority_non_graph_source_keys_not_empty")
+    if consumer == "graph":
+        if not isinstance(authority.get("mutation_id"), str) or not authority.get(
+            "mutation_id"
+        ):
+            diagnostics.append("consumer_authority_graph_mutation_id_missing")
+        if authority.get("source_ledger_ref") != "graph/source-state-ledger.json":
+            diagnostics.append("consumer_authority_graph_ledger_ref_invalid")
+    else:
+        if authority.get("mutation_id") != "":
+            diagnostics.append("consumer_authority_non_graph_mutation_id_invalid")
+        if authority.get("source_ledger_ref") != "":
+            diagnostics.append("consumer_authority_non_graph_ledger_ref_invalid")
+    for key in ("generation_id", "source_ref", "committed_at"):
+        if not isinstance(authority.get(key), str) or not authority.get(key):
+            diagnostics.append(f"consumer_authority_{key}_missing")
+    diagnostics.extend(_projection_outbox_typed_json_diagnostics(authority))
+    authority_sha256 = authority.get("authority_sha256")
+    if not isinstance(authority_sha256, str) or not re.fullmatch(
+        r"[a-f0-9]{64}", authority_sha256
+    ):
+        diagnostics.append("consumer_authority_digest_invalid")
+    elif authority_sha256 != _projection_outbox_authority_digest(authority):
+        diagnostics.append("consumer_authority_digest_mismatch")
+    return not diagnostics, unique_preserving_order(diagnostics)
+
+
+def _projection_outbox_load_authoritative_consumer_artifact(
+    *,
+    aoa_root: Path,
+    consumer: str,
+    record: dict[str, Any],
+    context: dict[str, Any],
+) -> tuple[dict[str, Any] | None, list[str]]:
+    authority_key = _projection_outbox_authority_key(
+        consumer=consumer,
+        session_id=str(context.get("session_id") or ""),
+        record_id=str(context.get("record_id") or ""),
+        publish_id=str(context.get("expected_publish_id") or ""),
+        operation_key=str(context.get("operation_key") or ""),
+        attempt=int_value(context.get("attempt"), 0),
+    )
+    artifact_path = _projection_outbox_authority_artifact_path(
+        aoa_root,
+        consumer,
+    )
+    authority: Any = None
+    if consumer in {"exact_and_lexical_search", "episode_semantic"}:
+        if not artifact_path.is_file():
+            return None, ["consumer_authority_artifact_missing"]
+        conn: sqlite3.Connection | None = None
+        try:
+            conn = connect_existing_search_db(artifact_path)
+            if not sqlite_table_exists(conn, PROJECTION_OUTBOX_CONSUMER_AUTHORITY_TABLE):
+                return None, ["consumer_authority_table_missing"]
+            row = conn.execute(
+                f"SELECT * FROM {PROJECTION_OUTBOX_CONSUMER_AUTHORITY_TABLE} "
+                "WHERE authority_key = ?",
+                (authority_key,),
+            ).fetchone()
+            if row is None:
+                return None, ["consumer_authority_row_missing"]
+            row_keys = set(row.keys())
+            if not {
+                "consumer",
+                "session_id",
+                "record_id",
+                "publish_id",
+                "operation",
+                "operation_key",
+                "attempt",
+                "authority_json",
+                "authority_sha256",
+            }.issubset(row_keys):
+                return None, ["consumer_authority_row_shape_invalid"]
+            if any(
+                row[key] != expected
+                for key, expected in {
+                    "consumer": consumer,
+                    "session_id": context.get("session_id"),
+                    "record_id": context.get("record_id"),
+                    "publish_id": context.get("expected_publish_id"),
+                    "operation": PROJECTION_OUTBOX_CONSUMER_OPERATION,
+                    "operation_key": context.get("operation_key"),
+                    "attempt": context.get("attempt"),
+                }.items()
+            ):
+                return None, ["consumer_authority_row_identity_mismatch"]
+            try:
+                authority = json.loads(str(row["authority_json"]))
+            except (TypeError, json.JSONDecodeError):
+                return None, ["consumer_authority_json_unreadable"]
+            if row["authority_sha256"] != _projection_outbox_authority_digest(
+                authority if isinstance(authority, dict) else {}
+            ):
+                return None, ["consumer_authority_row_digest_mismatch"]
+            required_tables = {
+                "exact_and_lexical_search": (
+                    "session_index_state",
+                    "search_freshness_state",
+                    "exact_literal_session_state",
+                ),
+                "episode_semantic": (
+                    "session_index_state",
+                    "episode_semantic_session_state",
+                ),
+            }[consumer]
+            for table in required_tables:
+                if not sqlite_table_exists(conn, table):
+                    return None, [f"consumer_authority_owner_table_missing:{table}"]
+            if consumer == "exact_and_lexical_search":
+                freshness = conn.execute(
+                    "SELECT status, generation_id FROM search_freshness_state "
+                    "WHERE session_id = ?",
+                    (context.get("session_id"),),
+                ).fetchone()
+                index_state = conn.execute(
+                    "SELECT generation_id FROM session_index_state "
+                    "WHERE session_id = ?",
+                    (context.get("session_id"),),
+                ).fetchone()
+                literal_state = conn.execute(
+                    "SELECT status, generation_id FROM exact_literal_session_state "
+                    "WHERE session_id = ?",
+                    (context.get("session_id"),),
+                ).fetchone()
+                if freshness is None or str(freshness["status"] or "") != "current":
+                    return None, ["search_authoritative_state_not_current"]
+                if index_state is None or not str(index_state["generation_id"] or ""):
+                    return None, ["search_authoritative_generation_missing"]
+                if literal_state is None or str(literal_state["status"] or "") not in {
+                    "current",
+                    "committed",
+                }:
+                    return None, ["search_exact_literal_state_not_current"]
+                generation_id = str(authority.get("generation_id") or "") if isinstance(authority, dict) else ""
+                if str(freshness["generation_id"] or "") != generation_id or str(index_state["generation_id"] or "") != generation_id or str(literal_state["generation_id"] or "") != generation_id:
+                    return None, ["search_authoritative_generation_drift"]
+            else:
+                episode_state = conn.execute(
+                    "SELECT status, generation_id FROM episode_semantic_session_state "
+                    "WHERE session_id = ?",
+                    (context.get("session_id"),),
+                ).fetchone()
+                if episode_state is None or str(episode_state["status"] or "") not in {
+                    "current",
+                    "no_task_episodes",
+                    "no_admitted_episode_text",
+                }:
+                    return None, ["episode_authoritative_state_not_current"]
+                if str(episode_state["generation_id"] or "") != str(
+                    authority.get("generation_id") if isinstance(authority, dict) else ""
+                ):
+                    return None, ["episode_authoritative_generation_drift"]
+        except (OSError, sqlite3.Error) as exc:
+            return None, [f"consumer_authority_owner_read_failed:{exc}"]
+        finally:
+            if conn is not None:
+                conn.close()
+    elif consumer == "entity_registry":
+        payload = read_json(artifact_path, {})
+        if not isinstance(payload, dict) or payload.get("artifact_type") != "entity_registry_snapshot":
+            return None, ["entity_registry_authority_artifact_missing"]
+        authorities = payload.get("projection_authorities")
+        if not isinstance(authorities, dict) or authority_key not in authorities:
+            return None, ["entity_registry_authority_entry_missing"]
+        authority = authorities.get(authority_key)
+        if not isinstance(payload.get("generation_identity"), dict) or not payload.get("generation_identity"):
+            return None, ["entity_registry_generation_missing"]
+        if not isinstance(authority, dict) or str(
+            payload["generation_identity"].get("generation_id") or ""
+        ) != str(authority.get("generation_id") or ""):
+            return None, ["entity_registry_generation_drift"]
+        if not isinstance(payload.get("semantic_digest"), dict) or not re.fullmatch(
+            r"[a-f0-9]{64}", str(payload["semantic_digest"].get("sha256") or "")
+        ):
+            return None, ["entity_registry_semantic_digest_missing"]
+    elif consumer == "graph":
+        payload = read_json(artifact_path, {})
+        if not isinstance(payload, dict) or payload.get("artifact_type") != "session_memory_graph_source_state_ledger":
+            return None, ["graph_source_ledger_missing"]
+        graph_store_path = graph_paths(aoa_root)["store"]
+        if not graph_store_path.is_file():
+            return None, ["graph_mutation_store_missing"]
+        authorities = payload.get("projection_authorities")
+        if not isinstance(authorities, dict) or authority_key not in authorities:
+            return None, ["graph_authority_entry_missing"]
+        authority = authorities.get(authority_key)
+        if not isinstance(authority, dict):
+            return None, ["graph_authority_entry_invalid"]
+        try:
+            graph_conn = sqlite3.connect(
+                f"{graph_store_path.resolve().as_uri()}?mode=ro",
+                uri=True,
+                timeout=1.0,
+            )
+            mutation_row = graph_conn.execute(
+                "SELECT session_id, record_id, publish_id, authority_key, generation_id, source_ledger_ref "
+                "FROM projection_outbox_mutations WHERE mutation_id = ?",
+                (authority.get("mutation_id"),),
+            ).fetchone()
+            graph_conn.close()
+        except (OSError, sqlite3.Error):
+            return None, ["graph_mutation_artifact_unreadable"]
+        if mutation_row is None:
+            return None, ["graph_mutation_record_missing"]
+        if tuple(mutation_row) != (
+            context.get("session_id"),
+            context.get("record_id"),
+            context.get("expected_publish_id"),
+            authority_key,
+            authority.get("generation_id"),
+            "graph/source-state-ledger.json",
+        ):
+            return None, ["graph_mutation_identity_mismatch"]
+        sources = payload.get("sources")
+        if not isinstance(sources, dict):
+            return None, ["graph_source_ledger_sources_missing"]
+        source_keys = authority.get("source_keys") if isinstance(authority, dict) else []
+        for source_key in source_keys if isinstance(source_keys, list) else []:
+            entry = sources.get(source_key)
+            if not isinstance(entry, dict):
+                return None, [f"graph_source_ledger_entry_missing:{source_key}"]
+            if entry.get("source_projection_publish_id") != context.get("expected_publish_id"):
+                return None, [f"graph_source_ledger_publish_mismatch:{source_key}"]
+            if entry.get("expected_generation_id") != authority.get("generation_id"):
+                return None, [f"graph_source_ledger_generation_mismatch:{source_key}"]
+            if entry.get("authority_key") != authority_key or entry.get("record_id") != context.get("record_id") or entry.get("mutation_id") != authority.get("mutation_id"):
+                return None, [f"graph_source_ledger_authority_mismatch:{source_key}"]
+    else:
+        return None, ["consumer_authority_consumer_unknown"]
+    valid, diagnostics = _projection_outbox_authority_payload_valid(
+        authority,
+        consumer=consumer,
+        record=record,
+        context=context,
+    )
+    if not valid:
+        return None, diagnostics
+    return authority, []
+
+
+def _projection_outbox_resource_admission_valid(
+    admission: Any,
+    *,
+    context: dict[str, Any],
+) -> tuple[bool, list[str]]:
+    diagnostics: list[str] = []
+    if not isinstance(admission, dict):
+        return False, ["resource_admission_not_object"]
+    required = {
+        "schema_version",
+        "artifact_type",
+        "status",
+        "decision",
+        "admitted",
+        "admission_id",
+        "lease_id",
+        "resource_id",
+        "holder_id",
+        "session_id",
+        "record_id",
+        "publish_id",
+        "consumer",
+        "operation",
+        "operation_key",
+        "attempt",
+        "concurrency",
+        "lease",
+        "source_ref",
+        "authority_ref",
+        "receipt_sha256",
+    }
+    diagnostics.extend(
+        f"resource_admission_unknown_field:{key}"
+        for key in sorted(set(admission) - required)
+    )
+    diagnostics.extend(
+        f"resource_admission_required_field_missing:{key}"
+        for key in sorted(required - set(admission))
+    )
+    if int_value(admission.get("schema_version"), -1) != 1:
+        diagnostics.append("resource_admission_schema_version_mismatch")
+    if admission.get("artifact_type") != (
+        "projection_outbox_consumer_resource_admission"
+    ):
+        diagnostics.append("resource_admission_artifact_type_mismatch")
+    if admission.get("status") != "admitted" or admission.get("decision") != "allow":
+        diagnostics.append("resource_admission_not_authoritatively_admitted")
+    if admission.get("admitted") is not True:
+        diagnostics.append("resource_admission_admitted_flag_invalid")
+    if int_value(admission.get("concurrency"), 0) != 1:
+        diagnostics.append("resource_admission_concurrency_invalid")
+    for key in ("admission_id", "lease_id", "resource_id", "holder_id", "source_ref"):
+        if not isinstance(admission.get(key), str) or not admission.get(key):
+            diagnostics.append(f"resource_admission_{key}_missing")
+    if admission.get("source_ref") != PROJECTION_OUTBOX_CONSUMER_RESOURCE_AUTHORITY_SOURCE_REF:
+        diagnostics.append("resource_admission_source_ref_not_owner_authority")
+    expected = {
+        "resource_id": PROJECTION_OUTBOX_CONSUMER_RESOURCE_ID,
+        "session_id": context.get("session_id"),
+        "record_id": context.get("record_id"),
+        "publish_id": context.get("expected_publish_id"),
+        "consumer": context.get("consumer"),
+        "operation": context.get("operation"),
+        "operation_key": context.get("operation_key"),
+        "attempt": context.get("attempt"),
+    }
+    for key, value in expected.items():
+        if admission.get(key) != value:
+            diagnostics.append(f"resource_admission_{key}_mismatch")
+    lease = admission.get("lease")
+    if not isinstance(lease, dict):
+        diagnostics.append("resource_admission_lease_invalid")
+    else:
+        lease_required = {
+            "lease_id",
+            "resource_id",
+            "holder_id",
+            "status",
+            "expires_at",
+        }
+        if set(lease) != lease_required:
+            diagnostics.append("resource_admission_lease_shape_invalid")
+        if lease.get("lease_id") != admission.get("lease_id"):
+            diagnostics.append("resource_admission_lease_id_mismatch")
+        if lease.get("resource_id") != admission.get("resource_id"):
+            diagnostics.append("resource_admission_lease_resource_mismatch")
+        if lease.get("holder_id") != admission.get("holder_id"):
+            diagnostics.append("resource_admission_lease_holder_mismatch")
+        if lease.get("status") != "active" or not lease.get("expires_at"):
+            diagnostics.append("resource_admission_lease_not_active")
+        expires_at = parse_utc_timestamp(str(lease.get("expires_at") or ""))
+        if expires_at is None:
+            diagnostics.append("resource_admission_lease_expiry_invalid")
+        elif datetime.now(timezone.utc) >= expires_at:
+            diagnostics.append("resource_admission_lease_expired")
+        if lease.get("expires_at") and admission.get("lease", {}).get("expires_at") != lease.get("expires_at"):
+            diagnostics.append("resource_admission_lease_expiry_alias_mismatch")
+    authority_ref = admission.get("authority_ref")
+    authority_path: Path | None = None
+    if not isinstance(authority_ref, dict) or set(authority_ref) != {
+        "kind",
+        "reference",
+        "sha256",
+    }:
+        diagnostics.append("resource_admission_authority_ref_not_typed")
+    else:
+        if authority_ref.get("kind") != "owner_resource_authority_ref_v1":
+            diagnostics.append("resource_admission_authority_ref_kind_invalid")
+        reference = authority_ref.get("reference")
+        if not isinstance(reference, str) or not reference:
+            diagnostics.append("resource_admission_authority_ref_reference_invalid")
+        else:
+            authority_path = Path(reference)
+            context_root = context.get("aoa_root")
+            if isinstance(context_root, (str, Path)) and not authority_path.is_absolute():
+                authority_path = Path(context_root) / authority_path
+            expected_authority_path = _projection_outbox_resource_authority_path(
+                Path(context_root)
+                if isinstance(context_root, (str, Path))
+                else Path("."),
+                str(admission.get("operation_key") or ""),
+            )
+            if not _projection_outbox_same_path(
+                authority_path,
+                expected_authority_path,
+            ):
+                diagnostics.append("resource_admission_authority_ref_path_invalid")
+        if not isinstance(authority_ref.get("sha256"), str) or not re.fullmatch(
+            r"[a-f0-9]{64}", str(authority_ref.get("sha256") or "")
+        ):
+            diagnostics.append("resource_admission_authority_ref_digest_invalid")
+    if authority_path is None or not authority_path.is_file():
+        diagnostics.append("resource_admission_owner_authority_missing")
+    else:
+        if authority_ref.get("sha256") != sha256_file(authority_path):
+            diagnostics.append("resource_admission_owner_authority_digest_mismatch")
+        owner_authority = read_json(authority_path, {})
+        expected_authority_keys = {
+            "schema_version",
+            "artifact_type",
+            "status",
+            "owner_repo",
+            "source_ref",
+            "resource_id",
+            "admission_key",
+            "admission_core_sha256",
+            "holder_id",
+            "lease",
+        }
+        if not isinstance(owner_authority, dict) or set(owner_authority) != expected_authority_keys:
+            diagnostics.append("resource_admission_owner_authority_shape_invalid")
+        else:
+            if owner_authority.get("schema_version") != PROJECTION_OUTBOX_CONSUMER_AUTHORITY_SCHEMA_VERSION:
+                diagnostics.append("resource_admission_owner_authority_schema_mismatch")
+            if owner_authority.get("artifact_type") != PROJECTION_OUTBOX_CONSUMER_RESOURCE_AUTHORITY_ARTIFACT_TYPE:
+                diagnostics.append("resource_admission_owner_authority_artifact_mismatch")
+            if owner_authority.get("status") != "active":
+                diagnostics.append("resource_admission_owner_authority_not_active")
+            if owner_authority.get("owner_repo") != PROJECTION_OUTBOX_CONSUMER_AUTHORITY_OWNER_REPO:
+                diagnostics.append("resource_admission_owner_authority_owner_mismatch")
+            if owner_authority.get("source_ref") != PROJECTION_OUTBOX_CONSUMER_RESOURCE_AUTHORITY_SOURCE_REF:
+                diagnostics.append("resource_admission_owner_authority_source_mismatch")
+            if owner_authority.get("resource_id") != PROJECTION_OUTBOX_CONSUMER_RESOURCE_ID:
+                diagnostics.append("resource_admission_owner_authority_resource_mismatch")
+            if owner_authority.get("admission_key") != admission.get("operation_key"):
+                diagnostics.append("resource_admission_owner_authority_key_mismatch")
+            if owner_authority.get("admission_core_sha256") != _projection_outbox_resource_admission_core_digest(admission):
+                diagnostics.append("resource_admission_owner_authority_content_mismatch")
+            if owner_authority.get("holder_id") != admission.get("holder_id"):
+                diagnostics.append("resource_admission_owner_authority_holder_mismatch")
+            if owner_authority.get("lease") != admission.get("lease"):
+                diagnostics.append("resource_admission_owner_authority_lease_mismatch")
+    receipt_sha256 = admission.get("receipt_sha256")
+    if not isinstance(receipt_sha256, str) or not re.fullmatch(
+        r"[a-f0-9]{64}", receipt_sha256
+    ):
+        diagnostics.append("resource_admission_receipt_digest_invalid")
+    elif receipt_sha256 != _projection_outbox_resource_admission_digest(admission):
+        diagnostics.append("resource_admission_receipt_digest_mismatch")
+    return not diagnostics, unique_preserving_order(diagnostics)
+
+
+def _projection_outbox_consumer_semantic_diagnostics(
+    *,
+    consumer: str,
+    receipt: dict[str, Any],
+    record: dict[str, Any],
+    session_dir: Path,
+) -> list[str]:
+    evidence = receipt.get("semantic_evidence")
+    if not isinstance(evidence, dict):
+        return ["semantic_evidence_missing"]
+    diagnostics: list[str] = []
+    publish_id = str(record.get("new_publish_id") or "")
+    session_id = str(record.get("session_id") or "")
+    authority_context = {
+        "session_id": session_id,
+        "record_id": str(record.get("record_id") or ""),
+        "expected_publish_id": publish_id,
+        "operation_key": str(receipt.get("operation_key") or ""),
+        "attempt": int_value(receipt.get("attempt"), 0),
+    }
+    authority, authority_diagnostics = _projection_outbox_load_authoritative_consumer_artifact(
+        aoa_root=session_dir.parent.parent,
+        consumer=consumer,
+        record=record,
+        context=authority_context,
+    )
+    diagnostics.extend(authority_diagnostics)
+    if authority is not None and receipt.get("authority_ref") != _projection_outbox_authority_reference(authority):
+        diagnostics.append("consumer_authority_receipt_reference_mismatch")
+    changes = {
+        str(change.get("component_id") or ""): str(
+            change.get("new_digest") or ""
+        )
+        for change in record.get("changes", [])
+        if isinstance(change, dict)
+        and consumer
+        in (
+            change.get("required_consumers")
+            if isinstance(change.get("required_consumers"), list)
+            else []
+        )
+    }
+    if consumer == "exact_and_lexical_search":
+        if evidence.get("status") != "committed":
+            diagnostics.append("search_generation_not_committed")
+        if not evidence.get("generation_id"):
+            diagnostics.append("search_generation_id_missing")
+        if evidence.get("session_id") != session_id:
+            diagnostics.append("search_generation_session_mismatch")
+        if evidence.get("publish_id") != publish_id:
+            diagnostics.append("search_generation_publish_mismatch")
+        if evidence.get("changed_component_digests") != changes:
+            diagnostics.append("search_generation_changed_components_mismatch")
+    elif consumer == "episode_semantic":
+        if evidence.get("status") not in {
+            "current",
+            "no_task_episodes",
+            "no_admitted_episode_text",
+        }:
+            diagnostics.append("episode_semantic_status_not_admitted")
+        if evidence.get("session_id") != session_id:
+            diagnostics.append("episode_semantic_session_mismatch")
+        if evidence.get("publish_id") != publish_id:
+            diagnostics.append("episode_semantic_publish_mismatch")
+        if not evidence.get("generation_id"):
+            diagnostics.append("episode_semantic_generation_id_missing")
+    elif consumer == "entity_registry":
+        if evidence.get("status") != "current":
+            diagnostics.append("entity_registry_status_not_current")
+        if evidence.get("session_id") != session_id:
+            diagnostics.append("entity_registry_session_mismatch")
+        if evidence.get("publish_id") != publish_id:
+            diagnostics.append("entity_registry_publish_mismatch")
+        search_receipt = evidence.get("search_receipt")
+        if not isinstance(search_receipt, dict):
+            diagnostics.append("entity_registry_search_receipt_missing")
+        else:
+            if search_receipt.get("consumer") != "exact_and_lexical_search":
+                diagnostics.append("entity_registry_search_consumer_mismatch")
+            if search_receipt.get("record_id") != record.get("record_id"):
+                diagnostics.append("entity_registry_search_record_mismatch")
+            if search_receipt.get("publish_id") != publish_id:
+                diagnostics.append("entity_registry_search_publish_mismatch")
+            if not (
+                isinstance(search_receipt.get("receipt_sha256"), str)
+                and re.fullmatch(r"[a-f0-9]{64}", search_receipt["receipt_sha256"])
+            ):
+                diagnostics.append("entity_registry_search_receipt_digest_invalid")
+            search_state = read_json(
+                projection_outbox_consumer_state_path(
+                    session_dir,
+                    consumer="exact_and_lexical_search",
+                    record_id=str(record.get("record_id") or ""),
+                ),
+                {},
+            )
+            if search_state.get("receipt_sha256") != search_receipt.get(
+                "receipt_sha256"
+            ):
+                diagnostics.append("entity_registry_search_receipt_not_current")
+            search_receipt_payload = search_state.get("completion_receipt")
+            search_valid, search_reason = _projection_outbox_completion_receipt_valid(
+                search_receipt_payload,
+                session_id=session_id,
+                record_id=str(record.get("record_id") or ""),
+                expected_publish_id=publish_id,
+                consumer="exact_and_lexical_search",
+                record=record,
+                session_dir=session_dir,
+                aoa_root=session_dir.parent.parent,
+            )
+            if not search_valid:
+                diagnostics.append(
+                    f"entity_registry_search_authority_not_current:{search_reason}"
+                )
+        dependency = evidence.get("route_dependency")
+        expected_route = _projection_outbox_route_registry_identity(
+            "entity_registry"
+        )
+        if not isinstance(dependency, dict):
+            diagnostics.append("entity_registry_route_dependency_missing")
+        else:
+            if dependency.get("status") != "current":
+                diagnostics.append("entity_registry_route_dependency_not_current")
+            for key, expected_value in (
+                ("session_id", session_id),
+                ("publish_id", publish_id),
+                ("registry_id", expected_route["registry_id"]),
+                ("registry_digest", expected_route["registry_digest"]),
+                ("route_id", expected_route["route_id"]),
+            ):
+                if dependency.get(key) != expected_value:
+                    diagnostics.append(f"entity_registry_route_{key}_mismatch")
+    elif consumer == "graph":
+        if evidence.get("status") != "committed":
+            diagnostics.append("graph_mutation_not_committed")
+        if evidence.get("session_id") != session_id:
+            diagnostics.append("graph_mutation_session_mismatch")
+        if evidence.get("publish_id") != publish_id:
+            diagnostics.append("graph_mutation_publish_mismatch")
+        if evidence.get("source_ledger_publish_id") != publish_id:
+            diagnostics.append("graph_source_ledger_publish_mismatch")
+        if not evidence.get("mutation_id"):
+            diagnostics.append("graph_mutation_id_missing")
+        source_keys = evidence.get("source_keys")
+        if not _projection_outbox_unique_strings(source_keys) or not source_keys:
+            diagnostics.append("graph_source_keys_invalid")
+    return unique_preserving_order(diagnostics)
+
+
+def _projection_outbox_completion_receipt_valid(
+    receipt: Any,
+    *,
+    session_id: str,
+    record_id: str,
+    expected_publish_id: str,
+    consumer: str,
+    record: dict[str, Any] | None = None,
+    session_dir: Path | None = None,
+    aoa_root: Path | None = None,
+    route_spec: dict[str, Any] | None = None,
+    expected_context: dict[str, Any] | None = None,
+) -> tuple[bool, str]:
+    if not isinstance(receipt, dict) or not receipt:
+        return False, "completion_receipt_missing"
+    if record is None:
+        return False, "completion_receipt_record_context_missing"
+    record_valid, record_diagnostics = _projection_outbox_record_valid(
+        record,
+        aoa_root=aoa_root,
+    )
+    if not record_valid:
+        return False, f"completion_receipt_record_invalid:{record_diagnostics[0]}"
+    receipt_type_diagnostics = _projection_outbox_typed_json_diagnostics(receipt)
+    if receipt_type_diagnostics:
+        return False, f"completion_receipt_nested_type_invalid:{receipt_type_diagnostics[0]}"
+    expected_route = _projection_outbox_route_registry_identity(consumer)
+    if not expected_route:
+        return False, "completion_receipt_route_registry_entry_missing"
+    expected_keys = {
+        "schema_version",
+        "artifact_type",
+        "status",
+        "truth_status",
+        "consumer",
+        "consumer_aliases",
+        "session_id",
+        "record_id",
+        "outbox_record_id",
+        "source_publish_id",
+        "expected_publish_id",
+        "publication_identity",
+        "publication_aliases",
+        "operation",
+        "operation_aliases",
+        "operation_key",
+        "route_registry",
+        "route_id",
+        "handler_id",
+        "attempt",
+        "resource_admission",
+        "commit_ref",
+        "authority_ref",
+        "semantic_evidence",
+        "committed_at",
+    }
+    if set(receipt) != expected_keys:
+        return False, "completion_receipt_schema_shape_invalid"
+    if int_value(receipt.get("schema_version"), -1) != PROJECTION_OUTBOX_CONSUMER_RECEIPT_SCHEMA_VERSION:
+        return False, "completion_receipt_schema_mismatch"
+    if receipt.get("artifact_type") != (
+        f"projection_outbox_{consumer}_committed_receipt"
+    ):
+        return False, "completion_receipt_artifact_type_mismatch"
+    if receipt.get("status") != "committed":
+        return False, "completion_receipt_status_not_committed"
+    if receipt.get("truth_status") != (
+        "authoritative_consumer_commit_not_global_freshness"
+    ):
+        return False, "completion_receipt_truth_status_invalid"
+    if receipt.get("consumer") != consumer:
+        return False, "completion_receipt_consumer_mismatch"
+    if receipt.get("consumer_aliases") != expected_route["consumer_aliases"]:
+        return False, "completion_receipt_consumer_aliases_mismatch"
+    for key, expected_value in (
+        ("session_id", session_id),
+        ("record_id", record_id),
+        ("outbox_record_id", record_id),
+        ("source_publish_id", expected_publish_id),
+        ("expected_publish_id", expected_publish_id),
+    ):
+        if receipt.get(key) != expected_value:
+            return False, f"completion_receipt_{key}_mismatch"
+    expected_publication = _projection_outbox_publication_aliases(
+        session_id=session_id,
+        record_id=record_id,
+        publish_id=expected_publish_id,
+    )
+    if receipt.get("publication_identity") != {
+        "session_id": session_id,
+        "record_id": record_id,
+        "publish_id": expected_publish_id,
+    }:
+        return False, "completion_receipt_publication_identity_mismatch"
+    if receipt.get("publication_aliases") != expected_publication:
+        return False, "completion_receipt_publication_aliases_mismatch"
+    if receipt.get("operation") != PROJECTION_OUTBOX_CONSUMER_OPERATION:
+        return False, "completion_receipt_operation_mismatch"
+    if receipt.get("operation_aliases") != expected_route["operation_aliases"]:
+        return False, "completion_receipt_operation_aliases_mismatch"
+    operation_key = receipt.get("operation_key")
+    if not isinstance(operation_key, str) or not re.fullmatch(
+        r"[a-f0-9]{64}", operation_key
+    ):
+        return False, "completion_receipt_operation_key_invalid"
+    expected_attempt = int_value(receipt.get("attempt"), 0)
+    if expected_attempt <= 0:
+        return False, "completion_receipt_attempt_invalid"
+    expected_operation_key = _projection_outbox_operation_key(
+        session_id=session_id,
+        record_id=record_id,
+        publish_id=expected_publish_id,
+        consumer=consumer,
+        operation=PROJECTION_OUTBOX_CONSUMER_OPERATION,
+        attempt=expected_attempt,
+        route_id=expected_route["route_id"],
+    )
+    if operation_key != expected_operation_key:
+        return False, "completion_receipt_operation_key_mismatch"
+    if receipt.get("route_registry") != expected_route:
+        return False, "completion_receipt_route_registry_mismatch"
+    if receipt.get("route_id") != expected_route["route_id"]:
+        return False, "completion_receipt_route_id_mismatch"
+    if receipt.get("handler_id") != expected_route["handler_id"]:
+        return False, "completion_receipt_handler_id_mismatch"
+    if session_dir is None:
+        session_dir = Path(
+            str(
+                (
+                    record.get("publication_receipt")
+                    if isinstance(record.get("publication_receipt"), dict)
+                    else {}
+                ).get("session_dir")
+                or ""
+            )
+        )
+    if aoa_root is None:
+        aoa_root = session_dir.parent.parent
+    resource = receipt.get("resource_admission")
+    resource_context = {
+        "aoa_root": aoa_root,
+        "session_id": session_id,
+        "record_id": record_id,
+        "expected_publish_id": expected_publish_id,
+        "consumer": consumer,
+        "operation": PROJECTION_OUTBOX_CONSUMER_OPERATION,
+        "operation_key": operation_key,
+        "attempt": expected_attempt,
+    }
+    resource_valid, resource_diagnostics = _projection_outbox_resource_admission_valid(
+        resource,
+        context=resource_context,
+    )
+    if not resource_valid:
+        return False, f"completion_receipt_resource_invalid:{resource_diagnostics[0]}"
+    if expected_context is not None and resource != expected_context.get(
+        "resource_admission"
+    ):
+        return False, "completion_receipt_resource_admission_mismatch"
+    authority_ref = receipt.get("authority_ref")
+    if not isinstance(authority_ref, dict) or set(authority_ref) != {
+        "kind",
+        "artifact_type",
+        "source_ref",
+        "authority_key",
+        "sha256",
+    }:
+        return False, "completion_receipt_authority_ref_not_typed"
+    if authority_ref.get("kind") != "owner_authority_ref_v1":
+        return False, "completion_receipt_authority_ref_kind_invalid"
+    if not all(
+        isinstance(authority_ref.get(key), str)
+        and bool(authority_ref.get(key))
+        for key in ("artifact_type", "source_ref", "authority_key", "sha256")
+    ):
+        return False, "completion_receipt_authority_ref_fields_invalid"
+    commit_ref = receipt.get("commit_ref")
+    if not isinstance(commit_ref, dict) or set(commit_ref) != {
+        "kind",
+        "reference",
+        "sha256",
+    }:
+        return False, "completion_receipt_commit_ref_not_typed"
+    if commit_ref.get("kind") != "owner_committed_operation_receipt_v1":
+        return False, "completion_receipt_commit_ref_kind_invalid"
+    if not isinstance(commit_ref.get("reference"), str) or not commit_ref.get(
+        "reference"
+    ):
+        return False, "completion_receipt_commit_ref_reference_invalid"
+    if not isinstance(commit_ref.get("sha256"), str) or not re.fullmatch(
+        r"[a-f0-9]{64}", commit_ref["sha256"]
+    ):
+        return False, "completion_receipt_commit_ref_digest_invalid"
+    expected_receipt_path = projection_outbox_consumer_operation_receipt_path(
+        aoa_root,
+        operation_key,
+    )
+    try:
+        if Path(str(commit_ref.get("reference"))).resolve() != expected_receipt_path.resolve():
+            return False, "completion_receipt_commit_ref_path_mismatch"
+    except OSError:
+        return False, "completion_receipt_commit_ref_path_unresolvable"
+    if commit_ref.get("sha256") != _projection_outbox_receipt_digest(receipt):
+        return False, "completion_receipt_commit_ref_digest_mismatch"
+    if not Path(str(commit_ref.get("reference"))).is_file():
+        return False, "completion_receipt_commit_ref_unresolvable"
+    stored_receipt = read_json(Path(str(commit_ref["reference"])), {})
+    if stored_receipt != receipt:
+        return False, "completion_receipt_commit_ref_content_mismatch"
+    semantic_diagnostics = _projection_outbox_consumer_semantic_diagnostics(
+        consumer=consumer,
+        receipt=receipt,
+        record=record,
+        session_dir=session_dir,
+    )
+    if semantic_diagnostics:
+        return False, semantic_diagnostics[0]
+    if not isinstance(receipt.get("committed_at"), str) or not receipt.get(
+        "committed_at"
+    ):
+        return False, "completion_receipt_committed_at_missing"
+    if route_spec is not None:
+        route_identity = _projection_outbox_route_identity_from_spec(route_spec)
+        if route_identity != expected_route:
+            return False, "completion_receipt_route_spec_mismatch"
+    return True, ""
+
+
+def _projection_outbox_route_identity_from_spec(
+    spec: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "registry_id": spec.get("registry_id"),
+        "registry_version": spec.get("registry_version"),
+        "registry_digest": spec.get("registry_digest"),
+        "entry_id": spec.get("registry_entry_id"),
+        "route_id": spec.get("route_id"),
+        "handler_id": spec.get("handler_id"),
+        "source_ref": spec.get("source_ref"),
+        "consumer_aliases": spec.get("consumer_aliases"),
+        "operation": spec.get("operation"),
+        "operation_aliases": spec.get("operation_aliases"),
+    }
+
+
 def projection_outbox_consumer_state_path(
     session_dir: Path,
     *,
@@ -28850,6 +30422,7 @@ def write_projection_outbox_consumer_state(
     status: str,
     reason: str,
     completion_receipt: dict[str, Any] | None = None,
+    authoritative: bool = False,
 ) -> dict[str, Any]:
     if consumer not in PROJECTION_OUTBOX_CONSUMERS:
         raise ValueError(
@@ -28863,6 +30436,31 @@ def write_projection_outbox_consumer_state(
         consumer=consumer,
         record_id=record_id,
     )
+    receipt = (
+        dict(completion_receipt)
+        if isinstance(completion_receipt, dict)
+        else {}
+    )
+    if status == "complete":
+        if not authoritative:
+            raise ValueError(
+                "projection_outbox_authoritative_receipt_required"
+            )
+        valid, validation_reason = _projection_outbox_completion_receipt_valid(
+            receipt,
+            session_id=str(record.get("session_id") or ""),
+            record_id=record_id,
+            expected_publish_id=str(record.get("new_publish_id") or ""),
+            consumer=consumer,
+            record=record,
+            session_dir=session_dir,
+            aoa_root=session_dir.parent.parent,
+        )
+        if not valid:
+            raise ValueError(
+                "projection_outbox_authoritative_receipt_invalid:"
+                f"{validation_reason}"
+            )
     existing = read_json(path, {})
     if isinstance(existing, dict) and existing.get("status") == "complete":
         existing_receipt = existing.get("completion_receipt")
@@ -28927,15 +30525,17 @@ def write_projection_outbox_consumer_state(
                 else []
             )
         ],
-        "semantic_completion": status == "complete",
-        "completion_receipt": (
-            dict(completion_receipt)
-            if isinstance(completion_receipt, dict)
-            else {}
+        "semantic_completion": status == "complete" and authoritative,
+        "completion_receipt": receipt if status == "complete" else {},
+        "receipt_sha256": (
+            _projection_outbox_receipt_digest(receipt)
+            if status == "complete"
+            else ""
         ),
+        "progress_receipt": receipt if status != "complete" else {},
         "truth_status": (
             "consumer_completion_receipt"
-            if status == "complete"
+            if status == "complete" and authoritative
             else "consumer_work_state_not_semantic_completion"
         ),
     }
@@ -28965,6 +30565,17 @@ def projection_outbox_retirement_path(
     record_id: str,
 ) -> Path:
     """Return the append-only terminal receipt path for one outbox record."""
+    return (
+        aoa_root
+        / PROJECTION_OUTBOX_RETIREMENTS_DIR
+        / f"{record_id}.json"
+    )
+
+
+def projection_outbox_consumer_retirement_path(
+    aoa_root: Path,
+    record_id: str,
+) -> Path:
     return (
         aoa_root
         / PROJECTION_OUTBOX_RETIREMENTS_DIR
@@ -29033,6 +30644,2140 @@ def projection_outbox_consumer_completion(
     }
 
 
+def _projection_outbox_same_path(left: Path, right: Path) -> bool:
+    try:
+        return left.resolve() == right.resolve()
+    except OSError:
+        return str(left) == str(right)
+
+
+def _projection_outbox_reconcile_result(
+    *,
+    status: str,
+    ok: bool,
+    apply: bool,
+    session_id: str,
+    record_id: str,
+    expected_publish_id: str,
+    consumer: str,
+    **fields: Any,
+) -> dict[str, Any]:
+    return {
+        "schema_version": PROJECTION_OUTBOX_CONSUMER_RECONCILE_SCHEMA_VERSION,
+        "artifact_type": PROJECTION_OUTBOX_CONSUMER_RECONCILE_ARTIFACT_TYPE,
+        "generated_at": utc_now(),
+        "ok": bool(ok),
+        "status": status,
+        "apply": bool(apply),
+        "dry_run": not bool(apply),
+        "mutates": bool(fields.pop("mutates", False)),
+        "session_id": session_id,
+        "record_id": record_id,
+        "expected_publish_id": expected_publish_id,
+        "consumer": consumer,
+        "scope": {
+            "kind": "exact_session",
+            "session_id": session_id,
+        },
+        "truth_status": (
+            "one_exact_consumer_completion_or_retirement_receipt_"
+            "not_global_freshness"
+        ),
+        "diagnostics": fields.pop("diagnostics", []),
+        **fields,
+    }
+
+
+def _projection_outbox_reconcile_identity(
+    *,
+    aoa_root: Path,
+    session_id: str,
+    record_id: str,
+    expected_publish_id: str,
+) -> dict[str, Any]:
+    if not session_id or not expected_publish_id:
+        return {
+            "ok": False,
+            "status": "invalid_identity",
+            "diagnostics": ["session_id_and_expected_publish_id_required"],
+        }
+    if not re.fullmatch(r"[a-f0-9]{64}", record_id):
+        return {
+            "ok": False,
+            "status": "invalid_identity",
+            "diagnostics": ["record_id_must_be_sha256"],
+        }
+    record_path = aoa_root / PROJECTION_OUTBOX_RECORDS_DIR / f"{record_id}.json"
+    record = read_json(record_path, {})
+    if not isinstance(record, dict) or not record:
+        return {
+            "ok": False,
+            "status": "record_unavailable",
+            "record_path": str(record_path),
+            "diagnostics": ["exact_outbox_record_missing_or_invalid"],
+        }
+    record_valid, record_diagnostics = _projection_outbox_record_valid(
+        record,
+        aoa_root=aoa_root,
+    )
+    if not record_valid:
+        return {
+            "ok": False,
+            "status": "invalid_record",
+            "record_path": str(record_path),
+            "diagnostics": record_diagnostics,
+        }
+    if str(record.get("record_id") or "") != record_id:
+        return {
+            "ok": False,
+            "status": "superseded_identity",
+            "record_path": str(record_path),
+            "diagnostics": ["record_id_field_mismatch"],
+        }
+    if str(record.get("session_id") or "") != session_id:
+        return {
+            "ok": False,
+            "status": "superseded_identity",
+            "record_path": str(record_path),
+            "diagnostics": ["record_session_id_mismatch"],
+        }
+    if str(record.get("new_publish_id") or "") != expected_publish_id:
+        return {
+            "ok": False,
+            "status": "superseded_identity",
+            "record_path": str(record_path),
+            "diagnostics": ["record_publish_id_superseded"],
+        }
+    if str(record.get("status") or "") != "pending":
+        return {
+            "ok": False,
+            "status": "record_not_pending",
+            "record_path": str(record_path),
+            "diagnostics": ["outbox_record_is_not_pending"],
+        }
+    publication = (
+        record.get("publication_receipt")
+        if isinstance(record.get("publication_receipt"), dict)
+        else {}
+    )
+    session_dir_text = str(publication.get("session_dir") or "")
+    if not session_dir_text:
+        return {
+            "ok": False,
+            "status": "session_route_unavailable",
+            "record_path": str(record_path),
+            "diagnostics": ["outbox_publication_session_dir_missing"],
+        }
+    session_dir = Path(session_dir_text)
+    if not session_dir.is_absolute():
+        session_dir = aoa_root / session_dir
+    if not _projection_outbox_same_path(
+        session_dir.parent.parent,
+        aoa_root,
+    ):
+        return {
+            "ok": False,
+            "status": "session_route_unavailable",
+            "record_path": str(record_path),
+            "diagnostics": ["session_dir_not_under_aoa_root"],
+        }
+    manifest_path = session_dir / "session.manifest.json"
+    manifest = read_json(manifest_path, {})
+    if not isinstance(manifest, dict) or not manifest:
+        return {
+            "ok": False,
+            "status": "session_route_unavailable",
+            "record_path": str(record_path),
+            "session_dir": str(session_dir),
+            "diagnostics": ["exact_session_manifest_missing_or_invalid"],
+        }
+    if str(manifest.get("session_id") or "") != session_id:
+        return {
+            "ok": False,
+            "status": "superseded_identity",
+            "record_path": str(record_path),
+            "session_dir": str(session_dir),
+            "diagnostics": ["current_manifest_session_id_mismatch"],
+        }
+    current_publish_id = projection_publish_id(
+        manifest.get("index_schema")
+        if isinstance(manifest.get("index_schema"), dict)
+        else {}
+    )
+    if current_publish_id != expected_publish_id:
+        return {
+            "ok": False,
+            "status": "superseded_identity",
+            "record_path": str(record_path),
+            "session_dir": str(session_dir),
+            "current_publish_id": current_publish_id,
+            "diagnostics": ["current_manifest_publish_id_superseded"],
+        }
+    if str(publication.get("publish_id") or "") != expected_publish_id:
+        return {
+            "ok": False,
+            "status": "superseded_identity",
+            "record_path": str(record_path),
+            "session_dir": str(session_dir),
+            "diagnostics": ["outbox_publication_publish_id_mismatch"],
+        }
+    if not _projection_outbox_same_path(
+        Path(session_dir_text)
+        if Path(session_dir_text).is_absolute()
+        else aoa_root / session_dir_text,
+        session_dir,
+    ):
+        return {
+            "ok": False,
+            "status": "superseded_identity",
+            "record_path": str(record_path),
+            "session_dir": str(session_dir),
+            "diagnostics": ["outbox_publication_session_dir_mismatch"],
+        }
+    normalized_required = list(record["required_consumers"])
+    return {
+        "ok": True,
+        "status": "identity_bound",
+        "record_path": str(record_path),
+        "session_dir": str(session_dir),
+        "record": record,
+        "manifest": manifest,
+        "required_consumers": normalized_required,
+        "current_publish_id": current_publish_id,
+    }
+
+
+def _projection_outbox_consumer_route_spec(
+    consumer: str,
+    consumer_routes: dict[str, Any] | None,
+) -> dict[str, Any]:
+    raw = (
+        consumer_routes.get(consumer)
+        if isinstance(consumer_routes, dict)
+        else None
+    )
+    if callable(raw):
+        raw = {"handler": raw}
+    if not isinstance(raw, dict):
+        return {
+            "consumer": "",
+            "available": False,
+            "targeted": False,
+            "global_scope": False,
+            "scope": "",
+            "route_id": "",
+            "handler": None,
+        }
+    spec = dict(raw)
+    handler = spec.get("handler") or spec.get("run")
+    spec["consumer"] = str(spec.get("consumer") or "")
+    spec["available"] = bool(
+        spec.get("available", callable(handler))
+    )
+    spec["targeted"] = bool(spec.get("targeted", True))
+    spec["global_scope"] = bool(spec.get("global_scope", False))
+    spec["scope"] = str(spec.get("scope") or "")
+    spec["route_id"] = str(spec.get("route_id") or "")
+    spec["handler"] = handler
+    return spec
+
+
+def _projection_outbox_global_child_violations(
+    spec: dict[str, Any],
+    *,
+    session_id: str,
+) -> list[str]:
+    violations: list[str] = []
+    if not bool(spec.get("available")):
+        violations.append("targeted_consumer_route_unavailable")
+    if not callable(spec.get("handler")):
+        violations.append("targeted_consumer_handler_missing")
+    if str(spec.get("consumer") or "") != str(
+        spec.get("_requested_consumer") or spec.get("consumer") or ""
+    ):
+        violations.append("route_consumer_not_allowlisted_target")
+    if not bool(spec.get("targeted")):
+        violations.append("route_not_targeted")
+    if bool(spec.get("global_scope")):
+        violations.append("global_scope_declared")
+    if str(spec.get("scope") or "") != "exact_session":
+        violations.append("route_scope_not_exact_session")
+    target_session_id = str(
+        spec.get("target_session_id")
+        or ""
+    )
+    if not target_session_id:
+        violations.append("route_target_session_id_missing")
+    elif target_session_id != session_id:
+        violations.append("route_target_session_id_mismatch")
+    requested_consumer = str(spec.get("_requested_consumer") or "")
+    expected_route = _projection_outbox_route_registry_identity(
+        requested_consumer
+    )
+    for key, expected in (
+        ("registry_id", expected_route.get("registry_id")),
+        ("registry_version", expected_route.get("registry_version")),
+        ("registry_digest", expected_route.get("registry_digest")),
+        ("registry_entry_id", expected_route.get("entry_id")),
+        ("route_id", expected_route.get("route_id")),
+        ("handler_id", expected_route.get("handler_id")),
+        ("source_ref", expected_route.get("source_ref")),
+        ("consumer_aliases", expected_route.get("consumer_aliases")),
+        ("operation", expected_route.get("operation")),
+        ("operation_aliases", expected_route.get("operation_aliases")),
+    ):
+        if spec.get(key) != expected:
+            violations.append(f"route_registry_{key}_mismatch")
+    command_value = spec.get("child_command", spec.get("command", []))
+    if isinstance(command_value, str):
+        try:
+            command = shlex.split(command_value)
+        except ValueError:
+            command = command_value.split()
+    elif isinstance(command_value, (list, tuple)):
+        command = [str(item) for item in command_value]
+    else:
+        command = []
+    lowered = [item.casefold() for item in command]
+    global_tokens = {
+        "all",
+        "--all",
+        "atlas",
+        "narrative",
+        "global",
+        "global-rebuild",
+        "full-rebuild",
+        "--global",
+        "--global-rebuild",
+        "--full-rebuild",
+        "--rebuild",
+        "--full",
+    }
+    for index, token in enumerate(lowered):
+        if token in global_tokens:
+            violations.append(f"global_child_token:{command[index]}")
+        if token in {"--session", "--session-id", "--target"}:
+            if index + 1 < len(lowered) and lowered[index + 1] == "all":
+                violations.append("global_child_target_all")
+    if any(
+        marker in token
+        for token in lowered
+        for marker in ("full-rebuild", "global-rebuild")
+    ):
+        violations.append("global_rebuild_marker")
+    return sorted(set(violations))
+
+
+def _projection_outbox_consumer_state_detail(
+    session_dir: Path,
+    *,
+    record: dict[str, Any],
+    consumer: str,
+) -> dict[str, Any]:
+    record_id = str(record.get("record_id") or "")
+    path = projection_outbox_consumer_state_path(
+        session_dir,
+        consumer=consumer,
+        record_id=record_id,
+    )
+    if not path.exists():
+        return {
+            "exists": False,
+            "path": str(path),
+            "state": {},
+        }
+    state = read_json(path, {})
+    if not isinstance(state, dict) or not state:
+        return {
+            "exists": True,
+            "path": str(path),
+            "state": {},
+            "identity_error": "consumer_state_invalid",
+        }
+    if (
+        str(state.get("record_id") or "") != record_id
+        or str(state.get("session_id") or "")
+        != str(record.get("session_id") or "")
+        or str(state.get("consumer") or "") != consumer
+        or str(state.get("source_publish_id") or "")
+        != str(record.get("new_publish_id") or "")
+    ):
+        return {
+            "exists": True,
+            "path": str(path),
+            "state": state,
+            "identity_error": "consumer_state_identity_mismatch",
+        }
+    if int_value(state.get("schema_version"), -1) != 1 or state.get(
+        "artifact_type"
+    ) != "projection_outbox_consumer_state":
+        return {
+            "exists": True,
+            "path": str(path),
+            "state": state,
+            "identity_error": "consumer_state_schema_invalid",
+        }
+    if state.get("status") == "complete" and state.get(
+        "semantic_completion"
+    ) is not True:
+        return {
+            "exists": True,
+            "path": str(path),
+            "state": state,
+            "identity_error": "consumer_state_not_authoritative",
+        }
+    return {
+        "exists": True,
+        "path": str(path),
+        "state": state,
+    }
+
+
+def _projection_outbox_consumer_retirement_recheck(
+    *,
+    aoa_root: Path,
+    session_dir: Path,
+    record: dict[str, Any],
+    required_consumers: list[str],
+    dry_run: bool,
+) -> dict[str, Any]:
+    session_id = str(record.get("session_id") or "")
+    record_id = str(record.get("record_id") or "")
+    publish_id = str(record.get("new_publish_id") or "")
+    current_identity = _projection_outbox_reconcile_identity(
+        aoa_root=aoa_root,
+        session_id=session_id,
+        record_id=record_id,
+        expected_publish_id=publish_id,
+    )
+    if not current_identity.get("ok"):
+        return {
+            "ok": False,
+            "status": str(
+                current_identity.get("status") or "superseded_identity"
+            ),
+            "diagnostics": current_identity.get("diagnostics", []),
+            "mutates": False,
+        }
+    if current_identity.get("record") != record:
+        return {
+            "ok": False,
+            "status": "superseded_identity",
+            "diagnostics": ["record_changed_before_retirement_recheck"],
+            "mutates": False,
+        }
+    if required_consumers != list(record.get("required_consumers") or []):
+        return {
+            "ok": False,
+            "status": "retirement_conflict",
+            "diagnostics": ["retirement_required_consumers_not_exact"],
+            "mutates": False,
+        }
+    state_summaries: dict[str, Any] = {}
+    missing: list[str] = []
+    invalid: list[dict[str, str]] = []
+    for consumer in required_consumers:
+        detail = _projection_outbox_consumer_state_detail(
+            session_dir,
+            record=record,
+            consumer=consumer,
+        )
+        state_summaries[consumer] = {
+            "path": detail["path"],
+            "status": str(
+                detail.get("state", {}).get("status") or ""
+            ),
+        }
+        if detail.get("identity_error"):
+            invalid.append(
+                {
+                    "consumer": consumer,
+                    "reason": str(detail["identity_error"]),
+                }
+            )
+            continue
+        state = detail.get("state") if isinstance(
+            detail.get("state"), dict
+        ) else {}
+        if not detail.get("exists") or str(
+            state.get("status") or ""
+        ) != "complete":
+            missing.append(consumer)
+            continue
+        valid, reason = _projection_outbox_completion_receipt_valid(
+            state.get("completion_receipt"),
+            session_id=session_id,
+            record_id=record_id,
+            expected_publish_id=publish_id,
+            consumer=consumer,
+            record=record,
+            session_dir=session_dir,
+            aoa_root=aoa_root,
+        )
+        if not valid:
+            invalid.append({"consumer": consumer, "reason": reason})
+        elif state.get("receipt_sha256") != _projection_outbox_receipt_digest(
+            state.get("completion_receipt")
+        ):
+            invalid.append(
+                {
+                    "consumer": consumer,
+                    "reason": "consumer_state_receipt_digest_mismatch",
+                }
+            )
+    retirement_path = projection_outbox_consumer_retirement_path(
+        aoa_root,
+        record_id,
+    )
+    completion_receipts: dict[str, Any] = {}
+    if not missing and not invalid:
+        for consumer in required_consumers:
+            detail = _projection_outbox_consumer_state_detail(
+                session_dir,
+                record=record,
+                consumer=consumer,
+            )
+            state = detail.get("state") if isinstance(
+                detail.get("state"), dict
+            ) else {}
+            receipt = state.get("completion_receipt")
+            completion_receipts[consumer] = {
+                "path": detail["path"],
+                "receipt_sha256": _projection_outbox_receipt_digest(receipt),
+                "operation_key": str(
+                    receipt.get("operation_key") if isinstance(receipt, dict) else ""
+                ),
+            }
+    retirement_identity = {
+        "schema_version": PROJECTION_OUTBOX_CONSUMER_RETIREMENT_SCHEMA_VERSION,
+        "artifact_type": PROJECTION_OUTBOX_CONSUMER_RETIREMENT_ARTIFACT_TYPE,
+        "status": "retired",
+        "session_id": session_id,
+        "record_id": record_id,
+        "expected_publish_id": publish_id,
+        "required_consumers": required_consumers,
+        "completion_receipts": completion_receipts,
+        "truth_status": (
+            "all_required_exact_consumer_receipts_verified_"
+            "outbox_retirement_not_global_freshness"
+        ),
+    }
+    retirement_id = _projection_outbox_json_digest(retirement_identity)
+    existing = read_json(retirement_path, {})
+    if isinstance(existing, dict) and existing:
+        if (
+            set(existing)
+            != set(retirement_identity) | {"retirement_id", "retired_at"}
+            or any(
+                existing.get(key) != value
+                for key, value in retirement_identity.items()
+            )
+            or existing.get("retirement_id") != retirement_id
+        ):
+            invalid.append(
+                {
+                    "consumer": "retirement",
+                    "reason": "retirement_content_conflict",
+                }
+            )
+        elif not missing and not invalid:
+            return {
+                "ok": True,
+                "status": "already_retired",
+                "path": str(retirement_path),
+                "required_consumers": required_consumers,
+                "missing_consumers": [],
+                "completion_receipts": completion_receipts,
+                "retirement_id": retirement_id,
+                "state_summaries": state_summaries,
+                "mutates": False,
+            }
+    if invalid:
+        return {
+            "ok": False,
+            "status": "retirement_conflict",
+            "path": str(retirement_path),
+            "required_consumers": required_consumers,
+            "missing_consumers": missing,
+            "invalid": invalid,
+            "state_summaries": state_summaries,
+            "mutates": False,
+        }
+    if missing:
+        return {
+            "ok": True,
+            "status": "pending_required_consumers",
+            "path": str(retirement_path),
+            "required_consumers": required_consumers,
+            "missing_consumers": missing,
+            "state_summaries": state_summaries,
+            "mutates": False,
+        }
+    if dry_run:
+        return {
+            "ok": True,
+            "status": "would_retire",
+            "path": str(retirement_path),
+            "required_consumers": required_consumers,
+            "missing_consumers": [],
+            "completion_receipts": completion_receipts,
+            "retirement_id": retirement_id,
+            "state_summaries": state_summaries,
+            "mutates": False,
+        }
+    retirement = {
+        **retirement_identity,
+        "retirement_id": retirement_id,
+        "retired_at": utc_now(),
+    }
+    write_json_durable(retirement_path, retirement)
+    return {
+        "ok": True,
+        "status": "retired",
+        "path": str(retirement_path),
+        "required_consumers": required_consumers,
+        "missing_consumers": [],
+        "completion_receipts": completion_receipts,
+        "retirement_id": retirement_id,
+        "state_summaries": state_summaries,
+        "mutates": True,
+        "write_paths": [str(retirement_path)],
+    }
+
+
+def _projection_outbox_reconcile_resource_admit(
+    *,
+    aoa_root: Path,
+    context: dict[str, Any],
+    resource_admission: dict[str, Any] | None,
+    resource_gate: Callable[[dict[str, Any]], dict[str, Any]] | None,
+) -> tuple[Any | None, dict[str, Any]]:
+    admission: Any = resource_admission
+    if resource_gate is not None:
+        try:
+            admission = resource_gate(dict(context))
+        except Exception as exc:
+            return None, {
+                "ok": False,
+                "status": "resource_denied",
+                "reason": "resource_gate_failed",
+                "diagnostics": [f"resource_gate_failed:{exc}"],
+            }
+    if not isinstance(admission, dict):
+        return None, {
+            "ok": False,
+            "status": "resource_denied",
+            "reason": "resource_admission_missing",
+            "diagnostics": ["apply_requires_explicit_resource_admission"],
+        }
+    valid, diagnostics = _projection_outbox_resource_admission_valid(
+        admission,
+        context=context,
+    )
+    if not valid:
+        return None, {
+            "ok": False,
+            "status": "resource_denied",
+            "reason": "resource_admission_not_authoritative",
+            "resource_admission": dict(admission),
+            "diagnostics": diagnostics,
+        }
+    lock_path = (
+        aoa_root
+        / DIAGNOSTICS_ROOT
+        / "projection-outbox-consumer-reconcile.lock"
+    )
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle: Any | None = None
+    try:
+        handle = lock_path.open("a+", encoding="utf-8")
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (BlockingIOError, OSError) as exc:
+        if handle is not None:
+            handle.close()  # type: ignore[union-attr]
+        return None, {
+            "ok": False,
+            "status": "resource_denied",
+            "reason": "concurrency_one_lock_busy",
+            "resource_admission": dict(admission),
+            "lock_path": str(lock_path),
+            "diagnostics": [f"reconcile_lock_unavailable:{exc}"],
+        }
+    return handle, {
+        "ok": True,
+        "status": "resource_admitted",
+        "resource_admission": dict(admission),
+        "lock_path": str(lock_path),
+    }
+
+
+def _projection_outbox_reconcile_release_lock(handle: Any | None) -> None:
+    if handle is None:
+        return
+    try:
+        fcntl.flock(handle, fcntl.LOCK_UN)
+    finally:
+        handle.close()
+
+
+def _projection_outbox_handler_result_valid(
+    *,
+    handler_result: Any,
+    consumer: str,
+    record: dict[str, Any],
+    session_dir: Path,
+    aoa_root: Path,
+    route_spec: dict[str, Any],
+    context: dict[str, Any],
+) -> tuple[dict[str, Any] | None, list[str]]:
+    if not isinstance(handler_result, dict):
+        return None, ["handler_result_not_object"]
+    required = {
+        "ok",
+        "status",
+        "consumer",
+        "consumer_aliases",
+        "session_id",
+        "record_id",
+        "outbox_record_id",
+        "expected_publish_id",
+        "source_publish_id",
+        "publication_identity",
+        "publication_aliases",
+        "operation",
+        "operation_aliases",
+        "operation_key",
+        "route_registry",
+        "route_id",
+        "handler_id",
+        "attempt",
+        "resource_admission_id",
+        "lease_id",
+        "commit_ref",
+    }
+    if set(handler_result) != required:
+        unknown = sorted(set(handler_result) - required)
+        missing = sorted(required - set(handler_result))
+        diagnostics = [
+            *(f"handler_result_field_missing:{key}" for key in missing),
+            *(f"handler_result_unknown_field:{key}" for key in unknown),
+        ]
+        return None, diagnostics
+    missing = sorted(required - set(handler_result))
+    if missing:
+        return None, [f"handler_result_field_missing:{key}" for key in missing]
+    expected_route = _projection_outbox_route_registry_identity(consumer)
+    expected_publication = _projection_outbox_publication_aliases(
+        session_id=str(record.get("session_id") or ""),
+        record_id=str(record.get("record_id") or ""),
+        publish_id=str(record.get("new_publish_id") or ""),
+    )
+    exact_values = {
+        "consumer": consumer,
+        "consumer_aliases": expected_route["consumer_aliases"],
+        "session_id": context["session_id"],
+        "record_id": context["record_id"],
+        "outbox_record_id": context["record_id"],
+        "expected_publish_id": context["expected_publish_id"],
+        "source_publish_id": context["expected_publish_id"],
+        "publication_identity": {
+            "session_id": context["session_id"],
+            "record_id": context["record_id"],
+            "publish_id": context["expected_publish_id"],
+        },
+        "publication_aliases": expected_publication,
+        "operation": PROJECTION_OUTBOX_CONSUMER_OPERATION,
+        "operation_aliases": expected_route["operation_aliases"],
+        "operation_key": context["operation_key"],
+        "route_registry": expected_route,
+        "route_id": expected_route["route_id"],
+        "handler_id": expected_route["handler_id"],
+        "attempt": context["attempt"],
+        "resource_admission_id": context["resource_admission"]["admission_id"],
+        "lease_id": context["resource_admission"]["lease_id"],
+    }
+    diagnostics = [
+        f"handler_result_{key}_mismatch"
+        for key, expected in exact_values.items()
+        if handler_result.get(key) != expected
+    ]
+    if handler_result.get("ok") is not True or handler_result.get(
+        "status"
+    ) != "committed":
+        diagnostics.append("handler_result_not_committed")
+    commit_ref = handler_result.get("commit_ref")
+    if not isinstance(commit_ref, dict) or set(commit_ref) != {
+        "kind",
+        "reference",
+        "sha256",
+    }:
+        diagnostics.append("handler_result_commit_ref_not_typed")
+    if diagnostics:
+        return None, unique_preserving_order(diagnostics)
+    receipt_path = Path(str(commit_ref.get("reference")))
+    try:
+        expected_path = projection_outbox_consumer_operation_receipt_path(
+            aoa_root,
+            str(context["operation_key"]),
+        )
+        if receipt_path.resolve() != expected_path.resolve():
+            return None, ["handler_result_commit_ref_path_mismatch"]
+    except OSError:
+        return None, ["handler_result_commit_ref_path_unresolvable"]
+    receipt = read_json(receipt_path, {})
+    valid, reason = _projection_outbox_completion_receipt_valid(
+        receipt,
+        session_id=context["session_id"],
+        record_id=context["record_id"],
+        expected_publish_id=context["expected_publish_id"],
+        consumer=consumer,
+        record=record,
+        session_dir=session_dir,
+        aoa_root=aoa_root,
+        route_spec=route_spec,
+        expected_context=context,
+    )
+    if not valid:
+        return None, [reason]
+    if receipt.get("commit_ref") != commit_ref:
+        return None, ["handler_result_commit_ref_receipt_mismatch"]
+    return receipt, []
+
+
+def _projection_outbox_operation_receipt_recovery(
+    *,
+    aoa_root: Path,
+    session_dir: Path,
+    record: dict[str, Any],
+    consumer: str,
+    route_spec: dict[str, Any] | None,
+    context: dict[str, Any],
+) -> tuple[dict[str, Any] | None, list[str]]:
+    journal_path = projection_outbox_consumer_operation_journal_path(
+        aoa_root,
+        str(context["operation_key"]),
+    )
+    receipt_path = projection_outbox_consumer_operation_receipt_path(
+        aoa_root,
+        str(context["operation_key"]),
+    )
+    journal_exists = journal_path.is_file()
+    receipt_exists = receipt_path.is_file()
+    journal = read_json(journal_path, {}) if journal_exists else {}
+    if journal_exists:
+        if not isinstance(journal, dict) or not journal:
+            return None, ["committed_operation_journal_unreadable"]
+        receipt = journal.get("receipt")
+    elif receipt_exists:
+        receipt = read_json(receipt_path, {})
+    else:
+        return None, []
+    if not isinstance(receipt, dict) or not receipt:
+        return None, ["committed_operation_receipt_unreadable"]
+    valid, reason = _projection_outbox_completion_receipt_valid(
+        receipt,
+        session_id=context["session_id"],
+        record_id=context["record_id"],
+        expected_publish_id=context["expected_publish_id"],
+        consumer=consumer,
+        record=record,
+        session_dir=session_dir,
+        aoa_root=aoa_root,
+        route_spec=route_spec,
+        expected_context=context,
+    )
+    if not valid:
+        return None, [f"committed_operation_conflict:{reason}"]
+    if isinstance(journal, dict) and journal:
+        if journal.get("status") != "committed" or journal.get(
+            "operation_key"
+        ) != context["operation_key"]:
+            return None, ["committed_operation_journal_identity_mismatch"]
+        if journal.get("receipt_sha256") != _projection_outbox_receipt_digest(
+            receipt
+        ):
+            return None, ["committed_operation_journal_receipt_conflict"]
+        if read_json(receipt_path, {}) != receipt:
+            return None, ["committed_operation_receipt_conflict"]
+    return receipt, []
+
+
+def _projection_outbox_persist_operation_journal(
+    *,
+    aoa_root: Path,
+    record: dict[str, Any],
+    consumer: str,
+    context: dict[str, Any],
+    receipt: dict[str, Any],
+) -> dict[str, Any]:
+    path = projection_outbox_consumer_operation_journal_path(
+        aoa_root,
+        str(context["operation_key"]),
+    )
+    payload = {
+        "schema_version": 1,
+        "artifact_type": "projection_outbox_consumer_operation_journal",
+        "status": "committed",
+        "session_id": context["session_id"],
+        "record_id": context["record_id"],
+        "publish_id": context["expected_publish_id"],
+        "consumer": consumer,
+        "operation": context["operation"],
+        "operation_key": context["operation_key"],
+        "attempt": context["attempt"],
+        "receipt_sha256": _projection_outbox_receipt_digest(receipt),
+        "receipt": receipt,
+        "committed_at": utc_now(),
+        "truth_status": "durable_committed_operation_before_semantic_state",
+    }
+    path_exists = path.is_file()
+    existing = read_json(path, {}) if path_exists else {}
+    if path_exists and (not isinstance(existing, dict) or not existing):
+        raise ValueError("projection_outbox_committed_operation_conflict")
+    if isinstance(existing, dict) and existing:
+        if existing == payload or (
+            existing.get("status") == "committed"
+            and existing.get("operation_key") == context["operation_key"]
+            and existing.get("receipt_sha256") == payload["receipt_sha256"]
+            and existing.get("receipt") == receipt
+        ):
+            return {"status": "reused", "path": str(path)}
+        raise ValueError("projection_outbox_committed_operation_conflict")
+    write_json_durable(path, payload)
+    return {"status": "written", "path": str(path)}
+
+
+def reconcile_projection_outbox_consumer(
+    *,
+    aoa_root: Path,
+    session_id: str,
+    record_id: str,
+    expected_publish_id: str,
+    consumer: str,
+    apply: bool = False,
+    max_attempts: int = PROJECTION_OUTBOX_CONSUMER_MAX_ATTEMPTS,
+    resource_admission: dict[str, Any] | None = None,
+    resource_gate: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    consumer_routes: dict[str, Any] | None = None,
+    execution_id: str | None = None,
+) -> dict[str, Any]:
+    base_fields: dict[str, Any] = {
+        "execution_id": str(execution_id or ""),
+        "effects": [],
+        "write_paths": [],
+    }
+    if consumer not in PROJECTION_OUTBOX_CONSUMER_RECONCILE_ORDER:
+        return _projection_outbox_reconcile_result(
+            status="unavailable_targeted_consumer_route",
+            ok=False,
+            apply=apply,
+            session_id=session_id,
+            record_id=record_id,
+            expected_publish_id=expected_publish_id,
+            consumer=consumer,
+            **base_fields,
+            diagnostics=["consumer_not_allowlisted"],
+        )
+    if max_attempts <= 0 or max_attempts > (
+        PROJECTION_OUTBOX_CONSUMER_MAX_ATTEMPTS
+    ):
+        return _projection_outbox_reconcile_result(
+            status="invalid_attempt_limit",
+            ok=False,
+            apply=apply,
+            session_id=session_id,
+            record_id=record_id,
+            expected_publish_id=expected_publish_id,
+            consumer=consumer,
+            **base_fields,
+            diagnostics=["attempt_limit_must_be_finite_and_within_policy"],
+        )
+    identity = _projection_outbox_reconcile_identity(
+        aoa_root=aoa_root,
+        session_id=session_id,
+        record_id=record_id,
+        expected_publish_id=expected_publish_id,
+    )
+    if not identity.get("ok"):
+        return _projection_outbox_reconcile_result(
+            status=str(identity.get("status") or "identity_unbound"),
+            ok=False,
+            apply=apply,
+            session_id=session_id,
+            record_id=record_id,
+            expected_publish_id=expected_publish_id,
+            consumer=consumer,
+            **base_fields,
+            **{
+                key: value
+                for key, value in identity.items()
+                if key not in {"ok", "status"}
+            },
+        )
+    record = identity["record"]
+    session_dir = Path(str(identity["session_dir"]))
+    record_retry_policy = record.get("retry_policy")
+    record_max_attempts = int_value(
+        record_retry_policy.get("max_attempts_per_cycle")
+        if isinstance(record_retry_policy, dict)
+        else 0,
+    )
+    if record_max_attempts <= 0:
+        return _projection_outbox_reconcile_result(
+            status="invalid_record",
+            ok=False,
+            apply=apply,
+            session_id=session_id,
+            record_id=record_id,
+            expected_publish_id=expected_publish_id,
+            consumer=consumer,
+            **base_fields,
+            diagnostics=["record_retry_policy_missing_or_invalid"],
+        )
+    # The caller may request a smaller budget, but can never widen the
+    # immutable retry policy carried by the content-addressed record.
+    max_attempts = min(max_attempts, record_max_attempts)
+    required_consumers = [
+        item
+        for item in PROJECTION_OUTBOX_CONSUMER_RECONCILE_ORDER
+        if item in identity["required_consumers"]
+    ]
+    if consumer not in required_consumers:
+        return _projection_outbox_reconcile_result(
+            status="consumer_not_required",
+            ok=False,
+            apply=apply,
+            session_id=session_id,
+            record_id=record_id,
+            expected_publish_id=expected_publish_id,
+            consumer=consumer,
+            **base_fields,
+            record_path=identity["record_path"],
+            required_consumers=required_consumers,
+        )
+    dependencies = list(
+        PROJECTION_OUTBOX_CONSUMER_RECONCILE_DEPENDENCIES.get(
+            consumer,
+            (),
+        )
+    )
+    if any(dependency not in required_consumers for dependency in dependencies):
+        return _projection_outbox_reconcile_result(
+            status="missing_dependency",
+            ok=False,
+            apply=apply,
+            session_id=session_id,
+            record_id=record_id,
+            expected_publish_id=expected_publish_id,
+            consumer=consumer,
+            **base_fields,
+            record_path=identity["record_path"],
+            required_consumers=required_consumers,
+            dependency_order=[*dependencies, consumer],
+            diagnostics=["dependency_not_required_by_record"],
+        )
+    target_detail = _projection_outbox_consumer_state_detail(
+        session_dir,
+        record=record,
+        consumer=consumer,
+    )
+    if target_detail.get("identity_error"):
+        return _projection_outbox_reconcile_result(
+            status="superseded_identity",
+            ok=False,
+            apply=apply,
+            session_id=session_id,
+            record_id=record_id,
+            expected_publish_id=expected_publish_id,
+            consumer=consumer,
+            **base_fields,
+            record_path=identity["record_path"],
+            required_consumers=required_consumers,
+            dependency_order=[*dependencies, consumer],
+            diagnostics=[str(target_detail["identity_error"])],
+        )
+    target_state = (
+        target_detail.get("state")
+        if isinstance(target_detail.get("state"), dict)
+        else {}
+    )
+    target_status = str(target_state.get("status") or "")
+    if target_status == "complete":
+        valid, reason = _projection_outbox_completion_receipt_valid(
+            target_state.get("completion_receipt"),
+            session_id=session_id,
+            record_id=record_id,
+            expected_publish_id=expected_publish_id,
+            consumer=consumer,
+            record=record,
+            session_dir=session_dir,
+            aoa_root=aoa_root,
+        )
+        if not valid:
+            return _projection_outbox_reconcile_result(
+                status="superseded_identity",
+                ok=False,
+                apply=apply,
+                session_id=session_id,
+                record_id=record_id,
+                expected_publish_id=expected_publish_id,
+                consumer=consumer,
+                **base_fields,
+                record_path=identity["record_path"],
+                required_consumers=required_consumers,
+                dependency_order=[*dependencies, consumer],
+                diagnostics=[reason],
+            )
+        retirement_plan = _projection_outbox_consumer_retirement_recheck(
+            aoa_root=aoa_root,
+            session_dir=session_dir,
+            record=record,
+            required_consumers=required_consumers,
+            dry_run=True,
+        )
+        if not retirement_plan.get("ok"):
+            return _projection_outbox_reconcile_result(
+                status=str(
+                    retirement_plan.get("status")
+                    or "superseded_identity"
+                ),
+                ok=False,
+                apply=apply,
+                session_id=session_id,
+                record_id=record_id,
+                expected_publish_id=expected_publish_id,
+                consumer=consumer,
+                **base_fields,
+                record_path=identity["record_path"],
+                required_consumers=required_consumers,
+                retirement=retirement_plan,
+            )
+        if retirement_plan.get("status") in {"already_retired"}:
+            return _projection_outbox_reconcile_result(
+                status="already_retired",
+                ok=True,
+                apply=apply,
+                session_id=session_id,
+                record_id=record_id,
+                expected_publish_id=expected_publish_id,
+                consumer=consumer,
+                **base_fields,
+                record_path=identity["record_path"],
+                required_consumers=required_consumers,
+                retirement=retirement_plan,
+            )
+        if retirement_plan.get("status") != "would_retire":
+            return _projection_outbox_reconcile_result(
+                status="consumer_already_complete",
+                ok=True,
+                apply=apply,
+                session_id=session_id,
+                record_id=record_id,
+                expected_publish_id=expected_publish_id,
+                consumer=consumer,
+                **base_fields,
+                record_path=identity["record_path"],
+                required_consumers=required_consumers,
+                retirement=retirement_plan,
+            )
+        if not apply:
+            return _projection_outbox_reconcile_result(
+                status="dry_run_would_retire",
+                ok=True,
+                apply=False,
+                session_id=session_id,
+                record_id=record_id,
+                expected_publish_id=expected_publish_id,
+                consumer=consumer,
+                **base_fields,
+                record_path=identity["record_path"],
+                required_consumers=required_consumers,
+                retirement=retirement_plan,
+            )
+        retirement_attempt = max(
+            1,
+            int_value(
+                (
+                    target_state.get("completion_receipt")
+                    if isinstance(target_state.get("completion_receipt"), dict)
+                    else {}
+                ).get("attempt"),
+                1,
+            ),
+        )
+        retirement_route = _projection_outbox_route_registry_identity(consumer)
+        retirement_operation_key = _projection_outbox_operation_key(
+            session_id=session_id,
+            record_id=record_id,
+            publish_id=expected_publish_id,
+            consumer=consumer,
+            operation="retirement",
+            attempt=retirement_attempt,
+            route_id=retirement_route["route_id"],
+        )
+        lock_handle, admission = _projection_outbox_reconcile_resource_admit(
+            aoa_root=aoa_root,
+            context={
+                "aoa_root": aoa_root,
+                "session_id": session_id,
+                "record_id": record_id,
+                "expected_publish_id": expected_publish_id,
+                "consumer": consumer,
+                "operation": "retirement",
+                "operation_key": retirement_operation_key,
+                "attempt": retirement_attempt,
+            },
+            resource_admission=resource_admission,
+            resource_gate=resource_gate,
+        )
+        if not admission.get("ok"):
+            return _projection_outbox_reconcile_result(
+                status="resource_denied",
+                ok=False,
+                apply=True,
+                session_id=session_id,
+                record_id=record_id,
+                expected_publish_id=expected_publish_id,
+                consumer=consumer,
+                **base_fields,
+                record_path=identity["record_path"],
+                required_consumers=required_consumers,
+                resource=admission,
+            )
+        try:
+            publication_fence = _projection_outbox_acquire_publication_fence(
+                session_dir
+            )
+            try:
+                retirement = _projection_outbox_consumer_retirement_recheck(
+                    aoa_root=aoa_root,
+                    session_dir=session_dir,
+                    record=record,
+                    required_consumers=required_consumers,
+                    dry_run=False,
+                )
+            finally:
+                _projection_outbox_release_publication_fence(
+                    publication_fence
+                )
+        finally:
+            _projection_outbox_reconcile_release_lock(lock_handle)
+        if not retirement.get("ok"):
+            return _projection_outbox_reconcile_result(
+                status=str(
+                    retirement.get("status") or "superseded_identity"
+                ),
+                ok=False,
+                apply=True,
+                session_id=session_id,
+                record_id=record_id,
+                expected_publish_id=expected_publish_id,
+                consumer=consumer,
+                **base_fields,
+                record_path=identity["record_path"],
+                required_consumers=required_consumers,
+                resource=admission,
+                retirement=retirement,
+            )
+        return _projection_outbox_reconcile_result(
+            status=str(retirement.get("status") or "retired"),
+            ok=True,
+            apply=True,
+            session_id=session_id,
+            record_id=record_id,
+            expected_publish_id=expected_publish_id,
+            consumer=consumer,
+            mutates=bool(retirement.get("mutates")),
+            record_path=identity["record_path"],
+            required_consumers=required_consumers,
+            resource=admission,
+            retirement=retirement,
+            effects=[
+                {
+                    "kind": "retirement",
+                    "path": retirement.get("path"),
+                }
+            ]
+            if retirement.get("mutates")
+            else [],
+            write_paths=retirement.get("write_paths", []),
+        )
+    dependency_states: dict[str, Any] = {}
+    for dependency in dependencies:
+        detail = _projection_outbox_consumer_state_detail(
+            session_dir,
+            record=record,
+            consumer=dependency,
+        )
+        if detail.get("identity_error"):
+            return _projection_outbox_reconcile_result(
+                status="superseded_identity",
+                ok=False,
+                apply=apply,
+                session_id=session_id,
+                record_id=record_id,
+                expected_publish_id=expected_publish_id,
+                consumer=consumer,
+                **base_fields,
+                record_path=identity["record_path"],
+                required_consumers=required_consumers,
+                dependency_order=[*dependencies, consumer],
+                diagnostics=[str(detail["identity_error"])],
+            )
+        state = (
+            detail.get("state")
+            if isinstance(detail.get("state"), dict)
+            else {}
+        )
+        dependency_states[dependency] = {
+            "path": detail["path"],
+            "status": str(state.get("status") or ""),
+        }
+        if not detail.get("exists") or str(
+            state.get("status") or ""
+        ) != "complete":
+            return _projection_outbox_reconcile_result(
+                status="missing_dependency",
+                ok=False,
+                apply=apply,
+                session_id=session_id,
+                record_id=record_id,
+                expected_publish_id=expected_publish_id,
+                consumer=consumer,
+                **base_fields,
+                record_path=identity["record_path"],
+                required_consumers=required_consumers,
+                dependency_order=[*dependencies, consumer],
+                dependencies=dependency_states,
+                diagnostics=[f"dependency_not_complete:{dependency}"],
+            )
+        valid, reason = _projection_outbox_completion_receipt_valid(
+            state.get("completion_receipt"),
+            session_id=session_id,
+            record_id=record_id,
+            expected_publish_id=expected_publish_id,
+            consumer=dependency,
+            record=record,
+            session_dir=session_dir,
+            aoa_root=aoa_root,
+        )
+        if not valid:
+            return _projection_outbox_reconcile_result(
+                status="superseded_identity",
+                ok=False,
+                apply=apply,
+                session_id=session_id,
+                record_id=record_id,
+                expected_publish_id=expected_publish_id,
+                consumer=consumer,
+                **base_fields,
+                record_path=identity["record_path"],
+                required_consumers=required_consumers,
+                dependency_order=[*dependencies, consumer],
+                dependencies=dependency_states,
+                diagnostics=[f"{dependency}:{reason}"],
+            )
+    attempt_count = int_value(target_state.get("attempt_count"), 0)
+    if attempt_count >= max_attempts:
+        return _projection_outbox_reconcile_result(
+            status="attempt_limit_exhausted",
+            ok=False,
+            apply=apply,
+            session_id=session_id,
+            record_id=record_id,
+            expected_publish_id=expected_publish_id,
+            consumer=consumer,
+            **base_fields,
+            record_path=identity["record_path"],
+            required_consumers=required_consumers,
+            dependency_order=[*dependencies, consumer],
+            dependencies=dependency_states,
+            attempt={
+                "attempt_count": attempt_count,
+                "max_attempts": max_attempts,
+                "next_attempt": None,
+            },
+        )
+    route_spec = _projection_outbox_consumer_route_spec(
+        consumer,
+        consumer_routes,
+    )
+    route_spec["_requested_consumer"] = consumer
+    route_violations = _projection_outbox_global_child_violations(
+        route_spec,
+        session_id=session_id,
+    )
+    route_summary = {
+        key: value
+        for key, value in route_spec.items()
+        if key not in {"handler", "_requested_consumer"}
+        and isinstance(value, (str, int, float, bool, list, dict, type(None)))
+    }
+    route_summary["global_child_violations"] = route_violations
+    if route_violations:
+        status = (
+            "unavailable_targeted_consumer_route"
+            if any(
+                item
+                in {
+                    "targeted_consumer_route_unavailable",
+                    "targeted_consumer_handler_missing",
+                }
+                for item in route_violations
+            )
+            else "global_child_forbidden"
+        )
+        return _projection_outbox_reconcile_result(
+            status=status,
+            ok=False,
+            apply=apply,
+            session_id=session_id,
+            record_id=record_id,
+            expected_publish_id=expected_publish_id,
+            consumer=consumer,
+            **base_fields,
+            record_path=identity["record_path"],
+            required_consumers=required_consumers,
+            dependency_order=[*dependencies, consumer],
+            dependencies=dependency_states,
+            attempt={
+                "attempt_count": attempt_count,
+                "max_attempts": max_attempts,
+                "next_attempt": attempt_count + 1,
+            },
+            consumer_route=route_summary,
+        )
+    route_identity = _projection_outbox_route_identity_from_spec(route_spec)
+    operation_attempt = attempt_count + 1
+    operation_key = _projection_outbox_operation_key(
+        session_id=session_id,
+        record_id=record_id,
+        publish_id=expected_publish_id,
+        consumer=consumer,
+        operation=PROJECTION_OUTBOX_CONSUMER_OPERATION,
+        attempt=operation_attempt,
+        route_id=str(route_identity["route_id"]),
+    )
+    if not apply:
+        return _projection_outbox_reconcile_result(
+            status="dry_run_ready",
+            ok=True,
+            apply=False,
+            session_id=session_id,
+            record_id=record_id,
+            expected_publish_id=expected_publish_id,
+            consumer=consumer,
+            **base_fields,
+            record_path=identity["record_path"],
+            required_consumers=required_consumers,
+            dependency_order=[*dependencies, consumer],
+            dependencies=dependency_states,
+            attempt={
+                "attempt_count": attempt_count,
+                "max_attempts": max_attempts,
+                "next_attempt": attempt_count + 1,
+            },
+            consumer_route=route_summary,
+        )
+    lock_handle, admission = _projection_outbox_reconcile_resource_admit(
+        aoa_root=aoa_root,
+        context={
+            "aoa_root": aoa_root,
+            "session_id": session_id,
+            "record_id": record_id,
+            "expected_publish_id": expected_publish_id,
+            "consumer": consumer,
+            "operation": PROJECTION_OUTBOX_CONSUMER_OPERATION,
+            "operation_key": operation_key,
+            "attempt": operation_attempt,
+        },
+        resource_admission=resource_admission,
+        resource_gate=resource_gate,
+    )
+    if not admission.get("ok"):
+        return _projection_outbox_reconcile_result(
+            status="resource_denied",
+            ok=False,
+            apply=True,
+            session_id=session_id,
+            record_id=record_id,
+            expected_publish_id=expected_publish_id,
+            consumer=consumer,
+            **base_fields,
+            record_path=identity["record_path"],
+            required_consumers=required_consumers,
+            dependency_order=[*dependencies, consumer],
+            dependencies=dependency_states,
+            attempt={
+                "attempt_count": attempt_count,
+                "max_attempts": max_attempts,
+                "next_attempt": attempt_count + 1,
+            },
+            consumer_route=route_summary,
+            resource=admission,
+        )
+    try:
+        locked_identity = _projection_outbox_reconcile_identity(
+            aoa_root=aoa_root,
+            session_id=session_id,
+            record_id=record_id,
+            expected_publish_id=expected_publish_id,
+        )
+        if not locked_identity.get("ok"):
+            return _projection_outbox_reconcile_result(
+                status=str(
+                    locked_identity.get("status")
+                    or "superseded_identity"
+                ),
+                ok=False,
+                apply=True,
+                session_id=session_id,
+                record_id=record_id,
+                expected_publish_id=expected_publish_id,
+                consumer=consumer,
+                **base_fields,
+                resource=admission,
+                **{
+                    key: value
+                    for key, value in locked_identity.items()
+                    if key not in {"ok", "status"}
+                },
+            )
+        locked_record = locked_identity["record"]
+        locked_session_dir = Path(str(locked_identity["session_dir"]))
+        locked_target = _projection_outbox_consumer_state_detail(
+            locked_session_dir,
+            record=locked_record,
+            consumer=consumer,
+        )
+        if locked_target.get("identity_error"):
+            return _projection_outbox_reconcile_result(
+                status="superseded_identity",
+                ok=False,
+                apply=True,
+                session_id=session_id,
+                record_id=record_id,
+                expected_publish_id=expected_publish_id,
+                consumer=consumer,
+                **base_fields,
+                resource=admission,
+                diagnostics=[str(locked_target["identity_error"])],
+            )
+        locked_state = (
+            locked_target.get("state")
+            if isinstance(locked_target.get("state"), dict)
+            else {}
+        )
+        if str(locked_state.get("status") or "") == "complete":
+            valid, reason = _projection_outbox_completion_receipt_valid(
+                locked_state.get("completion_receipt"),
+                session_id=session_id,
+                record_id=record_id,
+                expected_publish_id=expected_publish_id,
+                consumer=consumer,
+                record=locked_record,
+                session_dir=locked_session_dir,
+                aoa_root=aoa_root,
+            )
+            if not valid:
+                return _projection_outbox_reconcile_result(
+                    status="superseded_identity",
+                    ok=False,
+                    apply=True,
+                    session_id=session_id,
+                    record_id=record_id,
+                    expected_publish_id=expected_publish_id,
+                    consumer=consumer,
+                    **base_fields,
+                    resource=admission,
+                    diagnostics=[reason],
+                )
+            return _projection_outbox_reconcile_result(
+                status="resource_denied",
+                ok=False,
+                apply=True,
+                session_id=session_id,
+                record_id=record_id,
+                expected_publish_id=expected_publish_id,
+                consumer=consumer,
+                resource=admission,
+                diagnostics=[
+                    "retirement_requires_exact_retirement_admission"
+                ],
+            )
+        locked_attempt_count = int_value(
+            locked_state.get("attempt_count"),
+            0,
+        )
+        locked_operation_attempt = locked_attempt_count + 1
+        locked_operation_key = _projection_outbox_operation_key(
+            session_id=session_id,
+            record_id=record_id,
+            publish_id=expected_publish_id,
+            consumer=consumer,
+            operation=PROJECTION_OUTBOX_CONSUMER_OPERATION,
+            attempt=locked_operation_attempt,
+            route_id=str(route_identity["route_id"]),
+        )
+        locked_resource_context = {
+            "aoa_root": aoa_root,
+            "session_id": session_id,
+            "record_id": record_id,
+            "expected_publish_id": expected_publish_id,
+            "consumer": consumer,
+            "operation": PROJECTION_OUTBOX_CONSUMER_OPERATION,
+            "operation_key": locked_operation_key,
+            "attempt": locked_operation_attempt,
+        }
+        admission_receipt = admission.get("resource_admission")
+        resource_still_valid, resource_diagnostics = (
+            _projection_outbox_resource_admission_valid(
+                admission_receipt,
+                context=locked_resource_context,
+            )
+        )
+        if not resource_still_valid:
+            return _projection_outbox_reconcile_result(
+                status="resource_denied",
+                ok=False,
+                apply=True,
+                session_id=session_id,
+                record_id=record_id,
+                expected_publish_id=expected_publish_id,
+                consumer=consumer,
+                **base_fields,
+                resource=admission,
+                diagnostics=resource_diagnostics,
+            )
+        if locked_attempt_count >= max_attempts:
+            return _projection_outbox_reconcile_result(
+                status="attempt_limit_exhausted",
+                ok=False,
+                apply=True,
+                session_id=session_id,
+                record_id=record_id,
+                expected_publish_id=expected_publish_id,
+                consumer=consumer,
+                **base_fields,
+                resource=admission,
+                attempt={
+                    "attempt_count": locked_attempt_count,
+                    "max_attempts": max_attempts,
+                    "next_attempt": None,
+                },
+            )
+        context = {
+            "session_id": session_id,
+            "record_id": record_id,
+            "expected_publish_id": expected_publish_id,
+            "consumer": consumer,
+            "scope": {
+                "kind": "exact_session",
+                "session_id": session_id,
+            },
+            "record_path": identity["record_path"],
+            "session_dir": str(locked_session_dir),
+            "attempt": locked_operation_attempt,
+            "max_attempts": max_attempts,
+            "required_consumers": required_consumers,
+            "dependencies": dependencies,
+            "global_scope": False,
+            "operation": PROJECTION_OUTBOX_CONSUMER_OPERATION,
+            "operation_aliases": route_spec["operation_aliases"],
+            "operation_key": locked_operation_key,
+            "route_registry": route_identity,
+            "route_id": route_identity["route_id"],
+            "handler_id": route_identity["handler_id"],
+            "consumer_aliases": route_spec["consumer_aliases"],
+            "publication_identity": {
+                "session_id": session_id,
+                "record_id": record_id,
+                "publish_id": expected_publish_id,
+            },
+            "publication_aliases": _projection_outbox_publication_aliases(
+                session_id=session_id,
+                record_id=record_id,
+                publish_id=expected_publish_id,
+            ),
+            "resource_admission": admission_receipt,
+            "operation_receipt_path": str(
+                projection_outbox_consumer_operation_receipt_path(
+                    aoa_root,
+                    locked_operation_key,
+                )
+            ),
+        }
+        recovered_receipt, recovery_diagnostics = (
+            _projection_outbox_operation_receipt_recovery(
+                aoa_root=aoa_root,
+                session_dir=locked_session_dir,
+                record=locked_record,
+                consumer=consumer,
+                route_spec=route_spec,
+                context=context,
+            )
+        )
+        replayed = recovered_receipt is not None
+        handler_result: Any = None
+        result_diagnostics = list(recovery_diagnostics)
+        if not replayed and not recovery_diagnostics:
+            handler_exception: Exception | None = None
+            try:
+                handler_result = route_spec["handler"](dict(context))
+            except Exception as exc:
+                handler_exception = exc
+                handler_result = {
+                    "ok": False,
+                    "status": "exception",
+                    "error": str(exc),
+                }
+                # A consumer may durably commit its owner artifact and receipt
+                # immediately before transport/handler return. Re-resolve the
+                # same logical operation before recording a retryable attempt.
+                recovered_receipt, result_diagnostics = (
+                    _projection_outbox_operation_receipt_recovery(
+                        aoa_root=aoa_root,
+                        session_dir=locked_session_dir,
+                        record=locked_record,
+                        consumer=consumer,
+                        route_spec=route_spec,
+                        context=context,
+                    )
+                )
+                if recovered_receipt is not None:
+                    replayed = True
+                    result_diagnostics = []
+                else:
+                    result_diagnostics = [
+                        *result_diagnostics,
+                        f"handler_exception:{exc}",
+                    ]
+            if not replayed and handler_exception is None:
+                result_fields = (
+                    handler_result
+                    if isinstance(handler_result, dict)
+                    else {}
+                )
+                merged_route = {
+                    **route_spec,
+                    **{
+                        key: value
+                        for key, value in result_fields.items()
+                        if key
+                        in {
+                            "targeted",
+                            "global_scope",
+                            "scope",
+                            "target_session_id",
+                            "child_command",
+                            "command",
+                        }
+                    },
+                }
+                result_global_violations = _projection_outbox_global_child_violations(
+                    merged_route,
+                    session_id=session_id,
+                )
+                if result_global_violations:
+                    return _projection_outbox_reconcile_result(
+                        status="global_child_forbidden",
+                        ok=False,
+                        apply=True,
+                        session_id=session_id,
+                        record_id=record_id,
+                        expected_publish_id=expected_publish_id,
+                        consumer=consumer,
+                        **base_fields,
+                        resource=admission,
+                        consumer_route={
+                            **route_summary,
+                            "global_child_violations": result_global_violations,
+                        },
+                        attempt={
+                            "attempt_count": locked_attempt_count,
+                            "max_attempts": max_attempts,
+                            "next_attempt": locked_operation_attempt,
+                        },
+                    )
+                recovered_receipt, result_diagnostics = (
+                    _projection_outbox_handler_result_valid(
+                        handler_result=handler_result,
+                        consumer=consumer,
+                        record=locked_record,
+                        session_dir=locked_session_dir,
+                        aoa_root=aoa_root,
+                        route_spec=route_spec,
+                        context=context,
+                    )
+                )
+                if recovered_receipt is not None:
+                    replayed = True
+                elif not result_diagnostics:
+                    result_diagnostics = ["consumer_route_did_not_complete"]
+        if not replayed:
+            if any(
+                item.startswith("committed_operation")
+                for item in result_diagnostics
+            ):
+                return _projection_outbox_reconcile_result(
+                    status="committed_operation_conflict",
+                    ok=False,
+                    apply=True,
+                    session_id=session_id,
+                    record_id=record_id,
+                    expected_publish_id=expected_publish_id,
+                    consumer=consumer,
+                    **base_fields,
+                    resource=admission,
+                    record_path=identity["record_path"],
+                    required_consumers=required_consumers,
+                    dependency_order=[*dependencies, consumer],
+                    dependencies=dependency_states,
+                    attempt={
+                        "attempt_count": locked_attempt_count,
+                        "max_attempts": max_attempts,
+                        "next_attempt": locked_operation_attempt,
+                    },
+                    consumer_route=route_summary,
+                    diagnostics=result_diagnostics,
+                )
+            failure_state = write_projection_outbox_consumer_state(
+                locked_session_dir,
+                record=locked_record,
+                consumer=consumer,
+                status="failed_retryable",
+                reason="consumer_route_failed",
+            )
+            return _projection_outbox_reconcile_result(
+                status=(
+                    "committed_operation_conflict"
+                    if any(
+                        item.startswith("committed_operation")
+                        for item in result_diagnostics
+                    )
+                    else "consumer_route_failed"
+                ),
+                ok=False,
+                apply=True,
+                session_id=session_id,
+                record_id=record_id,
+                expected_publish_id=expected_publish_id,
+                consumer=consumer,
+                mutates=True,
+                resource=admission,
+                record_path=identity["record_path"],
+                required_consumers=required_consumers,
+                dependency_order=[*dependencies, consumer],
+                dependencies=dependency_states,
+                attempt={
+                    "attempt_count": locked_attempt_count,
+                    "max_attempts": max_attempts,
+                    "next_attempt": locked_operation_attempt,
+                },
+                consumer_route=route_summary,
+                route_result=(
+                    {
+                        key: value
+                        for key, value in handler_result.items()
+                        if isinstance(
+                            value,
+                            (str, int, float, bool, list, dict, type(None)),
+                        )
+                    }
+                    if isinstance(handler_result, dict)
+                    else {}
+                ),
+                diagnostics=result_diagnostics,
+                effects=[
+                    {
+                        "kind": "failed_attempt_state",
+                        "path": failure_state.get("path"),
+                    }
+                ],
+                write_paths=[str(failure_state.get("path") or "")],
+            )
+        completion_receipt = recovered_receipt
+        post_handler_identity = _projection_outbox_reconcile_identity(
+            aoa_root=aoa_root,
+            session_id=session_id,
+            record_id=record_id,
+            expected_publish_id=expected_publish_id,
+        )
+        if not post_handler_identity.get("ok"):
+            return _projection_outbox_reconcile_result(
+                status=str(
+                    post_handler_identity.get("status")
+                    or "superseded_identity"
+                ),
+                ok=False,
+                apply=True,
+                session_id=session_id,
+                record_id=record_id,
+                expected_publish_id=expected_publish_id,
+                consumer=consumer,
+                **base_fields,
+                resource=admission,
+                diagnostics=post_handler_identity.get("diagnostics", []),
+                consumer_route=route_summary,
+                replayed=replayed,
+            )
+        if post_handler_identity.get("record") != locked_record:
+            return _projection_outbox_reconcile_result(
+                status="superseded_identity",
+                ok=False,
+                apply=True,
+                session_id=session_id,
+                record_id=record_id,
+                expected_publish_id=expected_publish_id,
+                consumer=consumer,
+                **base_fields,
+                resource=admission,
+                diagnostics=["record_changed_after_handler"],
+                consumer_route=route_summary,
+                replayed=replayed,
+            )
+        try:
+            operation_journal = _projection_outbox_persist_operation_journal(
+                aoa_root=aoa_root,
+                record=locked_record,
+                consumer=consumer,
+                context=context,
+                receipt=completion_receipt,
+            )
+        except ValueError as exc:
+            return _projection_outbox_reconcile_result(
+                status="committed_operation_conflict",
+                ok=False,
+                apply=True,
+                session_id=session_id,
+                record_id=record_id,
+                expected_publish_id=expected_publish_id,
+                consumer=consumer,
+                **base_fields,
+                resource=admission,
+                diagnostics=[str(exc)],
+                consumer_route=route_summary,
+            )
+        completion_identity = _projection_outbox_reconcile_identity(
+            aoa_root=aoa_root,
+            session_id=session_id,
+            record_id=record_id,
+            expected_publish_id=expected_publish_id,
+        )
+        if not completion_identity.get("ok"):
+            return _projection_outbox_reconcile_result(
+                status=str(
+                    completion_identity.get("status")
+                    or "superseded_identity"
+                ),
+                ok=False,
+                apply=True,
+                session_id=session_id,
+                record_id=record_id,
+                expected_publish_id=expected_publish_id,
+                consumer=consumer,
+                **base_fields,
+                resource=admission,
+                diagnostics=completion_identity.get("diagnostics", []),
+                consumer_route=route_summary,
+                replayed=replayed,
+            )
+        if completion_identity.get("record") != locked_record:
+            return _projection_outbox_reconcile_result(
+                status="superseded_identity",
+                ok=False,
+                apply=True,
+                session_id=session_id,
+                record_id=record_id,
+                expected_publish_id=expected_publish_id,
+                consumer=consumer,
+                **base_fields,
+                resource=admission,
+                diagnostics=["record_changed_before_completion"],
+                consumer_route=route_summary,
+                replayed=replayed,
+            )
+        publication_fence = _projection_outbox_acquire_publication_fence(
+            locked_session_dir
+        )
+        completion_state_path = projection_outbox_consumer_state_path(
+            locked_session_dir,
+            consumer=consumer,
+            record_id=record_id,
+        )
+        prior_completion_state = read_json(completion_state_path, {})
+        try:
+            fence_identity = _projection_outbox_reconcile_identity(
+                aoa_root=aoa_root,
+                session_id=session_id,
+                record_id=record_id,
+                expected_publish_id=expected_publish_id,
+            )
+            if not fence_identity.get("ok") or fence_identity.get("record") != locked_record:
+                return _projection_outbox_reconcile_result(
+                    status="publication_fence_drift",
+                    ok=False,
+                    apply=True,
+                    session_id=session_id,
+                    record_id=record_id,
+                    expected_publish_id=expected_publish_id,
+                    consumer=consumer,
+                    **base_fields,
+                    resource=admission,
+                    diagnostics=(
+                        fence_identity.get("diagnostics", [])
+                        if isinstance(fence_identity, dict)
+                        else ["publication_fence_identity_unavailable"]
+                    ),
+                    consumer_route=route_summary,
+                    replayed=replayed,
+                )
+            completion_state = write_projection_outbox_consumer_state(
+                locked_session_dir,
+                record=locked_record,
+                consumer=consumer,
+                status="complete",
+                reason="exact_targeted_consumer_transaction_committed",
+                completion_receipt=completion_receipt,
+                authoritative=True,
+            )
+            after_state_identity = _projection_outbox_reconcile_identity(
+                aoa_root=aoa_root,
+                session_id=session_id,
+                record_id=record_id,
+                expected_publish_id=expected_publish_id,
+            )
+            after_state = read_json(completion_state_path, {})
+            if (
+                not after_state_identity.get("ok")
+                or after_state_identity.get("record") != locked_record
+            ):
+                if isinstance(prior_completion_state, dict) and prior_completion_state:
+                    write_json_durable(completion_state_path, prior_completion_state)
+                else:
+                    completion_state_path.unlink(missing_ok=True)
+                return _projection_outbox_reconcile_result(
+                    status="publication_fence_drift",
+                    ok=False,
+                    apply=True,
+                    session_id=session_id,
+                    record_id=record_id,
+                    expected_publish_id=expected_publish_id,
+                    consumer=consumer,
+                    **base_fields,
+                    resource=admission,
+                    diagnostics=["publication_advanced_at_completion_write"],
+                    consumer_route=route_summary,
+                    replayed=replayed,
+                )
+            if not isinstance(after_state, dict) or after_state.get("status") != "complete":
+                if isinstance(prior_completion_state, dict) and prior_completion_state:
+                    write_json_durable(completion_state_path, prior_completion_state)
+                else:
+                    completion_state_path.unlink(missing_ok=True)
+                return _projection_outbox_reconcile_result(
+                    status="publication_fence_drift",
+                    ok=False,
+                    apply=True,
+                    session_id=session_id,
+                    record_id=record_id,
+                    expected_publish_id=expected_publish_id,
+                    consumer=consumer,
+                    **base_fields,
+                    resource=admission,
+                    diagnostics=["completion_state_not_persisted_atomically"],
+                    consumer_route=route_summary,
+                    replayed=replayed,
+                )
+            retirement = _projection_outbox_consumer_retirement_recheck(
+                aoa_root=aoa_root,
+                session_dir=locked_session_dir,
+                record=locked_record,
+                required_consumers=required_consumers,
+                dry_run=False,
+            )
+            if not retirement.get("ok"):
+                if isinstance(prior_completion_state, dict) and prior_completion_state:
+                    write_json_durable(completion_state_path, prior_completion_state)
+                else:
+                    completion_state_path.unlink(missing_ok=True)
+                return _projection_outbox_reconcile_result(
+                    status="publication_fence_drift",
+                    ok=False,
+                    apply=True,
+                    session_id=session_id,
+                    record_id=record_id,
+                    expected_publish_id=expected_publish_id,
+                    consumer=consumer,
+                    **base_fields,
+                    resource=admission,
+                    diagnostics=retirement.get("diagnostics", []),
+                    consumer_route=route_summary,
+                    replayed=replayed,
+                    retirement=retirement,
+                )
+            effects = [
+                {
+                    "kind": "committed_operation_journal",
+                    "path": operation_journal.get("path"),
+                },
+                {
+                    "kind": "completion_state",
+                    "path": completion_state.get("path"),
+                }
+            ]
+            write_paths = [
+                str(operation_journal.get("path") or ""),
+                str(completion_state.get("path") or ""),
+            ]
+            if retirement.get("mutates"):
+                effects.append(
+                    {
+                        "kind": "retirement",
+                        "path": retirement.get("path"),
+                    }
+                )
+                write_paths.extend(
+                    str(item)
+                    for item in retirement.get("write_paths", [])
+                )
+            return _projection_outbox_reconcile_result(
+                status=(
+                    "retired"
+                    if retirement.get("status") == "retired"
+                    else "consumer_completed"
+                ),
+                ok=bool(retirement.get("ok")),
+                apply=True,
+                session_id=session_id,
+                record_id=record_id,
+                expected_publish_id=expected_publish_id,
+                consumer=consumer,
+                mutates=True,
+                resource=admission,
+                record_path=identity["record_path"],
+                required_consumers=required_consumers,
+                dependency_order=[*dependencies, consumer],
+                dependencies=dependency_states,
+                attempt={
+                    "attempt_count": locked_attempt_count,
+                    "max_attempts": max_attempts,
+                    "used_attempt": locked_operation_attempt,
+                },
+                consumer_route=route_summary,
+                completion_receipt=completion_receipt,
+                completion_state=completion_state,
+                retirement=retirement,
+                replayed=replayed,
+                effects=effects,
+                write_paths=write_paths,
+            )
+        finally:
+            _projection_outbox_release_publication_fence(publication_fence)
+    finally:
+        _projection_outbox_reconcile_release_lock(lock_handle)
+
+
 def projection_outbox_retirement_status(
     aoa_root: Path,
     *,
@@ -29088,12 +32833,12 @@ def projection_outbox_retirement_status(
     )
     record_id = str(selected_record.get("record_id") or "")
     publish_id = str(selected_record.get("new_publish_id") or "")
-    required_consumers = sorted(
-        {
+    required_consumers = unique_preserving_order(
+        [
             str(item)
             for item in selected_record.get("required_consumers", [])
             if str(item)
-        }
+        ]
     )
     retirement_path = (
         projection_outbox_retirement_path(aoa_root, record_id)
@@ -29499,6 +33244,12 @@ def session_projection_outbox_record_for_publish(
         record = read_json(path, {})
         if not isinstance(record, dict):
             continue
+        valid, _diagnostics = _projection_outbox_record_valid(
+            record,
+            aoa_root=aoa_root,
+        )
+        if not valid:
+            continue
         if (
             str(record.get("session_id") or "") == session_id
             and str(record.get("new_publish_id") or "") == publish_id
@@ -29611,6 +33362,24 @@ def projection_outbox_ready_sessions(
         if not isinstance(record, dict) or not record:
             continue
         inspected_count += 1
+        record_valid, _record_diagnostics = _projection_outbox_record_valid(
+            record,
+            aoa_root=aoa_root,
+        )
+        legacy_record_valid = projection_outbox_record_integrity_valid(record)
+        if not record_valid and not legacy_record_valid:
+            stale_record_count += 1
+            blocked_records.append(
+                {
+                    "record_id": str(record.get("record_id") or ""),
+                    "session_id": str(record.get("session_id") or ""),
+                    "status": "admission_blocked",
+                    "diagnostics": list(
+                        _record_diagnostics or ["outbox_record_invalid"]
+                    ),
+                }
+            )
+            continue
         record_session_id = str(record.get("session_id") or "")
         if target_session_id and target_session_id != record_session_id:
             continue
@@ -29639,7 +33408,7 @@ def projection_outbox_ready_sessions(
                 }
             )
             continue
-        if not projection_outbox_record_integrity_valid(record):
+        if not record_valid and not legacy_record_valid:
             stale_record_count += 1
             blocked_records.append(
                 {
@@ -29916,28 +33685,54 @@ def complete_projection_outbox_consumers_for_session(
         consumer_name = str(consumer)
         if consumer_name not in required:
             continue
-        existing_completion = projection_outbox_consumer_completion(
-            session_dir=session_dir,
-            record=record,
+        existing_state_path = projection_outbox_consumer_state_path(
+            session_dir,
             consumer=consumer_name,
+            record_id=str(record.get("record_id") or ""),
         )
-        if existing_completion.get("ok") is True:
-            completed.append(consumer_name)
-            states.append(
-                {
-                    "status": "already_complete",
-                    "path": existing_completion.get("path"),
-                    "consumer": consumer_name,
-                    "record_id": record.get("record_id"),
-                }
+        existing_state = read_json(existing_state_path, {})
+        if (
+            isinstance(existing_state, dict)
+            and existing_state.get("status") == "complete"
+            and existing_state.get("source_publish_id") == publish_id
+            and existing_state.get("record_id") == record.get("record_id")
+        ):
+            existing_valid, _existing_reason = (
+                _projection_outbox_completion_receipt_valid(
+                    existing_state.get("completion_receipt"),
+                    session_id=session_id,
+                    record_id=str(record.get("record_id") or ""),
+                    expected_publish_id=publish_id,
+                    consumer=consumer_name,
+                    record=record,
+                    session_dir=session_dir,
+                    aoa_root=aoa_root,
+                )
             )
-            continue
+            if (
+                existing_valid
+                and existing_state.get("semantic_completion") is True
+                and existing_state.get("receipt_sha256")
+                == _projection_outbox_receipt_digest(
+                    existing_state.get("completion_receipt")
+                )
+            ):
+                completed.append(consumer_name)
+                states.append(
+                    {
+                        "status": "already_complete",
+                        "path": str(existing_state_path),
+                        "consumer": consumer_name,
+                        "record_id": record.get("record_id"),
+                    }
+                )
+                continue
         state = write_projection_outbox_consumer_state(
             session_dir,
             record=record,
             consumer=consumer_name,
-            status="complete",
-            reason="exact_consumer_transaction_committed",
+            status="progress",
+            reason="legacy_nonsemantic_progress",
             completion_receipt={
                 **completion_receipt,
                 "consumer": consumer_name,
@@ -29950,10 +33745,12 @@ def complete_projection_outbox_consumers_for_session(
         states.append(state)
     return {
         "ok": True,
-        "status": "completed" if completed else "not_required",
+        "status": "progressed" if completed else "not_required",
         "record_id": record.get("record_id"),
         "outbox_ref": str(outbox_path),
         "completed_consumers": completed,
+        "progressed_consumers": completed,
+        "semantic_completion": False,
         "consumer_states": states,
     }
 
@@ -30311,10 +34108,41 @@ def session_projection_freshness_vector(
         )
         state_path = str(completion.get("path") or "")
         observed_status = str(state.get("status") or "unresolved")
+        completion_current = False
+        completion_reason = ""
+        if (
+            outbox_record
+            and observed_status == "complete"
+            and isinstance(state, dict)
+        ):
+            completion_current, completion_reason = (
+                _projection_outbox_completion_receipt_valid(
+                    state.get("completion_receipt"),
+                    session_id=session_id,
+                    record_id=str(outbox_record.get("record_id") or ""),
+                    expected_publish_id=publish_id,
+                    consumer=consumer,
+                    record=outbox_record,
+                    session_dir=session_dir,
+                    aoa_root=aoa_root,
+                )
+            )
+            if completion_current and state.get("semantic_completion") is not True:
+                completion_current = False
+                completion_reason = "consumer_state_not_authoritative"
+            elif completion_current and state.get("receipt_sha256") != (
+                _projection_outbox_receipt_digest(state.get("completion_receipt"))
+            ):
+                completion_current = False
+                completion_reason = "consumer_state_receipt_digest_mismatch"
+        if observed_status == "complete" and not completion_current:
+            observed_reason = completion_reason or "authoritative_receipt_unresolved"
+        else:
+            observed_reason = str(state.get("reason") or "")
         downstream[consumer] = {
             "status": observed_status,
-            "current": completion.get("ok") is True,
-            "semantic_completion": completion.get("ok") is True,
+            "current": completion_current,
+            "semantic_completion": completion_current,
             "source_publish_id": str(
                 state.get("source_publish_id") or publish_id
             ),
@@ -30324,9 +34152,7 @@ def session_projection_freshness_vector(
                 completion.get("completion_receipt_digest") or ""
             ),
             "reason": str(
-                completion.get("reason")
-                or state.get("reason")
-                or ""
+                observed_reason
             ),
         }
     returned = dict(returned_evidence or {})
@@ -32520,7 +36346,31 @@ def stage_existing_session_projection(
     return stage_dir
 
 
-def atomic_publish_session_projection(
+def projection_outbox_publication_fence_path(session_dir: Path) -> Path:
+    """The owner-versioned fence shared by publication and completion writes."""
+    return session_dir.parent / (
+        f".{session_dir.name}.projection-publication-fence.lock"
+    )
+
+
+def _projection_outbox_acquire_publication_fence(session_dir: Path) -> Any:
+    path = projection_outbox_publication_fence_path(session_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("a+", encoding="utf-8")
+    fcntl.flock(handle, fcntl.LOCK_EX)
+    return handle
+
+
+def _projection_outbox_release_publication_fence(handle: Any | None) -> None:
+    if handle is None:
+        return
+    try:
+        fcntl.flock(handle, fcntl.LOCK_UN)
+    finally:
+        handle.close()
+
+
+def _atomic_publish_session_projection_unfenced(
     *,
     stage_dir: Path,
     session_dir: Path,
@@ -32784,6 +36634,27 @@ def atomic_publish_session_projection(
             ),
         },
     }
+
+
+def atomic_publish_session_projection(
+    *,
+    stage_dir: Path,
+    session_dir: Path,
+    publish_identity: dict[str, Any],
+    execution_id: str | None = None,
+    work_id: str = "",
+) -> dict[str, Any]:
+    fence = _projection_outbox_acquire_publication_fence(session_dir)
+    try:
+        return _atomic_publish_session_projection_unfenced(
+            stage_dir=stage_dir,
+            session_dir=session_dir,
+            publish_identity=publish_identity,
+            execution_id=execution_id,
+            work_id=work_id,
+        )
+    finally:
+        _projection_outbox_release_publication_fence(fence)
 
 
 def write_session_agents(session_dir: Path) -> None:
@@ -86072,6 +89943,23 @@ def init_search_db(
             projection_fingerprint_mode TEXT,
             generation_id TEXT NOT NULL DEFAULT '',
             generation_identity_json TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {PROJECTION_OUTBOX_CONSUMER_AUTHORITY_TABLE} (
+            authority_key TEXT PRIMARY KEY,
+            consumer TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            record_id TEXT NOT NULL,
+            publish_id TEXT NOT NULL,
+            operation TEXT NOT NULL,
+            operation_key TEXT NOT NULL,
+            attempt INTEGER NOT NULL,
+            authority_json TEXT NOT NULL,
+            authority_sha256 TEXT NOT NULL,
+            committed_at TEXT NOT NULL
         )
         """
     )
@@ -151076,6 +154964,20 @@ class GraphSqliteStore:
             )
             """
         )
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS projection_outbox_mutations (
+                mutation_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                record_id TEXT NOT NULL,
+                publish_id TEXT NOT NULL,
+                authority_key TEXT NOT NULL,
+                generation_id TEXT NOT NULL,
+                source_ledger_ref TEXT NOT NULL,
+                committed_at TEXT NOT NULL
+            )
+            """
+        )
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_graph_sources_session ON graph_sources(session_id)")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_node_contribs_node ON node_contribs(node_id)")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_edge_contribs_edge ON edge_contribs(edge_id)")
@@ -211587,6 +215489,40 @@ def command_projection_status(args: argparse.Namespace) -> int:
     return 0 if payload.get("ok") else 1
 
 
+def command_projection_outbox_consumer_reconcile(
+    args: argparse.Namespace,
+) -> int:
+    explicit_workspace = (
+        Path(args.workspace_root) if args.workspace_root else None
+    )
+    root = aoa_root_for(
+        explicit_workspace,
+        Path(args.aoa_root) if args.aoa_root else None,
+    )
+    resource_admission = (
+        {
+            "admitted": True,
+            "concurrency": 1,
+            "source": "explicit_resource_admitted_child",
+        }
+        if args.resource_admitted
+        else None
+    )
+    payload = reconcile_projection_outbox_consumer(
+        aoa_root=root,
+        session_id=args.session_id,
+        record_id=args.record_id,
+        expected_publish_id=args.expected_publish_id,
+        consumer=args.consumer,
+        apply=args.apply,
+        max_attempts=args.max_attempts,
+        resource_admission=resource_admission,
+        execution_id=getattr(args, "execution_id", None),
+    )
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0 if payload.get("ok") else 1
+
+
 def command_auto_maintenance_resource(args: argparse.Namespace) -> int:
     explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
     root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
@@ -222031,6 +225967,61 @@ def build_parser() -> argparse.ArgumentParser:
     projection_status_parser.add_argument("--include-payload", action="store_true", help="Include the full latest projection-catchup diagnostic payload.")
     projection_status_parser.add_argument("--refresh-maintenance", action="store_true", help="Also run the hot maintenance-status calculation for current runtime guidance. Default uses the cached diagnostic only.")
     projection_status_parser.set_defaults(func=command_projection_status)
+
+    projection_outbox_reconcile_parser = sub.add_parser(
+        "projection-outbox-consumer-reconcile",
+        aliases=["outbox-consumer-reconcile"],
+        help=(
+            "Reconcile exactly one allowlisted projection outbox consumer "
+            "for one session and content-addressed publication."
+        ),
+    )
+    projection_outbox_reconcile_parser.add_argument(
+        "--session-id",
+        required=True,
+        help="Exact session_id; fuzzy and global session selection are forbidden.",
+    )
+    projection_outbox_reconcile_parser.add_argument(
+        "--record-id",
+        required=True,
+        help="Exact SHA-256 projection outbox record id.",
+    )
+    projection_outbox_reconcile_parser.add_argument(
+        "--expected-publish-id",
+        required=True,
+        help="Exact current publication identity expected by the record.",
+    )
+    projection_outbox_reconcile_parser.add_argument(
+        "--consumer",
+        required=True,
+        choices=PROJECTION_OUTBOX_CONSUMER_RECONCILE_ORDER,
+        help="Exactly one allowlisted required consumer.",
+    )
+    projection_outbox_reconcile_parser.add_argument("--workspace-root")
+    projection_outbox_reconcile_parser.add_argument("--aoa-root")
+    projection_outbox_reconcile_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Apply one targeted consumer transaction; admission is still required.",
+    )
+    projection_outbox_reconcile_parser.add_argument(
+        "--max-attempts",
+        type=int,
+        default=PROJECTION_OUTBOX_CONSUMER_MAX_ATTEMPTS,
+        help="Finite attempt ceiling, bounded by the outbox retry policy.",
+    )
+    projection_outbox_reconcile_parser.add_argument(
+        "--resource-admitted",
+        action="store_true",
+        help=(
+            "Internal admitted-child marker. Apply without an explicit "
+            "concurrency-one admission fails closed."
+        ),
+    )
+    projection_outbox_reconcile_parser.add_argument("--execution-id")
+    projection_outbox_reconcile_parser.set_defaults(
+        func=command_projection_outbox_consumer_reconcile
+    )
 
     auto_maintenance_parser = sub.add_parser(
         "auto-maintenance",
