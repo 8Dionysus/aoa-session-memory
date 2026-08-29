@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "artifact_type": "session_projection_incremental_core_portability_refresh_receipt",
+  "generated_at": "2026-08-11T10:17:12Z",
+  "truth_status": "clean_standalone_export_proof_not_live_runtime_freshness",
+  "source": {
+    "branch": "agent/session-memory-incremental-core-20260810",
+    "revision": "3037682",
+    "checkout_kind": "isolated_worktree",
+    "canonical_checkout_mutated": false,
+    "github_mutated": false
+  },
+  "export": {
+    "ok": true,
+    "tests_included": true,
+    "sessions_included": false,
+    "portable_public_safety": {
+      "ok": true,
+      "status": "current",
+      "scanned_files": 310,
+      "scanned_bytes": 14845859,
+      "issue_count": 0,
+      "truth_status": "bounded_portable_tree_audit_complete"
+    }
+  },
+  "standalone_repository": {
+    "local_git_initialized": true,
+    "existing_public_origin_configured": true,
+    "remote_write_performed": false
+  },
+  "standalone_validation": {
+    "ok": true,
+    "pipeline": "end_to_end_synthetic_fixture",
+    "check_count": 27,
+    "failed_checks": []
+  },
+  "portable_audit": {
+    "ok": true,
+    "audit_mode": "portable_bundle",
+    "remaining": [],
+    "blocked": []
+  },
+  "standalone_focused_tests": {
+    "ok": true,
+    "passed": 30,
+    "deselected": 1099,
+    "elapsed_seconds": 13.01,
+    "coverage": [
+      "task_episode_reduction",
+      "single_pass_shard_redaction",
+      "task_episode_checkpoint_resume",
+      "manifest_first_readers",
+      "deep_task_episode_shard_audit",
+      "ordered_segment_range_lookup"
+    ]
+  },
+  "authority_boundary": "This receipt refreshes the public-safe standalone export after the task-episode producer optimization. It proves export, validation, portable audit, and focused behavior without private sessions, live deployment, or any GitHub mutation."
+}

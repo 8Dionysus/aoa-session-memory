@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AoA session projection outbox consumer fairness state",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "artifact_type",
+    "policy",
+    "consumers",
+    "cursor_by_consumer",
+    "global_cursor",
+    "updated_at",
+    "advance_count",
+    "truth_status"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "artifact_type": {"const": "projection_outbox_consumer_fairness_state"},
+    "policy": {"const": "oldest_pending_consumer_round_robin_restart_safe_v1"},
+    "consumers": {
+      "const": [
+        "exact_and_lexical_search",
+        "episode_semantic",
+        "entity_registry",
+        "graph"
+      ]
+    },
+    "cursor_by_consumer": {
+      "type": "object",
+      "required": [
+        "exact_and_lexical_search",
+        "episode_semantic",
+        "entity_registry",
+        "graph"
+      ],
+      "properties": {
+        "exact_and_lexical_search": {"type": "string", "pattern": "^([a-f0-9]{64})?$"},
+        "episode_semantic": {"type": "string", "pattern": "^([a-f0-9]{64})?$"},
+        "entity_registry": {"type": "string", "pattern": "^([a-f0-9]{64})?$"},
+        "graph": {"type": "string", "pattern": "^([a-f0-9]{64})?$"}
+      },
+      "additionalProperties": false
+    },
+    "global_cursor": {"type": "string", "pattern": "^([a-f0-9]{64})?$"},
+    "updated_at": {"type": "string"},
+    "advance_count": {"type": "integer", "minimum": 0},
+    "truth_status": {"const": "scheduler_cursor_only_not_consumer_completion_or_freshness"}
+  },
+  "additionalProperties": false
+}

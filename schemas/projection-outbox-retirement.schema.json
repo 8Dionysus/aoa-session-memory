@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AoA session projection outbox terminal retirement receipt",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "artifact_type",
+    "record_id",
+    "session_id",
+    "source_publish_id",
+    "status",
+    "retired_at",
+    "outbox_record_ref",
+    "required_consumers",
+    "consumer_completions",
+    "truth_status"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "artifact_type": {"const": "projection_outbox_terminal_retirement"},
+    "record_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "session_id": {"type": "string", "minLength": 1},
+    "source_publish_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "status": {"const": "retired"},
+    "retired_at": {"type": "string", "minLength": 1},
+    "outbox_record_ref": {"type": "string", "minLength": 1},
+    "required_consumers": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "uniqueItems": true
+    },
+    "consumer_completions": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["state_ref", "completion_receipt_digest"],
+        "properties": {
+          "state_ref": {"type": "string", "minLength": 1},
+          "completion_receipt_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "truth_status": {"const": "all_required_consumer_completion_receipts_verified"}
+  },
+  "additionalProperties": false
+}

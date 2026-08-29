@@ -51,11 +51,30 @@ effectiveness.
    - `invocation_claim_allowed=false` is a hard claim boundary;
    - foreign-correlation results remain auditable context, never consequence.
 
-5. Expand only the missing evidence class. Use raw or segment refs to verify an
+5. For a comparative skill audit about successful, failed, or
+   procedure-deviating applications:
+
+   - start from `usage-chain <skill> --kind skill --full` and keep its
+     `task_episode_refs` only as bounded join candidates;
+   - for each selected candidate, run `task-answer-chain --session <session>
+     --task-episode-id <episode> --allow-missing-reasoning
+     --allow-missing-answer` before attributing a result to the skill; the
+     explicit flags preserve failed, interrupted, and receipt-bearing episodes
+     that have no ordinary final answer;
+   - route exact reviewed receipt, error, status, or failure-class anchors
+     through `literal-query-plan` with the same session and episode scope, then
+     open the proposed bounded evidence window;
+   - call an application successful only when reviewed result or verification
+     evidence belongs to the same procedure and correlation chain;
+   - treat missing positive proof as `unresolved`, not as a failed application,
+     and never turn a bounded set of failures into an archive-wide absence
+     claim.
+
+6. Expand only the missing evidence class. Use raw or segment refs to verify an
    important claim, exact error, or bounded interval. Keep private bodies,
    hidden reasoning, and unrelated context outside the packet.
 
-6. Return the evidence packet to the source owner, decision owner,
+7. Return the evidence packet to the source owner, decision owner,
    `aoa-evals`, or another named authority. Do not write that owner from
    session evidence alone.
 

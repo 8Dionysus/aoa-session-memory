@@ -40,6 +40,7 @@ An agent should be able to start from a stable operational anchor:
 ```text
 aoa_session_trace(anchor, kind="auto", doc_type="session")
 aoa_session_literal_query_plan(query, kind="auto", filters={...})
+aoa_session_memory_query_plan(query, kind="auto", filters={...})
 aoa_session_entity_usage_chain(anchor, kind="auto")
 aoa_session_search(query, filters)
 aoa_session_route(axis, key)
@@ -76,6 +77,17 @@ typed registry/inventory for broad entity-class questions, structured search
 filters, scoped full-text shards, or monolith fallback. Class questions with
 use/error/consequence intent include a bounded entity-usage scenario route
 before broad raw-text recall.
+
+Common memory-query planning remains producer-owned. MCP passes the natural
+language query and allowlisted scope/time controls to the producer's `.aoa`
+`memory-query-plan` command, then returns that packet without reclassifying
+intent, changing route order, admitting a candidate as a claim, or executing
+an external-owner or mutating maintenance handoff. This route is used for
+current-state, negative, temporal, causal, quantitative, semantic-episode, and
+other claim shapes; the specialized literal planner remains available for
+callers that already know they need literal routing. Exact and typed common
+queries keep the literal subplan selected by the producer rather than paying
+for semantic or graph expansion.
 
 Skill evidence remains producer-owned. When `.aoa` returns a typed skill
 candidate summary, the MCP compact adapter preserves the complete accepted

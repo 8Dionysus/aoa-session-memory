@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AoA owner-resolved projection outbox consumer authority artifact",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "artifact_type",
+    "status",
+    "truth_status",
+    "consumer",
+    "session_id",
+    "record_id",
+    "publish_id",
+    "operation",
+    "operation_key",
+    "attempt",
+    "authority_key",
+    "generation_id",
+    "generation_identity",
+    "changed_component_digests",
+    "source_ref",
+    "owner_provenance",
+    "source_keys",
+    "mutation_id",
+    "source_ledger_ref",
+    "committed_at",
+    "authority_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "artifact_type": {"type": "string", "minLength": 1},
+    "status": {"type": "string", "minLength": 1},
+    "truth_status": {
+      "const": "owner_authoritative_consumer_artifact_not_handler_output"
+    },
+    "consumer": {
+      "enum": [
+        "exact_and_lexical_search",
+        "episode_semantic",
+        "entity_registry",
+        "graph"
+      ]
+    },
+    "session_id": {"type": "string", "minLength": 1},
+    "record_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "publish_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "operation": {"const": "projection_outbox_consumer_reconcile"},
+    "operation_key": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "attempt": {"type": "integer", "minimum": 1},
+    "authority_key": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "generation_id": {"type": "string", "minLength": 1},
+    "generation_identity": {
+      "type": "object",
+      "required": ["generation_id"],
+      "additionalProperties": {"$ref": "#/$defs/jsonValue"}
+    },
+    "changed_component_digests": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^([a-f0-9]{64})?$"
+      }
+    },
+    "source_ref": {"type": "string", "minLength": 1},
+    "owner_provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["owner_repo", "source_ref", "authority_kind", "authority_version"],
+      "properties": {
+        "owner_repo": {"const": "aoa-session-memory"},
+        "source_ref": {"type": "string", "minLength": 1},
+        "authority_kind": {"type": "string", "minLength": 1},
+        "authority_version": {"const": 1}
+      }
+    },
+    "source_keys": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "mutation_id": {"type": "string"},
+    "source_ledger_ref": {"type": "string"},
+    "committed_at": {"type": "string", "minLength": 1},
+    "authority_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+  },
+  "$defs": {
+    "jsonValue": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "string"},
+        {"type": "boolean"},
+        {"type": "number"},
+        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
+        {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/jsonValue"}
+        }
+      ]
+    }
+  }
+}

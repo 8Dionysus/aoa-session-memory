@@ -1,0 +1,13 @@
+include DESIGN.md
+include LICENSE
+include MANIFEST.in
+include PROJECTION.md
+include README.md
+include package.export.policy.json
+include package.manifest.json
+include package.manifest.schema.json
+include pyproject.toml
+recursive-include docs *.md
+recursive-include scripts *.py
+recursive-include src *.py
+recursive-include tests *.py

@@ -1,0 +1,17 @@
+{
+  "allowed_bytes": 31885508,
+  "allowed_tracked_bytes": 30740988,
+  "approved_by": "repository-owner",
+  "base_ref": "1d79b84e7ae09738936ba7e88adeeefd4f0f28b2",
+  "changed_generated_bytes": 31885508,
+  "changed_generated_files": 463,
+  "decision_ref": "aoa-kag:docs/decisions/AOA-KAG-D-0017-portable-content-addressed-repository-family.md",
+  "default_limit_bytes": 1048576,
+  "head_family_digest": "9babb965b1becede61159a0c1e7367c19e9c609bbc766ff0eeb7a7e8f579d0d9",
+  "reason": "Owner-authorized cleanup removes obsolete competition attribution from current public source and synthetic demo naming; regenerate the source-linked KAG family without changing standing budgets.",
+  "repo": "aoa-session-memory",
+  "schema_version": "aoa-repo-local-kag-budget-receipt-v1",
+  "scope": "generated_delta_and_tracked_size",
+  "tracked_bytes": 30740988,
+  "tracked_bytes_max": 13631488
+}

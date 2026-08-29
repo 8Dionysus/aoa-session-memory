@@ -103,6 +103,15 @@
       "acceptance": "The default doctor path performs bounded structural health checks without deep event parsing or source mutation."
     },
     {
+      "id": "assure-doctor-runtime-install-profile",
+      "critical_branch": "session-memory.stewardship.assure",
+      "skill_ids": ["skill.aoa-session-memory-doctor", "skill.aoa-session-archive-init"],
+      "runner": "local:doctor-install-profile",
+      "scenario_kind": "installation-shape-recovery",
+      "expected_effects": ["runtime-mutation", "read-only"],
+      "acceptance": "An owner-profiled no-tests runtime install stays doctor-green with an explicit source/export limitation; an absent profile, a partial test tree, or accidental test loss stays red; and a full install remains doctor-green before loss is introduced."
+    },
+    {
       "id": "codex-adapter-hook-archive",
       "critical_branch": "session-memory.adapters.codex",
       "skill_ids": ["skill.aoa-codex-session-segment-archive"],

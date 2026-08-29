@@ -13,6 +13,10 @@ blast radius.
 - `aoa_session_memory.py` implements archive generation, hook handling,
   indexing, naming, distillation, validation, export, install, audit, and
   doctor checks.
+- `aoa_epistemic_action_event_chain.py` implements the portable append-only
+  prediction/action/observation chain, replay and concurrency guards, typed
+  discrepancy states, and shadow-only candidate inspection. It is re-exported
+  by `aoa_session_memory.py` but is not wired into the foreground hook.
 - `generate_decision_indexes.py` derives portable lookup indexes from canonical
   `docs/decisions/AOA-SM-D-*.md` records and checks their parity.
 - `validate_local_stats_port.py` delegates the owner-local measurement packet

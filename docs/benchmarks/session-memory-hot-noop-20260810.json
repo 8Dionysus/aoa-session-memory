@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "artifact_type": "session_memory_hot_noop_benchmark",
+  "generated_at": "2026-08-11T02:53:44Z",
+  "run_count": 21,
+  "wall_seconds_p50": 0.031403,
+  "wall_seconds_p95": 0.053686,
+  "wall_seconds_max": 0.06202,
+  "all_event_driven_empty_queue": true,
+  "any_archive_manifest_scan": false,
+  "any_raw_payload_read": false,
+  "outbox_raw_bytes_read_total": 0,
+  "slo_seconds": 2.0,
+  "slo_met": true,
+  "truth_status": "empty_event_driven_hot_queue_measurement_not_global_freshness",
+  "authority_boundary": "This measures the ordinary empty event-driven hot queue on an isolated target-host fixture. It proves no-op scheduling cost and zero archive/raw reads; it does not claim global projection freshness."
+}

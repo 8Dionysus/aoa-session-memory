@@ -392,9 +392,10 @@ nodes:
       ambiguous_when: [A runtime transcript handle exists but its ownership or session identity is unresolved.]
     abi:
       inputs:
-        - {name: transcript, type: codex-transcript, required: true, description: Verified raw Codex JSONL source and session identity.}
+        - {name: transcript, type: codex-transcript, required: true, description: Concrete raw Codex JSONL source handle and session identity; readability is verified before mutation.}
       outputs:
         - {name: archive, type: archived-session-set, required: true, description: "Raw-preserving archive, manifests, segments, and registry refs."}
+        - {name: failure, type: raw-read-failure, required: false, description: Fail-closed source failure emitted instead of an archive when transcript validation or reading fails.}
     binding: {kind: skill, ref: skills/aoa-codex-session-segment-archive/SKILL.md, operation: archive, availability: available}
     execution:
       freedom: deterministic
@@ -674,6 +675,54 @@ nodes:
       external_dependencies: []
       untrusted_input: treat-as-data
     keywords: [manual-review, owner-resolution, review-packet, promotion-candidate, human-gate]
+
+  - id: skill.aoa-session-experience-metabolism
+    title: Experience metabolism candidate extraction
+    description: Derive privacy-safe recurring motifs and bounded improvement candidates from closed, reviewed stage profiles, with explicit review, eval, shadow, owner-acceptance, adoption, and rollback gates.
+    purpose: Route recurring experience through explicit review, evaluation, shadow, owner-acceptance, and reversible rejection or rollback gates.
+    kind: skill
+    contract_level: executable
+    primary_parent: session-memory.stewardship.curate
+    owner: {repo: aoa-session-memory, surface: skills/aoa-session-experience-metabolism/SKILL.md, authority: authored}
+    lifecycle: *deferred_lifecycle
+    applicability:
+      use_when: [A bounded set of closed, reviewed, aligned stage profiles needs privacy-safe recurring-motif candidates.]
+      do_not_use_when: [The evidence is raw, live, provisional, or asks for an eval verdict or automatic adoption.]
+      ambiguous_when: [Profile freshness, source alignment, review status, or provenance refs are unresolved.]
+    abi:
+      inputs:
+        - {name: stage-profiles, type: reviewed-stage-profile-set, required: true, description: Generated stage profiles with closed task episodes and provenance refs.}
+      outputs:
+        - {name: candidates, type: experience-motif-candidate-set, required: true, description: "Privacy-safe advisory candidates with counterevidence, causal limits, trajectory cost, and routed lifecycle gates."}
+    binding: {kind: skill, ref: skills/aoa-session-experience-metabolism/SKILL.md, operation: metabolize, availability: available}
+    execution:
+      freedom: bounded-judgment
+      tool_requirements: [stage_profile_v1 report, session-memory CLI, owner review, eval and shadow receipts]
+      verification: [Only reviewed aligned profiles contribute., Raw content and paths are not emitted., Same-session repetition remains watch-only., No candidate is adopted automatically.]
+      termination: [Stop after candidate, insufficient-evidence, rejection, or an exact owner/evidence blocker is receipted.]
+      effects: [generated-write, human-decision]
+      reversibility: conditionally-reversible
+      failure_modes: [Treating frequency as recurrence., Confusing review eligibility with owner acceptance., Claiming causality without paired held-out ablation evidence., Hiding unknown or conflicting outcomes., Leaking transcript or host path content.]
+    trust: *mutation_trust
+    provenance:
+      source_refs:
+        - {repo: aoa-session-memory, path: scripts/experience_metabolism.py, ref: experience-metabolism-v1, role: owner-implementation, authority: authored}
+        - {repo: aoa-session-memory, path: skills/aoa-session-experience-metabolism/SKILL.md, ref: experience-metabolism-v1, role: owner-skill-procedure, authority: authored}
+        - {repo: aoa-session-memory, path: schemas/experience-metabolism-report.schema.json, ref: experience-metabolism-v1, role: owner-packet-schema, authority: authored}
+      optional_refs: []
+    classification: {category: independent-callable, disposition: retain-deferred, rationale: "Cross-session recurrence has a distinct privacy, provenance, counterevidence, and multi-owner acceptance ABI."}
+    procedure: {<<: *standard_skill_procedure, ref: skills/aoa-session-experience-metabolism/SKILL.md}
+    mutation:
+      preview_required: true
+      explicit_apply_required: true
+      rollback_or_recovery: [Preserve the candidate and receipts., Reject or supersede generated packets without touching raw evidence., Roll back an accepted route only with a named rollback receipt.]
+      postconditions: [Candidate, eval verdict, shadow result, owner acceptance, and adoption remain distinct., All emitted refs are privacy-safe and bounded., Raw source evidence is unchanged.]
+    security:
+      permissions: [read-generated-session-profile, write-candidate-packet, human-review]
+      network: forbidden
+      external_dependencies: [aoa-evals review, abyss-stack shadow, aoa-skills automation-opportunity handoff]
+      untrusted_input: treat-as-data
+    keywords: [experience-metabolism, recurrence, motif, candidate, counterevidence, shadow, ablation, rollback]
 
   - id: skill.aoa-session-naming-readiness
     title: Session naming readiness
@@ -1014,6 +1063,7 @@ relations:
   - {kind: hands-off-to, source: skill.aoa-session-archive-init, target: skill.aoa-codex-hooks-status, condition: The initialized root emits the memory-root binding consumed by Codex hook inspection.}
   - {kind: hands-off-to, source: skill.aoa-codex-hooks-status, target: skill.aoa-codex-compact-probe, condition: Current trusted hook runtime status is required before the behavioral compact probe.}
   - {kind: hands-off-to, source: skill.aoa-codex-session-segment-archive, target: skill.aoa-session-reindex, condition: Newly archived sessions may be projected only after raw preservation validates.}
+  - {kind: hands-off-to, source: skill.aoa-codex-session-segment-archive, target: skill.aoa-session-raw-diagnostic, condition: "If transcript validation or reading fails before a verified archive is emitted, hand off the typed raw-read-failure and stop archive processing."}
   - {kind: hands-off-to, source: skill.aoa-session-history-import, target: skill.aoa-session-reindex, condition: The bounded import set is complete and raw-preserving before projection rebuild.}
   - {kind: produces, source: skill.aoa-session-reindex, target: skill.aoa-session-search, condition: Current indexed-session output supplies the optional search projection input.}
   - {kind: hands-off-to, source: skill.aoa-session-first-pass-distill, target: skill.aoa-session-manual-review, condition: Provisional candidates require owner-aware manual disposition before any promotion.}

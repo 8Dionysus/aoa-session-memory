@@ -25,6 +25,12 @@ FORBIDDEN_MUTATION_TOKENS = (
     "_repair",
     "_write",
 )
+REQUIRED_PROJECTED_PATHS = {
+    "DESIGN.md",
+    "README.md",
+    "scripts/validate_session_memory_mcp.py",
+}
+OWNER_ONLY_PROJECTED_PATHS = {"AGENTS.md"}
 
 
 def _sha256(path: Path) -> str:
@@ -76,6 +82,10 @@ def validate(package_root: Path) -> list[str]:
 
     declared = {str(item.get("path")): item for item in manifest.get("files", []) if isinstance(item, dict)}
     actual = _actual_files(package_root)
+    for path in sorted(REQUIRED_PROJECTED_PATHS - set(declared)):
+        errors.append(f"required projected file missing from manifest: {path}")
+    for path in sorted(OWNER_ONLY_PROJECTED_PATHS & (set(declared) | actual)):
+        errors.append(f"owner-only file must not be projected: {path}")
     if actual != set(declared):
         for path in sorted(set(declared) - actual):
             errors.append(f"manifest file missing: {path}")

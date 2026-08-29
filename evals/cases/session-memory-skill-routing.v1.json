@@ -165,6 +165,14 @@
       "expected_parent": "session-memory.adapters.codex"
     },
     {
+      "id": "experience-metabolism",
+      "query": "session memory: derive privacy-safe recurring motifs from closed reviewed stage profiles with paired held-out ablation shadow and rollback gates",
+      "expected": "skill.aoa-session-experience-metabolism",
+      "stage": "deep_rerank",
+      "max_rank": 2,
+      "expected_parent": "session-memory.stewardship.curate"
+    },
+    {
       "id": "global-router-russian-paraphrase",
       "query": ".aoa: направь запрос о сжатии контекста и архивах сессий в правильную способность",
       "expected": "skill.aoa-session-memory-global-route",

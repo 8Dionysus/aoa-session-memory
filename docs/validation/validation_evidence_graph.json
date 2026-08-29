@@ -1,0 +1,326 @@
+{
+  "schema_version": "aoa_validation_evidence_graph_v1",
+  "graph_id": "aoa-session-memory-standalone-validation-v1",
+  "owner_repo": "aoa-session-memory",
+  "default_profile": "full",
+  "unknown_change_policy": "full",
+  "routing_status": "shadow_only",
+  "instant_budget_seconds": 1.0,
+  "max_workers": 3,
+  "claims": [
+    {
+      "id": "validation-graph-integrity",
+      "risk": "A malformed graph, unpinned runner, or command-inventory drift could omit a serial obligation or manufacture false sufficiency.",
+      "required_evidence": ["validation-graph-contract"]
+    },
+    {
+      "id": "validation-graph-regressions",
+      "risk": "The owner adapter, scheduler experiment, identity binding, or fail-closed comparison behavior could regress while the static manifest remains valid.",
+      "required_evidence": ["validation-graph-contract-tests"]
+    },
+    {
+      "id": "decision-index-currentness",
+      "risk": "Generated decision indexes could stop matching their canonical owner records.",
+      "required_evidence": ["decision-index-parity"]
+    },
+    {
+      "id": "public-source-safety",
+      "risk": "Current authored files could expose blocked material or leave the public checkout unsafe.",
+      "required_evidence": ["current-public-tree-audit"]
+    },
+    {
+      "id": "retained-history-safety",
+      "risk": "The retained Git history could contain material that the current-tree audit cannot observe.",
+      "required_evidence": ["retained-history-inventory"]
+    },
+    {
+      "id": "validation-side-effect-safety",
+      "risk": "A complete validation run could leave generated or blocked material in the checkout after its build and test nodes finish.",
+      "required_evidence": ["post-build-public-tree-audit"]
+    },
+    {
+      "id": "portable-source-behavior",
+      "risk": "The complete portable source behavior may regress even when narrow validators remain green.",
+      "required_evidence": ["portable-source-test-corpus"]
+    },
+    {
+      "id": "mcp-package-behavior",
+      "risk": "The standalone MCP projection or its complete package test corpus may drift from owner source.",
+      "required_evidence": ["mcp-package-release-check"]
+    },
+    {
+      "id": "release-artifact-portability",
+      "risk": "Source tests may pass while wheel or sdist reproduction, clean installation, bootstrap, or real stdio protocol behavior fails.",
+      "required_evidence": ["reproducible-release-artifacts", "installed-stdio-protocol"]
+    }
+  ],
+  "profiles": {
+    "instant": ["validation-graph-integrity"],
+    "full": [
+      "validation-graph-integrity",
+      "validation-graph-regressions",
+      "decision-index-currentness",
+      "public-source-safety",
+      "retained-history-safety",
+      "validation-side-effect-safety",
+      "portable-source-behavior",
+      "mcp-package-behavior",
+      "release-artifact-portability"
+    ]
+  },
+  "routes": [
+    {
+      "id": "validation-plane",
+      "patterns": [
+        "docs/validation/**",
+        "scripts/validation_lanes.py",
+        "scripts/validation_identity.py",
+        "scripts/validation_evidence_graph.py",
+        "scripts/validation_scheduler_experiment.py",
+        "scripts/pytest_scheduler_experiment.py",
+        "scripts/pytest_scheduler_probe.py",
+        "scripts/release_check.py",
+        "scripts/validate_release_artifacts.py",
+        ".github/workflows/**",
+        "tests/test_validation_evidence_graph.py",
+        "tests/test_validation_scheduler_experiment.py"
+      ],
+      "claims": [
+        "validation-graph-integrity",
+        "validation-graph-regressions",
+        "decision-index-currentness",
+        "public-source-safety",
+        "retained-history-safety",
+        "validation-side-effect-safety",
+        "portable-source-behavior",
+        "mcp-package-behavior",
+        "release-artifact-portability"
+      ]
+    },
+    {
+      "id": "portable-kernel",
+      "patterns": [
+        "scripts/aoa_session_memory.py",
+        "scripts/benchmark_session_projection.py",
+        "tests/test_session_memory.py",
+        "DESIGN.md",
+        "PIPELINE.md",
+        "READINESS.md"
+      ],
+      "claims": ["portable-source-behavior", "release-artifact-portability"]
+    },
+    {
+      "id": "mcp-package",
+      "patterns": [
+        "packages/**",
+        "examples/synthetic/**",
+        "scripts/build_mcp_package.py"
+      ],
+      "claims": ["mcp-package-behavior", "release-artifact-portability"]
+    },
+    {
+      "id": "decision-records",
+      "patterns": ["docs/decisions/**", "scripts/generate_decision_indexes.py"],
+      "claims": ["decision-index-currentness", "public-source-safety"]
+    },
+    {
+      "id": "public-source",
+      "patterns": ["README.md", "LICENSE", ".gitignore", "skills/**", "stats/**"],
+      "claims": ["public-source-safety"]
+    }
+  ],
+  "nodes": [
+    {
+      "id": "validation-graph-contract",
+      "tier": "instant",
+      "priority": 100,
+      "depends_on": [],
+      "provides_evidence": ["validation-graph-contract"],
+      "timeout_seconds": 10,
+      "inputs": [
+        "docs/validation/**",
+        "scripts/validation_lanes.py",
+        "scripts/validation_identity.py",
+        "scripts/validation_evidence_graph.py",
+        "scripts/validation_scheduler_experiment.py",
+        "scripts/pytest_scheduler_experiment.py",
+        "scripts/pytest_scheduler_probe.py",
+        "scripts/release_check.py"
+      ],
+      "steps": [
+        {
+          "id": "validate-owner-graph-runner-pin-and-serial-inventory",
+          "argv": ["{python}", "scripts/validation_evidence_graph.py", "--validate-only"]
+        }
+      ]
+    },
+    {
+      "id": "validation-graph-contract-tests",
+      "tier": "fast",
+      "priority": 98,
+      "depends_on": [],
+      "provides_evidence": ["validation-graph-contract-tests"],
+      "timeout_seconds": 30,
+      "inputs": [
+        "docs/validation/**",
+        "scripts/validation_lanes.py",
+        "scripts/validation_identity.py",
+        "scripts/validation_evidence_graph.py",
+        "scripts/validation_scheduler_experiment.py",
+        "scripts/pytest_scheduler_experiment.py",
+        "scripts/pytest_scheduler_probe.py",
+        "scripts/release_check.py",
+        "scripts/validate_release_artifacts.py",
+        "tests/test_validation_evidence_graph.py",
+        "tests/test_validation_scheduler_experiment.py"
+      ],
+      "steps": [
+        {
+          "id": "validation-graph-contract-tests",
+          "argv": [
+            "{python}",
+            "-m",
+            "pytest",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+            "tests/test_validation_evidence_graph.py",
+            "tests/test_validation_scheduler_experiment.py"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "portable-source-tests",
+      "tier": "contextual",
+      "priority": 95,
+      "depends_on": [],
+      "provides_evidence": ["portable-source-test-corpus"],
+      "timeout_seconds": 1800,
+      "inputs": ["**"],
+      "steps": [
+        {
+          "id": "portable-source-tests",
+          "argv": [
+            "{python}",
+            "-m",
+            "pytest",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+            "tests/test_session_memory.py",
+            "tests/test_public_tree_audit.py",
+            "tests/test_git_history_audit.py"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "release-artifact-portability",
+      "tier": "artifact",
+      "priority": 90,
+      "depends_on": [],
+      "provides_evidence": ["reproducible-release-artifacts", "installed-stdio-protocol"],
+      "timeout_seconds": 900,
+      "inputs": [
+        "packages/**",
+        "examples/synthetic/**",
+        "scripts/build_mcp_package.py",
+        "scripts/validate_release_artifacts.py",
+        "scripts/validation_identity.py",
+        "README.md",
+        "LICENSE"
+      ],
+      "steps": [
+        {
+          "id": "reproducible-artifacts-and-installed-protocol",
+          "argv": ["{python}", "scripts/validate_release_artifacts.py"]
+        }
+      ]
+    },
+    {
+      "id": "mcp-package-release",
+      "tier": "semantic",
+      "priority": 85,
+      "depends_on": [],
+      "provides_evidence": ["mcp-package-release-check"],
+      "timeout_seconds": 600,
+      "inputs": ["packages/**", "scripts/aoa_session_memory.py", "skills/**"],
+      "steps": [
+        {
+          "id": "mcp-package-release-check",
+          "argv": ["{python}", "packages/aoa-session-memory-mcp/scripts/release_check.py"]
+        }
+      ]
+    },
+    {
+      "id": "decision-indexes",
+      "tier": "fast",
+      "priority": 80,
+      "depends_on": [],
+      "provides_evidence": ["decision-index-parity"],
+      "timeout_seconds": 120,
+      "inputs": ["docs/decisions/**", "scripts/generate_decision_indexes.py"],
+      "steps": [
+        {
+          "id": "decision-index-parity",
+          "argv": ["{python}", "scripts/generate_decision_indexes.py", "--check"]
+        }
+      ]
+    },
+    {
+      "id": "current-public-source-audit",
+      "tier": "fast",
+      "priority": 75,
+      "depends_on": [],
+      "provides_evidence": ["current-public-tree-audit"],
+      "timeout_seconds": 120,
+      "inputs": ["**"],
+      "steps": [
+        {
+          "id": "current-public-tree-audit",
+          "argv": ["{python}", "scripts/audit_public_tree.py", "--root", ".", "--fail-on", "blocking"]
+        }
+      ]
+    },
+    {
+      "id": "retained-history-inventory",
+      "tier": "contextual",
+      "priority": 72,
+      "depends_on": [],
+      "provides_evidence": ["retained-history-inventory"],
+      "timeout_seconds": 600,
+      "inputs": [".git"],
+      "steps": [
+        {
+          "id": "retained-history-inventory",
+          "argv": ["{python}", "scripts/audit_git_history.py", "--repo", ".", "--fail-on", "none"]
+        }
+      ]
+    },
+    {
+      "id": "post-build-public-source-audit",
+      "tier": "fast",
+      "priority": 70,
+      "depends_on": [
+        "validation-graph-contract",
+        "validation-graph-contract-tests",
+        "portable-source-tests",
+        "release-artifact-portability",
+        "mcp-package-release",
+        "decision-indexes",
+        "current-public-source-audit",
+        "retained-history-inventory"
+      ],
+      "provides_evidence": ["post-build-public-tree-audit"],
+      "timeout_seconds": 120,
+      "inputs": ["**"],
+      "steps": [
+        {
+          "id": "post-build-public-tree-audit",
+          "argv": ["{python}", "scripts/audit_public_tree.py", "--root", ".", "--fail-on", "blocking"]
+        }
+      ]
+    }
+  ]
+}

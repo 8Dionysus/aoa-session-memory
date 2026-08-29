@@ -19,7 +19,7 @@ or run the required CI lane.
 | `abyss_stack_rag` | optional integration | Disabled future service; it cannot replace raw or indexed `.aoa` evidence. |
 | `abyss-machine resource launch` routes | optional orchestration | Returned only as bounded next-action plans for expensive expansion routes; the MCP does not execute them and ordinary routes do not require the command. |
 | Authenticated loopback Streamable HTTP | optional deployment | The portable default is stdio. HTTP requires an explicit loopback bind and bearer source. |
-| systemd credentials and service units | system deployment configuration | Stack-owned launch policy; no unit or credential is shipped as a portable default. |
+| systemd credentials and service units | system deployment configuration | Stack-owned launch policy; source can explicitly render reviewed unit text, but no unit, credential, enablement, or activation is shipped as a portable default. |
 | `/srv` workspace and launch paths | system deployment configuration | Supplied by an explicit stack-owned profile. Generic discovery does not assume them. |
 | `aoa-kag`, `aoa-stats`, `aoa-skills`, and `aoa-evals` | optional ecosystem validation | Checked only by the manual/scheduled ecosystem workflow, never by required standalone CI. |
 | Host process, Codex config, and HTTP fixtures | test fixture | Synthetic values exercise deployment diagnostics without becoming defaults. |

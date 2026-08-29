@@ -7,6 +7,10 @@ authored `aoa-session-memory-mcp` package into the standalone
 The downstream package is a committed distribution read model, not a second
 implementation owner. Change implementation, tests, package metadata, and this
 policy here first; then export from a clean committed owner checkpoint.
+The service-local `AGENTS.md` remains an `abyss-stack` owner/deployment route
+and is intentionally not projected. The exported live validator detects its
+manifest-backed standalone install profile instead of requiring owner-local
+route files that would contain inapplicable stack paths and commands.
 
 ## Export
 

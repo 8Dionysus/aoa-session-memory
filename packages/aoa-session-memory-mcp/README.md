@@ -62,6 +62,8 @@ Tools:
   current proof.
 - `aoa_session_search(query="", filters, limit)`; route-only search is valid when filters such as `route_signal` and `doc_type` are supplied. `layer` is accepted as an input alias for `route_layer`, and explicit `use_shards`/`max_shards` filter controls are honored for bounded fan-out instead of being reported as unsupported filters. MCP returns compact hits, `mcp_route_plan`, and a provider freshness summary by default; follow `full_search_route` for the full archive CLI packet. `date_from`/`date_to` filter indexed search document/session dates; hook receipt timestamp checks should follow the returned `hook_receipts_route`.
 - `aoa_session_literal_query_plan(query="", kind="auto", filters)`; plans the cheapest reliable route before broad literal raw-text search. It prefers `entity_usage_chain` for typed operational anchors, entity registry/inventory for broad class queries such as skills/MCP/hooks/tools, rehydrate plus session-scoped search for exact session ids, structured filters for exact route reads, scoped full-text shards when available, and monolith fallback only as a bounded recall safety net. The packet exposes `classifications`, `cost_profile`, `fallback_plan`, and `next_expansion_command` so agents can see why the route was selected and where to expand next.
+- `aoa_session_memory_query_plan(query="", kind="auto", filters)`; transports the producer-owned claim-shape classifier and bounded retrieval plan for natural-language memory questions. The packet preserves the selected route, answer admission, generation and freshness state, insufficiency reason, and any non-executable owner or maintenance handoff without letting MCP reconstruct those meanings, admit a claim, or execute the handoff. Exact and typed questions retain the producer's literal subplan.
+- `aoa_session_episode_search(query, session, status, date_from, date_to, time_from, time_to, mode, limit, dense_candidate_limit, rerank_local, rerank_candidate_limit, explain, full)`; executes the producer-owned episode reader after planning. Its compact packet preserves temporal, causal-attribution, quantitative, and other typed relation evidence, source refs, generation/freshness, answer admission, abstention, budgets, and next route. MCP does not reclassify a relation or admit a claim; `full=true` returns the uncompact producer packet when bounded review needs all evidence.
 - `aoa_session_agent_responses(query, session, agent_events, episode, closeout_final, verification_state, failure_state, limit)`
 - `aoa_session_agent_closeouts(query, session, episode, limit)`
 - `aoa_session_agent_progress_updates(query, session, episode, limit)`
@@ -136,9 +138,20 @@ insufficiency, and the exact next route.
 Compaction may bound samples and omit non-contract producer detail, but it must
 not turn a candidate into a claim, erase a rejected correlation, upgrade scoped
 freshness to global freshness, or drop the reason an answer was rejected.
+Evidence-first usage packets keep the complete state order and state-specific
+admission map while carrying evidence samples only where evidence or a
+candidate actually exists. Duplicate top-level samples are omitted when the
+lifecycle, evidence envelope, and accepted chain already preserve the same
+refs; counts and the full route remain visible.
 `full=true` remains the explicit source-owned expansion route. MCP transports
 this contract and remains weaker than raw events, receipts, and current external
 owner/runtime evidence.
+
+Compact episode search keeps one relation-bearing admitted candidate when the
+producer admits an answer, or one bounded navigation candidate when it
+abstains. Original candidate ids, result counts, omission counts, evidence
+refs, relation status, admission, freshness, and the full producer route remain
+visible; `full=true` is the deliberate expansion for the remaining candidates.
 
 ### Skill-evidence compact contract
 
@@ -296,6 +309,13 @@ When installed as a package, the direct server entry point is
 `aoa-session-memory-mcp-server`; `aoa-session-memory-mcp` remains the CLI entry
 point.
 
+For the same producer-owned common planner through the package CLI:
+
+```bash
+aoa-session-memory-mcp memory-query-plan \
+  "Ghostty сейчас установлен и какая сейчас версия?"
+```
+
 Both entrypoints accept `--workspace-root`, `--aoa-root`, and `--script-path`.
 Without explicit arguments or matching environment variables, discovery checks
 the current directory and its parents for a marker-valid standalone root, then
@@ -312,8 +332,9 @@ identity, file digests, entrypoints, compatibility ranges, root-discovery and
 authority contracts, and the complete MCP surface catalog.
 
 The owner-side route, allowlist, schema, drift behavior, and standalone
-validator are documented in [`projection/README.md`](projection/README.md).
-Export does not install, deploy, register, or restart the system MCP runtime.
+validator are documented as `projection/README.md` in `abyss-stack`. The
+exported package carries the same contract as `PROJECTION.md`. Export does not
+install, deploy, register, or restart the system MCP runtime.
 
 Codex discovers MCP tools when it attaches to the configured owner. The server
 auto-reloads the `core.py` implementation for existing tools when the source
@@ -337,6 +358,8 @@ failure when a fresh, authenticated loopback owner is configured.
 
 ## Agent Route
 
-Executable run, smoke, and validation commands live in
-[`AGENTS.md`](AGENTS.md#run). This README describes the service surface;
-`AGENTS.md` owns the operational route for agents.
+Owner-deployment run, smoke, and validation commands live in the owner-local
+`mcp/services/aoa-session-memory-mcp/AGENTS.md`. This README describes the
+portable service surface; that owner-local file remains the operational route
+for agents working inside `abyss-stack` and is intentionally not distributed
+with the standalone package.

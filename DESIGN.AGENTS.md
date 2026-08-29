@@ -159,6 +159,15 @@ Stop escalation when:
 - freshness is too weak;
 - the required owner or raw evidence is unavailable.
 
+For timed portable SQLite retrieval, a cooperative SQLite progress handler is not
+the complete deadline boundary: storage acquisition may block before it runs.
+The generated reader therefore executes in an isolated child owned by the
+serving parent, whose deadline covers result transport and child cleanup as
+well. A timeout or reader failure selects the bounded source/raw fallback from
+the parent; global fallback candidate selection must remain source-only and must
+not reopen the generated store. Cleanup that is not verified is an explicit
+failed state, not a usable generated result.
+
 Local reranking is an optional escalation after hybrid candidate generation,
 not a default semantic stage. Weak lexical coverage is an observed signal, not
 an automatic trigger: it is expected for multilingual and conceptual

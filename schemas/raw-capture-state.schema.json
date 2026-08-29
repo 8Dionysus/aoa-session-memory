@@ -23,7 +23,7 @@
     "projection_authority"
   ],
   "properties": {
-    "schema_version": {"const": 1},
+    "schema_version": {"const": 2},
     "artifact_type": {"const": "raw_capture_state"},
     "session_id": {"type": "string", "minLength": 1},
     "status": {
@@ -34,11 +34,12 @@
         "indexed_with_projection"
       ]
     },
-    "capture_id": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "capture_id": {"type": "string", "pattern": "^(sha256|ledger-sha256):[a-f0-9]{64}$"},
     "capture_path": {"type": "string", "minLength": 1},
     "capture_ref": {"type": "string", "minLength": 1},
     "preserved_capture_path": {"type": "string"},
-    "raw_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "raw_sha256": {"type": "string", "pattern": "^([a-f0-9]{64})?$"},
+    "raw_digest_status": {"enum": ["complete_sha256", "deferred_to_projection"]},
     "raw_bytes": {"type": "integer", "minimum": 0},
     "raw_line_count": {"type": "integer", "minimum": 0},
     "captured_at": {"type": "string", "minLength": 1},
@@ -46,6 +47,18 @@
     "source_snapshot_before": {"$ref": "#/$defs/fileSnapshot"},
     "source_snapshot_after": {"$ref": "#/$defs/fileSnapshot"},
     "source_stable_during_capture": {"type": "boolean"},
+    "capture_mode": {"enum": ["append_only_immutable_block_ledger_v1"]},
+    "ledger_path": {"type": "string", "minLength": 1},
+    "ledger_epoch_id": {"type": "string", "pattern": "^[a-f0-9]{24}$"},
+    "ledger_chain_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "ledger_block_count": {"type": "integer", "minimum": 0},
+    "appended_bytes": {"type": "integer", "minimum": 0},
+    "appended_block_count": {"type": "integer", "minimum": 0},
+    "sha256_state_bootstrap_bytes_read": {"type": "integer", "minimum": 0},
+    "sha256_delta_bytes_hashed": {"type": "integer", "minimum": 0},
+    "has_incomplete_tail": {"type": "boolean"},
+    "persistent_live_tail_index": {"type": "string", "minLength": 1},
+    "persistent_live_tail_index_written": {"type": "boolean"},
     "hooks_seen": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
     "projection_publish_id_at_capture": {"type": "string"},
     "projection_raw_sha256_at_capture": {"type": "string"},

@@ -33,7 +33,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
           repository: 8Dionysus/aoa-skills
-          ref: 6f53e97cecb74877cf1d91432d685a72cf6771b8
+          ref: 9b009123e88cd864ef11147a6d9cba31a3bf81a5
           path: .deps/aoa-skills
           token: ${{ secrets.AOA_ECOSYSTEM_READ_TOKEN || github.token }}
 

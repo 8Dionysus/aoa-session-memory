@@ -25,7 +25,7 @@
     {
       "path": "tests/test_skill_system.py",
       "kind": "file",
-      "sha256": "b0db8ba6acab74cedd1e704ad9f3d8d24eb8dc7216e51171281da5747c9fada2"
+      "sha256": "0d06a1c4a4711f8f39a1bd354c200e812ea5d515507c5d353fd1cb8f25c7437b"
     },
     {
       "path": "evals/cases/session-memory-skill-routing.v1.json",
@@ -35,7 +35,7 @@
     {
       "path": "capabilities/families/session-memory.yaml",
       "kind": "file",
-      "sha256": "4e05d54671706b16a6cc087edc8b25c0545c52cd3819073a90cf933847782e91"
+      "sha256": "acfc8e8d3faf48d9e544b4e127e533f388cee33f2ded356f3a3b374d2263754d"
     },
     {
       "path": "capabilities/port.manifest.json",
@@ -50,7 +50,7 @@
     {
       "path": "generated/capability_graph.json",
       "kind": "file",
-      "sha256": "d0fb0b27a75976a164d58866870e6c0cdac30a2612eed87ceb1cb5bd6b437d07"
+      "sha256": "0e943944ef82b4a6eac250cfa0f72c7d56a54f5fdc5d613be1b661d4ce3e0291"
     }
   ],
   "auto_run_allowed": false,

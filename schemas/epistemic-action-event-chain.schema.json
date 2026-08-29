@@ -1,0 +1,432 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aoa-session-memory.local/schemas/epistemic-action-event-chain.schema.json",
+  "title": "AoA privacy-safe Epistemic Action event chain",
+  "description": "An append-only, replay-safe source record for prediction, action, observation, discrepancy, and shadow-only model-update candidates. It intentionally contains public identifiers, bounded confidence, and opaque digests only.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "artifact_type",
+    "chain_id",
+    "session_id",
+    "turn_id",
+    "chain_status",
+    "claim_ceiling",
+    "head",
+    "event_count",
+    "events",
+    "model_update_candidates",
+    "diagnostics"
+  ],
+  "properties": {
+    "schema_version": {"const": "aoa_epistemic_action_event_chain_v2"},
+    "artifact_type": {"const": "epistemic_action_event_chain"},
+    "chain_id": {"$ref": "#/$defs/publicId"},
+    "session_id": {"$ref": "#/$defs/publicId"},
+    "turn_id": {"$ref": "#/$defs/publicId"},
+    "chain_status": {
+      "enum": ["ready", "unknown", "ambiguous", "refused", "shadow_only"]
+    },
+    "claim_ceiling": {
+      "const": "storage_source_correctness_candidate_only"
+    },
+    "head": {"$ref": "#/$defs/head"},
+    "event_count": {"type": "integer", "minimum": 0},
+    "events": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/event"}
+    },
+    "model_update_candidates": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/modelUpdateCandidate"}
+    },
+    "diagnostics": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/reasonCode"}
+    }
+  },
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "publicId": {
+      "type": "string",
+      "pattern": "^(?:(?:id|event|candidate|chain|prediction|action|observation|session|turn):[0-9a-f]{64}|[A-Za-z0-9][A-Za-z0-9._:-]{0,127})$"
+    },
+    "reasonCode": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{1,63}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,6})?Z$"
+    },
+    "head": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sequence", "event_id", "event_digest"],
+      "properties": {
+        "sequence": {"type": "integer", "minimum": 0},
+        "event_id": {
+          "oneOf": [{"$ref": "#/$defs/publicId"}, {"type": "null"}]
+        },
+        "event_digest": {
+          "oneOf": [{"const": "genesis"}, {"$ref": "#/$defs/digest"}]
+        }
+      }
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "event_type",
+        "event_id",
+        "sequence",
+        "prev_event_digest",
+        "event_digest",
+        "state",
+        "created_at",
+        "session_id",
+        "turn_id"
+      ],
+      "properties": {
+        "schema_version": {"const": "aoa_epistemic_action_event_v2"},
+        "event_type": {
+          "enum": [
+            "prediction_commitment",
+            "action_binding",
+            "observation",
+            "observation_conflict",
+            "discrepancy",
+            "model_update_candidate",
+            "refusal"
+          ]
+        },
+        "event_id": {"$ref": "#/$defs/publicId"},
+        "sequence": {"type": "integer", "minimum": 1},
+        "prev_event_digest": {
+          "oneOf": [{"const": "genesis"}, {"$ref": "#/$defs/digest"}]
+        },
+        "event_digest": {"$ref": "#/$defs/digest"},
+        "state": {
+          "enum": [
+            "committed",
+            "bound",
+            "observed",
+            "ready",
+            "unknown",
+            "ambiguous",
+            "refused",
+            "shadow_only"
+          ]
+        },
+        "created_at": {"$ref": "#/$defs/timestamp"},
+        "session_id": {"$ref": "#/$defs/publicId"},
+        "turn_id": {"$ref": "#/$defs/publicId"},
+        "request_id": {"$ref": "#/$defs/publicId"},
+        "attempt_id": {"$ref": "#/$defs/publicId"},
+        "tool_use_id": {"$ref": "#/$defs/publicId"},
+        "prediction_id": {"$ref": "#/$defs/publicId"},
+        "prediction_commitment_digest": {"$ref": "#/$defs/digest"},
+        "pre_action_marker": {"$ref": "#/$defs/digest"},
+        "observation_window_digest": {"$ref": "#/$defs/digest"},
+        "observation_window_start_at": {"$ref": "#/$defs/timestamp"},
+        "observation_window_end_at": {"$ref": "#/$defs/timestamp"},
+        "expected_observation_facet_ids": {
+          "type": "array",
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/publicId"}
+        },
+        "hypothesis_digest": {"$ref": "#/$defs/digest"},
+        "expected_change_digest": {"$ref": "#/$defs/digest"},
+        "falsifier_digest": {"$ref": "#/$defs/digest"},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "action_plan_digest": {"$ref": "#/$defs/digest"},
+        "action_id": {"$ref": "#/$defs/publicId"},
+        "action_digest": {"$ref": "#/$defs/digest"},
+        "action_kind": {"$ref": "#/$defs/publicId"},
+        "effect_class": {"$ref": "#/$defs/publicId"},
+        "action_started_at": {"$ref": "#/$defs/timestamp"},
+        "prediction_sequence": {"type": "integer", "minimum": 1},
+        "observation_id": {"$ref": "#/$defs/publicId"},
+        "expected_observation_digest": {"$ref": "#/$defs/digest"},
+        "observation_digest": {"$ref": "#/$defs/digest"},
+        "observed_observation_digest": {"$ref": "#/$defs/digest"},
+        "observed_at": {"$ref": "#/$defs/timestamp"},
+        "observed_observation_facet_ids": {
+          "type": "array",
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/publicId"}
+        },
+        "observation_status": {
+          "enum": ["observed", "missing", "unknown", "ambiguous", "refused"]
+        },
+        "evidence_ref_ids": {
+          "type": "array",
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/publicId"}
+        },
+        "reason_code": {"$ref": "#/$defs/reasonCode"},
+        "related_event_ids": {
+          "type": "array",
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/publicId"}
+        },
+        "source_event_ids": {
+          "type": "array",
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/publicId"}
+        },
+        "discrepancy_kind": {
+          "enum": ["match", "partial_match", "mismatch", "unknown", "ambiguous"]
+        },
+        "candidate_id": {"$ref": "#/$defs/publicId"},
+        "candidate_status": {
+          "enum": ["shadow_only", "unknown", "ambiguous", "refused"]
+        },
+        "alternative_explanation_digest": {"$ref": "#/$defs/digest"},
+        "model_update_digest": {"$ref": "#/$defs/digest"},
+        "next_distinguishing_action_digest": {"$ref": "#/$defs/digest"},
+        "update_kind": {
+          "enum": ["review_prediction", "withhold_update", "inspect_only"]
+        },
+        "claim_ceiling": {
+          "const": "candidate_only_no_model_update_no_benefit"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "event_type": {"const": "prediction_commitment"}
+            }
+          },
+          "then": {
+            "required": [
+              "request_id",
+              "attempt_id",
+              "prediction_id",
+              "prediction_commitment_digest",
+              "pre_action_marker",
+              "observation_window_digest",
+              "observation_window_start_at",
+              "observation_window_end_at",
+              "expected_observation_facet_ids",
+              "hypothesis_digest",
+              "expected_change_digest",
+              "falsifier_digest",
+              "confidence",
+              "action_plan_digest",
+              "action_id",
+              "expected_observation_digest"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "event_type": {"const": "action_binding"}
+            }
+          },
+          "then": {
+            "required": [
+              "request_id",
+              "attempt_id",
+              "prediction_id",
+              "action_id",
+              "action_digest",
+              "action_kind",
+              "effect_class",
+              "action_started_at",
+              "prediction_sequence",
+              "prediction_commitment_digest",
+              "related_event_ids"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "event_type": {
+                "enum": ["observation", "observation_conflict"]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "request_id",
+              "attempt_id",
+              "action_id",
+              "observation_id",
+              "observation_status",
+              "evidence_ref_ids",
+              "observed_observation_facet_ids",
+              "reason_code",
+              "related_event_ids"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "event_type": {
+                "enum": ["observation", "observation_conflict"]
+              },
+              "observation_status": {"const": "observed"}
+            }
+          },
+          "then": {
+            "required": ["observation_digest", "observed_at"]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "event_type": {
+                "enum": ["observation", "observation_conflict"]
+              },
+              "observation_status": {
+                "enum": ["missing", "unknown", "ambiguous", "refused"]
+              }
+            }
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                {"required": ["observation_digest"]},
+                {"required": ["observed_at"]}
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "event_type": {"const": "discrepancy"}
+            }
+          },
+          "then": {
+            "required": [
+              "request_id",
+              "attempt_id",
+              "prediction_id",
+              "action_id",
+              "expected_observation_digest",
+              "discrepancy_kind",
+              "related_event_ids",
+              "source_event_ids"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "event_type": {"const": "model_update_candidate"}
+            }
+          },
+          "then": {
+            "required": [
+              "request_id",
+              "attempt_id",
+              "action_id",
+              "candidate_id",
+              "candidate_status",
+              "discrepancy_kind",
+              "update_kind",
+              "source_event_ids",
+              "related_event_ids",
+              "claim_ceiling",
+              "hypothesis_digest",
+              "expected_change_digest",
+              "falsifier_digest",
+              "confidence",
+              "action_plan_digest",
+              "observation_window_digest",
+              "pre_action_marker"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "event_type": {"const": "refusal"}
+            }
+          },
+          "then": {
+            "required": ["reason_code"],
+            "properties": {
+              "state": {"enum": ["refused", "ambiguous"]}
+            }
+          }
+        }
+      ]
+    },
+    "modelUpdateCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_id",
+        "attempt_id",
+        "action_id",
+        "candidate_id",
+        "candidate_event_id",
+        "status",
+        "discrepancy_kind",
+        "update_kind",
+        "source_event_ids",
+        "claim_ceiling",
+        "hypothesis_digest",
+        "expected_change_digest",
+        "falsifier_digest",
+        "confidence",
+        "action_plan_digest",
+        "observation_window_digest",
+        "pre_action_marker"
+      ],
+      "properties": {
+        "request_id": {"$ref": "#/$defs/publicId"},
+        "attempt_id": {"$ref": "#/$defs/publicId"},
+        "action_id": {"$ref": "#/$defs/publicId"},
+        "candidate_id": {"$ref": "#/$defs/publicId"},
+        "candidate_event_id": {"$ref": "#/$defs/publicId"},
+        "status": {
+          "enum": ["shadow_only", "unknown", "ambiguous", "refused"]
+        },
+        "discrepancy_kind": {
+          "enum": ["match", "partial_match", "mismatch", "unknown", "ambiguous"]
+        },
+        "update_kind": {
+          "enum": ["review_prediction", "withhold_update", "inspect_only"]
+        },
+        "source_event_ids": {
+          "type": "array",
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/publicId"}
+        },
+        "claim_ceiling": {
+          "const": "candidate_only_no_model_update_no_benefit"
+        },
+        "hypothesis_digest": {"$ref": "#/$defs/digest"},
+        "expected_change_digest": {"$ref": "#/$defs/digest"},
+        "falsifier_digest": {"$ref": "#/$defs/digest"},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "action_plan_digest": {"$ref": "#/$defs/digest"},
+        "observation_window_digest": {"$ref": "#/$defs/digest"},
+        "pre_action_marker": {"$ref": "#/$defs/digest"},
+        "tool_use_id": {"$ref": "#/$defs/publicId"},
+        "alternative_explanation_digest": {"$ref": "#/$defs/digest"},
+        "model_update_digest": {"$ref": "#/$defs/digest"},
+        "next_distinguishing_action_digest": {"$ref": "#/$defs/digest"}
+      }
+    }
+  }
+}

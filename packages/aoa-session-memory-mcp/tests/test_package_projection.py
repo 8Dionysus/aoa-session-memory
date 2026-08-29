@@ -14,3 +14,10 @@ SPEC.loader.exec_module(validator)
 
 def test_committed_package_projection_matches_its_manifest() -> None:
     assert validator.validate(PACKAGE_ROOT) == []
+
+
+def test_committed_package_keeps_the_owner_agent_route_out_of_projection() -> None:
+    readme = (PACKAGE_ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert not (PACKAGE_ROOT / "AGENTS.md").exists()
+    assert "intentionally not distributed" in readme

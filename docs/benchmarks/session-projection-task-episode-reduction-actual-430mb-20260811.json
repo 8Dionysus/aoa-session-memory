@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "artifact_type": "session_projection_task_episode_reduction_benchmark",
+  "generated_at": "2026-08-11T10:09:41Z",
+  "fixture": {
+    "synthetic": false,
+    "source_kind": "read_only_captured_snapshot",
+    "fixture_alias": "event-dense-readonly-430mb",
+    "raw_bytes": 429811332,
+    "profile_event_count": 20000,
+    "segment_count": 644,
+    "episode_shard_count": 311
+  },
+  "reduction_measurement": {
+    "mode": "paired_same_process_task_episode_reduction",
+    "repetitions": 3,
+    "baseline_seconds": [
+      11.58104566700058,
+      12.607390435994603,
+      11.53531720500905
+    ],
+    "optimized_seconds": [
+      6.935413758998038,
+      6.586581107010716,
+      5.7036235080013284
+    ],
+    "baseline_median_seconds": 11.58104566700058,
+    "optimized_median_seconds": 6.586581107010716,
+    "median_speedup": 1.758278760839032,
+    "output_sha256_equal": true
+  },
+  "shard_redaction_measurement": {
+    "mode": "single_pair_parent_plus_worker_vs_worker_only",
+    "repetitions": 1,
+    "baseline_seconds": 95.12728435099416,
+    "optimized_seconds": 33.56271627100068,
+    "speedup": 2.834314230793869,
+    "output_sha256_equal": true,
+    "p95_claimed": false
+  },
+  "generation_scope": {
+    "classification_generation_unchanged": true,
+    "classification_generation_id": "511c2bb32d50f1f499cadfca390e3acf9852b56dee0d3efc99fd60ec6e53b67f",
+    "segment_generation_unchanged": true,
+    "segment_generation_id": "461859a08daf00413d0e2780b88d413694acb3b827bc7d1f5fe0bb718e90d72a",
+    "previous_task_episode_generation_id": "6eeec4c0f1c84c088b9f5458aabe857bc70ea3f21e6b76ebfc32198e4c6cf119",
+    "task_episode_generation_id": "c389e9a2f3a879e8b02dfac51ca45c6a763f94dde41476a752ba43ab80484956",
+    "previous_session_index_generation_id": "0a2b22c8cf143506746c5d93d1d7385fe49d12802dd60e7f97a7fbbaed0ef6bf",
+    "session_index_generation_id": "622f01a1a1a5024c94072cfa081f3b6744d6ef625a5d6a02a7d86e8d37d52185"
+  },
+  "privacy": {
+    "cold_shard_full_redaction_passes": 1,
+    "prior_shard_expected_payload_reused_for_worker": true,
+    "worker_without_pre_redacted_payload_falls_back_to_full_redaction": true,
+    "raw_text_persisted": false,
+    "host_paths_persisted": false
+  },
+  "truth_status": "paired_component_benchmark_not_cold_projection_slo",
+  "ok": true
+}

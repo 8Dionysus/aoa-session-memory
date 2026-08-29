@@ -1,0 +1,24 @@
+{
+  "owner": "codex-app-server",
+  "currentness": "current_at_read",
+  "methods": ["thread/goal/get", "thread/read"],
+  "goal": {
+    "threadId": "thread:fixture-master",
+    "objective": "PRIVATE_INVALID_OBJECTIVE",
+    "status": "futureStatus",
+    "createdAt": 1720000000,
+    "updatedAt": 1720000010
+  },
+  "thread": {
+    "id": "thread:fixture-master",
+    "status": "idle",
+    "cwd": "/private/invalid/path"
+  },
+  "items": [
+    {
+      "id": "item:fixture-invalid",
+      "type": "futureItem",
+      "prompt": "PRIVATE_INVALID_PROMPT"
+    }
+  ]
+}

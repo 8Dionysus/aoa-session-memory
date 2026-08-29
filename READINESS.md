@@ -107,6 +107,16 @@ Ready when:
 - generation identities name the producer bytes loaded by the writer, and a
   changed producer source refuses publication;
 - stale indexes are detected and rebuildable;
+- incompatible Atlas generations and mixed publish epochs are deferred from
+  bounded non-deep profiles to the clean deep route; current admission requires
+  matching root, projection-state, and axis generation/publish identities;
+- a valid complete registry source set is distinguished from a bounded batch;
+  a removed projected session blocks answer candidates until deep atomic
+  replacement removes monolith, shard, Atlas, and graph contributions, while
+  raw evidence and its digest remain unchanged;
+- an authoritative empty registry can publish an empty current source set, and
+  reinstating a preserved owner record is an indexed correction rather than
+  raw recovery;
 - compaction markers do not create false semantic microsegments.
 
 Progress transport is a separate runtime-observability gate. A disconnected
@@ -134,6 +144,12 @@ Ready when:
 - literal fallback remains available until a replacement is proved;
 - route selection and cost are inspectable;
 - hard negatives do not become positive claims.
+
+For a timed portable SQLite query, the deadline must cover generated-storage
+acquisition, query/result transport, and reader cleanup through an isolated
+process boundary. A blocked reader must not suppress the bounded session or
+global raw fallback; a normal generated success retains its refs and freshness.
+Unverified reader cleanup remains failed and cannot be admitted as success.
 
 ### 6. Semantic and hybrid retrieval
 
@@ -191,7 +207,20 @@ Ready when:
   and owner preflight rejects every remaining stage;
 - live tails wait for a quiet window without hiding stable evidence;
 - resource/lock deferral later resumes automatically;
+- a continuously arriving current-epoch obligation receives a bounded fresh-
+  arrival opportunity while older current work advances through a persisted
+  fair cursor, and fail-closed identity refusals do not consume or advance
+  either scheduling opportunity;
 - no heavy necessary projection starves indefinitely;
+- a current projection outbox remains visible until every required consumer
+  has an exact receipt and an append-only terminal-retirement receipt binds
+  those receipts to the same publication;
+- projection retry hands the same persistent obligation to downstream entity
+  and graph work instead of clearing it on capture/search progress, launcher
+  success, or a timer result;
+- bounded arrival and retirement measurements show consumer capacity above the
+  observed arrival rate with explicit headroom, current-work service, and a
+  non-positive or actionable backlog slope;
 - readers see honest stale/fallback state;
 - graph readers distinguish global recall freshness from bounded returned-
   evidence freshness without letting either scope hide the other;
@@ -224,6 +253,16 @@ Ready for promotion only when:
 Finding a candidate is not promotion. A session-memory packet never grants
 training, skill, automation, policy, or owner-write authority.
 
+For experience metabolism, mechanical readiness additionally requires a
+closed/reviewed eligibility gate, privacy-safe bounded refs, explicit
+counterevidence, and a reversible lifecycle packet. A recurring motif may
+enter review, but it cannot enter eval without independent review, cannot enter
+shadow without the eval route, and cannot be accepted without paired,
+held-out, ablation, baseline, trajectory-cost, owner, and live-canary
+evidence. Owner acceptance yields an adoption-review state; a separate
+adoption receipt is required before any adoption flag. A directional shadow
+delta is measurement, not a benefit verdict.
+
 ### 12. Portability
 
 Ready when:
@@ -255,7 +294,7 @@ Use the narrowest sufficient route.
 | Config or schema | focused tests, schema validation, affected projection rebuild path |
 | Capture or hooks | focused tests, adapter grounding, hook status, live lifecycle probe |
 | Classifier or taxonomy | reindex/catch-up, manual positive/negative samples, freshness |
-| Exact search | fixed gold refs, collision and fallback cases, latency |
+| Exact search | fixed gold refs, collision and fallback cases, storage-boundary cleanup, latency |
 | Semantic/rerank | unchanged gold corpus, per-lane and production-auto A/B, cold/warm provider gates, exact-recall guard |
 | Episode formation | manually adjudicated boundaries and cross-compaction cases |
 | Graph semantics | relation/path review, hybrid-only comparison, cardinality |
@@ -333,6 +372,25 @@ python3 scripts/aoa_session_memory.py search-provider-status \
   --workspace-root /path/to/workspace \
   --aoa-root /path/to/workspace/.aoa
 ```
+
+The default provider packet separates capability/model availability from a
+real served request. An optional host provider reports
+`served_request_health.status=unobserved` until an operator deliberately asks
+for one bounded end-to-end embedding probe:
+
+```bash
+python3 scripts/aoa_session_memory.py search-provider-status \
+  --workspace-root /path/to/workspace \
+  --aoa-root /path/to/workspace/.aoa \
+  --provider abyss_machine_nervous \
+  --include-host \
+  --probe-served-request
+```
+
+`served` is current only for that invocation and is not semantic-quality
+proof. `failed` or `contract_drift` blocks the explicitly probed provider even
+when its process or model gate remains available. The dense generation route
+continues to run its own real-request preflight at the generation boundary.
 
 Use their exact next action rather than copying a generic maintenance command.
 For a portable checkout, use the standalone audit:

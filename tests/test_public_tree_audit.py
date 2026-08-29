@@ -30,6 +30,41 @@ def test_audit_reports_secret_fingerprints_without_values(tmp_path: Path) -> Non
     assert all(item["fingerprint"].startswith("sha256:") for item in report["findings"])
 
 
+def test_candidate_scanner_preserves_overlapping_exact_rule_matches() -> None:
+    auditor = load_auditor()
+    value = "sk-" + "A" * 32
+    first_label = "api_" + "key"
+    second_label = "author" + "ization"
+    scheme = "bear" + "er"
+    third_label = "pa" + "\u017f\u017f" + "word"
+    fourth_label = "client_" + "secret"
+    home_path = "/home/" + "alice"
+    host_path = "/srv/" + "AbyssOS"
+    text = "\n".join(
+        [
+            f'{first_label}="{value}"',
+            f"{second_label}: {scheme} abcdefghijklmnopqrstuvwxyz",
+            "AKIA" + "B" * 16,
+            f"{home_path}/project {host_path}/.aoa 192.168.2.3",
+            f'{third_label}="abcdefghijklmnop"',
+            f'clİent_{fourth_label.removeprefix("client_")}="qrstuvwxyzabcdef"',
+        ]
+    )
+    expected = sorted(
+        (class_name, match.start(), match.group(0))
+        for class_name, _severity, pattern, _reason in auditor.content_rules()
+        for match in pattern.finditer(text)
+    )
+    actual = sorted(
+        (class_name, match.start(), match.group(0))
+        for class_name, _severity, match, _reason in auditor.iter_content_rule_matches(
+            text
+        )
+    )
+
+    assert actual == expected
+
+
 def test_audit_blocks_runtime_material_and_non_generic_home_paths(tmp_path: Path) -> None:
     auditor = load_auditor()
     session_dir = tmp_path / "sessions" / "private-session"
@@ -57,3 +92,54 @@ def test_audit_keeps_generic_examples_and_host_profiles_distinct(tmp_path: Path)
     assert report["counts"] == {"blocking": 0, "review": 1}
     assert report["findings"][0]["class"] == "host_profile_path"
     assert host_profile not in json.dumps(report)
+
+
+def test_audit_accepts_only_the_verified_empty_portable_session_skeleton(
+    tmp_path: Path,
+) -> None:
+    auditor = load_auditor()
+    session_root = tmp_path / "sessions"
+    session_root.mkdir()
+    payload = {
+        "schema_version": 1,
+        "artifact_type": "sessions_directory_index",
+        "generated_at": "2026-07-23T18:00:07Z",
+        "session_count": 0,
+        "named_session_count": 0,
+        "naming_readiness_counts": {"by_status": {}, "by_route": {}},
+        "naming_work_queue": [],
+        "sessions_root": "sessions",
+        "read_order": auditor.EMPTY_SESSION_READ_ORDER,
+        "by_date": {},
+        "largest_sessions": [],
+        "named_sessions": [],
+        "sessions": [],
+    }
+    (session_root / "AGENTS.md").write_text("# Sessions\n", encoding="utf-8")
+    (session_root / "index.json").write_text(
+        json.dumps(payload, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    (session_root / "INDEX.md").write_text(
+        auditor.empty_session_index_markdown(payload),
+        encoding="utf-8",
+    )
+
+    report = auditor.audit(tmp_path)
+
+    assert report["ok"] is True
+    assert report["findings"] == []
+
+    (session_root / "INDEX.md").write_text(
+        auditor.empty_session_index_markdown(payload)
+        + "\nprivate session narrative\n",
+        encoding="utf-8",
+    )
+    tampered_report = auditor.audit(tmp_path)
+
+    assert tampered_report["ok"] is False
+    assert {
+        item["path"]
+        for item in tampered_report["findings"]
+        if item["class"] == "session_material"
+    } == {"sessions/INDEX.md", "sessions/index.json"}

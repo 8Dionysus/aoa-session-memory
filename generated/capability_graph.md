@@ -2,7 +2,7 @@
 
 Derived from `capabilities/families/*.yaml`. This file is a read model, not capability authority.
 
-Source content hash: `b65694714f8e40a82e0f0829efc460349efcdd54cdaf6f4c7d12ffa011090704`
+Source content hash: `f6d51e2a0f348f2444f337fa652440d931296924119cd3b503d3d25da1c3a74a`
 
 ## Semantic tree
 
@@ -23,6 +23,7 @@ Source content hash: `b65694714f8e40a82e0f0829efc460349efcdd54cdaf6f4c7d12ffa011
       - `skill.aoa-session-raw-diagnostic` (skill, deferred, challenger)
     - `session-memory.stewardship.curate` (capability, internal, healthy)
       - `skill.aoa-session-batch-distill` (skill, deferred, challenger)
+      - `skill.aoa-session-experience-metabolism` (skill, deferred, challenger)
       - `skill.aoa-session-first-pass-distill` (skill, deferred, challenger)
       - `skill.aoa-session-manual-review` (skill, deferred, challenger)
     - `session-memory.stewardship.name` (capability, internal, healthy)
@@ -47,6 +48,7 @@ Source content hash: `b65694714f8e40a82e0f0829efc460349efcdd54cdaf6f4c7d12ffa011
 | conflicts-with | `skill.aoa-session-reindex` | `skill.aoa-session-naming-wave` | Do not rebuild projections and mutate names for the same session set concurrently. |
 | generalizes | `skill.aoa-session-first-pass-distill` | `skill.aoa-session-batch-distill` | Single-session extraction is the reusable procedure generalized by bounded batch orchestration. |
 | hands-off-to | `skill.aoa-codex-hooks-status` | `skill.aoa-codex-compact-probe` | Current trusted hook runtime status is required before the behavioral compact probe. |
+| hands-off-to | `skill.aoa-codex-session-segment-archive` | `skill.aoa-session-raw-diagnostic` | If transcript validation or reading fails before a verified archive is emitted, hand off the typed raw-read-failure and stop archive processing. |
 | hands-off-to | `skill.aoa-codex-session-segment-archive` | `skill.aoa-session-reindex` | Newly archived sessions may be projected only after raw preservation validates. |
 | hands-off-to | `skill.aoa-session-archive-init` | `skill.aoa-codex-hooks-status` | The initialized root emits the memory-root binding consumed by Codex hook inspection. |
 | hands-off-to | `skill.aoa-session-batch-distill` | `skill.aoa-session-manual-review` | The batch candidate queue remains provisional and enters bounded manual review. |
@@ -72,6 +74,7 @@ Source content hash: `b65694714f8e40a82e0f0829efc460349efcdd54cdaf6f4c7d12ffa011
 | primary-parent | `skill.aoa-codex-session-segment-archive` | `session-memory.adapters.codex` | - |
 | primary-parent | `skill.aoa-session-archive-init` | `session-memory.stewardship.capture` | - |
 | primary-parent | `skill.aoa-session-batch-distill` | `session-memory.stewardship.curate` | - |
+| primary-parent | `skill.aoa-session-experience-metabolism` | `session-memory.stewardship.curate` | - |
 | primary-parent | `skill.aoa-session-first-pass-distill` | `session-memory.stewardship.curate` | - |
 | primary-parent | `skill.aoa-session-history-import` | `session-memory.stewardship.capture` | - |
 | primary-parent | `skill.aoa-session-manual-review` | `session-memory.stewardship.curate` | - |

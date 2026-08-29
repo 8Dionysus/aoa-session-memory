@@ -43,10 +43,24 @@ prints matched credential or host values.
 
 ## Existing installations
 
-Kernel upgrades preserve existing session directories and rebuild the
-registry/index views from those archives. Forced export may replace portable
-files while preserving repository-owned `.git`, `.github`, and `kag` surfaces.
-It must not silently delete runtime evidence.
+Kernel upgrades preserve existing session directories and the generated
+projection overlay. Changed producer identities mark only their owned stages or
+components dirty; normal catch-up reuses unchanged raw blocks, segments,
+classification summaries, and task-episode shards. A full rebuild is reserved
+for explicit bootstrap, migration, or deep-repair cases. Forced export may
+replace portable files while preserving repository-owned `.git`, `.github`, and
+`kag` surfaces.
+It must not silently delete runtime evidence. `export-bundle --force` therefore
+fails closed before mutation when its target contains a runtime install
+profile, archived sessions, or generated runtime stores. Upgrade an installed
+root with `install --force`; reserve forced export for a clean portable target.
+
+Runtime install upgrades replace authored map templates but transactionally
+overlay the existing generated atlas indexes, entry files, projection state,
+and entity registry afterward. A failed overlay restores the previous map
+tree. Generated projections remain non-authoritative and may still be marked
+dirty by the new producer generation; preservation prevents an upgrade from
+turning ordinary incremental catch-up into accidental bootstrap loss.
 
 ## Hook rendering
 
@@ -56,6 +70,33 @@ and native Codex hook trust are explicit user operations.
 
 Project and user hooks may both run. Archive writes are idempotent for the same
 raw source, while duplicate receipts remain possible and visible.
+
+## Systemd unit rendering
+
+Fresh capture, discovery/stable sweep, and persistent retry dispatch are
+separate owner lanes. The fresh-capture unit is capture-watch-only;
+discovery/stable projection runs in a separately named resource-gated sweep
+unit; and the retry timer invokes the bounded owner dispatcher, which performs
+resource admission for each child. Render them into an explicitly chosen
+target when a runtime owner is ready to review deployment:
+
+```bash
+python3 scripts/aoa_session_memory.py render-systemd-units \
+  --workspace-root /absolute/path/to/workspace \
+  --aoa-root /absolute/path/to/workspace/.aoa \
+  --output-dir /absolute/path/to/user/systemd \
+  --force
+```
+
+An installed-root upgrade can render the same six named files with
+`install --systemd-unit-dir <target> --force`: capture service/timer, sweep
+service/timer, and retry-dispatch service/timer. The installer never enables,
+starts, reloads, or trusts a unit, and it never changes a live systemd
+directory unless that directory is explicitly supplied by the caller. The
+rendered capture contract must remain one `capture-watch` `ExecStart`; the
+resource-gated sweep owns transcript discovery and stable projection; and the
+retry unit must contain only the bounded `auto-maintenance-retry` dispatcher,
+not capture, sweep, or projection-catchup work.
 
 ## User skills
 
@@ -72,9 +113,13 @@ doctor evaluates the selected installation; audit can still report missing
 live grounding.
 
 An install created with `--no-tests` is a supported runtime shape. The owner
-installer records that choice in a runtime-only install profile. `doctor`
+installer records that choice in a runtime-only install profile. The profile
+also records the source root, local source commit and tree, producer-script
+SHA-256, install timestamp, and a deterministic install identity. `doctor`
 accepts an absent test tree only when that profile is valid and bound to the
-selected workspace and AoA root; accidental test-tree loss still fails.
+selected workspace and AoA root; missing or incomplete source provenance is
+not admitted. A `working_tree` source status is explicit branch-trial
+evidence; current production activation must use a clean canonical checkout.
 Source/export completion and standalone release proof require the full
 portable test suite.
 
@@ -87,3 +132,28 @@ The executable CLI owns exact export, install, hook-rendering, skill-install,
 validate, doctor, and audit syntax. Inspect the selected subcommand help in
 `scripts/aoa_session_memory.py`. Short focused check routes live in the nearest
 `AGENTS.md` rather than in this document.
+
+After installation, `projection-status` and `freshness-vector <session>` expose
+capture, live-overlay, stable-projection, and downstream-consumer progress.
+`auto-maintenance hot --apply` remains the bounded event-driven queue producer;
+the source-rendered retry timer invokes `auto-maintenance-retry`, while
+`projection-catchup` and deep maintenance remain explicit child/repair routes.
+When a persistent freshness item owns a current projection outbox, the retry
+dispatcher keeps it through a projection stage and an automatic downstream
+stage. The item is releasable only after exact entity, graph, and other
+required-consumer receipts are bound by the append-only terminal-retirement
+receipt; the immutable outbox record itself remains pending historical work
+intent.
+
+For a supported global exact query, a SQLite projection timeout or missing
+index is followed by the same bounded recent live/raw fallback used by the
+ordinary search route. Recovered refs are usable bounded navigation evidence,
+not a global absence claim or proof that every downstream consumer is current;
+the fallback never edits queues, indexes, or raw evidence.
+
+Timed `portable_sqlite` search places generated-storage acquisition, the read,
+result transport, and reader cleanup inside an isolated process boundary. The
+normal generated result remains the preferred path; when the boundary times out
+or fails, the serving parent uses the bounded session raw or global recent
+source-only route without reopening the generated store. A cleanup that cannot
+be verified is a failed search result, not an admitted success.

@@ -779,6 +779,71 @@ MAINTENANCE_STATUS = {
     "mcp_boundary": "MCP may expose this packet read-only; repair/reindex/maintenance commands stay outside MCP.",
 }
 
+PROJECTION_STATUS = {
+    "schema_version": 1,
+    "schema": "aoa_session_memory_projection_status_v1",
+    "artifact_type": "session_memory_projection_status",
+    "generated_at": "2026-05-26T00:04:00Z",
+    "ok": True,
+    "status": "current_with_deferred_live",
+    "mutates": False,
+    "source": "refreshed_maintenance_status",
+    "projection_completeness": {
+        "schema_version": 1,
+        "artifact_type": "session_memory_projection_completeness",
+        "status": "current_with_deferred_live",
+        "actionable_surface_ids": [],
+        "deferred_surface_ids": ["live_tail"],
+        "surfaces": {
+            "search_index": {"status": "current", "needs_maintenance": False},
+            "entity_registry": {
+                "status": "current",
+                "needs_maintenance": False,
+                "entity_count": 12,
+            },
+            "graph": {"status": "current", "needs_maintenance": False},
+            "live_tail": {
+                "status": "deferred",
+                "needs_maintenance": False,
+                "reason": "waiting_for_quiet_window",
+            },
+        },
+    },
+    "projection_completeness_source": "refreshed_maintenance_status",
+    "latest_projection_catchup": {
+        "path": "/tmp/.aoa/diagnostics/projection-catchup.json",
+        "payload": None,
+        "used_as_current_basis": False,
+    },
+    "current_maintenance": {
+        "snapshot_mode": "refreshed_hot",
+        "refreshed": True,
+        "recommendation": "wait_live_catchup",
+    },
+    "current_maintenance_freshness": {
+        "snapshot_mode": "refreshed_hot",
+        "refreshed": True,
+        "refresh_required_for_current_truth": False,
+    },
+    "next_operator_route": {
+        "id": "wait_live_catchup",
+        "status": "deferred",
+        "reason": "recent_live_sources_deferred_until_quiet_window",
+        "command": ["python3", "scripts/aoa_session_memory.py", "maintenance-status", "--no-timers"],
+    },
+    "exact_next_command": "python3 scripts/aoa_session_memory.py maintenance-status --no-timers",
+    "diagnostics": [],
+    "mcp_access": {
+        "mutates": False,
+        "archive_command": None,
+        "read_only": True,
+        "does_not_run_projection_catchup": True,
+        "writer_route_stays_outside_mcp": True,
+        "archive_fallback_command": "projection-status",
+    },
+    "authority_boundary": "raw evidence remains authority; projection status is read-only route guidance",
+}
+
 SEARCH_RESULTS = {
     "schema_version": 1,
     "artifact_type": "search_results",
@@ -838,6 +903,56 @@ LITERAL_QUERY_PLAN = {
     },
     "route_candidates": [{"layer": "mcp", "key": "aoa_session_memory_mcp", "route_signal": "mcp:aoa_session_memory_mcp"}],
     "authority_boundary": "This planner chooses a cheap first route; raw transcript and segment indexes remain evidence authority.",
+}
+
+MEMORY_QUERY_PLAN = {
+    "schema_version": 1,
+    "artifact_type": "session_memory_query_plan",
+    "ok": True,
+    "mutates": False,
+    "truth_status": "query_plan_is_route_advice_not_evidence_truth",
+    "query": "Ghostty сейчас установлен и какая сейчас версия?",
+    "query_intent": {
+        "primary": "current_state",
+        "claim_shape": {
+            "kind": "current_state",
+            "negative_polarity_detected": False,
+            "retrieval_candidates_are_claims": False,
+        },
+    },
+    "primary_route": {
+        "route_id": "external_current_owner_handoff",
+        "authority": "external_current_owner_required_memory_navigation_only",
+        "readiness": "external_adapter_required",
+        "command": "",
+        "handoff": {
+            "kind": "current_owner_or_runtime_verification",
+            "memory_role": "historical_navigation_only",
+            "executable": False,
+            "mutates": False,
+        },
+    },
+    "answer_admission": {
+        "admitted": False,
+        "status": "requires_current_owner_evidence",
+        "claim_shape": "current_state",
+        "insufficiency_reason": "session memory cannot prove current external owner or runtime state",
+    },
+    "maintenance_handoff": {
+        "needed": False,
+        "mutates": False,
+        "command": "",
+    },
+    "evidence_envelope": {
+        "schema": "aoa_session_memory_evidence_packet_v1",
+        "truth_status": "navigation_and_admission_packet_not_source_truth",
+        "answer_admission": {
+            "admitted": False,
+            "status": "requires_current_owner_evidence",
+        },
+        "insufficiency_reason": "session memory cannot prove current external owner or runtime state",
+    },
+    "authority_boundary": "The router chooses navigation routes. Accepted claims still require resolvable evidence refs.",
 }
 
 
@@ -1487,7 +1602,7 @@ GRAPH_NEIGHBORHOOD = {
         {"id": "route:mcp:mcp:aoa_session_memory_mcp", "type": "mcp", "label": "mcp:aoa_session_memory_mcp"},
         {"id": "event:session-1:000:000001", "type": "event", "title": "debug mcp"},
     ],
-    "edges": [{"source": "event:session-1:000:000001", "target": "route:mcp:mcp:aoa_session_memory_mcp", "type": "mentions_route_signal"}],
+    "edges": [{"source": "event:session-1:000:000001", "target": "route:mcp:mcp:aoa_session_memory_mcp", "type": "event_has_route_signal"}],
     "evidence_refs": [
         {
             "session_id": "session-1",
@@ -1828,6 +1943,8 @@ class FakeRunner:
             payload = ROUTE_READINESS_FAST_GATE
         elif command == "maintenance-status":
             payload = MAINTENANCE_STATUS
+        elif command == "projection-status":
+            payload = PROJECTION_STATUS
         elif command == "search-operational-route-rollup-query":
             payload = OPERATIONAL_ROUTE_ROLLUP_QUERY
         elif command == "search-operational-direct-event-rollup-query":
@@ -1837,6 +1954,9 @@ class FakeRunner:
         elif command == "literal-query-plan":
             query = args[args.index("--query") + 1] if "--query" in args else ""
             payload = literal_query_plan_fixture(query)
+        elif command == "memory-query-plan":
+            payload = json.loads(json.dumps(MEMORY_QUERY_PLAN))
+            payload["query"] = args[args.index("--query") + 1] if "--query" in args else ""
         elif command in {"agent-responses", "agent-closeouts", "agent-progress-updates"}:
             payload = AGENT_RESPONSES
         elif command in {"agent-reasoning-windows", "answer-neighborhood"}:
@@ -1886,6 +2006,28 @@ class FakeRunner:
         else:
             return CommandOutput(argv, 2, "{}", f"unexpected command {command}", 1.0)
         return CommandOutput(argv, 0, json.dumps(payload), "", 1.0)
+
+
+class ProjectionStatusRunner(FakeRunner):
+    def __init__(self, payload: dict[str, Any], *, returncode: int = 0) -> None:
+        super().__init__()
+        self.payload = payload
+        self.returncode = returncode
+
+    def __call__(self, argv: list[str], timeout: float) -> CommandOutput:
+        command = argv[2]
+        args = tuple(argv[3:])
+        if command == "projection-status":
+            self.calls.append((command, args))
+            self.timeouts.append((command, timeout))
+            return CommandOutput(
+                argv,
+                self.returncode,
+                json.dumps(self.payload),
+                "",
+                1.0,
+            )
+        return super().__call__(argv, timeout)
 
 
 class SessionProviderTimeoutRunner(FakeRunner):
@@ -2072,6 +2214,77 @@ def test_latest_session_resolution_uses_registry_updated_at(tmp_path: Path) -> N
 
     assert brief["ok"] is True
     assert brief["session"]["session_id"] == "session-1"
+
+
+def test_session_resources_reject_traversal_external_registry_and_symlink_roots(tmp_path: Path) -> None:
+    state = state_with_fixture(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    write_json(outside / "session.manifest.json", {"private": "must-not-be-read"})
+
+    traversal = state.read_resource("aoa-session-memory://session/..%2F..%2Foutside/manifest")
+    rehydrate = state.read_resource("aoa-session-memory://session/..%2F..%2Foutside/rehydrate")
+
+    assert traversal["ok"] is False
+    assert traversal["diagnostics"] == ["session not found"]
+    assert rehydrate["ok"] is False
+    assert rehydrate["diagnostics"] == ["session not found"]
+
+    registry_path = state.aoa_root / "session-registry.json"
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    registry["sessions"][0]["display"]["path"] = outside.as_posix()
+    write_json(registry_path, registry)
+    assert state.session_brief("session-1")["ok"] is False
+
+    linked = state.aoa_root / "sessions" / "linked-outside"
+    linked.symlink_to(outside, target_is_directory=True)
+    assert state.session_brief("linked-outside")["ok"] is False
+
+    with pytest.raises(ValueError, match="axis contains unsupported characters"):
+        state.session_route("by-../../../outside")
+
+
+def test_session_resources_reject_symlinked_evidence_files(tmp_path: Path) -> None:
+    state = state_with_fixture(tmp_path)
+    session_dir = state.aoa_root / "sessions/2026-05-26__001__session-memory-mcp"
+    outside_manifest = tmp_path / "outside-manifest.json"
+    write_json(outside_manifest, {"private": "must-not-be-read"})
+    manifest_path = session_dir / "session.manifest.json"
+    manifest_path.unlink()
+    manifest_path.symlink_to(outside_manifest)
+
+    resource = state.read_resource("aoa-session-memory://session/session-1/manifest")
+    brief = state.session_brief("session-1")
+
+    assert resource["ok"] is False
+    assert resource["diagnostics"] == ["session evidence path escapes archive"]
+    assert "must-not-be-read" not in json.dumps(resource)
+    assert "must-not-be-read" not in json.dumps(brief)
+
+    manifest_path.unlink()
+    manifest_path.symlink_to(manifest_path.name)
+    looped_resource = state.read_resource("aoa-session-memory://session/session-1/manifest")
+    assert looped_resource["ok"] is False
+    assert looped_resource["diagnostics"] == ["session evidence path escapes archive"]
+
+
+def test_raw_line_freshness_rejects_symlink_escape_before_open(tmp_path: Path) -> None:
+    state = state_with_fixture(tmp_path)
+    session_dir = state.aoa_root / "sessions/2026-05-26__001__session-memory-mcp"
+    outside_raw = tmp_path / "outside.raw.jsonl"
+    outside_raw.write_text('{"private":"must-not-be-read"}\n', encoding="utf-8")
+    raw_path = session_dir / "raw/session.raw.jsonl"
+    raw_path.unlink()
+    raw_path.symlink_to(outside_raw)
+
+    freshness = state.session_freshness_check(["raw:line:1"], session="session-1")
+    check = freshness["checks"][0]
+
+    assert freshness["ok"] is False
+    assert check["status"] == "invalid"
+    assert check["inside_aoa_root"] is False
+    assert check["reason"] == "session evidence path escapes archive"
+    assert "must-not-be-read" not in json.dumps(freshness)
 
 
 def test_latest_session_resolution_prefers_registry_recency_over_stale_raw_mtime(tmp_path: Path) -> None:
@@ -2435,42 +2648,69 @@ def test_projection_status_reads_latest_completeness_without_running_catchup(tmp
 
     assert status["schema"] == "aoa_session_memory_projection_status_v1"
     assert status["ok"] is True
+    assert status["status"] == "current_with_deferred_live"
     assert status["mutates"] is False
-    assert status["source"] == "latest_projection_catchup_diagnostic"
-    assert status["projection_completeness"]["status"] == "current"
+    assert status["source"] == "refreshed_maintenance_status"
+    assert status["projection_completeness"]["status"] == "current_with_deferred_live"
     assert status["projection_completeness"]["surfaces"]["entity_registry"]["entity_count"] == 12
-    assert status["next_operator_route"]["id"] == "verify_projection_status"
-    assert status["mcp_access"]["archive_command"] is None
+    assert status["next_operator_route"]["id"] == "wait_live_catchup"
+    assert status["mcp_access"]["archive_command"] == "projection-status"
     assert status["mcp_access"]["does_not_run_projection_catchup"] is True
-    assert any(call[0] == "maintenance-status" for call in runner.calls)
+    assert any(call[0] == "projection-status" for call in runner.calls)
+    assert not any(call[0] == "maintenance-status" for call in runner.calls)
     assert not any(call[0] == "projection-catchup" for call in runner.calls)
 
     resource = state.read_resource("aoa-session-memory://projection/status")
     assert resource["projection_completeness"]["surfaces"]["search_index"]["status"] == "current"
 
 
+def test_projection_status_delegates_to_owner_packet_and_preserves_envelope(tmp_path: Path) -> None:
+    runner = FakeRunner()
+    state = state_with_fixture(tmp_path, runner)
+
+    status = state.session_projection_status(include_payload=True)
+
+    assert status["schema_version"] == 1
+    assert status["schema"] == "aoa_session_memory_projection_status_v1"
+    assert status["artifact_type"] == "session_memory_projection_status"
+    assert status["status"] == "current_with_deferred_live"
+    assert status["source"] == "refreshed_maintenance_status"
+    assert status["projection_completeness_source"] == "refreshed_maintenance_status"
+    assert status["current_maintenance_freshness"]["refreshed"] is True
+    assert status["exact_next_command"].endswith("maintenance-status --no-timers")
+    assert status["mcp_access"]["archive_command"] == "projection-status"
+    assert status["mcp_access"]["read_only"] is True
+    assert status["mcp_access"]["does_not_run_projection_catchup"] is True
+    assert status["mcp_access"]["writer_route_stays_outside_mcp"] is True
+    projection_calls = [args for command, args in runner.calls if command == "projection-status"]
+    assert len(projection_calls) == 1
+    assert "--refresh-maintenance" in projection_calls[0]
+    assert "--include-payload" in projection_calls[0]
+    assert not any(command == "maintenance-status" for command, _args in runner.calls)
+    assert not any(command == "projection-catchup" for command, _args in runner.calls)
+
+
 def test_projection_status_treats_stale_completeness_as_not_ok(tmp_path: Path) -> None:
     aoa = seed_archive(tmp_path)
-    write_json(
-        aoa / "diagnostics/20260526T000200Z__projection-catchup-catchup.json",
+    stale = json.loads(json.dumps(PROJECTION_STATUS))
+    stale.update(
         {
-            "schema_version": 1,
-            "artifact_type": "session_memory_projection_catchup",
-            "ok": True,
-            "projection_completeness": {
-                "schema_version": 1,
-                "artifact_type": "session_memory_projection_completeness",
-                "status": "stale",
-                "actionable_surface_ids": ["search_index"],
-                "deferred_surface_ids": [],
-                "surfaces": {
-                    "search_index": {"status": "stale", "needs_maintenance": True},
-                    "entity_registry": {"status": "current", "needs_maintenance": False},
-                },
+            "ok": False,
+            "status": "stale",
+            "source": "refreshed_maintenance_status",
+            "diagnostics": ["projection_completeness_stale"],
+            "next_operator_route": {
+                "id": "run_projection_catchup_outside_mcp",
+                "status": "needed",
+                "reason": "projection_completeness_stale",
+                "command": ["python3", "scripts/aoa_session_memory.py", "projection-catchup", "all", "--write-report"],
             },
-        },
+        }
     )
-    runner = FakeRunner()
+    stale["projection_completeness"]["status"] = "stale"
+    stale["projection_completeness"]["actionable_surface_ids"] = ["search_index"]
+    stale["projection_completeness"]["deferred_surface_ids"] = []
+    runner = ProjectionStatusRunner(stale, returncode=1)
     state = AoASessionMemoryMCPState.discover(
         workspace_root=tmp_path,
         aoa_root=aoa,
@@ -2482,27 +2722,35 @@ def test_projection_status_treats_stale_completeness_as_not_ok(tmp_path: Path) -
     status = state.session_projection_status()
 
     assert status["ok"] is False
-    assert status["source"] == "stale_projection_catchup_diagnostic"
+    assert status["status"] == "stale"
+    assert status["source"] == "refreshed_maintenance_status"
     assert status["next_operator_route"]["id"] == "run_projection_catchup_outside_mcp"
     assert status["next_operator_route"]["reason"] == "projection_completeness_stale"
     assert "projection_completeness_stale" in status["diagnostics"]
+    assert status["mcp_access"]["returncode"] == 1
+    assert any(command == "projection-status" for command, _args in runner.calls)
     assert not any(call[0] == "projection-catchup" for call in runner.calls)
 
 
 def test_projection_status_flags_legacy_completeness_diagnostic(tmp_path: Path) -> None:
     aoa = seed_archive(tmp_path)
-    write_json(
-        aoa / "diagnostics/20260526T000200Z__projection-catchup-catchup.json",
+    missing = json.loads(json.dumps(PROJECTION_STATUS))
+    missing.update(
         {
-            "artifact_type": "session_memory_projection_catchup",
-            "ok": True,
-            "completeness_check": {
-                "freshness_before_after": True,
-                "schema_classifier_dirty_detection": "legacy string-only status",
+            "ok": False,
+            "status": "missing",
+            "source": "refreshed_maintenance_status",
+            "projection_completeness": {},
+            "diagnostics": ["projection_completeness_missing_or_legacy"],
+            "next_operator_route": {
+                "id": "run_projection_catchup_outside_mcp",
+                "status": "needed",
+                "reason": "projection_completeness_missing_or_legacy",
+                "command": ["python3", "scripts/aoa_session_memory.py", "projection-catchup", "all", "--write-report"],
             },
-        },
+        }
     )
-    runner = FakeRunner()
+    runner = ProjectionStatusRunner(missing, returncode=1)
     state = AoASessionMemoryMCPState.discover(
         workspace_root=tmp_path,
         aoa_root=aoa,
@@ -2514,9 +2762,12 @@ def test_projection_status_flags_legacy_completeness_diagnostic(tmp_path: Path) 
     status = state.session_projection_status()
 
     assert status["ok"] is False
-    assert status["source"] == "legacy_projection_catchup_diagnostic"
+    assert status["status"] == "missing"
+    assert status["source"] == "refreshed_maintenance_status"
     assert status["next_operator_route"]["id"] == "run_projection_catchup_outside_mcp"
     assert "projection_completeness_missing_or_legacy" in status["diagnostics"]
+    assert status["mcp_access"]["returncode"] == 1
+    assert any(command == "projection-status" for command, _args in runner.calls)
     assert not any(call[0] == "projection-catchup" for call in runner.calls)
 
 
@@ -2668,7 +2919,7 @@ def test_trace_kind_aliases_bridge_entity_registry_and_usage_routes(tmp_path: Pa
     assert neighborhood["kind"] == "mcp"
     assert neighborhood["requested_kind"] == "mcp_service"
     assert neighborhood["mcp_access"]["selected_route_signal"] == "mcp:aoa_session_memory_mcp"
-    assert timeline["kind"] == "tool"
+    assert timeline["kind"] == "mcp_tool"
     assert timeline["requested_kind"] == "mcp_tool"
     assert quality["artifact_type"] == "session_memory_graph_quality_audit"
 
@@ -2677,7 +2928,7 @@ def test_trace_kind_aliases_bridge_entity_registry_and_usage_routes(tmp_path: Pa
     audit_args = next(args for command, args in calls if command == "entity-usage-audit")
     assert trace_args[trace_args.index("--kind") + 1] == "mcp"
     assert audit_args[audit_args.index("--kind") + 1] == "mcp"
-    assert "--kind tool" in timeline["next_expansion_command"]
+    assert "--kind mcp_tool" in timeline["next_expansion_command"]
     assert "session_memory_mcp:mcp:aoa-session-memory-mcp" in quality["next_expansion_command"]
     assert not any(command in {"graph-timeline", "graph-quality-audit"} for command, _args in calls)
 
@@ -2854,6 +3105,516 @@ def test_literal_query_plan_routes_to_allowlisted_archive_command(tmp_path: Path
     assert args[args.index("--route-layer") + 1] == "mcp"
     assert args[args.index("--max-shards") + 1] == "3"
     assert not any(call[0] == "search" for call in runner.calls)
+
+
+def test_memory_query_plan_transports_producer_claim_admission_without_reconstruction(
+    tmp_path: Path,
+) -> None:
+    runner = FakeRunner()
+    state = state_with_fixture(tmp_path, runner)
+
+    plan = state.session_memory_query_plan(
+        "Ghostty сейчас установлен и какая сейчас версия?",
+        kind="mcp_service",
+        filters={
+            "session": "session-1",
+            "episode": "task-0001",
+            "time_from": "2026-05-26T10:00:00Z",
+            "time_to": "2026-05-26T11:00:00Z",
+            "max_shards": 3,
+            "query_timeout_ms": 500,
+            "unsupported": "must-not-reach-producer",
+        },
+    )
+
+    assert plan["artifact_type"] == "session_memory_query_plan"
+    assert plan["kind"] == "mcp"
+    assert plan["requested_kind"] == "mcp_service"
+    assert plan["query_intent"]["primary"] == "current_state"
+    assert plan["primary_route"]["route_id"] == "external_current_owner_handoff"
+    assert plan["answer_admission"]["admitted"] is False
+    assert plan["answer_admission"]["status"] == "requires_current_owner_evidence"
+    assert plan["maintenance_handoff"]["mutates"] is False
+    assert plan["evidence_envelope"]["schema"] == "aoa_session_memory_evidence_packet_v1"
+    assert "ignored unsupported filter 'unsupported'" in plan["diagnostics"]
+    plan_calls = [call for call in runner.calls if call[0] == "memory-query-plan"]
+    assert len(plan_calls) == 1
+    args = plan_calls[0][1]
+    assert args[args.index("--kind") + 1] == "mcp"
+    assert args[args.index("--session") + 1] == "session-1"
+    assert args[args.index("--task-episode-id") + 1] == "task-0001"
+    assert args[args.index("--time-from") + 1] == "2026-05-26T10:00:00Z"
+    assert args[args.index("--time-to") + 1] == "2026-05-26T11:00:00Z"
+    assert args[args.index("--max-shards") + 1] == "3"
+    assert args[args.index("--query-timeout-ms") + 1] == "500"
+    assert "unsupported" not in args
+    assert not any(call[0] == "search" for call in runner.calls)
+
+
+def test_episode_search_preserves_producer_admission_relations_and_refs(
+    tmp_path: Path,
+) -> None:
+    class EpisodeSearchRunner(FakeRunner):
+        def __call__(
+            self,
+            argv: list[str],
+            timeout: float,
+        ) -> CommandOutput:
+            command = argv[2]
+            args = tuple(argv[3:])
+            if command != "episode-search":
+                return super().__call__(argv, timeout)
+            self.calls.append((command, args))
+            self.timeouts.append((command, timeout))
+            payload = {
+                "schema_version": 3,
+                "artifact_type": "episode_semantic_search_results",
+                "search_schema_version": 21,
+                "episode_semantic_projection_version": 14,
+                "route_signal_classifier_version": 41,
+                "task_episode_schema_version": 8,
+                "generated_at": "2026-07-29T00:00:00Z",
+                "ok": True,
+                "query": "Какие mechanics parts changed most since v0.2.3?",
+                "query_intent": {
+                    "primary": "quantitative_comparison",
+                    "claim_shape": {
+                        "kind": "quantitative_comparison",
+                        "retrieval_candidates_are_claims": False,
+                    },
+                },
+                "generation_identity": {
+                    "projection": "episode_semantic",
+                    "generation_id": "episode-generation",
+                    "projection_version": 14,
+                    "route_signal_classifier_version": 41,
+                },
+                "generation_identities": {
+                    "expected": {
+                        "episode_semantic": {
+                            "generation_id": "episode-generation",
+                        }
+                    },
+                    "compatible": True,
+                },
+                "filters": {"session": "session-1"},
+                "candidate_count": 1,
+                "result_count": 1,
+                "candidate_ids": ["episode:session-1:task-0001"],
+                "results": [
+                    {
+                        "candidate_id": "episode:session-1:task-0001",
+                        "doc_id": "episode:session-1:task-0001",
+                        "session_id": "session-1",
+                        "task_episode_id": "task-0001",
+                        "event_range": {"from_line": 100, "to_line": 140},
+                        "preview": "private episode body " * 200,
+                        "query_coverage": {
+                            "coverage": 1.0,
+                            "matched_term_count": 6,
+                        },
+                        "freshness": {
+                            "status": "cached_unverified",
+                            "live_source": {"status": "current"},
+                        },
+                        "refs": {
+                            "raw": "raw:line:116",
+                            "segment": "segments/001.md",
+                            "session": "sessions/session-1/session.manifest.json",
+                        },
+                        "supporting_evidence": [
+                            {
+                                "role": "actions",
+                                "line": 116,
+                                "text": "git diff --name-only v0.2.3..HEAD | uniq -c",
+                                "source_lane": "structured_tool_call",
+                                "event_type": "COMMAND",
+                                "admission_basis": "structured_quantitative_count_action",
+                                "correlation_id": "call-count",
+                                "refs": {
+                                    "raw": "raw:line:116",
+                                    "segment": "segments/001.md",
+                                },
+                            },
+                            {
+                                "role": "outcomes",
+                                "line": 122,
+                                "text": "183 recurrence\n158 agon\n" + ("private " * 200),
+                                "source_lane": "structured_tool_result",
+                                "event_type": "COMMAND_OUTPUT",
+                                "admission_basis": "correlation_owned_quantitative_numeric_result",
+                                "correlation_id": "call-count",
+                                "refs": {
+                                    "raw": "raw:line:122",
+                                    "segment": "segments/001.md",
+                                },
+                            },
+                        ],
+                        "quantitative_comparison": {
+                            "active": True,
+                            "accepted": True,
+                            "status": "correlation_owned_ranked_count_available",
+                            "correlation_id": "call-count",
+                            "qualified_chain_count": 1,
+                            "action": {
+                                "line": 116,
+                                "text": "git diff --name-only v0.2.3..HEAD | uniq -c",
+                                "correlation_id": "call-count",
+                                "refs": {"raw": "raw:line:116"},
+                            },
+                            "result": {
+                                "line": 122,
+                                "text": "183 recurrence\n158 agon",
+                                "correlation_id": "call-count",
+                                "refs": {"raw": "raw:line:122"},
+                            },
+                            "numeric_rows": [
+                                {"count": index, "label": f"part-{index}"}
+                                for index in range(20, 0, -1)
+                            ],
+                        },
+                    }
+                ],
+                "answer_admission": {
+                    "admitted": True,
+                    "status": "answer_evidence_admitted",
+                    "basis": "typed_quantitative_comparison_evidence",
+                    "retrieval_candidates_are_claims": False,
+                    "relation_gate": {
+                        "required": True,
+                        "admitted": True,
+                        "gates": [
+                            {
+                                "kind": "quantitative_comparison",
+                                "status": "qualified_quantitative_comparison_available",
+                                "admitted": True,
+                                "qualified_count": 1,
+                            }
+                        ],
+                    },
+                },
+                "retrieval": {
+                    "requested_mode": "auto",
+                    "effective_mode": "hybrid",
+                    "fusion": "reciprocal_rank_fusion",
+                    "quantitative_comparison_relation_gate": {
+                        "status": "qualified_quantitative_comparison_available",
+                        "qualified_count": 1,
+                        "ambiguous": False,
+                    },
+                },
+                "coverage": {
+                    "status": "current",
+                    "covered_session_count": 1,
+                    "indexed_session_count": 1,
+                },
+                "cost_profile": {"candidate_bound": 64},
+                "evidence_envelope": {
+                    "schema": "aoa_session_memory_evidence_packet_v1",
+                    "truth_status": "evidence_packet_not_owner_truth",
+                    "candidate_ids": ["episode:session-1:task-0001"],
+                    "evidence_refs": [
+                        {"raw": "raw:line:116"},
+                        {"raw": "raw:line:122"},
+                    ],
+                    "freshness": {
+                        "global": {"status": "current"},
+                        "scoped": {
+                            "status": "current",
+                            "does_not_upgrade_global_freshness": True,
+                        },
+                    },
+                    "answer_admission": {
+                        "admitted": True,
+                        "status": "answer_evidence_admitted",
+                    },
+                },
+                "diagnostics": [],
+            }
+            return CommandOutput(
+                argv,
+                0,
+                json.dumps(payload),
+                "",
+                1.0,
+            )
+
+    runner = EpisodeSearchRunner()
+    state = state_with_fixture(tmp_path, runner)
+
+    packet = state.session_episode_search(
+        query="Какие mechanics parts changed most since v0.2.3?",
+        session="session-1",
+        mode="hybrid",
+        limit=6,
+        dense_candidate_limit=40,
+        rerank_local=True,
+        rerank_candidate_limit=8,
+        explain=True,
+    )
+
+    assert packet["answer_admission"]["admitted"] is True
+    assert packet["answer_admission"]["basis"] == (
+        "typed_quantitative_comparison_evidence"
+    )
+    assert packet["answer_admission"]["relation_gate"]["gates"][0][
+        "status"
+    ] == "qualified_quantitative_comparison_available"
+    result = packet["results"][0]
+    assert result["candidate_id"] == "episode:session-1:task-0001"
+    assert {
+        item["refs"]["raw"]
+        for item in result["supporting_evidence"]
+    } == {"raw:line:116", "raw:line:122"}
+    relation = result["quantitative_comparison"]
+    assert relation["correlation_id"] == "call-count"
+    assert relation["action"]["refs"]["raw"] == "raw:line:116"
+    assert relation["result"]["refs"]["raw"] == "raw:line:122"
+    assert relation["numeric_row_count"] == 20
+    assert relation["omitted_numeric_row_count"] == 8
+    assert packet["evidence_envelope"]["evidence_ref_count"] == 2
+    assert packet["mcp_payload_policy"][
+        "answer_admission_preserved"
+    ] is True
+    assert packet["mcp_payload_policy"]["relation_evidence_preserved"] is True
+    assert packet["mcp_access"]["mutates"] is False
+    assert len(result["preview"]) <= 700
+    assert len(result["supporting_evidence"][1]["text"]) <= 700
+    assert ("private episode body " * 200) not in json.dumps(packet)
+    assert len(json.dumps(packet)) < 30_000
+    calls = [call for call in runner.calls if call[0] == "episode-search"]
+    assert len(calls) == 1
+    args = calls[0][1]
+    assert args[args.index("--session") + 1] == "session-1"
+    assert args[args.index("--mode") + 1] == "hybrid"
+    assert args[args.index("--dense-candidate-limit") + 1] == "40"
+    assert args[args.index("--rerank-candidate-limit") + 1] == "8"
+    assert "--rerank-local" in args
+    assert "--explain" in args
+
+
+def test_episode_search_compaction_selects_the_admitted_relation_candidate() -> None:
+    from aoa_session_memory_mcp import core as core_module
+
+    weak_result = {
+        "candidate_id": "episode:weak",
+        "preview": "weak navigation candidate " * 200,
+        "supporting_evidence": [
+            {
+                "text": "navigation only " * 200,
+                "refs": {"raw": "raw:line:10"},
+            }
+        ],
+        "causal_attribution": {
+            "active": True,
+            "status": "causal_candidate_unresolved",
+        },
+    }
+    admitted_result = {
+        "candidate_id": "episode:admitted",
+        "preview": "bounded admitted candidate",
+        "refs": {
+            "raw": "raw:line:20",
+            "segment": "segments/000.md",
+            "session": "sessions/example/session.manifest.json",
+        },
+        "supporting_evidence": [
+            {
+                "role": "actions",
+                "text": "run the bounded command",
+                "correlation_id": "call-20",
+                "refs": {"raw": "raw:line:20"},
+            },
+            {
+                "role": "outcomes",
+                "text": "14 passed in 0.09s",
+                "correlation_id": "call-20",
+                "refs": {"raw": "raw:line:21"},
+            },
+        ],
+        "causal_attribution": {
+            "active": True,
+            "accepted": True,
+            "status": "ordered_action_result_attribution_chain",
+            "correlation_id": "call-20",
+            "action": {
+                "text": "run the bounded command",
+                "refs": {"raw": "raw:line:20"},
+            },
+            "result": {
+                "text": "14 passed in 0.09s",
+                "refs": {"raw": "raw:line:21"},
+            },
+        },
+    }
+    payload = {
+        "schema_version": 3,
+        "artifact_type": "episode_semantic_search_results",
+        "ok": True,
+        "candidate_ids": [
+            "episode:weak",
+            "episode:admitted",
+            "episode:other",
+        ],
+        "candidate_count": 3,
+        "result_count": 3,
+        "results": [
+            weak_result,
+            admitted_result,
+            {**weak_result, "candidate_id": "episode:other"},
+        ],
+        "answer_admission": {
+            "admitted": True,
+            "status": "answer_evidence_admitted",
+            "basis": "correlation_owned_open_result_evidence",
+        },
+        "evidence_envelope": {
+            "schema": "aoa_session_memory_evidence_packet_v1",
+            "candidate_ids": [
+                "episode:weak",
+                "episode:admitted",
+                "episode:other",
+            ],
+            "evidence_refs": [
+                {"raw": "raw:line:20"},
+                {"raw": "raw:line:21"},
+            ],
+            "freshness": {
+                "global": {"status": "stale-readable"},
+                "scoped": {
+                    "status": "current",
+                    "does_not_upgrade_global_freshness": True,
+                },
+            },
+        },
+    }
+
+    compact = core_module._compact_episode_search_payload(
+        payload,
+        full_route="episode-search --full",
+    )
+
+    assert compact["candidate_ids"] == payload["candidate_ids"]
+    assert compact["result_count"] == 3
+    assert compact["returned_result_count"] == 1
+    assert compact["omitted_result_count"] == 2
+    assert compact["results"][0]["candidate_id"] == "episode:admitted"
+    assert compact["results"][0]["causal_attribution"]["status"] == (
+        "ordered_action_result_attribution_chain"
+    )
+    assert {
+        item["refs"]["raw"]
+        for item in compact["results"][0]["supporting_evidence"]
+    } == {"raw:line:20", "raw:line:21"}
+    assert len(json.dumps(compact)) < 30_000
+
+
+def test_compact_episode_search_preserves_temporal_interval_read_state() -> None:
+    from aoa_session_memory_mcp import core as core_module
+
+    relation = {
+        "active": True,
+        "accepted": True,
+        "status": "ordered_span_found",
+        "answer_scope": "interval_contents",
+        "interval_contents_status": (
+            "bounded_interval_contents_truncated"
+        ),
+        "left": {
+            "line": 22644,
+            "refs": {"raw": "raw:line:22644"},
+        },
+        "right": {
+            "line": 22731,
+            "refs": {"raw": "raw:line:22731"},
+        },
+        "interval_contents": {
+            "status": "bounded_interval_contents_truncated",
+            "from_raw_ref": "raw:line:22644",
+            "to_raw_ref": "raw:line:22731",
+            "readable_event_count": 46,
+            "returned_event_count": 46,
+            "omitted_event_count": 0,
+            "event_limit": 48,
+            "truncated": True,
+            "retention_truncated": False,
+            "output_truncated": False,
+            "source_read_truncated": True,
+            "event_raw_refs": [
+                f"raw:line:{line}"
+                for line in range(22645, 22691)
+            ],
+            "events": [
+                {
+                    "line": line,
+                    "text": "private bounded event body",
+                    "refs": {"raw": f"raw:line:{line}"},
+                }
+                for line in range(22645, 22691)
+            ],
+            "evidence_time_scope": {
+                "status": "not_requested",
+                "timestamp_coverage_complete": True,
+            },
+            "authority": "raw_session_transcript",
+        },
+    }
+
+    compact = core_module._compact_episode_search_relation(relation)
+
+    assert compact["interval_contents_status"] == (
+        "bounded_interval_contents_truncated"
+    )
+    contents = compact["interval_contents"]
+    assert contents["status"] == (
+        "bounded_interval_contents_truncated"
+    )
+    assert contents["from_raw_ref"] == "raw:line:22644"
+    assert contents["to_raw_ref"] == "raw:line:22731"
+    assert contents["truncated"] is True
+    assert contents["source_read_truncated"] is True
+    assert contents["event_bodies_included"] is False
+    assert contents["event_body_route"] == "full_evidence_route"
+    assert contents["event_raw_ref_count"] == 46
+    assert contents["omitted_event_raw_ref_count"] > 0
+    assert "events" not in contents
+    assert "private bounded event body" not in json.dumps(compact)
+
+
+def test_compact_episode_search_preserves_causal_ambiguity_scope() -> None:
+    from aoa_session_memory_mcp import core as core_module
+
+    relation = {
+        "active": True,
+        "status": "ambiguous_causal_attribution_chains",
+        "ambiguous": True,
+        "ambiguity_scope": "generic_plural_query_scope",
+        "qualified_chain_count": 1,
+        "candidate_chains": [
+            {
+                "correlation_id": "call_one_of_several",
+                "action": {
+                    "line": 201,
+                    "refs": {"raw": "raw:line:201"},
+                },
+                "result": {
+                    "line": 202,
+                    "refs": {"raw": "raw:line:202"},
+                },
+            }
+        ],
+    }
+
+    compact = core_module._compact_episode_search_relation(relation)
+
+    assert compact["status"] == (
+        "ambiguous_causal_attribution_chains"
+    )
+    assert compact["ambiguous"] is True
+    assert compact["ambiguity_scope"] == "generic_plural_query_scope"
+    assert compact["candidate_chains"][0]["correlation_id"] == (
+        "call_one_of_several"
+    )
 
 
 def test_retrieve_unsupported_recipe_returns_structured_diagnostic(tmp_path: Path) -> None:
@@ -3522,6 +4283,14 @@ def test_stdio_route_count_summary_allows_empty_route_results() -> None:
         {"ok": True, "window_count": 0},
         {"ok": True, "entity_count": 1},
         {"primary_route": {"route_id": "entity_usage_chain"}, "cost_profile": {"structured_first": True}},
+        {
+            "query_intent": {"primary": "current_state"},
+            "primary_route": {"route_id": "external_current_owner_handoff"},
+            "answer_admission": {
+                "admitted": False,
+                "insufficiency_reason": "session memory cannot prove current external owner or runtime state",
+            },
+        },
         {"quality": {"usage_event_count": 2, "graph_node_count": 3, "raw_or_segment_ref_present": True}},
         {
             "counts": {"usage_event_count": 2, "chain_with_result_or_consequence_count": 2},
@@ -3576,6 +4345,12 @@ def test_stdio_route_count_summary_allows_empty_route_results() -> None:
     assert summary["answer_neighborhood_count"] == 0
     assert summary["literal_plan_primary_route"] == "entity_usage_chain"
     assert summary["literal_plan_structured_first"] is True
+    assert summary["memory_plan_primary_intent"] == "current_state"
+    assert summary["memory_plan_primary_route"] == "external_current_owner_handoff"
+    assert summary["memory_plan_answer_admitted"] is False
+    assert summary["memory_plan_insufficiency_reason"] == (
+        "session memory cannot prove current external owner or runtime state"
+    )
     assert summary["entity_dossier_usage_count"] == 2
     assert summary["entity_dossier_graph_node_count"] == 3
     assert summary["entity_dossier_raw_or_segment_ref_present"] is True
@@ -3613,6 +4388,8 @@ def test_validator_requires_literal_and_graph_mcp_tools() -> None:
     validator = load_validator_module()
 
     assert "aoa_session_literal_query_plan" in validator.REQUIRED_STDIO_SMOKE_TOOLS
+    assert "aoa_session_memory_query_plan" in validator.REQUIRED_STDIO_SMOKE_TOOLS
+    assert "aoa_session_episode_search" in validator.REQUIRED_STDIO_SMOKE_TOOLS
     assert "aoa_session_entity_dossier" in validator.REQUIRED_STDIO_SMOKE_TOOLS
     assert "aoa_session_entity_usage_chain" in validator.REQUIRED_STDIO_SMOKE_TOOLS
     assert "aoa_session_route_rollup_query" in validator.REQUIRED_STDIO_SMOKE_TOOLS
@@ -4692,6 +5469,8 @@ def test_published_tool_schema_allows_route_only_search_and_usage_neighborhood(t
     query_schema = tools["aoa_session_search"].inputSchema["properties"]["query"]
     assert query_schema["default"] == ""
     assert "aoa_session_literal_query_plan" in tools
+    assert "aoa_session_memory_query_plan" in tools
+    assert "aoa_session_episode_search" in tools
     assert "aoa_session_agent_responses" in tools
     assert "aoa_session_agent_closeouts" in tools
     assert "aoa_session_agent_progress_updates" in tools
@@ -4732,9 +5511,14 @@ def test_published_tool_schema_allows_route_only_search_and_usage_neighborhood(t
     assert tools["aoa_session_graph_neighborhood"].inputSchema["properties"]["edge_limit"]["default"] is None
     assert tools["aoa_session_entity_usage_chain"].inputSchema["properties"]["limit"]["default"] == 6
     assert tools["aoa_session_entity_usage_chain"].inputSchema["properties"]["per_route_limit"]["default"] == 12
+    assert tools["aoa_session_entity_usage_chain"].inputSchema[
+        "properties"
+    ]["correlation_id"]["default"] == ""
     assert tools["aoa_session_entity_dossier"].inputSchema["properties"]["usage_limit"]["default"] == 4
     assert tools["aoa_session_entity_dossier"].inputSchema["properties"]["graph_edge_limit"]["default"] == 24
     literal_description = tools["aoa_session_literal_query_plan"].description or ""
+    memory_plan_description = tools["aoa_session_memory_query_plan"].description or ""
+    episode_search_description = tools["aoa_session_episode_search"].description or ""
     dossier_description = tools["aoa_session_entity_dossier"].description or ""
     usage_chain_description = tools["aoa_session_entity_usage_chain"].description or ""
     live_scenario_description = tools["aoa_session_live_scenario_audit"].description or ""
@@ -4744,6 +5528,8 @@ def test_published_tool_schema_allows_route_only_search_and_usage_neighborhood(t
     graph_description = tools["aoa_session_graph_neighborhood"].description or ""
     bridge_description = tools["aoa_session_graph_bridge"].description or ""
     assert "literal skill/MCP/hook/tool/API/path/query" in literal_description
+    assert "producer-owned bounded route, admission, freshness" in memory_plan_description
+    assert "producer-owned semantic episode retrieval" in episode_search_description
     assert "one compact registry, usage, consequence" in dossier_description
     assert "usage-to-consequence chains" in usage_chain_description
     assert "entity registry lookup status probes" in live_scenario_description
@@ -5070,6 +5856,12 @@ def test_entity_registry_mcp_preserves_candidates_and_blocks_incompatible_genera
         "source_fingerprint_mode": (
             module.ENTITY_REGISTRY_EXPECTED_SOURCE_FINGERPRINT_MODE
         ),
+        "observed_dependency_contract_version": (
+            module.ENTITY_REGISTRY_EXPECTED_OBSERVED_DEPENDENCY_CONTRACT_VERSION
+        ),
+        "history_policy_contract": (
+            module.ENTITY_REGISTRY_EXPECTED_HISTORY_POLICY_CONTRACT
+        ),
     }
     snapshot["generation_identity"]["generation_id"] = (
         module._entity_registry_generation_digest(
@@ -5095,6 +5887,9 @@ def test_entity_registry_mcp_preserves_candidates_and_blocks_incompatible_genera
     compact = module._compact_entity_registry_entry(
         resolved["entries"][0]
     )
+    compact_generation = module._compact_generation_identity(
+        resolved["generation_identity"]
+    )
 
     assert resolved["identity_status"] == "resolved"
     assert resolved["identity_claim_admitted"] is True
@@ -5112,6 +5907,12 @@ def test_entity_registry_mcp_preserves_candidates_and_blocks_incompatible_genera
     assert resolved["projection_freshness"][
         "current_state_claim_admitted"
     ] is False
+    assert resolved["projection_freshness"][
+        "generation_policy_compatible"
+    ] is True
+    assert resolved["projection_freshness"][
+        "expected_generation_policy"
+    ]["observed_dependency_contract_version"] == 1
     assert resolved["identity_candidate_ids"] == [
         candidate["candidate_id"]
     ]
@@ -5125,6 +5926,50 @@ def test_entity_registry_mcp_preserves_candidates_and_blocks_incompatible_genera
     assert compact["identity_candidates"][0]["source_refs"][0][
         "registry_owner"
     ] == "aoa-skills"
+    assert compact_generation[
+        "observed_dependency_contract_version"
+    ] == 1
+    assert compact_generation["history_policy_contract"] == (
+        module.ENTITY_REGISTRY_EXPECTED_HISTORY_POLICY_CONTRACT
+    )
+
+    snapshot["generation_identity"][
+        "observed_dependency_contract_version"
+    ] = 2
+    snapshot["generation_identity"]["generation_id"] = (
+        module._entity_registry_generation_digest(
+            snapshot["generation_identity"]
+        )
+    )
+    write_json(registry_path, snapshot)
+
+    policy_incompatible = state.session_entity_registry(
+        kind="skill",
+        lookup="aoa-decision",
+        limit=5,
+    )
+
+    assert policy_incompatible["identity_status"] == (
+        "incompatible_generation"
+    )
+    assert policy_incompatible["identity_claim_admitted"] is False
+    assert policy_incompatible["projection_freshness"][
+        "generation_policy_compatible"
+    ] is False
+    assert (
+        "entity_registry_generation_policy_incompatible"
+        in policy_incompatible["diagnostics"]
+    )
+    snapshot["generation_identity"][
+        "observed_dependency_contract_version"
+    ] = (
+        module.ENTITY_REGISTRY_EXPECTED_OBSERVED_DEPENDENCY_CONTRACT_VERSION
+    )
+    snapshot["generation_identity"]["generation_id"] = (
+        module._entity_registry_generation_digest(
+            snapshot["generation_identity"]
+        )
+    )
 
     snapshot["source_fingerprint"] = "0" * 64
     write_json(registry_path, snapshot)
@@ -5545,6 +6390,7 @@ def test_entity_usage_chain_routes_to_allowlisted_archive_command(tmp_path: Path
         consequence_window=4,
         document_limit=9,
         session="session-1",
+        correlation_id="call-exact-instance",
     )
 
     assert chain["artifact_type"] == "session_memory_entity_usage_chain"
@@ -5564,7 +6410,203 @@ def test_entity_usage_chain_routes_to_allowlisted_archive_command(tmp_path: Path
     assert args[args.index("--consequence-window") + 1] == "4"
     assert args[args.index("--document-limit") + 1] == "9"
     assert args[args.index("--session") + 1] == "session-1"
+    assert args[args.index("--correlation-id") + 1] == (
+        "call-exact-instance"
+    )
+    assert "--correlation-id call-exact-instance" in chain[
+        "mcp_access"
+    ]["full_evidence_route"]
     assert runner.timeouts[-1] == ("usage-chain", 90.0)
+
+    with pytest.raises(
+        ValueError,
+        match="correlation_id requires an explicit session",
+    ):
+        state.session_entity_usage_chain(
+            "aoa-session-memory-mcp",
+            kind="mcp_service",
+            correlation_id="call-exact-instance",
+        )
+
+
+def test_entity_usage_chain_preserves_mcp_tool_identity_for_archive_admission(
+    tmp_path: Path,
+) -> None:
+    runner = FakeRunner()
+    state = state_with_fixture(tmp_path, runner)
+
+    chain = state.session_entity_usage_chain(
+        "aoa_session_route_rollup_query",
+        kind="mcp_tool",
+        limit=5,
+        per_route_limit=7,
+        session="session-1",
+    )
+
+    assert chain["artifact_type"] == "session_memory_entity_usage_chain"
+    assert chain["requested_kind"] == "mcp_tool"
+    usage_calls = [call for call in runner.calls if call[0] == "usage-chain"]
+    assert len(usage_calls) == 1
+    args = usage_calls[0][1]
+    assert args[args.index("--kind") + 1] == "mcp_tool"
+    assert "--kind mcp_tool" in chain["mcp_access"]["full_evidence_route"]
+
+
+def test_exact_instance_fields_and_admission_survive_compaction() -> None:
+    from aoa_session_memory_mcp import core as core_module
+
+    event = {
+        "doc_id": "event:session:008:000384",
+        "event_id": "000384",
+        "event_type": "TOOL_CALL",
+        "role": "usage",
+        "session_id": "session-1",
+        "task_episode_id": "task-0043",
+        "task_episode_ref": (
+            "task_episode:session-1:task-0043"
+        ),
+        "correlation_id": "call-exact-instance",
+        "mcp_tool_usage_admission": "structured_invocation_proven",
+        "hook_usage_admission": (
+            "structured_hook_command_invocation_proven"
+        ),
+        "refs": {
+            "raw": "raw:line:384",
+            "segment": "008.md#event-000384",
+            "task_episode": (
+                "task_episode:session-1:task-0043"
+            ),
+        },
+    }
+    compact_event = core_module._compact_usage_chain_event(event)
+    assert compact_event["correlation_id"] == "call-exact-instance"
+    assert compact_event["mcp_tool_usage_admission"] == (
+        "structured_invocation_proven"
+    )
+    assert compact_event["hook_usage_admission"] == (
+        "structured_hook_command_invocation_proven"
+    )
+
+    compact = core_module._compact_entity_usage_chain_payload(
+        {
+            "schema_version": 1,
+            "artifact_type": "session_memory_entity_usage_chain",
+            "ok": True,
+            "mutates": False,
+            "anchor": "aoa_session_entity_usage_chain",
+            "kind": "tool",
+            "requested_kind": "mcp_tool",
+            "session": "session-1",
+            "correlation_id": "call-exact-instance",
+            "selection_scope": {
+                "mode": "exact_session_correlation",
+                "session": "session-1",
+                "correlation_id": "call-exact-instance",
+                "candidate_count_exhaustive": True,
+                "absence_claim_allowed": False,
+            },
+            "normalized_entity": {
+                "anchor": "aoa_session_entity_usage_chain",
+                "route_key": (
+                    "mcp_aoa_session_memory_"
+                    "aoa_session_entity_usage_chain"
+                ),
+                "kind": "mcp_tool",
+                "route_signal": (
+                    "tool:mcp_aoa_session_memory_"
+                    "aoa_session_entity_usage_chain"
+                ),
+                "identity": {
+                    "status": "resolved",
+                    "entity_ids": [
+                        "tool:aoa_session_entity_usage_chain"
+                    ],
+                    "observed_instance_status": "resolved",
+                },
+                "registry_entries": [
+                    {
+                        "source_refs": [
+                            {
+                                "path": (
+                                    "/private/runtime/"
+                                    "aoa-search.sqlite3"
+                                )
+                            }
+                        ]
+                    }
+                ],
+            },
+            "quality": {
+                "exact_instance_mode": True,
+                "exact_correlation_id": "call-exact-instance",
+                "exact_correlation_source_hit_count": 3,
+                "candidate_count_exhaustive": True,
+            },
+            "source_episode_refs": [
+                {
+                    "episode_ref": (
+                        "task_episode:session-1:task-0043"
+                    ),
+                    "session_id": "session-1",
+                    "task_episode_id": "task-0043",
+                    "anchor_raw_ref": "raw:line:384",
+                    "task_answer_chain_command": (
+                        "python3 scripts/aoa_session_memory.py "
+                        "task-answer-chain --session session-1 "
+                        "--task-episode-id task-0043"
+                    ),
+                    "authority": (
+                        "generated episode coordinate; raw refs "
+                        "remain authoritative"
+                    ),
+                }
+            ],
+            "usage_chain": {
+                "chains": [
+                    {
+                        "usage_event": event,
+                        "result_or_consequence_events": [],
+                    }
+                ]
+            },
+        },
+        full_route=(
+            "usage-chain aoa_session_entity_usage_chain "
+            "--session session-1 "
+            "--correlation-id call-exact-instance --full"
+        ),
+    )
+    assert compact["correlation_id"] == "call-exact-instance"
+    assert compact["selection_scope"]["mode"] == (
+        "exact_session_correlation"
+    )
+    assert compact["quality"]["exact_instance_mode"] is True
+    assert compact["quality"]["exact_correlation_id"] == (
+        "call-exact-instance"
+    )
+    assert compact["quality"]["exact_correlation_source_hit_count"] == 3
+    compact_event = compact["usage_chain"]["chains"][0][
+        "usage_event"
+    ]
+    assert compact_event["task_episode_id"] == "task-0043"
+    assert compact_event["refs"]["task_episode"] == (
+        "task_episode:session-1:task-0043"
+    )
+    assert compact["source_episode_refs"] == [
+        {
+            "episode_ref": (
+                "task_episode:session-1:task-0043"
+            ),
+            "session_id": "session-1",
+            "task_episode_id": "task-0043",
+        }
+    ]
+    assert compact["source_episode_ref_count"] == 1
+    assert compact["normalized_entity"]["identity"][
+        "observed_instance_status"
+    ] == "resolved"
+    assert "registry_entries" not in compact["normalized_entity"]
+    assert "/private/runtime" not in json.dumps(compact)
 
 
 def test_entity_usage_chain_compact_preserves_evidence_first_admission_contract(
@@ -5713,11 +6755,22 @@ def test_entity_usage_chain_compact_preserves_evidence_first_admission_contract(
                         "route_id": "entity_usage_chain",
                         "reason": "state-specific usage and correlation evidence",
                     },
-                    "generation_identities": {
-                        "expected": {
-                            "episode_semantic": {
-                                "projection": "episode_semantic",
-                                "schema_version": 22,
+                        "generation_identities": {
+                            "expected": {
+                                "entity_registry": {
+                                    "projection": "entity_registry",
+                                    "schema_version": 4,
+                                    "generation_id": "entity-generation",
+                                    "producer_sha256": "entity-producer-digest",
+                                },
+                                "exact_literal": {
+                                    "projection": "exact_literal",
+                                    "schema_version": 3,
+                                    "generation_id": "exact-generation",
+                                },
+                                "episode_semantic": {
+                                    "projection": "episode_semantic",
+                                    "schema_version": 22,
                                 "projection_version": 14,
                                 "route_signal_classifier_version": 41,
                                 "generation_id": "episode-generation",
@@ -5732,14 +6785,14 @@ def test_entity_usage_chain_compact_preserves_evidence_first_admission_contract(
                                     "episode_semantic": "episode-generation"
                                 },
                             },
-                        },
-                        "observed": {
-                            "episode_semantic": {
-                                "projection": "episode_semantic",
-                                "schema_version": 22,
-                                "generation_id": "episode-generation",
-                            }
-                        },
+                            },
+                            "observed": {
+                                "entity_registry": {
+                                    "projection": "entity_registry",
+                                    "schema_version": 4,
+                                    "generation_id": "entity-generation",
+                                }
+                            },
                         "compatible": True,
                     },
                     "freshness": {
@@ -5837,25 +6890,32 @@ def test_entity_usage_chain_compact_preserves_evidence_first_admission_contract(
     assert chain["usage_lifecycle"]["states"]["loaded"]["candidate_present"] is True
     assert chain["usage_lifecycle"]["states"]["loaded"]["positive_instance_admitted"] is False
     assert chain["usage_lifecycle"]["states"]["invoked"]["present"] is False
+    assert (
+        "positive_instance_admitted"
+        not in chain["usage_lifecycle"]["states"]["invoked"]
+    )
     assert chain["usage_lifecycle"]["identity"]["collision_preserved"] is True
     correlation = chain["usage_lifecycle"]["correlation"]
     assert correlation["accepted_consequence_chain_count"] == 0
     assert correlation["rejected_context_count"] == 3
-    assert len(correlation["rejected_context_sample"]) == 2
-    assert correlation["omitted_rejected_context_sample_count"] == 1
+    assert len(correlation["rejected_context_sample"]) == 1
+    assert correlation["omitted_rejected_context_sample_count"] == 2
     assert chain["answer_admission"]["umbrella_used_claim_admitted"] is False
     assert chain["answer_admission"]["claim_admission_by_state"]["selected"]["positive_instance_admitted"] is True
     assert chain["answer_admission"]["claim_admission_by_state"]["loaded"]["positive_instance_admitted"] is False
     envelope = chain["evidence_envelope"]
-    assert envelope["generation_identities"]["expected"]["episode_semantic"] == {
-        "projection": "episode_semantic",
-        "generation_id": "episode-generation",
-        "schema_version": 22,
-        "projection_version": 14,
-        "route_signal_classifier_version": 41,
-        "producer_sha256": "producer-digest",
+    assert envelope["generation_identities"]["expected"]["entity_registry"] == {
+        "projection": "entity_registry",
+        "generation_id": "entity-generation",
+        "schema_version": 4,
+        "producer_sha256": "entity-producer-digest",
     }
-    assert envelope["generation_identities"]["expected"]["episode_dense"]["embedding_model"] == "test-embedding-model"
+    assert envelope["generation_identities"]["expected"]["exact_literal"][
+        "generation_id"
+    ] == "exact-generation"
+    assert "episode_semantic" not in envelope["generation_identities"]["expected"]
+    assert envelope["generation_identities"]["expected_count"] == 4
+    assert envelope["generation_identities"]["omitted_expected_count"] == 2
     assert envelope["freshness"]["global"]["status"] == "stale-readable"
     assert envelope["freshness"]["scoped"]["status"] == "current"
     assert envelope["freshness"]["scoped"]["does_not_upgrade_global_freshness"] is True
@@ -5884,7 +6944,15 @@ def test_entity_usage_chain_compact_preserves_evidence_first_admission_contract(
     assert chain["mcp_payload_policy"]["usage_lifecycle_preserved"] is True
     assert chain["mcp_payload_policy"]["answer_admission_preserved"] is True
     assert chain["mcp_payload_policy"]["evidence_envelope_preserved"] is True
-    assert len(json.dumps(chain)) < 20_000
+    assert (
+        chain["mcp_payload_policy"][
+            "evidence_first_duplicate_samples_omitted"
+        ]
+        is True
+    )
+    assert "answer_admission" not in chain["usage_lifecycle"]
+    assert "answer_admission" not in chain["evidence_envelope"]
+    assert len(json.dumps(chain)) < 15_000
 
 
 def test_entity_dossier_composes_first_route_packet(tmp_path: Path) -> None:
@@ -7240,11 +8308,11 @@ def test_graph_neighborhood_uses_sqlite_fast_path_for_exact_route_node(tmp_path:
         edge_payloads = [
             (
                 "edge:1",
-                "mentions_route_signal",
+                "event_has_route_signal",
                 event_node["id"],
                 route_node["id"],
                 {
-                    "type": "mentions_route_signal",
+                    "type": "event_has_route_signal",
                     "event_id": "000001",
                     "segment_id": "000",
                     "session_id": "session-1",
@@ -7269,27 +8337,27 @@ def test_graph_neighborhood_uses_sqlite_fast_path_for_exact_route_node(tmp_path:
             ),
             (
                 "edge:3",
-                "mentions_route_signal",
+                "event_has_route_signal",
                 "event:session-1:000:000002",
                 route_node["id"],
-                {"type": "mentions_route_signal", "event_id": "000002"},
+                {"type": "event_has_route_signal", "event_id": "000002"},
                 1,
             ),
             (
                 "edge:alias",
-                "mentions_route_signal",
+                "event_has_route_signal",
                 event_node["id"],
                 alias_route_node["id"],
-                {"type": "mentions_route_signal", "event_id": "000001"},
+                {"type": "event_has_route_signal", "event_id": "000001"},
                 4,
             ),
             (
                 "edge:target",
-                "mentions_route_signal",
+                "event_has_route_signal",
                 event_node["id"],
                 target_route_node["id"],
                 {
-                    "type": "mentions_route_signal",
+                    "type": "event_has_route_signal",
                     "event_id": "000001",
                     "segment_id": "000",
                     "session_id": "session-1",
@@ -7333,7 +8401,7 @@ def test_graph_neighborhood_uses_sqlite_fast_path_for_exact_route_node(tmp_path:
             (
                 "event:session-1:000:000001",
                 "edge:1",
-                "mentions_route_signal",
+                "event_has_route_signal",
                 event_node["id"],
                 route_node["id"],
                 json.dumps(edge_payloads[0][4]),
@@ -7517,8 +8585,8 @@ def test_graph_event_sqlite_route_orders_timeline_independently_of_edge_weight(t
         conn.executemany(
             "INSERT INTO edges (id, edge_type, source_node, target_node, payload_json, count) VALUES (?, ?, ?, ?, ?, ?)",
             [
-                ("edge:late", "mentions_route_signal", late_event_id, route_id, "{}", 20),
-                ("edge:early", "mentions_route_signal", early_event_id, route_id, "{}", 1),
+                ("edge:late", "event_has_route_signal", late_event_id, route_id, "{}", 20),
+                ("edge:early", "event_has_route_signal", early_event_id, route_id, "{}", 1),
             ],
         )
         conn.commit()
@@ -7715,7 +8783,7 @@ def test_graph_packets_are_compact_by_default_without_losing_refs(tmp_path: Path
                         {
                             "source": f"event:session-1:000:{idx % 60:06d}",
                             "target": "route:mcp:mcp:aoa_session_memory_mcp",
-                            "type": "mentions_route_signal",
+                            "type": "event_has_route_signal",
                             "content": long_text,
                         }
                         for idx in range(100)

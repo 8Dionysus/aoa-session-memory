@@ -1,0 +1,209 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://abyssos.local/schemas/aoa/inference-economy-session-contribution.schema.json",
+  "title": "AoA session-memory inference economy contribution",
+  "description": "An opt-in, count-only owner contribution for session token and compaction evidence. It is adapted into the central aoa-stats inference economy observation and carries no lifecycle authority.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "central_contract_ref",
+    "contract_version",
+    "observation_id",
+    "source_ref",
+    "source_revision",
+    "observation_status",
+    "token_count_basis",
+    "tokens",
+    "compactions",
+    "provenance",
+    "progress",
+    "unknown_fields",
+    "default_off",
+    "activation_allowed",
+    "authority_ceiling"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "aoa_session_memory_inference_economy_contribution_v1"
+    },
+    "central_contract_ref": {
+      "const": "aoa-stats:stats/measurement-contract/inference-economy-observation.schema.json"
+    },
+    "contract_version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "observation_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+    },
+    "source_ref": {
+      "$ref": "#/$defs/evidence_ref"
+    },
+    "source_revision": {
+      "type": "string",
+      "minLength": 1
+    },
+    "observation_status": {
+      "enum": ["complete", "partial", "missing", "unknown", "stale"]
+    },
+    "token_count_basis": {
+      "enum": [
+        "provider_reported",
+        "exact_tokenizer",
+        "estimated",
+        "unknown",
+        "not_applicable"
+      ]
+    },
+    "tokens": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["input", "cached_input", "output"],
+      "properties": {
+        "input": {
+          "$ref": "#/$defs/count_metric"
+        },
+        "cached_input": {
+          "$ref": "#/$defs/count_metric"
+        },
+        "output": {
+          "$ref": "#/$defs/count_metric"
+        }
+      }
+    },
+    "compactions": {
+      "$ref": "#/$defs/count_metric"
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["evidence_refs", "derivation_ref", "source_revision"],
+      "properties": {
+        "evidence_refs": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/evidence_ref"
+          }
+        },
+        "derivation_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_revision": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "progress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "completed", "total"],
+      "properties": {
+        "state": {
+          "enum": ["partial", "terminal"]
+        },
+        "completed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "total": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "unknown_fields": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "tokens.input",
+          "tokens.cached_input",
+          "tokens.output",
+          "compactions"
+        ]
+      }
+    },
+    "default_off": {
+      "const": true
+    },
+    "activation_allowed": {
+      "const": false
+    },
+    "authority_ceiling": {
+      "const": "Session-memory owner evidence only; it does not authorize activation, promotion, proof, policy, routing, eval, closeout, or owner acceptance."
+    }
+  },
+  "$defs": {
+    "evidence_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "ref"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ref": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "count_metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "basis",
+        "uncertainty",
+        "value",
+        "evidence_refs",
+        "reason"
+      ],
+      "properties": {
+        "status": {
+          "enum": ["observed", "missing", "unknown", "stale"]
+        },
+        "basis": {
+          "enum": [
+            "provider_reported",
+            "exact_tokenizer",
+            "estimated",
+            "unknown",
+            "not_applicable"
+          ]
+        },
+        "uncertainty": {
+          "enum": [
+            "exact",
+            "estimated",
+            "not_estimated",
+            "not_applicable"
+          ]
+        },
+        "value": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "evidence_refs": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/evidence_ref"
+          }
+        },
+        "reason": {
+          "type": ["string", "null"],
+          "minLength": 1
+        }
+      }
+    }
+  }
+}

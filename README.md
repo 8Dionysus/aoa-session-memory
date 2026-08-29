@@ -27,6 +27,8 @@ The current production adapter is Codex.
 - trace conclusions back to the session evidence they came from
 - connect development history with the current state of a repository
 - prepare reviewed candidates for evals, skills, automations, and datasets
+- derive privacy-safe recurring-motif candidates from reviewed stage profiles
+  without adopting them as policy
 
 The portable implementation includes raw session preservation, readable
 segments, typed task episodes, stable session identity, structured entities,
@@ -51,6 +53,13 @@ agent session
   -> improvement or eval candidate
 ```
 
+The `aoa-session-experience-metabolism` skill consumes only bounded,
+generated `stage_profile_v1` reports. It retains counterevidence and
+trajectory cost, then routes candidates through independent review, eval,
+shadow, owner acceptance, and a separate explicit adoption receipt, plus
+reversible rejection or rollback. Frequency and correlation never produce an
+automatic skill, policy, or benefit claim.
+
 Derived views are used for navigation. Important results keep references back to
 their sources:
 
@@ -62,6 +71,15 @@ answer or narrative
 ```
 
 This distinction matters in real agent work.
+
+Normal operation is event-driven and incremental. Hooks append a durable raw
+capture ledger and update the live-tail overlay first, so a newly observed
+session can be queried before every heavier projection has caught up. Published
+session components have separate generation identities and checkpoints;
+unchanged raw blocks, segments, classifications, and task-episode shards are
+reused instead of rebuilt. A transactional outbox then advances exact search,
+semantic, entity, and graph consumers independently. Their freshness remains
+visible and no partial reader is allowed to make a global negative claim.
 
 A skill may appear in a transcript without being used. It may have been visible
 to the agent, selected, read, partially followed, completed, verified, or linked
@@ -80,6 +98,12 @@ The repository includes public-safe synthetic fixtures that run through the real
 session-memory mechanics. They exercise skill routing, evidence packets,
 lifecycle boundaries, recovery behavior, attribution limits, and Codex adapter
 handling.
+
+The optional `inference_economy_session_contribution` source function exposes
+only count-only token ledgers and raw compaction-boundary refs for the shared
+provider-neutral inference-economy ABI. It is default-off, keeps provider-
+reported and estimated counts separate, and does not claim runtime outcome,
+eval, closeout, promotion, or owner acceptance.
 
 Behavioral-sandbox cases run in isolated temporary environments. They cannot
 make an in-process network connection or modify the authored source tree. One
@@ -145,6 +169,25 @@ not claim that a model independently selected the best skill or that a skill
 improved performance. Those questions require live evidence and a separate eval.
 The complete skill-router integration suite uses a pinned `aoa-skills` checkout
 and runs in the optional ecosystem workflow; it is not a standalone dependency.
+
+## Public Goal catalog
+
+The owner-local `goal-catalog` read surface enumerates current and historical
+Goal lifecycles from the complete available session index. It returns
+public-safe correlation and lifecycle fields, source generation and watermark,
+opaque immutable pagination, and item/page digests. Missing, unknown, stale,
+deferred, and invalid source states fail closed instead of becoming a current
+dashboard snapshot. See [`docs/GOAL_CATALOG.md`](docs/GOAL_CATALOG.md) for the
+CLI contract and privacy boundary.
+
+The owner-local `goal-thread-board` read surface publishes a real board for
+one exact Goal/master-thread binding. It combines allowlisted lifecycle
+markers from current owner indexes with safe immutable item markers and direct
+parent/fork observations from typed Codex app-server reads, while withholding
+all prompt/transcript bodies, raw paths, and private metadata. Branch lifecycle
+and replayable event ordering remain explicitly missing when their owner does
+not publish them. See [`docs/GOAL_THREAD_BOARD.md`](docs/GOAL_THREAD_BOARD.md)
+for the exact query, pagination, currentness, and privacy contract.
 
 ### Run the standalone MCP demo
 
@@ -227,6 +270,40 @@ python3 /absolute/path/to/workspace/.aoa/scripts/aoa_session_memory.py \
   --aoa-root /absolute/path/to/workspace/.aoa
 ```
 
+Inspect incremental freshness and bounded reader state without forcing a full
+rebuild:
+
+```bash
+python3 /absolute/path/to/workspace/.aoa/scripts/aoa_session_memory.py \
+  projection-status \
+  --workspace-root /absolute/path/to/workspace \
+  --aoa-root /absolute/path/to/workspace/.aoa
+
+python3 /absolute/path/to/workspace/.aoa/scripts/aoa_session_memory.py \
+  freshness-vector SESSION_ID \
+  --workspace-root /absolute/path/to/workspace \
+  --aoa-root /absolute/path/to/workspace/.aoa
+```
+
+`task-episodes SESSION_ID --limit N --order recent` hydrates only the verified
+manifest shards needed for the requested result window. Heavy repair remains an
+explicit bounded maintenance route, not a prerequisite for live capture or
+ordinary recent-session access.
+
+Live exact retrieval uses a compact receipt-bound manifest plus bounded
+immutable posting shards. A normal append reads only the new complete JSONL
+lines and, when needed, the last open shard; it does not re-sanitize or rewrite
+all historical live postings. Returned candidates are still reverified against
+their exact raw byte ranges, and a miss remains non-exhaustive.
+For a very large unprojected first capture, the live layer indexes a bounded
+recent complete-line window and records the omitted prefix explicitly; raw and
+the later stable projection retain the complete history.
+
+Large capture epochs also avoid a second whole-history SHA pass: their initial
+exact digest is computed natively during capture, later appends remain current
+through immutable block-chain evidence, and stable projection/audit supplies a
+conventional full-stream digest at an exact watermark without changing raw.
+
 Private session archives, generated runtime databases, diagnostics, secrets, and
 host-specific configuration are excluded from the normal portable source.
 
@@ -246,33 +323,11 @@ assessment.
 The same approach can be applied to tools, MCP servers, errors, decisions,
 workflows, and recurring development patterns.
 
-## Built during OpenAI Build Week
-
-`aoa-session-memory` began before OpenAI Build Week. During the submission
-period, it was substantially extended and prepared as a portable developer tool.
-
-The Build Week work included:
-
-- stronger exact, semantic, temporal, and graph retrieval
-- evidence-backed skill-use and consequence tracking
-- generation-aware freshness and maintenance
-- a semantic skill system with typed capability relationships
-- progressive skill disclosure and task-local routing
-- a public-safe behavioral sandbox
-- a deterministic read-only MCP package and synthetic protocol demo
-- portable installation, validation, export, and Codex grounding
-- stronger privacy and public-safety boundaries
-- a reproducible procedure for reviewing skill-use evidence
-
-The main submission-period development is preserved in pull requests
-[#59](https://github.com/8Dionysus/aoa-session-memory/pull/59) through
-[#62](https://github.com/8Dionysus/aoa-session-memory/pull/62).
-
 ## How Codex and GPT-5.6 were used
 
 I built `aoa-session-memory` in close collaboration with Codex. Earlier parts
 of the project were developed with GPT-5.5, while most of the current
-architecture and the Build Week work were completed with GPT-5.6 Sol.
+architecture was completed with GPT-5.6 Sol.
 
 Our work took place through long, iterative Codex sessions. We would move from
 an architectural idea to implementation, test it, inspect what failed, and

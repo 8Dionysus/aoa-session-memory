@@ -1,0 +1,23 @@
+{
+  "owner": "codex-app-server",
+  "currentness": "current_at_read",
+  "methods": ["thread/goal/get", "thread/read", "thread/items/list"],
+  "goal": {
+    "threadId": "thread:fixture-master",
+    "status": "active",
+    "createdAt": 1720000000,
+    "updatedAt": 1720000010
+  },
+  "thread": {
+    "id": "thread:fixture-master",
+    "status": {"type": "active"},
+    "parentThreadId": null,
+    "forkedFromId": null
+  },
+  "items": {
+    "state": "unknown",
+    "error": "PRIVATE_OWNER_ERROR_DETAIL",
+    "data": []
+  },
+  "relations": {"data": []}
+}

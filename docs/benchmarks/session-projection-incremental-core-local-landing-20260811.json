@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "artifact_type": "session_projection_incremental_core_local_landing_receipt",
+  "generated_at": "2026-08-11T15:06:47Z",
+  "source_branch": "agent/session-memory-incremental-core-20260810",
+  "tested_source_revision": "5f58221cdf2141cc5928c0a7f03c8932e3a3439f",
+  "landing_ref": "refs/heads/local/session-memory-incremental-core-landing-20260811",
+  "landing_target": "commit_containing_this_receipt",
+  "landing_mode": "local_ref_only",
+  "base_revision": "e98aa3ce2cc20a5a06a8d6f0fbcd02576cd10441",
+  "history_relation": "strict_descendant",
+  "canonical_checkout_mutated": false,
+  "live_install_mutated": false,
+  "github_mutated": false,
+  "push_performed": false,
+  "existing_github_freeze_preserved": true,
+  "verification": {
+    "full_source_suite_passed": 1328,
+    "portable_export_ok": true,
+    "decision_records": 57,
+    "decision_indexes": 6,
+    "decision_indexes_current": true
+  },
+  "claim_limit": "Resolve landing_ref locally and require it to equal the commit containing this receipt. This local landing does not advance the canonical checked-out branch, install the code, or change GitHub."
+}

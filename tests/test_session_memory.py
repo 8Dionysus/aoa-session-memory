@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import copy
 import importlib.util
 import contextlib
 import fcntl
@@ -13,6 +15,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 import warnings
 from datetime import datetime, timezone
@@ -24,11 +27,404 @@ import pytest
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "aoa_session_memory.py"
+HOOK_SCRIPT = (
+    Path(__file__).resolve().parents[1] / "scripts" / "aoa_session_hook.py"
+)
+BENCHMARK_SCRIPT = (
+    Path(__file__).resolve().parents[1]
+    / "scripts"
+    / "benchmark_session_projection.py"
+)
 spec = importlib.util.spec_from_file_location("aoa_session_memory", SCRIPT)
 assert spec and spec.loader
 module = importlib.util.module_from_spec(spec)
 sys.modules["aoa_session_memory"] = module
 spec.loader.exec_module(module)
+hook_spec = importlib.util.spec_from_file_location(
+    "aoa_session_hook",
+    HOOK_SCRIPT,
+)
+assert hook_spec and hook_spec.loader
+hook_module = importlib.util.module_from_spec(hook_spec)
+sys.modules["aoa_session_hook"] = hook_module
+hook_spec.loader.exec_module(hook_module)
+
+
+def test_session_projection_benchmark_smoke_proves_parity_and_reuse(
+    tmp_path: Path,
+) -> None:
+    receipt_path = tmp_path / "benchmark-receipt.json"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(BENCHMARK_SCRIPT),
+            "--segments",
+            "3",
+            "--payload-bytes",
+            "64",
+            "--workers",
+            "2",
+            "--fresh-segments",
+            "1",
+            "--growth-segments",
+            "1",
+            "--live-route-repetitions",
+            "3",
+            "--temp-root",
+            str(tmp_path),
+            "--output",
+            str(receipt_path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(completed.stdout)
+
+    assert completed.returncode == 0, completed.stderr
+    assert payload["ok"] is True
+    assert payload["status"] == "complete"
+    assert json.loads(receipt_path.read_text(encoding="utf-8")) == payload
+    assert payload["serial_parallel_semantic_parity"] is True
+    assert payload["cold_serial"]["raw_unchanged"] is True
+    assert payload["cold_parallel"]["raw_unchanged"] is True
+    assert payload["cold_serial_summary"]["run_count"] == 1
+    assert payload["cold_parallel_summary"]["run_count"] == 1
+    assert payload["cold_serial_summary"]["wall_seconds_p95"] > 0
+    assert payload["cold_parallel_summary"]["wall_seconds_p95"] > 0
+    assert payload["initial_capture_execution"]["postings"][
+        "historical_raw_bytes_read"
+    ] == 0
+    assert payload["live_route"]["ok"] is True
+    assert payload["live_route"]["run_count"] == 3
+    assert payload["live_route"]["overlay_p95_within_30_seconds"] is True
+    assert payload["live_route"][
+        "event_availability_p95_within_5_seconds"
+    ] is True
+    assert payload["live_route"]["historical_raw_bytes_read"] == 0
+    assert payload["live_route"]["max_shards_read_for_update"] <= 1
+    assert payload["live_route"]["max_posting_shards_examined"] <= 1
+    assert payload["cold_parallel_summary"][
+        "cgroup_measurement_run_count"
+    ] in {0, 1}
+    assert "cgroup_memory" in payload["cold_parallel"]
+    assert "available" in payload["cold_parallel"]["cgroup_memory"]
+    assert payload["growing_session"]["capture_execution"][
+        "appended_bytes"
+    ] == payload["growing_session"]["capture_execution"][
+        "sha256_delta_bytes_hashed"
+    ]
+    growing_gate = payload["growing_incremental_gate"]
+    assert growing_gate["ok"] is True
+    assert 0 <= growing_gate[
+        "sha256_state_bootstrap_bytes_read"
+    ] < 64
+    assert growing_gate["maximum_sha256_state_bootstrap_bytes"] == 63
+    assert growing_gate["prefix_bytes_reused"] == payload["fixture"][
+        "raw_bytes"
+    ]
+    assert growing_gate["tail_bytes_read"] == growing_gate[
+        "appended_bytes"
+    ]
+    assert growing_gate["source_bytes_read"] <= growing_gate[
+        "appended_bytes"
+    ] + 1
+    assert payload["growing_session"]["raw_scan_execution"][
+        "scan_mode"
+    ] == "attested_prefix_plus_captured_tail_v1"
+    assert payload["growing_session"]["segment_execution"][
+        "published_reused_segment_count"
+    ] >= 2
+    assert payload["growing_session"]["raw_block_execution"][
+        "reused_block_count"
+    ] >= 2
+    for cold_run in (
+        payload["cold_serial"],
+        payload["cold_parallel"],
+    ):
+        assert cold_run["raw_block_execution"][
+            "token_accounting_mode"
+        ] == "derived_from_segment_components_v1"
+        assert cold_run["raw_block_execution"][
+            "segment_summary_backfill_count"
+        ] == cold_run["segment_count"]
+        assert cold_run["raw_block_execution"][
+            "token_accounting_ms"
+        ] < 100
+        assert cold_run["projection_validation"][
+            "raw_block_validation"
+        ] == {
+            "metadata_receipt_admitted_count": cold_run[
+                "segment_count"
+            ],
+            "reused_last_good_count": 0,
+            "full_sha256_count": 0,
+            "policy": (
+                "metadata_receipt_or_samefile_reuse_else_full_sha256_v1"
+            ),
+        }
+
+
+def test_session_projection_benchmark_uses_stable_read_only_snapshot(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "owner-snapshot.raw.jsonl"
+    write_jsonl(
+        source,
+        [
+            {
+                "timestamp": "2026-08-08T12:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "private-source-id-not-in-receipt",
+                    "cwd": str(tmp_path / "owner"),
+                },
+            },
+            {
+                "timestamp": "2026-08-08T12:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "snapshot task"}
+                    ],
+                },
+            },
+            {
+                "timestamp": "2026-08-08T12:00:02Z",
+                "type": "turn_context",
+                "payload": {"summary": "snapshot boundary"},
+            },
+        ],
+    )
+    source_before = hashlib.sha256(source.read_bytes()).hexdigest()
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(BENCHMARK_SCRIPT),
+            "--source-transcript",
+            str(source),
+            "--fixture-alias",
+            "read-only-owner-snapshot",
+            "--payload-bytes",
+            "64",
+            "--workers",
+            "2",
+            "--fresh-segments",
+            "1",
+            "--growth-segments",
+            "1",
+            "--capture-only",
+            "--temp-root",
+            str(tmp_path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(completed.stdout)
+
+    assert completed.returncode == 0, completed.stderr
+    assert payload["ok"] is True
+    assert payload["fixture"]["synthetic"] is False
+    assert payload["fixture"]["source_kind"] == (
+        "read_only_captured_snapshot"
+    )
+    assert payload["fixture"]["snapshot_copy"] == {
+        "stable_during_copy": True,
+        "source_bytes": source.stat().st_size,
+        "snapshot_bytes": source.stat().st_size,
+        "source_unchanged": True,
+    }
+    assert payload["truth_status"] == (
+        "read_only_snapshot_measurement_not_live_runtime_mutation"
+    )
+    assert "private-source-id-not-in-receipt" not in completed.stdout
+    assert str(source) not in completed.stdout
+    assert hashlib.sha256(source.read_bytes()).hexdigest() == source_before
+
+
+def test_session_projection_benchmark_supports_parallel_only_repetitions(
+    tmp_path: Path,
+) -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(BENCHMARK_SCRIPT),
+            "--segments",
+            "2",
+            "--payload-bytes",
+            "32",
+            "--workers",
+            "2",
+            "--fresh-segments",
+            "1",
+            "--growth-segments",
+            "1",
+            "--serial-repetitions",
+            "0",
+            "--parallel-repetitions",
+            "2",
+            "--cold-only",
+            "--temp-root",
+            str(tmp_path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(completed.stdout)
+
+    assert completed.returncode == 0, completed.stderr
+    assert payload["ok"] is True
+    assert payload["status"] == "cold_only_complete"
+    assert payload["fixture"]["cold_only"] is True
+    assert payload["cold_serial"] is None
+    assert payload["cold_serial_summary"]["run_count"] == 0
+    assert payload["cold_parallel_summary"]["run_count"] == 2
+    assert payload["serial_parallel_semantic_parity"] is None
+    assert payload["parallel_internal_semantic_parity"] is True
+    assert "fresh_session" not in payload
+    assert "growing_session" not in payload
+
+
+def test_session_projection_benchmark_reads_cgroup_v2_without_path(
+    tmp_path: Path,
+) -> None:
+    benchmark_spec = importlib.util.spec_from_file_location(
+        "session_projection_benchmark", BENCHMARK_SCRIPT
+    )
+    assert benchmark_spec and benchmark_spec.loader
+    benchmark_module = importlib.util.module_from_spec(benchmark_spec)
+    benchmark_spec.loader.exec_module(benchmark_module)
+    cgroup_root = tmp_path / "cgroup"
+    unit_root = cgroup_root / "user.slice" / "benchmark.scope"
+    unit_root.mkdir(parents=True)
+    proc_cgroup = tmp_path / "proc-self-cgroup"
+    proc_cgroup.write_text(
+        "0::/user.slice/benchmark.scope\n", encoding="utf-8"
+    )
+    counters = {
+        "memory.current": "1024\n",
+        "memory.peak": "4096\n",
+        "memory.swap.current": "0\n",
+        "memory.swap.peak": "0\n",
+        "memory.swap.max": "0\n",
+    }
+    for name, value in counters.items():
+        (unit_root / name).write_text(value, encoding="utf-8")
+
+    snapshot = benchmark_module.cgroup_memory_snapshot(
+        proc_cgroup=proc_cgroup,
+        cgroup_root=cgroup_root,
+    )
+
+    assert snapshot == {
+        "available": True,
+        "memory_current_bytes": 1024,
+        "memory_peak_bytes": 4096,
+        "swap_current_bytes": 0,
+        "swap_peak_bytes": 0,
+        "swap_max_bytes": 0,
+        "truth_status": (
+            "current_process_cgroup_v2_counters_without_path"
+        ),
+    }
+    assert "benchmark.scope" not in json.dumps(snapshot)
+
+
+def test_session_projection_benchmark_summarizes_cgroup_swap_gate() -> None:
+    benchmark_spec = importlib.util.spec_from_file_location(
+        "session_projection_benchmark_summary", BENCHMARK_SCRIPT
+    )
+    assert benchmark_spec and benchmark_spec.loader
+    benchmark_module = importlib.util.module_from_spec(benchmark_spec)
+    benchmark_spec.loader.exec_module(benchmark_module)
+    summary = benchmark_module.benchmark_run_summary(
+        [
+            {
+                "wall_seconds": 1.0,
+                "cpu_seconds": 2.0,
+                "cgroup_memory": {
+                    "available": True,
+                    "swap_peak_after_bytes": 0,
+                    "swap_peak_delta_bytes": 0,
+                    "swap_max_bytes": 0,
+                },
+            },
+            {
+                "wall_seconds": 2.0,
+                "cpu_seconds": 3.0,
+                "cgroup_memory": {
+                    "available": True,
+                    "swap_peak_after_bytes": 0,
+                    "swap_peak_delta_bytes": 0,
+                    "swap_max_bytes": 0,
+                },
+            },
+        ]
+    )
+
+    assert summary["cgroup_measurement_run_count"] == 2
+    assert summary["cgroup_swap_peak_bytes"] == 0
+    assert summary["cgroup_swap_peak_growth_bytes"] == 0
+    assert summary["cgroup_swap_max_bytes"] == 0
+    assert summary["cgroup_swap_disabled"] is True
+    assert summary["cgroup_swap_observed"] is False
+
+
+def test_session_projection_benchmark_capture_only_proves_live_route(
+    tmp_path: Path,
+) -> None:
+    receipt_path = tmp_path / "capture-only-receipt.json"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(BENCHMARK_SCRIPT),
+            "--segments",
+            "3",
+            "--payload-bytes",
+            "64",
+            "--capture-only",
+            "--live-route-repetitions",
+            "3",
+            "--temp-root",
+            str(tmp_path),
+            "--output",
+            str(receipt_path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(completed.stdout)
+
+    assert completed.returncode == 0, completed.stderr
+    assert payload["ok"] is True
+    assert payload["status"] == "capture_only_complete"
+    assert json.loads(receipt_path.read_text(encoding="utf-8")) == payload
+    assert payload["initial_capture_execution"]["raw_bytes"] == payload[
+        "fixture"
+    ]["raw_bytes"]
+    assert payload["initial_capture_execution"]["postings"][
+        "processed_bytes"
+    ] == payload["fixture"]["raw_bytes"]
+    assert payload["initial_capture_execution"]["postings"][
+        "historical_raw_bytes_read"
+    ] == 0
+    assert payload["initial_history_read_gate"]["ok"] is True
+    assert payload["initial_capture_execution"]["cgroup_memory"][
+        "available"
+    ] in {True, False}
+    assert payload["live_route"]["ok"] is True
+    assert payload["live_route"]["run_count"] == 3
+    assert payload["live_route"][
+        "event_availability_p95_within_5_seconds"
+    ] is True
+    assert payload["live_route"]["historical_raw_bytes_read"] == 0
+    assert payload["live_route"]["max_shards_read_for_update"] <= 1
+    assert payload["live_route"]["max_posting_shards_examined"] <= 1
 
 
 def test_best_effort_progress_emitter_quarantines_broken_pipe() -> None:
@@ -487,6 +883,190 @@ def test_doctor_deep_segment_indexes_validates_event_records(tmp_path: Path) -> 
     assert any("event missing raw_ref or md_anchor" in item for item in payload["problems"])
 
 
+def test_doctor_excludes_projection_stages_from_archive_health_counts(
+    tmp_path: Path,
+) -> None:
+    workspace, root = build_doctor_root_with_missing_generated_segment(
+        tmp_path,
+        recent_live=False,
+    )
+    session_dir, _index_path = complete_doctor_segment_fixture(root)
+    sessions_root = root / module.SESSION_ROOT
+    complete_stage = sessions_root / (
+        f".{session_dir.name}.projection-stage-987654-complete"
+    )
+    incomplete_stage = sessions_root / (
+        f".{session_dir.name}.projection-stage-987654-incomplete"
+    )
+    shutil.copytree(session_dir, complete_stage)
+    incomplete_stage.mkdir()
+
+    code, payload = run_doctor_payload(workspace, root)
+
+    assert code == 0
+    assert payload["ok"] is True
+    assert payload["archive_dir_count"] == 1
+    assert payload["session_dir_count"] == 3
+    assert payload["projection_stage_dir_count"] == 2
+    assert payload["problems"] == []
+    assert any(
+        "session projection stages are excluded from archive health counts"
+        in warning
+        for warning in payload["warnings"]
+    )
+
+
+def make_raw_unavailable_duplicate(
+    root: Path,
+    session_dir: Path,
+    *,
+    label: str,
+    session_id: str | None = None,
+) -> Path:
+    duplicate = session_dir.parent / label
+    shutil.copytree(session_dir, duplicate)
+    manifest = module.read_json(duplicate / "session.manifest.json", {})
+    manifest["session_id"] = session_id or manifest["session_id"]
+    manifest["session_label"] = label
+    manifest["archive_status"] = "raw_unavailable"
+    manifest["display"] = {
+        **(manifest.get("display") if isinstance(manifest.get("display"), dict) else {}),
+        "label": label,
+        "navigation_path": str(duplicate),
+    }
+    module.write_json(duplicate / "session.manifest.json", manifest)
+    incidents = duplicate / "incidents"
+    incidents.mkdir(parents=True, exist_ok=True)
+    (incidents / "20260822T000000Z__raw-session-unavailable__INCIDENT.md").write_text(
+        "# preserved test incident\n",
+        encoding="utf-8",
+    )
+    module.write_json(
+        incidents / "20260822T000000Z__raw-session-unavailable__DIAGNOSTIC.json",
+        {"session_id": manifest["session_id"], "incident_type": "raw_session_unavailable"},
+    )
+    return duplicate
+
+
+def test_doctor_separates_logical_registry_from_preserved_physical_duplicates(
+    tmp_path: Path,
+) -> None:
+    workspace, root = build_doctor_root_with_missing_generated_segment(
+        tmp_path,
+        recent_live=False,
+    )
+    session_dir, _index_path = complete_doctor_segment_fixture(root)
+    registry = module.read_json(root / module.REGISTRY_NAME, {})
+    registry["sessions"][0]["archive_status"] = "raw_unavailable"
+    module.write_json(root / module.REGISTRY_NAME, registry)
+    manifest = module.read_json(session_dir / "session.manifest.json", {})
+    manifest["archive_status"] = "raw_unavailable"
+    module.write_json(session_dir / "session.manifest.json", manifest)
+    incidents = session_dir / "incidents"
+    incidents.mkdir()
+    (incidents / "20260822T000000Z__raw-session-unavailable__INCIDENT.md").write_text(
+        "# preserved test incident\n",
+        encoding="utf-8",
+    )
+    module.write_json(
+        incidents / "20260822T000000Z__raw-session-unavailable__DIAGNOSTIC.json",
+        {"session_id": manifest["session_id"], "incident_type": "raw_session_unavailable"},
+    )
+    duplicate = make_raw_unavailable_duplicate(
+        root,
+        session_dir,
+        label="2026-06-11__007__doctor-duplicate",
+    )
+
+    code, payload = run_doctor_payload(workspace, root)
+
+    assert code == 0
+    assert payload["ok"] is True
+    assert payload["session_count"] == 1
+    assert payload["logical_registry_count"] == 1
+    assert payload["archive_dir_count"] == 2
+    assert payload["physical_archive_count"] == 2
+    assert payload["physical_archive_duplicate_count"] == 1
+    lineage = next(
+        item
+        for item in payload["physical_archive_lineage"]
+        if item["session_id"] == manifest["session_id"]
+    )
+    assert lineage["lineage_status"] == "preserved_duplicate_reported"
+    assert lineage["current_path_match_count"] == 1
+    assert str(duplicate) in payload["warnings"][0]
+
+
+@pytest.mark.parametrize("failure", ["unregistered", "mismatched", "malformed", "ambiguous"])
+def test_doctor_fails_closed_for_unresolved_physical_archive_lineage(
+    tmp_path: Path,
+    failure: str,
+) -> None:
+    workspace, root = build_doctor_root_with_missing_generated_segment(
+        tmp_path,
+        recent_live=False,
+    )
+    session_dir, _index_path = complete_doctor_segment_fixture(root)
+    if failure == "unregistered":
+        make_raw_unavailable_duplicate(
+            root,
+            session_dir,
+            label="2026-06-11__007__unregistered",
+            session_id="unregistered-session",
+        )
+    elif failure == "mismatched":
+        manifest = module.read_json(session_dir / "session.manifest.json", {})
+        manifest["session_id"] = "mismatched-session"
+        module.write_json(session_dir / "session.manifest.json", manifest)
+    elif failure == "malformed":
+        (session_dir / "session.manifest.json").write_text("{not-json\n", encoding="utf-8")
+    else:
+        registry = module.read_json(root / module.REGISTRY_NAME, {})
+        registry["sessions"][0]["path"] = str(session_dir.parent / "missing-current")
+        module.write_json(root / module.REGISTRY_NAME, registry)
+
+    code, payload = run_doctor_payload(workspace, root)
+
+    assert code == 1
+    assert payload["ok"] is False
+    if failure == "unregistered":
+        assert any("unregistered physical archive" in item for item in payload["problems"])
+    elif failure == "mismatched":
+        assert any("session_id mismatch" in item for item in payload["problems"])
+    elif failure == "malformed":
+        assert any("malformed archive manifest" in item for item in payload["problems"])
+    else:
+        assert any("not an unambiguous physical archive" in item for item in payload["problems"])
+
+
+def test_registry_rebuild_keeps_one_logical_record_and_explicit_physical_lineage(
+    tmp_path: Path,
+) -> None:
+    _workspace, root = build_doctor_root_with_missing_generated_segment(
+        tmp_path,
+        recent_live=False,
+    )
+    session_dir, _index_path = complete_doctor_segment_fixture(root)
+    duplicate = make_raw_unavailable_duplicate(
+        root,
+        session_dir,
+        label="2026-06-11__007__registry-duplicate",
+    )
+    manifest = module.read_json(session_dir / "session.manifest.json", {})
+    manifest["archive_status"] = "raw_unavailable"
+    module.write_json(session_dir / "session.manifest.json", manifest)
+
+    records = module.registry_records_from_manifests(root)
+    matching = [record for record in records if record["session_id"] == manifest["session_id"]]
+
+    assert len(matching) == 1
+    lineage = matching[0]["physical_archive_lineage"]
+    assert lineage["logical_session_id"] == manifest["session_id"]
+    assert lineage["physical_archive_count"] == 2
+    assert str(session_dir) in lineage["physical_paths"]
+    assert str(duplicate) in lineage["physical_paths"]
+
+
 def test_graph_compact_node_hydrates_refs_from_evidence_refs() -> None:
     compact = module.graph_compact_node_for_packet(
         {
@@ -506,6 +1086,114 @@ def test_graph_compact_node_hydrates_refs_from_evidence_refs() -> None:
 
     assert compact["refs"]["raw"] == "raw:line:1"
     assert compact["evidence_refs"][0]["refs"]["segment"] == "001.md#event-000001"
+
+
+def test_graph_contribution_compaction_preserves_goal_event_ref_aliases() -> None:
+    edge = module.graph_relation_contract_payload(
+        {
+            "source": "goal_lifecycle:session:goal_0001",
+            "target": "event:session:001:000001",
+            "type": "goal_lifecycle_has_event",
+            "evidence_refs": [
+                {
+                    "session_id": "session",
+                    "event_id": "000001",
+                    "refs": {
+                        "raw_ref": "raw:line:1",
+                        "segment_ref": (
+                            "/workspace/.aoa/sessions/session/"
+                            "segments/001__initial-to-latest.md#event-000001"
+                        ),
+                        "segment_index": (
+                            "/workspace/.aoa/sessions/session/"
+                            "segments/001__initial-to-latest.index.json"
+                        ),
+                    },
+                }
+            ],
+        }
+    )
+
+    compact = module.graph_compact_contribution_payload(
+        edge,
+        kind="edge",
+    )
+    compact_refs = compact["evidence_refs"][0]["refs"]
+    rehydrated = module.graph_relation_contract_payload(
+        {
+            **edge,
+            "evidence_refs": compact["evidence_refs"],
+        }
+    )
+
+    assert compact_refs == {
+        "raw": "raw:line:1",
+        "segment": (
+            "sessions/session/segments/001__initial-to-latest.md"
+        ),
+    }
+    assert "segment_index" not in compact_refs
+    assert rehydrated["evidence_status"] == "present"
+    assert rehydrated["relation_state"] == "observed_projection"
+
+
+def test_graph_work_context_projection_admits_only_resolved_high_confidence() -> None:
+    resolved_fields = module.graph_work_context_projection_fields(
+        {
+            "status": "resolved",
+            "confidence": "high",
+        }
+    )
+    ambiguous_fields = module.graph_work_context_projection_fields(
+        {
+            "status": "ambiguous",
+            "confidence": "low",
+        }
+    )
+    base = {
+        "source": "session:session",
+        "target": "work_context:workspace",
+        "type": "has_work_context",
+        "evidence_refs": [
+            {
+                "session_id": "session",
+                "refs": {"session": "sessions/session/session.manifest.json"},
+            }
+        ],
+    }
+    resolved = module.graph_relation_contract_payload(
+        {
+            **base,
+            **resolved_fields,
+        }
+    )
+    ambiguous = module.graph_relation_contract_payload(
+        {
+            **base,
+            **ambiguous_fields,
+        }
+    )
+    compact = module.graph_compact_contribution_payload(
+        ambiguous,
+        kind="edge",
+    )
+    rehydrated = module.graph_relation_contract_payload(
+        {
+            **base,
+            **compact,
+        }
+    )
+
+    assert resolved_fields["source_projection_candidate"] is False
+    assert resolved["relation_state"] == "observed_projection"
+    assert ambiguous_fields["source_projection_candidate"] is True
+    assert ambiguous["relation_state"] == "inferred_candidate"
+    assert ambiguous["navigation_admissible"] is True
+    assert ambiguous["answer_admissible"] is False
+    assert compact["source_projection_status"] == "ambiguous"
+    assert compact["source_projection_confidence"] == "low"
+    assert compact["source_projection_candidate"] is True
+    assert rehydrated["relation_state"] == "inferred_candidate"
 
 
 def test_graph_aggregate_payload_compaction_sample_detects_legacy_payload(tmp_path: Path) -> None:
@@ -533,7 +1221,7 @@ def test_graph_aggregate_payload_compaction_sample_detects_legacy_payload(tmp_pa
     }
     legacy_edge = {
         "id": "edge:fixture",
-        "type": "mentions_route_signal",
+        "type": "event_has_route_signal",
         "source": "event:fixture",
         "target": "route:skill:aoa-decision",
         "route_signals": [f"skill:aoa-decision:{index}" for index in range(40)],
@@ -545,7 +1233,7 @@ def test_graph_aggregate_payload_compaction_sample_detects_legacy_payload(tmp_pa
     )
     conn.execute(
         "INSERT INTO edges(id, edge_type, source_node, target_node, payload_json, count) VALUES (?, ?, ?, ?, ?, ?)",
-        ("edge:fixture", "mentions_route_signal", "event:fixture", "route:skill:aoa-decision", module.graph_json(legacy_edge), 1),
+        ("edge:fixture", "event_has_route_signal", "event:fixture", "route:skill:aoa-decision", module.graph_json(legacy_edge), 1),
     )
     conn.commit()
     conn.close()
@@ -743,7 +1431,53 @@ def test_hook_archives_raw_and_builds_segments(tmp_path: Path) -> None:
     assert "COMMAND_OUTPUT" in segment_index["by_type"]
     segment_md = (session_dir / "segments" / "000__initial-to-compaction.md").read_text(encoding="utf-8")
     assert "index: ./000__initial-to-compaction.index.json" in segment_md
-    assert "stdout line" in segment_md
+    assert "## Index-first view" in segment_md
+    assert "stdout line" not in segment_md
+    assert segment_index["markdown_render"] == {
+        "mode": "index_first_compact_v1",
+        "full_raw_views_rendered": False,
+        "on_demand_supported": True,
+        "synopsis_event_limit": (
+            module.SEGMENT_COMPACT_REVIEW_EVENT_LIMIT
+        ),
+        "synopsis_event_count": 5,
+    }
+    rendered = module.render_segment_markdown_on_demand(
+        session_dir=session_dir,
+        segment="000",
+    )
+    rendered_text = Path(rendered["rendered_path"]).read_text(
+        encoding="utf-8"
+    )
+    assert rendered["status"] == "rendered"
+    assert rendered["rendered_event_count"] == 5
+    assert rendered["source_read_mode"] == "verified_raw_block"
+    assert rendered["source_bytes_read"] < rendered[
+        "privacy_scan_bytes_read"
+    ]
+    assert "stdout line" in rendered_text
+    assert "generated_redacted_on_demand_view" in rendered_text
+    freshness_vector = module.session_projection_freshness_vector(
+        aoa_root=aoa_root,
+        session_dir=session_dir,
+    )
+    assert freshness_vector["axes"]["raw_capture"]["current"] is True
+    assert freshness_vector["axes"]["stable_session_projection"][
+        "current"
+    ] is True
+    assert freshness_vector["axes"]["search"]["status"] == "queued"
+    assert freshness_vector["axes"]["graph"]["current"] is False
+    assert freshness_vector["axes"]["global_recall"] == {
+        "status": "incomplete",
+        "complete": False,
+        "negative_claims_admitted": False,
+    }
+    ready = module.projection_outbox_ready_sessions(aoa_root)
+    assert ready["status"] == "ready"
+    assert ready["ready_session_count"] == 1
+    assert ready["records"][0]["session_id"] == "session-1"
+    assert ready["raw_bytes_read"] == 0
+    assert ready["archive_manifest_scan_performed"] is False
     registry = json.loads((aoa_root / "session-registry.json").read_text(encoding="utf-8"))
     registry_record = registry["sessions"][0]
     assert registry_record["session_label"] == "2026-05-12__001__start-hooks-now"
@@ -751,6 +1485,1040 @@ def test_hook_archives_raw_and_builds_segments(tmp_path: Path) -> None:
     assert registry_record["raw"]["indexing_status"] == "indexed"
     assert registry_record["raw"]["blocks_index"] == str(session_dir / "raw" / "blocks.index.json")
     assert registry_record["raw_blocks"]["block_count"] == 2
+
+
+def test_segment_compact_markdown_is_bounded_but_index_remains_complete(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "bounded-segment-session.jsonl"
+    rows: list[dict[str, Any]] = [
+        {
+            "timestamp": "2026-08-08T12:00:00Z",
+            "type": "session_meta",
+            "payload": {"id": "bounded-segment", "cwd": str(workspace)},
+        }
+    ]
+    rows.extend(
+        {
+            "timestamp": f"2026-08-08T12:00:{ordinal:02d}Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": f"bounded synopsis event {ordinal}",
+                    }
+                ],
+            },
+        }
+        for ordinal in range(1, 21)
+    )
+    rows.append(
+        {
+            "timestamp": "2026-08-08T12:00:59Z",
+            "type": "turn_context",
+            "payload": {"summary": "bounded segment boundary"},
+        }
+    )
+    write_jsonl(transcript, rows)
+
+    receipt = module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "bounded-segment",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    assert receipt["ok"] is True
+    session_dir = Path(receipt["session_dir"])
+    manifest = json.loads(
+        (session_dir / "session.manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    first_segment = manifest["segments"][0]
+    segment_index = json.loads(
+        Path(first_segment["index"]).read_text(encoding="utf-8")
+    )
+    segment_markdown = Path(first_segment["markdown"]).read_text(
+        encoding="utf-8"
+    )
+    materialized = [
+        event
+        for event in segment_index["events"]
+        if event["markdown_anchor_materialized"] is True
+    ]
+    omitted = [
+        event
+        for event in segment_index["events"]
+        if event["markdown_anchor_materialized"] is False
+    ]
+
+    assert len(segment_index["events"]) > (
+        module.SEGMENT_COMPACT_REVIEW_EVENT_LIMIT
+    )
+    assert len(materialized) == module.SEGMENT_COMPACT_REVIEW_EVENT_LIMIT
+    assert len(omitted) == (
+        len(segment_index["events"])
+        - module.SEGMENT_COMPACT_REVIEW_EVENT_LIMIT
+    )
+    assert segment_markdown.count("## EVENT ") == (
+        module.SEGMENT_COMPACT_REVIEW_EVENT_LIMIT
+    )
+    assert "Events omitted from synopsis:" in segment_markdown
+    assert all("#" not in event["md_anchor"] for event in omitted)
+
+
+def test_raw_block_metadata_receipt_falls_back_to_digest_after_tamper(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "raw-block-receipt-session.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-08-10T12:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "raw-block-receipt",
+                    "cwd": str(workspace),
+                },
+            },
+            {
+                "timestamp": "2026-08-10T12:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "receipt task"}
+                    ],
+                },
+            },
+        ],
+    )
+    receipt = module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "raw-block-receipt",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    session_dir = Path(receipt["session_dir"])
+    manifest = module.read_json(
+        session_dir / "session.manifest.json", {}
+    )
+    publish_identity = manifest["index_schema"][
+        "projection_publish"
+    ]
+    stage_dir = module.stage_existing_session_projection(session_dir)
+    try:
+        raw_index = module.read_json(
+            stage_dir / "raw" / module.RAW_BLOCK_INDEX_JSON,
+            {},
+        )
+        block = raw_index["blocks"][0]
+        block_path = (
+            stage_dir
+            / "raw"
+            / module.RAW_BLOCKS_DIR
+            / Path(block["plain_path"]).name
+        )
+        original = block_path.read_bytes()
+        receipt_mtime_ns = block["artifact_receipts"]["plain"][
+            "mtime_ns"
+        ]
+        block_path.unlink()
+        block_path.write_bytes(original)
+        os.utime(
+            block_path,
+            ns=(receipt_mtime_ns, receipt_mtime_ns),
+        )
+        clean = module.validate_staged_session_projection(
+            stage_dir=stage_dir,
+            session_dir=session_dir,
+            publish_identity=publish_identity,
+        )
+        assert clean["ok"] is True
+        assert clean["raw_block_validation"][
+            "metadata_receipt_admitted_count"
+        ] == 0
+        assert clean["raw_block_validation"][
+            "full_sha256_count"
+        ] == 1
+
+        tampered = bytearray(original)
+        tampered[-2] = (tampered[-2] + 1) % 256
+        block_path.write_bytes(tampered)
+        os.utime(
+            block_path,
+            ns=(receipt_mtime_ns, receipt_mtime_ns),
+        )
+        assert module.sha256_file_exact(block_path) != block["sha256"]
+        rejected = module.validate_staged_session_projection(
+            stage_dir=stage_dir,
+            session_dir=session_dir,
+            publish_identity=publish_identity,
+        )
+        assert rejected["ok"] is False
+        assert "staged_raw_block_digest_mismatch:000" in rejected[
+            "diagnostics"
+        ]
+        assert rejected["raw_block_validation"][
+            "full_sha256_count"
+        ] == 1
+    finally:
+        module.remove_projection_publish_path(stage_dir)
+
+
+def test_outbox_consumers_complete_only_from_exact_committed_dependencies(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    session_dir = aoa_root / "sessions" / "outbox-session"
+    session_dir.mkdir(parents=True)
+    publish_id = "c" * 64
+    module.write_json(
+        session_dir / "session.manifest.json",
+        {
+            "session_id": "outbox-session",
+            "archive_status": "indexed",
+            "display": {"label": "outbox-session"},
+            "index_schema": {
+                "projection_publish": {
+                    "publish_id": publish_id,
+                }
+            },
+        },
+    )
+    record = module.session_projection_outbox_record(
+        session_dir=session_dir,
+        old_snapshot={},
+        new_snapshot={
+            "task_episode:episode-1": {
+                "component_type": "task_episode",
+                "digest": "d" * 64,
+                "source_ref": "session-index-shards/task-episodes/episode-1.json",
+                "generation_identity": {"generation_id": "episode-v1"},
+            }
+        },
+        old_publish_id="",
+        new_publish_id=publish_id,
+        session_id="outbox-session",
+    )
+    module.write_projection_outbox_record(session_dir, record)
+
+    blocked_entity = module.complete_entity_registry_outbox_consumers(
+        aoa_root
+    )
+    assert blocked_entity["completed_count"] == 0
+
+    module.write_projection_outbox_consumer_state(
+        session_dir,
+        record=record,
+        consumer="exact_and_lexical_search",
+        status="progress",
+        reason="legacy_progress_only",
+        completion_receipt={"db_commit": "exact"},
+    )
+    monkeypatch.setattr(
+        module,
+        "entity_registry_maintenance_status",
+        lambda _aoa_root: {
+            "status": "current",
+            "path": str(aoa_root / module.ENTITY_REGISTRY_PATH),
+            "generated_at": "2026-08-10T00:00:00Z",
+            "semantic_digest": {"sha256": "registry-digest"},
+            "observed_route_source": "operational_route_rollup",
+            "observed_source_dependency": {
+                "semantic_sha256": "observed-digest"
+            },
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "entity_registry_observed_rollup_ready",
+        lambda _aoa_root: {"ready": True, "status": "current"},
+    )
+    entity = module.complete_entity_registry_outbox_consumers(
+        aoa_root
+    )
+    assert entity["completed_count"] == 0
+
+    module.write_graph_source_state_ledger(
+        aoa_root,
+        {
+            "sources": {
+                module.graph_source_key(
+                    "session", "outbox-session", ""
+                ): {
+                    "status": "current",
+                    "source_projection_publish_id": publish_id,
+                }
+            }
+        },
+    )
+    graph = module.complete_graph_outbox_consumers_from_ledger(
+        aoa_root
+    )
+    assert graph["completed_count"] == 1
+    ready = module.projection_outbox_ready_sessions(aoa_root)
+    assert ready["records"][0]["pending_consumers"] == [
+        "exact_and_lexical_search",
+        "episode_semantic",
+        "entity_registry",
+        "graph",
+    ]
+
+
+def test_projection_component_snapshot_uses_manifest_segment_identity(
+    tmp_path: Path,
+) -> None:
+    projection_dir = tmp_path / "projection"
+    segment_dir = projection_dir / "segments"
+    segment_dir.mkdir(parents=True)
+    segment_index = segment_dir / "000.index.json"
+    segment_index.write_text(
+        "not-json-and-must-not-be-hydrated", encoding="utf-8"
+    )
+    input_digest = "a" * 64
+    generation_id = "b" * 64
+    module.write_json(
+        projection_dir / "session.manifest.json",
+        {
+            "index_schema": {
+                "session_index_generation_id": "c" * 64,
+            },
+            "segments": [
+                {
+                    "segment_id": "000",
+                    "index": str(segment_index),
+                    "input_digest": input_digest,
+                    "component_identity": {
+                        "input_digest": input_digest,
+                        "generation_id": generation_id,
+                    },
+                }
+            ],
+        },
+    )
+    module.write_json(
+        projection_dir / module.SESSION_INDEX_JSON,
+        {"payload": "index"},
+    )
+
+    snapshot = module.projection_component_snapshot(projection_dir)
+
+    expected_digest = hashlib.sha256(
+        json.dumps(
+            {
+                "input_digest": input_digest,
+                "generation_id": generation_id,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    assert snapshot["segment:000"] == {
+        "component_id": "segment:000",
+        "component_type": "segment_index",
+        "digest": expected_digest,
+        "source_ref": "segments/000.index.json",
+        "generation_identity": {"generation_id": generation_id},
+    }
+    assert snapshot["session:index"]["generation_identity"] == {
+        "generation_id": "c" * 64,
+    }
+
+
+def test_outbox_completion_crash_replay_is_durable_and_idempotent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    session_dir = aoa_root / "sessions" / "outbox-crash-session"
+    session_dir.mkdir(parents=True)
+    publish_id = "e" * 64
+    module.write_json(
+        session_dir / "session.manifest.json",
+        {
+            "session_id": "outbox-crash-session",
+            "archive_status": "indexed",
+            "index_schema": {
+                "projection_publish": {"publish_id": publish_id}
+            },
+        },
+    )
+    record = module.session_projection_outbox_record(
+        session_dir=session_dir,
+        old_snapshot={},
+        new_snapshot={
+            "segment:000": {
+                "component_type": "segment_index",
+                "digest": "f" * 64,
+                "source_ref": "segments/000.index.json",
+                "generation_identity": {"generation_id": "segment-v1"},
+            }
+        },
+        old_publish_id="",
+        new_publish_id=publish_id,
+        session_id="outbox-crash-session",
+    )
+    written = module.write_projection_outbox_record(
+        session_dir, record
+    )
+    assert written["status"] == "written"
+
+    with pytest.raises(
+        ValueError,
+        match="projection_outbox_authoritative_receipt_required",
+    ):
+        module.write_projection_outbox_consumer_state(
+            session_dir,
+            record=record,
+            consumer="exact_and_lexical_search",
+            status="complete",
+            reason="generic completion is not authoritative",
+            completion_receipt={"db_commit": "commit-1"},
+        )
+    monkeypatch.setattr(module, "utc_now", lambda: "2026-08-23T00:00:00Z")
+    progress = module.write_projection_outbox_consumer_state(
+        session_dir,
+        record=record,
+        consumer="exact_and_lexical_search",
+        status="progress",
+        reason="legacy progress after restart",
+        completion_receipt={"db_commit": "commit-1"},
+    )
+    replay = module.write_projection_outbox_consumer_state(
+        session_dir,
+        record=record,
+        consumer="exact_and_lexical_search",
+        status="progress",
+        reason="replayed progress",
+        completion_receipt={"db_commit": "commit-1"},
+    )
+    state_path = module.projection_outbox_consumer_state_path(
+        session_dir,
+        consumer="exact_and_lexical_search",
+        record_id=record["record_id"],
+    )
+    state = module.read_json(state_path, {})
+    assert progress["status"] == "progress"
+    assert replay["status"] == "progress"
+    assert state["attempt_count"] == 2
+    assert state["semantic_completion"] is False
+    assert state["progress_receipt"] == {"db_commit": "commit-1"}
+
+
+def test_outbox_terminal_retirement_requires_all_exact_receipts_and_is_replayable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    session_dir = aoa_root / "sessions" / "outbox-retirement"
+    session_dir.mkdir(parents=True)
+    monkeypatch.setattr(
+        module,
+        "_projection_outbox_completion_receipt_valid",
+        lambda *_args, **_kwargs: (True, ""),
+    )
+    publish_id = "a" * 64
+    module.write_json(
+        session_dir / "session.manifest.json",
+        {
+            "session_id": "outbox-retirement",
+            "archive_status": "indexed",
+            "index_schema": {"projection_publish": {"publish_id": publish_id}},
+        },
+    )
+    record = module.session_projection_outbox_record(
+        session_dir=session_dir,
+        old_snapshot={},
+        new_snapshot={
+            "task_episode:episode-1": {
+                "component_type": "task_episode",
+                "digest": "b" * 64,
+                "source_ref": "session-index-shards/task-episodes/episode-1.json",
+                "generation_identity": {"generation_id": "episode-v1"},
+            }
+        },
+        old_publish_id="",
+        new_publish_id=publish_id,
+        session_id="outbox-retirement",
+    )
+    record_write = module.write_projection_outbox_record(session_dir, record)
+    record_path = Path(record_write["path"])
+    original_record_bytes = record_path.read_bytes()
+    record_path.write_text("{malformed outbox", encoding="utf-8")
+    with pytest.raises(
+        ValueError,
+        match="projection_outbox_record_collision",
+    ):
+        module.write_projection_outbox_record(session_dir, record)
+    assert record_path.read_bytes() == b"{malformed outbox"
+    record_path.write_bytes(original_record_bytes)
+
+    partial = module.projection_outbox_retirement_status(
+        aoa_root,
+        session_dir=session_dir,
+        record_path=record_path,
+        record=record,
+    )
+    assert partial["status"] == "consumer_completion_pending"
+    assert set(partial["pending_consumers"]) == set(
+        module.PROJECTION_OUTBOX_CONSUMERS
+    )
+    assert module.write_projection_outbox_retirement(
+        aoa_root,
+        session_dir=session_dir,
+        record_path=record_path,
+        record=record,
+    )["status"] == "deferred"
+    assert not list(
+        (aoa_root / module.PROJECTION_OUTBOX_RETIREMENTS_DIR).glob("*.json")
+    )
+
+    for consumer in record["required_consumers"]:
+        module.write_projection_outbox_consumer_state(
+            session_dir,
+            record=record,
+            consumer=consumer,
+            status="complete",
+            reason="test_exact_commit",
+            completion_receipt={"consumer": consumer, "commit": "exact"},
+            authoritative=True,
+        )
+    retirement_path = module.projection_outbox_retirement_path(
+        aoa_root,
+        record["record_id"],
+    )
+    retirement_path.parent.mkdir(parents=True, exist_ok=True)
+    retirement_path.write_text("{malformed retirement", encoding="utf-8")
+    malformed_retirement_bytes = retirement_path.read_bytes()
+    with pytest.raises(
+        ValueError,
+        match="projection_outbox_retirement_collision",
+    ):
+        module.write_projection_outbox_retirement(
+            aoa_root,
+            session_dir=session_dir,
+            record_path=record_path,
+            record=record,
+        )
+    assert retirement_path.read_bytes() == malformed_retirement_bytes
+    retirement_path.unlink()
+    ready_before_retirement = module.projection_outbox_ready_sessions(aoa_root)
+    assert ready_before_retirement["ready_session_count"] == 1
+    assert ready_before_retirement["records"][0]["pending_consumers"] == []
+    assert ready_before_retirement["records"][0]["outbox_retirement_pending"] is True
+
+    written = module.write_projection_outbox_retirement(
+        aoa_root,
+        session_dir=session_dir,
+        record_path=record_path,
+        record=record,
+    )
+    replay = module.write_projection_outbox_retirement(
+        aoa_root,
+        session_dir=session_dir,
+        record_path=record_path,
+        record=record,
+    )
+    assert written["status"] == "written"
+    assert replay["status"] == "reused"
+    retirement_payload = module.read_json(retirement_path, {})
+    module.write_json(
+        retirement_path,
+        {
+            **retirement_payload,
+            "outbox_record_ref": str(tmp_path / "wrong-outbox-record.json"),
+        },
+    )
+    invalid_ref = module.projection_outbox_retirement_status(
+        aoa_root,
+        session_dir=session_dir,
+        record_path=record_path,
+        record=record,
+    )
+    assert invalid_ref["status"] == "retirement_invalid"
+    module.write_json(retirement_path, retirement_payload)
+    retired = module.projection_outbox_retirement_status(
+        aoa_root,
+        session_dir=session_dir,
+        record_path=record_path,
+        record=record,
+    )
+    assert retired["ok"] is True
+    assert retired["status"] == "retired"
+    assert module.read_json(Path(record_write["path"]), {})["status"] == "pending"
+    assert module.projection_outbox_ready_sessions(aoa_root)[
+        "ready_session_count"
+    ] == 0
+
+
+def test_entity_outbox_ack_requires_exact_search_completion_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    session_dir = aoa_root / "sessions" / "entity-predecessor"
+    session_dir.mkdir(parents=True)
+    publish_id = "c" * 64
+    module.write_json(
+        session_dir / "session.manifest.json",
+        {
+            "session_id": "entity-predecessor",
+            "archive_status": "indexed",
+            "index_schema": {
+                "projection_publish": {"publish_id": publish_id}
+            },
+        },
+    )
+    record = module.session_projection_outbox_record(
+        session_dir=session_dir,
+        old_snapshot={},
+        new_snapshot={
+            "raw_block:block-1": {
+                "component_type": "raw_block",
+                "digest": "d" * 64,
+                "source_ref": "raw/blocks/block-1.jsonl",
+                "generation_identity": {},
+            }
+        },
+        old_publish_id="",
+        new_publish_id=publish_id,
+        session_id="entity-predecessor",
+    )
+    module.write_projection_outbox_record(session_dir, record)
+    search_state_path = module.projection_outbox_consumer_state_path(
+        session_dir,
+        consumer="exact_and_lexical_search",
+        record_id=record["record_id"],
+    )
+    module.write_json(
+        search_state_path,
+        {
+            "schema_version": 1,
+            "artifact_type": "projection_outbox_consumer_state",
+            "record_id": record["record_id"],
+            "session_id": "entity-predecessor",
+            "consumer": "exact_and_lexical_search",
+            "source_publish_id": publish_id,
+            "status": "complete",
+            "semantic_completion": False,
+            "completion_receipt": {},
+        },
+    )
+    search_db = module.search_db_path(aoa_root)
+    search_db.parent.mkdir(parents=True, exist_ok=True)
+    search_db.touch()
+    monkeypatch.setattr(
+        module,
+        "entity_registry_maintenance_status",
+        lambda _aoa_root: {
+            "status": "current",
+            "observed_route_source": "archived_route_terms",
+            "path": str(aoa_root / "entity-registry.json"),
+            "generated_at": "2026-08-26T00:00:00Z",
+            "semantic_digest": "registry-digest",
+        },
+    )
+
+    result = module.complete_entity_registry_outbox_consumers(aoa_root)
+
+    assert result["status"] == "no_completion"
+    assert result["completed_count"] == 0
+    assert result["deferred"][0]["reason"] == (
+        "exact_search_predecessor_not_complete"
+    )
+    assert result["deferred"][0]["predecessor_diagnostic"] == (
+        "consumer_completion_receipt_missing_or_mismatched"
+    )
+    assert not module.projection_outbox_consumer_state_path(
+        session_dir,
+        consumer="entity_registry",
+        record_id=record["record_id"],
+    ).exists()
+
+
+def test_outbox_consumer_lanes_are_fair_restart_safe_and_fail_closed(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+
+    def write_task_episode_record(
+        session_id: str,
+        publish_id: str,
+        created_at: str,
+    ) -> tuple[Path, dict[str, Any]]:
+        session_dir = aoa_root / "sessions" / session_id
+        session_dir.mkdir(parents=True)
+        module.write_json(
+            session_dir / "session.manifest.json",
+            {
+                "session_id": session_id,
+                "archive_status": "indexed",
+                "index_schema": {
+                    "projection_publish": {"publish_id": publish_id}
+                },
+            },
+        )
+        record = module.session_projection_outbox_record(
+            session_dir=session_dir,
+            old_snapshot={},
+            new_snapshot={
+                "task_episode:episode-1": {
+                    "component_type": "task_episode",
+                    "digest": f"digest-{session_id}",
+                    "source_ref": "session-index-shards/task-episodes/episode-1.json",
+                    "generation_identity": {"generation_id": "episode-v1"},
+                }
+            },
+            old_publish_id="",
+            new_publish_id=publish_id,
+            session_id=session_id,
+        )
+        record["created_at"] = created_at
+        record["record_id"] = module._projection_outbox_record_recomputed_id(
+            record
+        )
+        module.write_projection_outbox_record(session_dir, record)
+        return session_dir, record
+
+    sessions = [
+        write_task_episode_record(
+            "fair-a", "a" * 64, "2026-08-26T00:00:01Z"
+        ),
+        write_task_episode_record(
+            "fair-b", "b" * 64, "2026-08-26T00:00:02Z"
+        ),
+        write_task_episode_record(
+            "fair-c", "c" * 64, "2026-08-26T00:00:03Z"
+        ),
+    ]
+    records_by_session = {record["session_id"]: record for _, record in sessions}
+
+    first = module.projection_outbox_ready_sessions(
+        aoa_root,
+        limit=1,
+        consumer="graph",
+        advance_cursor=True,
+    )
+    assert first["records"][0]["session_id"] == "fair-a"
+    assert first["missing_consumer_state_record_count"] == 3
+    assert first["blocked_record_count"] == 0
+
+    second = module.projection_outbox_ready_sessions(
+        aoa_root,
+        limit=1,
+        consumer="graph",
+        advance_cursor=True,
+    )
+    third = module.projection_outbox_ready_sessions(
+        aoa_root,
+        limit=1,
+        consumer="graph",
+        advance_cursor=True,
+    )
+    fourth_after_restart = module.projection_outbox_ready_sessions(
+        aoa_root,
+        limit=1,
+        consumer="graph",
+        advance_cursor=True,
+    )
+    assert [
+        second["records"][0]["session_id"],
+        third["records"][0]["session_id"],
+        fourth_after_restart["records"][0]["session_id"],
+    ] == ["fair-b", "fair-c", "fair-a"]
+    fairness_state = module.projection_outbox_fairness_state(aoa_root)
+    assert fairness_state["ok"] is True
+    assert fairness_state["cursor_by_consumer"]["graph"] == records_by_session[
+        "fair-a"
+    ]["record_id"]
+
+    entity_lane = module.projection_outbox_ready_sessions(
+        aoa_root,
+        limit=3,
+        consumer="entity_registry",
+    )
+    assert [
+        item["session_id"] for item in entity_lane["records"]
+    ] == ["fair-a", "fair-b", "fair-c"]
+
+    invalid_session_dir, invalid_record = sessions[0]
+    invalid_path = Path(
+        module.projection_outbox_record_path(
+            invalid_session_dir,
+            invalid_record["record_id"],
+        )
+    )
+    invalid_payload = module.read_json(invalid_path, {})
+    invalid_payload["created_at"] = ""
+    module.write_json(invalid_path, invalid_payload)
+    invalid_bytes = invalid_path.read_bytes()
+    after_invalid = module.projection_outbox_ready_sessions(
+        aoa_root,
+        limit=3,
+        consumer="graph",
+    )
+    assert after_invalid["blocked_record_count"] == 1
+    assert "record_created_at_missing" in after_invalid["blocked_records"][0][
+        "diagnostics"
+    ]
+    assert "fair-a" not in {
+        item["session_id"] for item in after_invalid["records"]
+    }
+    assert invalid_path.read_bytes() == invalid_bytes
+
+    fairness_path = module.projection_outbox_fairness_state_path(aoa_root)
+    module.write_json(fairness_path, {"schema_version": 999})
+    fairness_bytes = fairness_path.read_bytes()
+    scheduler_blocked = module.projection_outbox_ready_sessions(
+        aoa_root,
+        limit=3,
+        consumer="graph",
+    )
+    assert scheduler_blocked["status"] == "scheduler_state_invalid"
+    assert scheduler_blocked["records"] == []
+    assert fairness_path.read_bytes() == fairness_bytes
+
+
+def test_outbox_receipt_identity_and_unverified_child_reconcile_are_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    session_dir = aoa_root / "sessions" / "receipt-identity"
+    session_dir.mkdir(parents=True)
+    publish_id = "d" * 64
+    module.write_json(
+        session_dir / "session.manifest.json",
+        {
+            "session_id": "receipt-identity",
+            "archive_status": "indexed",
+            "index_schema": {"projection_publish": {"publish_id": publish_id}},
+        },
+    )
+    record = module.session_projection_outbox_record(
+        session_dir=session_dir,
+        old_snapshot={},
+        new_snapshot={
+            "task_episode:episode-1": {
+                "component_type": "task_episode",
+                "digest": "e" * 64,
+                "source_ref": "episode.json",
+                "generation_identity": {"generation_id": "episode-v1"},
+            }
+        },
+        old_publish_id="",
+        new_publish_id=publish_id,
+        session_id="receipt-identity",
+    )
+    with pytest.raises(
+        ValueError,
+        match="projection_outbox_authoritative_receipt_invalid",
+    ):
+        module.write_projection_outbox_consumer_state(
+            session_dir,
+            record=record,
+            consumer="graph",
+            status="complete",
+            reason="wrong receipt identity",
+            completion_receipt={"consumer": "entity_registry"},
+            authoritative=True,
+        )
+
+    calls: list[str] = []
+
+    def graph(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        calls.append("graph")
+        return {"completed_count": 0}
+
+    def entity(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        calls.append("entity")
+        return {"completed_count": 0}
+
+    def retirement(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        calls.append("retirement")
+        return {"written_count": 0}
+
+    monkeypatch.setattr(module, "complete_graph_outbox_consumers_from_ledger", graph)
+    monkeypatch.setattr(module, "complete_entity_registry_outbox_consumers", entity)
+    monkeypatch.setattr(module, "reconcile_projection_outbox_retirements", retirement)
+    reconciled = module.automatic_outbox_convergence_postpass(
+        aoa_root=aoa_root,
+        target="receipt-identity",
+        launch_result_verified=False,
+    )
+    assert reconciled["status"] == "completed_after_unverified_child"
+    assert reconciled["child_result_verified"] is False
+    assert calls == ["graph", "entity", "retirement"]
+
+
+def test_retry_dispatch_hands_projection_to_downstream_and_closes_only_after_retirement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    session_id = "outbox-stage-session"
+    options = {
+        "persistent_obligation": True,
+        "obligation_kind": module.SESSION_PROJECTION_FRESHNESS_OBLIGATION_KIND,
+        "session_id": session_id,
+        "session_dir": str(aoa_root / "sessions" / session_id),
+        "required_stable_projection": True,
+        "required_search_consumer": True,
+        "outbox_convergence_required": True,
+        "convergence_stage": "projection",
+    }
+
+    def schedule(queue_payload: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        return (
+            module.auto_maintenance_retry_upsert_item(
+                queue_payload,
+                profile="backlog",
+                target=session_id,
+                reason="timer_backlog",
+                launch_status="freshness_obligation_enqueued",
+                options=options,
+                now_epoch=1_000.0,
+                initial_delay_seconds=0,
+            ),
+            True,
+        )
+
+    module.mutate_auto_maintenance_retry_queue(
+        aoa_root,
+        schedule,
+        now_epoch=1_000.0,
+    )
+    phase = 1
+    obligation_calls = 0
+    convergence_calls = 0
+    launches: list[dict[str, Any]] = []
+
+    def fake_obligation(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        nonlocal obligation_calls
+        obligation_calls += 1
+        satisfied = phase == 2 or obligation_calls >= 2
+        return {
+            "ok": satisfied,
+            "status": "satisfied" if satisfied else "remaining",
+            "projected_capture_bytes": 20 if satisfied else 10,
+            "satisfied_axes": ["capture", "stable_session_projection", "search"]
+            if satisfied
+            else [],
+            "remaining_axes": [] if satisfied else ["capture"],
+        }
+
+    def fake_convergence(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        nonlocal convergence_calls
+        convergence_calls += 1
+        if phase == 1:
+            return {
+                "ok": False,
+                "status": "remaining",
+                "outbox_present": True,
+                "pending_consumers": ["entity_registry", "graph"],
+            }
+        return {
+            "ok": convergence_calls >= 2,
+            "status": "converged" if convergence_calls >= 2 else "remaining",
+            "outbox_present": True,
+            "pending_consumers": []
+            if convergence_calls >= 2
+            else ["graph"],
+        }
+
+    def fake_launch(**kwargs: Any) -> dict[str, Any]:
+        launches.append(kwargs)
+        return {
+            "schema_version": 1,
+            "artifact_type": "auto_maintenance_resource_launch",
+            "ok": True,
+            "status": "completed",
+            "child_result_verified": True,
+        }
+
+    monkeypatch.setattr(module, "session_projection_freshness_obligation_status", fake_obligation)
+    monkeypatch.setattr(module, "session_projection_outbox_convergence_status", fake_convergence)
+    monkeypatch.setattr(module, "auto_maintenance_resource_launch", fake_launch)
+    monkeypatch.setattr(
+        module,
+        "automatic_outbox_convergence_postpass",
+        lambda **_kwargs: {
+            "status": "completed",
+            "graph": {"completed_count": 1},
+            "entity": {"completed_count": 1},
+            "retirement": {"written_count": 1},
+        },
+    )
+
+    first = module.auto_maintenance_retry_dispatch(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        apply=True,
+        limit=1,
+        now_epoch=1_001.0,
+    )
+    first_result = first["results"][0]
+    assert first_result["disposition"] == (
+        "projection_stage_completed_downstream_pending"
+    )
+    assert first_result["convergence_stage_after"] == "downstream"
+    assert "projection-catchup" in launches[0]["child_command_override"]
+    assert launches[0]["repair_indexes"] is False
+    assert launches[0]["repair_graph"] is False
+    staged = module.auto_maintenance_retry_queue_status(
+        aoa_root,
+        now_epoch=1_001.0,
+    )
+    assert staged["items"]["backlog:" + session_id]["options"][
+        "convergence_stage"
+    ] == "downstream"
+
+    phase = 2
+    obligation_calls = 0
+    convergence_calls = 0
+    second = module.auto_maintenance_retry_dispatch(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        apply=True,
+        limit=1,
+        now_epoch=1_003.0,
+    )
+    second_result = second["results"][0]
+    assert second_result["launch_status"] == "outbox_convergence_satisfied"
+    assert second_result["disposition"] == "completed"
+    assert second_result["convergence_stage_before"] == "downstream"
+    assert "auto-maintenance" in launches[1]["child_command_override"]
+    assert session_id in launches[1]["child_command_override"]
+    assert launches[1]["repair_indexes"] is True
+    assert launches[1]["repair_graph"] is True
+    assert module.auto_maintenance_retry_queue_status(aoa_root)[
+        "queued_count"
+    ] == 0
 
 
 def test_agent_event_taxonomy_task_episodes_and_search_routes(tmp_path: Path, monkeypatch: Any) -> None:
@@ -818,7 +2586,13 @@ def test_agent_event_taxonomy_task_episodes_and_search_routes(tmp_path: Path, mo
     session_index = json.loads((session_dir / "session.index.json").read_text(encoding="utf-8"))
     assert session_index["agent_event_counts"]["assistant_reasoning_boundary"] == 1
     assert session_index["task_episode_counts"]["total"] == 2
-    first_episode = session_index["task_episodes"][0]
+    assert session_index["task_episodes"] == []
+    task_episodes = module.session_index_task_episode_components(
+        session_dir,
+        session_index,
+    )
+    assert len(task_episodes) == 2
+    first_episode = task_episodes[0]
     assert first_episode["start_user_ref"]["raw_ref"] == "raw:line:2"
     assert first_episode["status"] == "closed"
     assert first_episode["reasoning_refs"]
@@ -836,7 +2610,7 @@ def test_agent_event_taxonomy_task_episodes_and_search_routes(tmp_path: Path, mo
     )
     assert first_episode["time_span"]["from"] == "2026-06-13T00:00:01Z"
     assert first_episode["time_span"]["to"] == "2026-06-13T00:00:09Z"
-    assert session_index["task_episodes"][1]["transition"]["previous_episode_id"] == first_episode["episode_id"]
+    assert task_episodes[1]["transition"]["previous_episode_id"] == first_episode["episode_id"]
     recent_episode_route = module.task_episode_route_search(aoa_root=aoa_root, target="latest", limit=1)
     assert recent_episode_route["order"] == "recent"
     assert recent_episode_route["results"][0]["episode_id"] == "task-0002"
@@ -1119,6 +2893,150 @@ def test_agent_event_taxonomy_task_episodes_and_search_routes(tmp_path: Path, mo
     assert "explain" not in windows_without_explain["results"][0]
 
 
+def test_search_event_inside_task_interval_keeps_episode_join_when_not_a_curated_ref(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = (
+        tmp_path
+        / "rollout-2026-07-11T00-00-00-episode-interval-search.jsonl"
+    )
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-07-11T00:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "episode-interval-search",
+                    "cwd": str(workspace),
+                },
+            },
+            {
+                "timestamp": "2026-07-11T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Review the live skill dispatch receipt.",
+                        }
+                    ],
+                },
+            },
+            {
+                "timestamp": "2026-07-11T00:00:02Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": "call-receipt",
+                    "arguments": json.dumps(
+                        {"cmd": "show reviewed receipt"}
+                    ),
+                },
+            },
+            {
+                "timestamp": "2026-07-11T00:00:03Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call-receipt",
+                    "output": (
+                        "direct_procedure_gap\n"
+                        + ("large reviewed receipt row\n" * 300)
+                    ),
+                },
+            },
+            {
+                "timestamp": "2026-07-11T00:00:04Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "Receipt review complete.",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "episode-interval-search",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    session_dir = next(
+        path
+        for path in (aoa_root / "sessions").iterdir()
+        if path.is_dir()
+    )
+    session_index = module.read_json(
+        session_dir / "session.index.json",
+        {},
+    )
+    episode = module.session_index_task_episode_components(
+        session_dir,
+        session_index,
+    )[0]
+    assert episode["event_range"]["from_line"] == 2
+    assert episode["event_range"]["to_line"] == 5
+    assert all(
+        str(ref.get("raw_ref") or "") != "raw:line:4"
+        for bucket in (
+            "reasoning_refs",
+            "plan_refs",
+            "progress_refs",
+            "answer_refs",
+            "action_refs",
+            "tool_refs",
+            "verification_refs",
+            "error_refs",
+            "closeout_refs",
+            "blocker_refs",
+            "transition_refs",
+        )
+        for ref in episode.get(bucket, [])
+        if isinstance(ref, dict)
+    )
+
+    index_result = module.search_index_sessions(
+        aoa_root=aoa_root,
+        target="all",
+        rebuild=True,
+    )
+    assert index_result["ok"] is True
+    result = module.search_sessions(
+        aoa_root=aoa_root,
+        query="direct_procedure_gap",
+        session=session_dir.name,
+        task_episode_id=episode["episode_id"],
+        limit=5,
+        explain=True,
+    )
+    assert result["ok"] is True
+    assert result["result_count"] == 1
+    assert result["results"][0]["task_episode_id"] == (
+        episode["episode_id"]
+    )
+    assert result["results"][0]["raw_ref"] == "raw:line:4"
+    assert result["results"][0]["refs"]["raw"] == "raw:line:4"
+
+
 def test_task_episode_semantics_admits_compact_success_observation_but_not_source_dump() -> None:
     rows = [
         {
@@ -1203,6 +3121,82 @@ def test_task_episode_semantics_admits_compact_success_observation_but_not_sourc
     assert ("tool", "exec_command", "invoked") in source_relations
     assert ("skill", "aoa_session_memory_global_route", "inspected") in source_relations
     assert source_result.get("typed_anchors", []) == []
+
+
+def test_task_episode_builder_computes_semantic_text_once_per_event(
+    monkeypatch: Any,
+) -> None:
+    rows = [
+        {
+            "timestamp": "2026-08-11T00:00:00Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "Inspect the current projection",
+                    }
+                ],
+            },
+        },
+        {
+            "timestamp": "2026-08-11T00:00:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "arguments": json.dumps({"cmd": "session-memory status"}),
+                "call_id": "call-semantic-once",
+            },
+        },
+        {
+            "timestamp": "2026-08-11T00:00:02Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call-semantic-once",
+                "output": "Process exited with code 0",
+            },
+        },
+    ]
+    events = [
+        module.classify_raw_event(json.dumps(row), row, line_no)
+        for line_no, row in enumerate(rows, start=1)
+    ]
+    original = module.event_semantic_text
+    observed_lines: list[int] = []
+
+    def counted(event: Any) -> str:
+        observed_lines.append(event.line_no)
+        return original(event)
+
+    monkeypatch.setattr(module, "event_semantic_text", counted)
+    episodes = module.generated_task_episodes_for_events(events, [])
+
+    assert episodes
+    assert observed_lines == [1, 2, 3]
+
+
+def test_segment_for_line_uses_ordered_ranges_without_losing_boundaries() -> None:
+    segments = [
+        {
+            "segment_id": f"{ordinal:03d}",
+            "source_range": {
+                "from_line": (ordinal * 10) + 1,
+                "to_line": (ordinal * 10) + 8,
+            },
+        }
+        for ordinal in range(644)
+    ]
+
+    assert module.segment_for_line(segments, 1)["segment_id"] == "000"
+    assert module.segment_for_line(segments, 3211)["segment_id"] == "321"
+    assert module.segment_for_line(segments, 6438)["segment_id"] == "643"
+    assert module.segment_for_line(segments, 9) == {}
+    assert module.segment_for_line(segments, 0) == {}
+    assert module.segment_for_line([], 1) == {}
 
 
 def test_task_episode_replayed_intent_after_turn_abort_stays_in_one_semantic_lifecycle() -> None:
@@ -1743,6 +3737,452 @@ def test_task_episode_failure_observation_and_resume_stay_with_open_lifecycle() 
     assert any(
         item["refs"]["raw"] == "raw:line:9"
         for item in episode["representations"]["outcomes"]
+    )
+
+
+def test_task_episode_real_context_addition_bridges_runtime_turn_boundary() -> None:
+    rows = [
+        {
+            "timestamp": "2026-06-13T17:26:26Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": (
+                            "Тут как-будто нужен aoa-eval-skill с подскиллами, "
+                            "чтобы проверять доступные evals и применять их."
+                        ),
+                    }
+                ],
+            },
+        },
+        {
+            "timestamp": "2026-06-13T17:27:30Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": (
+                            "После MCP/local ports следующий орган — "
+                            "aoa-eval skill family."
+                        ),
+                    }
+                ],
+            },
+        },
+        {
+            "timestamp": "2026-06-13T17:27:33Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "task_complete",
+                "turn_id": "turn-plan",
+            },
+        },
+        {
+            "timestamp": "2026-06-13T17:29:55Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "task_started",
+                "turn_id": "turn-context-addition",
+            },
+        },
+        {
+            "timestamp": "2026-06-13T17:29:55.100Z",
+            "type": "turn_context",
+            "payload": {
+                "turn_id": "turn-context-addition",
+            },
+        },
+        {
+            "timestamp": "2026-06-13T17:29:56Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": (
+                            "Да, всё именно так. Но ещё бы лучше на каждый "
+                            "перечисленный тобою пункт изучил бы инфу в вебе "
+                            "и всех репо, перед тем как пойти в сессии."
+                        ),
+                    }
+                ],
+            },
+        },
+    ]
+    events = [
+        module.classify_raw_event(
+            json.dumps(row, ensure_ascii=False),
+            row,
+            line_no,
+        )
+        for line_no, row in enumerate(rows, start=1)
+    ]
+
+    episodes = module.generated_task_episodes_for_events(events, [])
+
+    assert len(episodes) == 1
+    assert events[5].facets["conversation_act"]["kind"] == (
+        "operator_context_addition"
+    )
+    episode = episodes[0]
+    assert [item["raw_ref"] for item in episode["intent_refs"]] == [
+        "raw:line:1",
+        "raw:line:6",
+    ]
+    assert len(episode["semantic_continuations"]) == 1
+    continuation = episode["semantic_continuations"][0]
+    assert continuation["event_id"] == "000006"
+    assert continuation["raw_ref"] == "raw:line:6"
+    assert continuation["conversation_act"] == "operator_context_addition"
+    assert continuation["relation"] == "context_addition"
+    assert continuation["admission_basis"] == (
+        "typed_operator_conversation_act"
+    )
+    assert (
+        "runtime_turn_boundary_bridged_by_typed_continuation"
+        in episode["ambiguity_flags"]
+    )
+    assert any(
+        ref["raw_ref"] == "raw:line:4"
+        and ref.get("runtime_boundary_role")
+        == "bridged_runtime_task_started"
+        for ref in episode["transition_refs"]
+    )
+    assert any(
+        item["refs"]["raw"] == "raw:line:6"
+        and item["semantic_continuation_relation"] == "context_addition"
+        for item in episode["representations"]["intents"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("И ещё учти ограничение по времени.", True),
+        ("Дополнение: не изменяй канонический репозиторий.", True),
+        ("Also keep in mind the repository is frozen.", True),
+        ("Теперь новая задача: подготовь отчёт по календарю.", False),
+        ("И ещё одна новая задача: подготовь отчёт по календарю.", False),
+        ("Перейдём к другой задаче.", False),
+    ],
+)
+def test_operator_context_addition_signal_is_bounded(
+    text: str,
+    expected: bool,
+) -> None:
+    assert module.operator_context_addition_signal(text) is expected
+
+
+def test_task_episode_standalone_context_addition_starts_one_lifecycle() -> None:
+    rows = [
+        {
+            "timestamp": "2026-07-18T00:00:02Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "И ещё учти ограничение по времени.",
+                    }
+                ],
+            },
+        },
+    ]
+    events = [
+        module.classify_raw_event(
+            json.dumps(row, ensure_ascii=False),
+            row,
+            line_no,
+        )
+        for line_no, row in enumerate(rows, start=1)
+    ]
+
+    episodes = module.generated_task_episodes_for_events(events, [])
+
+    assert len(episodes) == 1
+    assert episodes[0]["event_range"]["from_line"] == 1
+    assert episodes[0]["transition"]["reason"] == "operator_context_addition"
+    assert episodes[0]["semantic_continuations"] == []
+
+
+def test_task_episode_unrelated_prompt_adopts_empty_runtime_turn_boundary() -> None:
+    rows = [
+        {
+            "timestamp": "2026-07-18T00:00:00Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "Проверь индексы aoa-session-memory",
+                    }
+                ],
+            },
+        },
+        {
+            "timestamp": "2026-07-18T00:00:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "Индексы проверены.",
+                    }
+                ],
+            },
+        },
+        {
+            "timestamp": "2026-07-18T00:00:02Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "task_complete",
+                "turn_id": "turn-indexes",
+            },
+        },
+        {
+            "timestamp": "2026-07-18T00:01:00Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "task_started",
+                "turn_id": "turn-calendar",
+            },
+        },
+        {
+            "timestamp": "2026-07-18T00:01:00.100Z",
+            "type": "turn_context",
+            "payload": {
+                "turn_id": "turn-calendar",
+            },
+        },
+        {
+            "timestamp": "2026-07-18T00:01:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "Подготовь отдельный отчёт по календарю",
+                    }
+                ],
+            },
+        },
+    ]
+    events = [
+        module.classify_raw_event(
+            json.dumps(row, ensure_ascii=False),
+            row,
+            line_no,
+        )
+        for line_no, row in enumerate(rows, start=1)
+    ]
+
+    episodes = module.generated_task_episodes_for_events(events, [])
+
+    assert len(episodes) == 2
+    assert episodes[0]["event_range"]["to_line"] == 3
+    second = episodes[1]
+    assert second["event_range"]["from_line"] == 4
+    assert second["intent_refs"][0]["raw_ref"] == "raw:line:6"
+    assert second["transition"]["previous_episode_id"] == "task-0001"
+    assert second["transition"]["first_semantic_intent_ref"] == (
+        "raw:line:6"
+    )
+    assert second["transition"]["user_conversation_act"] == (
+        "operator_instruction"
+    )
+    assert second["semantic_continuations"] == []
+
+
+def test_task_episode_generic_exact_prompt_does_not_bridge_runtime_turn() -> None:
+    rows = [
+        {
+            "timestamp": "2026-06-18T23:51:04Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "Давай",
+                    }
+                ],
+            },
+        },
+        {
+            "timestamp": "2026-06-18T23:57:47Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "Практический smoke завершён.",
+                    }
+                ],
+            },
+        },
+        {
+            "timestamp": "2026-06-18T23:57:50Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "task_complete",
+                "turn_id": "turn-smoke",
+            },
+        },
+        {
+            "timestamp": "2026-06-18T23:58:24Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "task_started",
+                "turn_id": "turn-next",
+            },
+        },
+        {
+            "timestamp": "2026-06-18T23:58:26Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "Давай",
+                    }
+                ],
+            },
+        },
+    ]
+    events = [
+        module.classify_raw_event(
+            json.dumps(row, ensure_ascii=False),
+            row,
+            line_no,
+        )
+        for line_no, row in enumerate(rows, start=1)
+    ]
+
+    episodes = module.generated_task_episodes_for_events(events, [])
+
+    assert len(episodes) == 2
+    assert episodes[0]["intent_refs"][0]["raw_ref"] == "raw:line:1"
+    assert episodes[1]["intent_refs"][0]["raw_ref"] == "raw:line:5"
+    assert episodes[1]["transition"]["first_semantic_intent_ref"] == (
+        "raw:line:5"
+    )
+    assert episodes[1]["semantic_continuations"] == []
+    assert not any(
+        "runtime_turn_boundary_bridged_by_typed_continuation"
+        in episode["ambiguity_flags"]
+        for episode in episodes
+    )
+
+
+def test_task_episode_context_addition_does_not_bridge_evidence_bearing_runtime_episode() -> None:
+    rows = [
+        {
+            "timestamp": "2026-07-18T00:00:00Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "Проверь индексы aoa-session-memory",
+                    }
+                ],
+            },
+        },
+        {
+            "timestamp": "2026-07-18T00:00:01Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "task_complete",
+                "turn_id": "turn-indexes",
+            },
+        },
+        {
+            "timestamp": "2026-07-18T00:01:00Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "task_started",
+                "turn_id": "turn-intervening",
+            },
+        },
+        {
+            "timestamp": "2026-07-18T00:01:00.500Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "Выполняю отдельное восстановление runtime.",
+                    }
+                ],
+            },
+        },
+        {
+            "timestamp": "2026-07-18T00:01:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "И ещё учти ограничение по времени.",
+                    }
+                ],
+            },
+        },
+    ]
+    events = [
+        module.classify_raw_event(
+            json.dumps(row, ensure_ascii=False),
+            row,
+            line_no,
+        )
+        for line_no, row in enumerate(rows, start=1)
+    ]
+
+    episodes = module.generated_task_episodes_for_events(events, [])
+
+    assert len(episodes) == 2
+    assert episodes[0]["intent_refs"][0]["raw_ref"] == "raw:line:1"
+    assert any(
+        ref["raw_ref"] == "raw:line:4"
+        for ref in episodes[1]["answer_refs"]
+    )
+    assert any(
+        continuation["raw_ref"] == "raw:line:5"
+        and continuation["relation"] == "context_addition"
+        for continuation in episodes[1]["semantic_continuations"]
+    )
+    assert not any(
+        "runtime_turn_boundary_bridged_by_typed_continuation"
+        in episode["ambiguity_flags"]
+        for episode in episodes
     )
 
 
@@ -5530,12 +7970,15 @@ def test_graph_timeline_recovers_exact_segment_peer_from_stale_search_seed(
         for relation in timeline["edges"]
     } == {"answered_by", "responds_to"}
     assert timeline["freshness"]["status"] == "stale_readable"
+    assert timeline["freshness"]["selected_seed_route"] == (
+        "exact_literal_postings"
+    )
     assert timeline["quality"][
         "structured_correlation_segment_peer_admitted_count"
-    ] == 1
+    ] == 0
     assert timeline["quality"][
         "structured_correlation_segment_peer_candidate_count"
-    ] == 2
+    ] == 1
     assert timeline["quality"][
         "structured_correlation_segment_peer_unverifiable_count"
     ] == 0
@@ -6518,9 +8961,18 @@ def test_episode_source_identity_is_semantic_and_rejects_digest_tampering(
     assert after_clock_only_rewrite["fingerprint"] == before["fingerprint"]
 
     tampered_index = module.read_json(index_path, {})
-    assert tampered_index["task_episodes"]
-    tampered_index["task_episodes"][0]["status"] = "tampered-status"
-    module.write_json(index_path, tampered_index)
+    assert tampered_index["task_episodes"] == []
+    component_manifest = module.read_json(
+        session_dir / tampered_index["component_storage"]["manifest_ref"],
+        {},
+    )
+    shard_ref = component_manifest["components"]["task_episodes"][0][
+        "ref"
+    ]
+    shard_path = session_dir / shard_ref
+    tampered_shard = module.read_json(shard_path, {})
+    tampered_shard["payload"]["status"] = "tampered-status"
+    module.write_json(shard_path, tampered_shard)
     tampered = module.episode_semantic_source_fingerprint(
         record,
         manifest=manifest,
@@ -6732,7 +9184,23 @@ def test_episode_dense_projection_exact_cosine_and_semantic_refresh_invalidation
         )
         episode = {
             "episode_id": "task-0001",
-            "representations": {"outcomes": [{"text": text}]},
+            "representations": {
+                "outcomes": [
+                    {
+                        "text": text,
+                        "refs": {
+                            "raw": (
+                                f"raw:line:{10 + index}"
+                            ),
+                            "session": (
+                                f"sessions/{session_id}/session.json"
+                            ),
+                        },
+                        "source_lane": "assistant",
+                        "admission_basis": "assistant_observation",
+                    }
+                ]
+            },
             "narrative": text,
         }
         conn.execute(
@@ -6793,6 +9261,51 @@ def test_episode_dense_projection_exact_cosine_and_semantic_refresh_invalidation
     assert built["ok"] is True
     assert built["coverage"]["status"] == "current"
     assert built["coverage"]["vector_count"] == 2
+    assert built["coverage"]["representation_vector_count"] == 2
+    assert built["generation_publish"]["status"] == "published"
+    metadata_conn = module.connect_existing_search_db(db_path)
+    stored_generations = module.projection_generation_from_json(
+        metadata_conn.execute(
+            "SELECT value FROM meta "
+            "WHERE key = 'generation_identities_json'"
+        ).fetchone()[0]
+    )
+    metadata_conn.close()
+    assert stored_generations["episode_dense"]["generation_id"] == (
+        module.session_memory_expected_generation_identities(aoa_root)[
+            "episode_dense"
+        ]["generation_id"]
+    )
+    stored_generations["episode_dense"] = {
+        "generation_id": "stale-dense-generation"
+    }
+    metadata_conn = module.init_search_db(
+        db_path,
+        rebuild=False,
+        create_indexes=False,
+    )
+    metadata_conn.execute(
+        "INSERT OR REPLACE INTO meta(key, value) "
+        "VALUES ('generation_identities_json', ?)",
+        (
+            json.dumps(
+                stored_generations,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        ),
+    )
+    metadata_conn.commit()
+    metadata_conn.close()
+    metadata_repair = module.episode_dense_index_sessions(
+        aoa_root=aoa_root,
+        dirty_only=True,
+    )
+    assert metadata_repair["status"] == "no_work"
+    assert metadata_repair["generation_publish"]["status"] == "published"
+    assert metadata_repair["generation_publish"][
+        "previous_generation_id"
+    ] == "stale-dense-generation"
 
     ranking = module.episode_dense_search_ranking(
         aoa_root=aoa_root,
@@ -6803,6 +9316,11 @@ def test_episode_dense_projection_exact_cosine_and_semantic_refresh_invalidation
     )
     assert ranking["ok"] is True
     assert ranking["ranking"][0]["doc_id"] == "episode_semantic:dense-session-1:task-0001"
+    assert ranking["representation_vector_count"] == 2
+    assert ranking["episode_fallback_vector_count"] == 0
+    assert ranking["ranking"][0]["representation_matches"][0][
+        "raw_ref"
+    ] == "raw:line:11"
     assert ranking["scanned_vector_bytes"] == 2 * module.EPISODE_DENSE_DEFAULT_DIMENSION * 4
 
     indexed_classifier_version = module.ROUTE_SIGNAL_CLASSIFIER_VERSION
@@ -6859,12 +9377,17 @@ def test_episode_dense_projection_exact_cosine_and_semantic_refresh_invalidation
     dense_vector_count = conn.execute(
         "SELECT COUNT(*) FROM episode_dense_vectors WHERE session_id = 'dense-session-1'"
     ).fetchone()[0]
+    representation_vector_count = conn.execute(
+        "SELECT COUNT(*) FROM episode_dense_representation_vectors "
+        "WHERE session_id = 'dense-session-1'"
+    ).fetchone()[0]
     dense_state_count = conn.execute(
         "SELECT COUNT(*) FROM episode_dense_session_state WHERE session_id = 'dense-session-1'"
     ).fetchone()[0]
     conn.close()
     assert removed == 1
     assert dense_vector_count == 0
+    assert representation_vector_count == 0
     assert dense_state_count == 0
 
 
@@ -6908,7 +9431,17 @@ def test_episode_dense_rebuild_is_semantically_deterministic_and_failed_store_pr
         "episode_id": "task-0001",
         "representations": {
             "outcomes": [
-                {"text": "dense atomic projection evidence"}
+                {
+                    "text": "dense atomic projection evidence",
+                    "refs": {
+                        "raw": "raw:line:7",
+                        "session": (
+                            "sessions/dense-atomic-session/session.json"
+                        ),
+                    },
+                    "source_lane": "assistant",
+                    "admission_basis": "assistant_observation",
+                }
             ]
         },
     }
@@ -6985,12 +9518,24 @@ def test_episode_dense_rebuild_is_semantically_deterministic_and_failed_store_pr
         ).fetchone()
         state = snapshot_conn.execute(
             "SELECT status, episode_document_count, vector_count, "
+            "representation_document_count, representation_vector_count, "
             "generation_id FROM episode_dense_session_state "
             "WHERE session_id = ?",
             (session_id,),
         ).fetchone()
+        representations = snapshot_conn.execute(
+            "SELECT representation_id, doc_id, role, raw_ref, "
+            "document_sha256, hex(vector_f32), generation_id "
+            "FROM episode_dense_representation_vectors "
+            "WHERE session_id = ? ORDER BY representation_id",
+            (session_id,),
+        ).fetchall()
         snapshot_conn.close()
-        return tuple(row) + tuple(state)
+        return (
+            tuple(row)
+            + tuple(state)
+            + tuple(tuple(item) for item in representations)
+        )
 
     first = module.episode_dense_index_sessions(
         aoa_root=aoa_root,
@@ -8308,6 +10853,178 @@ def test_episode_dense_document_keeps_several_recent_evidence_items() -> None:
     assert len(document) <= module.EPISODE_DENSE_DOCUMENT_MAX_CHARS
 
 
+def test_episode_dense_representation_documents_are_stable_bounded_and_raw_ref_backed() -> None:
+    entries = [
+        {
+            "text": f"verification evidence {index}",
+            "refs": {
+                "raw": f"raw:line:{index}",
+                "segment": f"sessions/representation/segments/{index}.json",
+                "session": "sessions/representation/session.json",
+            },
+            "source_lane": "assistant",
+            "admission_basis": "verification_observation",
+            "outcome": "success",
+        }
+        for index in range(1, 7)
+    ]
+    entries.insert(
+        0,
+        {
+            "text": "projection text without a raw ref must not be embedded",
+            "refs": {"segment": "sessions/representation/segments/0.json"},
+        },
+    )
+    episode = {"representations": {"verification": entries}}
+
+    first = module.episode_dense_representation_documents(
+        episode,
+        doc_id="episode_semantic:representation:task-0001",
+        session_id="representation",
+        episode_id="task-0001",
+    )
+    second = module.episode_dense_representation_documents(
+        copy.deepcopy(episode),
+        doc_id="episode_semantic:representation:task-0001",
+        session_id="representation",
+        episode_id="task-0001",
+    )
+
+    assert first == second
+    assert len(first) == module.EPISODE_DENSE_REPRESENTATION_PER_ROLE_LIMIT
+    assert [item["raw_ref"] for item in first] == [
+        "raw:line:3",
+        "raw:line:4",
+        "raw:line:5",
+        "raw:line:6",
+    ]
+    assert all(
+        len(item["document"])
+        <= module.EPISODE_DENSE_REPRESENTATION_TEXT_MAX_CHARS + 160
+        for item in first
+    )
+
+
+def test_episode_dense_representation_match_selection_preserves_primary_and_adds_distinct_roles() -> None:
+    candidates = [
+        {
+            "representation_id": f"rep-{index}",
+            "role": role,
+            "raw_ref": f"raw:line:{40 + index}",
+            "score": round(0.99 - index / 100, 2),
+            "rank_within_episode": index,
+        }
+        for index, role in enumerate(
+            (
+                "actions",
+                "actions",
+                "outcomes",
+                "outcomes",
+                "failures",
+                "verification",
+            ),
+            start=1,
+        )
+    ]
+
+    selected = module.episode_dense_select_representation_matches(
+        candidates
+    )
+
+    assert [item["representation_id"] for item in selected] == [
+        "rep-1",
+        "rep-2",
+        "rep-3",
+        "rep-5",
+    ]
+    assert [item["selection_basis"] for item in selected] == [
+        "primary_similarity",
+        "primary_similarity",
+        "role_diversity",
+        "role_diversity",
+    ]
+    assert [item["rank_within_episode"] for item in selected] == [
+        1,
+        2,
+        3,
+        5,
+    ]
+    assert len(selected) == (
+        module.EPISODE_DENSE_REPRESENTATION_MATCH_LIMIT
+    )
+
+
+def test_episode_dense_representation_support_hydrates_distinct_raw_refs_only() -> None:
+    raw_one = "raw:line:40"
+    raw_two = "raw:line:41"
+    episode = {
+        "representations": {
+            "actions": [
+                {
+                    "text": "ran the bounded command",
+                    "refs": {"raw": raw_one},
+                    "admission_basis": "structured_operational_action",
+                }
+            ],
+            "verification": [
+                {
+                    "text": "verified the bounded outcome",
+                    "refs": {"raw": raw_two},
+                    "admission_basis": "verification_observation",
+                }
+            ],
+        }
+    }
+    matches = [
+        {
+            "representation_id": "rep-one",
+            "role": "actions",
+            "raw_ref": raw_one,
+            "score": 0.91,
+            "rank_within_episode": 1,
+        },
+        {
+            "representation_id": "rep-one-duplicate",
+            "role": "actions",
+            "raw_ref": raw_one,
+            "score": 0.90,
+            "rank_within_episode": 2,
+        },
+        {
+            "representation_id": "rep-two",
+            "role": "verification",
+            "raw_ref": raw_two,
+            "score": 0.89,
+            "rank_within_episode": 3,
+        },
+    ]
+
+    result = module.episode_dense_hydrate_result_support(
+        {
+            "supporting_evidence": [
+                {
+                    "role": "outcomes",
+                    "text": "duplicate existing evidence",
+                    "refs": {"raw": raw_one},
+                }
+            ]
+        },
+        episode,
+        matches,
+    )
+
+    returned_raw_refs = [
+        str(item.get("refs", {}).get("raw") or "")
+        for item in result["supporting_evidence"]
+    ]
+    assert returned_raw_refs == [raw_one, raw_two]
+    assert all(
+        item["dense_representation"]["truth_status"]
+        == "dense_representation_navigation_not_claim_truth"
+        for item in result["supporting_evidence"]
+    )
+
+
 def test_episode_dense_projection_state_remains_readable_during_search_writer(tmp_path: Path) -> None:
     aoa_root = tmp_path / ".aoa"
     db_path = module.search_db_path(aoa_root)
@@ -8848,7 +11565,12 @@ def test_episode_selective_rerank_is_bounded_and_only_promotes_decisive_winner(
             for document in payload["documents"]
         )
         calls["count"] += 1
-        scores = [0.20, 0.95, 0.10] if calls["count"] == 1 else [0.91, 0.95, 0.90]
+        if calls["count"] in {1, 3}:
+            scores = [0.20, 0.95, 0.10]
+        elif calls["count"] in {4, 5}:
+            scores = [0.002, 0.69, 0.02]
+        else:
+            scores = [0.91, 0.95, 0.90]
         ranked = sorted(range(3), key=lambda index: -scores[index])
         return {
             "ok": True,
@@ -8884,6 +11606,131 @@ def test_episode_selective_rerank_is_bounded_and_only_promotes_decisive_winner(
     )
     assert ambiguous["status"] == "ambiguous_preserved_fusion_order"
     assert ambiguous["results"][0]["task_episode_id"] == "task-0001"
+
+    protected_results = copy.deepcopy(results)
+    protected_results[0]["explain"] = {
+        "fusion": {
+            "sparse_anchor": True,
+            "sparse_anchor_reasons": [
+                "decisive_typed_sparse_evidence",
+            ],
+        },
+    }
+    protected = module.episode_selective_local_rerank(
+        aoa_root=aoa_root,
+        query="where does local fork work begin",
+        results=protected_results,
+        candidate_limit=24,
+    )
+    assert (
+        protected["status"]
+        == "decisive_winner_blocked_by_typed_sparse_anchor"
+    )
+    assert protected["results"][0]["task_episode_id"] == "task-0001"
+    assert protected["typed_sparse_anchor_protection"] == {
+        "active": True,
+        "doc_id": (
+            "episode_semantic:rerank-session:task-0001"
+        ),
+        "reasons": ["decisive_typed_sparse_evidence"],
+        "blocked_promotion": True,
+        "policy": (
+            "a decisive typed or ordered sparse evidence anchor remains "
+            "ahead of model-only reranker relevance; claim admission "
+            "still requires source evidence"
+        ),
+    }
+
+    consensus_results = copy.deepcopy(results)
+    consensus_results[0].update(
+        {
+            "dense_rank": 2,
+            "sparse_rank": 1,
+            "fusion_score": 0.032522475,
+        }
+    )
+    consensus_results[1].update(
+        {
+            "dense_rank": 1,
+            "sparse_rank": 2,
+            "fusion_score": 0.032522475,
+        }
+    )
+    consensus_results[2].update(
+        {
+            "dense_rank": 3,
+            "sparse_rank": 3,
+            "fusion_score": 0.031746032,
+        }
+    )
+    consensus = module.episode_selective_local_rerank(
+        aoa_root=aoa_root,
+        query="which pre-publication review found a partial index",
+        results=consensus_results,
+        candidate_limit=24,
+    )
+    assert (
+        consensus["status"]
+        == "dense_reranker_consensus_promoted"
+    )
+    assert (
+        consensus["results"][0]["task_episode_id"]
+        == "task-0002"
+    )
+    assert consensus["promotion_min_score"] == 0.80
+    assert consensus["promotion_min_margin"] == 0.10
+    assert consensus["dense_reranker_consensus"] == {
+        "active": True,
+        "winner_doc_id": (
+            "episode_semantic:rerank-session:task-0002"
+        ),
+        "winner_dense_rank": 1,
+        "fusion_tied": True,
+        "reranker_margin_admitted": True,
+        "typed_sparse_anchor_protected": False,
+        "policy": (
+            "an unprotected exact RRF tie may be broken only when "
+            "dense rank 1 and the reranker winner independently agree "
+            "under the existing margin floor; model-only score and "
+            "claim-admission thresholds remain unchanged"
+        ),
+    }
+
+    protected_consensus_results = copy.deepcopy(
+        consensus_results
+    )
+    protected_consensus_results[0]["explain"] = {
+        "fusion": {
+            "sparse_anchor": True,
+            "sparse_anchor_reasons": [
+                "decisive_typed_sparse_evidence",
+            ],
+        },
+    }
+    protected_consensus = module.episode_selective_local_rerank(
+        aoa_root=aoa_root,
+        query="which pre-publication review found a partial index",
+        results=protected_consensus_results,
+        candidate_limit=24,
+    )
+    assert (
+        protected_consensus["status"]
+        == "ambiguous_preserved_fusion_order"
+    )
+    assert (
+        protected_consensus["results"][0]["task_episode_id"]
+        == "task-0001"
+    )
+    assert (
+        protected_consensus["dense_reranker_consensus"]["active"]
+        is False
+    )
+    assert (
+        protected_consensus["dense_reranker_consensus"][
+            "typed_sparse_anchor_protected"
+        ]
+        is True
+    )
 
 
 def test_episode_auto_rerank_trigger_does_not_confuse_kakoi_with_kak() -> None:
@@ -10164,6 +13011,29 @@ def test_causal_attribution_requires_correlation_owned_target_bearing_result() -
     assert explicit["chain"]["operation_identity_coverage"] == 1.0
     assert explicit["qualified_chain_count"] == 1
 
+    bounded_result_preview = module.episode_compact_relation_entry(
+        entry(
+            "outcomes",
+            371,
+            ("linked action prefix " * 30)
+            + "compact successful output observation: "
+            + "[ok] topology\n.............. [100%]\n14 passed in 0.09s",
+            correlation_id="call_fk0puwMDNACW8PKHZGdgwg1m",
+            admission_basis="structured_compact_success_observation",
+            event_type="TOOL_OUTPUT",
+            source_lane="structured_tool_result",
+            outcome="succeeded",
+        ),
+        role="outcomes",
+        matched_query_terms=[],
+    )
+    assert "linked action prefix" not in bounded_result_preview["text"]
+    assert "14 passed in 0.09s" in bounded_result_preview["text"]
+    assert (
+        len(bounded_result_preview["text"])
+        <= module.TASK_EPISODE_COMPACT_SUCCESS_OUTPUT_MAX_CHARS
+    )
+
     explicit_foreign_only = module.episode_causal_attribution_alignment(
         {
             "representations": {
@@ -10341,6 +13211,72 @@ def test_causal_attribution_scope_gate_rejects_repeated_unanchored_command() -> 
         candidate["task_episode_id"]
         for candidate in gated_results[0]["causal_attribution"]["candidate_chains"]
     } == {"task-0012", "task-0006"}
+
+
+def test_causal_attribution_scope_gate_rejects_generic_plural_result_window() -> None:
+    query = "Что показали MCP-команды?"
+    terms = module.episode_semantic_query_terms(query)
+    profile = module.episode_causal_attribution_query_profile(
+        terms,
+        query_text=query,
+    )
+    assert profile["open_result_query"] is True
+    assert profile["plural_operation_query"] is True
+    assert profile["generic_plural_open_result_query"] is True
+    intent = module.memory_query_intent(query)
+    assert intent["primary"] == "causal_chain"
+    assert intent["claim_shape"]["kind"] == "causal"
+
+    result = {
+        "doc_id": "episode_semantic:session:task-0042",
+        "session_id": "session",
+        "task_episode_id": "task-0042",
+        "causal_attribution": {
+            "active": True,
+            "profile": profile,
+            "status": "ordered_action_result_attribution_chain",
+            "chain": {
+                "action": {
+                    "line": 201,
+                    "refs": {"raw": "raw:line:201"},
+                },
+                "result": {
+                    "line": 202,
+                    "refs": {"raw": "raw:line:202"},
+                },
+                "correlation_id": "call_one_of_several",
+            },
+        },
+        "explain": {},
+    }
+    gated_results, scope = module.episode_causal_attribution_scope_gate(
+        [result]
+    )
+
+    assert scope["status"] == "ambiguous_causal_attribution_chains"
+    assert scope["ambiguity_scope"] == "generic_plural_query_scope"
+    assert scope["qualified_chain_count"] == 1
+    attribution = gated_results[0]["causal_attribution"]
+    assert attribution["ambiguous"] is True
+    assert attribution["chain"] == {}
+    assert attribution["candidate_chains"][0]["correlation_id"] == (
+        "call_one_of_several"
+    )
+
+    exact_query = (
+        "Что показала MCP-команда с correlation "
+        "call_q82ZhpGgtOKHx3paoHS0zSBM?"
+    )
+    exact_profile = module.episode_causal_attribution_query_profile(
+        module.episode_semantic_query_terms(exact_query),
+        query_text=exact_query,
+    )
+    assert exact_profile["open_result_query"] is True
+    assert exact_profile["generic_plural_open_result_query"] is False
+    assert exact_profile["required_operation_specific_terms"]
+    assert module.memory_query_intent(exact_query)["primary"] == (
+        "exact_literal"
+    )
 
 
 def test_answer_admission_cannot_override_unresolved_causal_attribution_with_reranker() -> None:
@@ -11040,6 +13976,7 @@ def test_episode_sparse_ranking_prefers_coherent_raw_support_over_scattered_term
 
 def test_episode_search_explicit_time_window_requires_in_window_support(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Synthetic regression derived from a manual long-episode temporal false-support case."""
     aoa_root = tmp_path / ".aoa"
@@ -11314,6 +14251,38 @@ def test_episode_search_explicit_time_window_requires_in_window_support(
         f"evidence-window {session_id} raw:line:3 "
     )
     assert result["retrieval"]["answer_admission"]["admitted"] is True
+
+    with monkeypatch.context() as truncated_scope:
+        truncated_scope.setattr(
+            module,
+            "EPISODE_EXPLICIT_TIME_SUPPORT_MAX_EVENTS",
+            1,
+        )
+        truncated_result = module.episode_semantic_search(
+            aoa_root=aoa_root,
+            query=query,
+            session=session_id,
+            time_from="2026-07-14T00:00:30Z",
+            time_to="2026-07-14T00:01:30Z",
+            mode="sparse",
+            limit=5,
+            explain=True,
+        )
+    truncated_evidence_scope = truncated_result["retrieval"][
+        "explicit_time_evidence_scope"
+    ]
+    truncated_admission = truncated_result["retrieval"]["answer_admission"]
+    assert truncated_result["result_count"] == 1
+    assert truncated_evidence_scope["status"] == "applied_truncated"
+    assert truncated_evidence_scope["truncated"] is True
+    assert truncated_evidence_scope["admission_ready"] is False
+    assert truncated_admission["admitted"] is False
+    assert truncated_admission["status"] == "explicit_time_evidence_scope_unresolved"
+    assert (
+        truncated_admission["basis"]
+        == "critical_explicit_time_scope_truncation"
+    )
+    assert truncated_admission["explicit_time_evidence_gate"]["admitted"] is False
 
     out_of_window_causal = dict(result["results"][0])
     out_of_window_causal["causal_attribution"] = {
@@ -14644,6 +17613,183 @@ def test_episode_quantitative_comparison_requires_correlated_count_result(
     )["active"] is False
 
 
+def test_quantitative_length_comparison_requires_successful_measurement_chain(
+    tmp_path: Path,
+) -> None:
+    query_text = "Какие AGENTS.md были длиннее?"
+    query = module.episode_quantitative_comparison_query(query_text)
+    intent = module.memory_query_intent(query_text)
+
+    assert query["active"] is True
+    assert query["operation"] == "line_count"
+    assert query["relation_basis"] == (
+        "line_count_comparison_requires_correlated_numeric_result"
+    )
+    assert [term["token"] for term in query["subject_terms"]] == [
+        "agents",
+        "md",
+    ]
+    assert intent["primary"] == "quantitative_comparison"
+    assert intent["claim_shape"]["kind"] == "quantitative_comparison"
+
+    raw_path = tmp_path / "rollout-length-comparison.jsonl"
+    write_jsonl(
+        raw_path,
+        [
+            {
+                "timestamp": "2026-07-17T06:23:00Z",
+                "type": "session_meta",
+                "payload": {"id": "length-session"},
+            },
+            {
+                "timestamp": "2026-07-17T06:23:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": "call_lengths",
+                    "arguments": json.dumps(
+                        {
+                            "cmd": (
+                                "wc -l /workspace/one/AGENTS.md "
+                                "/workspace/two/AGENTS.md"
+                            )
+                        }
+                    ),
+                },
+            },
+            {
+                "timestamp": "2026-07-17T06:23:02Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call_lengths",
+                    "output": (
+                        "Process exited with code 1\n"
+                        "Final output:\n"
+                        "196 /workspace/one/AGENTS.md\n"
+                        "wc: /workspace/two/AGENTS.md: No such file\n"
+                    ),
+                },
+            },
+        ],
+    )
+    candidates = [
+        {
+            "doc_id": "episode_semantic:length-session:task-0001",
+            "session_id": "length-session",
+            "task_episode_id": "task-0001",
+            "event_range": {"from_line": 1, "to_line": 3},
+            "supporting_evidence": [],
+        }
+    ]
+    hydrated, hydration = (
+        module.episode_quantitative_comparison_scoped_raw_hydration(
+            raw_path=raw_path,
+            segments=[],
+            results=candidates,
+            comparison_query=query,
+            max_raw_bytes=1024 * 1024,
+            max_lines=100,
+        )
+    )
+    qualified, gate = module.episode_quantitative_comparison_relation_gate(
+        hydrated,
+        query,
+    )
+
+    assert hydration["candidate_action_count"] == 1
+    assert hydration["rejected_action_count"] == 1
+    assert hydration["qualified_candidate_count"] == 0
+    assert qualified == []
+    assert gate["status"] == "no_qualified_quantitative_comparison"
+
+    successful_path = tmp_path / "rollout-length-comparison-success.jsonl"
+    write_jsonl(
+        successful_path,
+        [
+            {
+                "timestamp": "2026-07-17T06:23:00Z",
+                "type": "session_meta",
+                "payload": {"id": "length-session"},
+            },
+            {
+                "timestamp": "2026-07-17T06:23:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": "call_lengths",
+                    "arguments": json.dumps(
+                        {
+                            "cmd": (
+                                "wc -l /workspace/one/AGENTS.md "
+                                "/workspace/two/AGENTS.md"
+                            )
+                        }
+                    ),
+                },
+            },
+            {
+                "timestamp": "2026-07-17T06:23:02Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call_lengths",
+                    "output": (
+                        "Process exited with code 0\n"
+                        "Final output:\n"
+                        "196 /workspace/one/AGENTS.md\n"
+                        "246 /workspace/two/AGENTS.md\n"
+                        "442 total\n"
+                    ),
+                },
+            },
+        ],
+    )
+    successful_hydrated, successful_hydration = (
+        module.episode_quantitative_comparison_scoped_raw_hydration(
+            raw_path=successful_path,
+            segments=[],
+            results=candidates,
+            comparison_query=query,
+            max_raw_bytes=1024 * 1024,
+            max_lines=100,
+        )
+    )
+    successful_qualified, successful_gate = (
+        module.episode_quantitative_comparison_relation_gate(
+            successful_hydrated,
+            query,
+        )
+    )
+    assert successful_hydration["qualified_candidate_count"] == 1
+    assert successful_gate["status"] == (
+        "qualified_quantitative_comparison_available"
+    )
+    successful_evidence = successful_qualified[0][
+        "quantitative_comparison"
+    ]
+    assert successful_evidence["numeric_row_count"] == 2
+    assert [
+        row["label"]
+        for row in successful_evidence["numeric_rows"]
+    ] == [
+        "/workspace/one/AGENTS.md",
+        "/workspace/two/AGENTS.md",
+    ]
+    successful_admission = module.episode_answer_admission(
+        successful_qualified[0],
+        query_term_count=3,
+        quantitative_comparison_gate=successful_gate,
+    )
+    assert successful_admission["admitted"] is True
+    assert successful_admission["basis"] == (
+        "typed_quantitative_comparison_evidence"
+    )
+    assert successful_admission["policy_version"] == 10
+
+
 def test_episode_search_quantitative_comparison_is_wired_to_raw_relation_gate(
     tmp_path: Path,
 ) -> None:
@@ -17287,17 +20433,23 @@ def test_episode_claim_shape_override_blocks_negative_and_current_projection_cla
     )
 
 
-def test_memory_query_intent_keeps_short_ru_paraphrase_and_completion_question_out_of_closeout_literal_lane() -> None:
-    semantic_queries = [
-        "искали поля состояния и завершённости сессии через rg",
-        "какие сессии были подтверждены завершёнными этим поиском?",
-    ]
+def test_memory_query_intent_keeps_short_ru_queries_out_of_closeout_literal_lane() -> None:
+    expected_intents = {
+        "искали поля состояния и завершённости сессии через rg": (
+            "semantic_episode"
+        ),
+        "какие сессии были подтверждены завершёнными этим поиском?": (
+            "causal_chain"
+        ),
+    }
 
-    for query in semantic_queries:
+    for query, expected_primary in expected_intents.items():
         intent = module.memory_query_intent(query)
-        assert intent["primary"] == "semantic_episode", (query, intent)
+        assert intent["primary"] == expected_primary, (query, intent)
         assert "exact_literal" not in intent["secondary"]
         assert intent["literal_shape"]["inferred_agent_event"] == ""
+        if expected_primary == "causal_chain":
+            assert intent["claim_shape"]["kind"] == "causal"
 
     explicit_closeout = module.memory_query_intent("финальный ответ ассистента")
     assert explicit_closeout["primary"] == "exact_literal"
@@ -17421,7 +20573,10 @@ def test_agent_event_splits_handoff_resume_and_ignores_external_restart(tmp_path
     assert handoff["facets"]["agent_event"]["transition_kind"] == "handoff"
 
     session_index = json.loads((session_dir / "session.index.json").read_text(encoding="utf-8"))
-    episode = session_index["task_episodes"][0]
+    episode = module.session_index_task_episode_components(
+        session_dir,
+        session_index,
+    )[0]
     transition_agent_events = [ref.get("agent_event") for ref in episode["transition_refs"]]
     assert episode["status"] == "handoff"
     assert transition_agent_events == ["assistant_resume", "assistant_handoff"]
@@ -17576,7 +20731,10 @@ def test_prompt_only_task_episode_is_interrupted_not_quality_gap(tmp_path: Path)
 
     session_dir = next(path for path in (aoa_root / "sessions").iterdir() if path.is_dir())
     session_index = json.loads((session_dir / "session.index.json").read_text(encoding="utf-8"))
-    episode = session_index["task_episodes"][0]
+    episode = module.session_index_task_episode_components(
+        session_dir,
+        session_index,
+    )[0]
     assert episode["status"] == "interrupted"
     assert "no_agent_response_seen" in episode["ambiguity_flags"]
 
@@ -18104,6 +21262,7 @@ def test_sync_session_publish_rolls_back_raw_and_projections_together(
             if relative.parts[0] not in {
                 "raw",
                 "segments",
+                module.SESSION_INDEX_SHARDS_DIR,
             } and relative.name not in {
                 "session.manifest.json",
                 module.SESSION_INDEX_JSON,
@@ -18114,6 +21273,12 @@ def test_sync_session_publish_rolls_back_raw_and_projections_together(
         return included
 
     last_good = projection_bytes()
+    last_good_outbox_records = {
+        path.name
+        for path in (
+            aoa_root / module.PROJECTION_OUTBOX_RECORDS_DIR
+        ).glob("*.json")
+    }
     with transcript.open("a", encoding="utf-8") as handle:
         handle.write(
             json.dumps(
@@ -18196,6 +21361,12 @@ def test_sync_session_publish_rolls_back_raw_and_projections_together(
         in failed["diagnostics"]
     )
     assert projection_bytes() == last_good
+    assert {
+        path.name
+        for path in (
+            aoa_root / module.PROJECTION_OUTBOX_RECORDS_DIR
+        ).glob("*.json")
+    } == last_good_outbox_records
     assert mid_publish_packets["episodes"]["result_count"] == 0
     assert mid_publish_packets["episodes"][
         "incompatible_session_indexes"
@@ -18265,6 +21436,151 @@ def test_sync_session_publish_rolls_back_raw_and_projections_together(
     assert sha256_file == recovered["projection_publish"]["source"][
         "raw_sha256"
     ]
+
+
+def test_committed_publish_recovery_finalizes_without_rollback(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    session_dir = aoa_root / "sessions" / "committed-session"
+    session_dir.mkdir(parents=True)
+    current = session_dir / "session.manifest.json"
+    current.write_text('{"state":"committed"}\n', encoding="utf-8")
+    stage_dir = session_dir.parent / (
+        f".{session_dir.name}.projection-stage-999999-test"
+    )
+    backup_root = session_dir.parent / (
+        f".{session_dir.name}.projection-backup-test"
+    )
+    stage_dir.mkdir()
+    backup_root.mkdir()
+    (backup_root / "session.manifest.json").write_text(
+        '{"state":"old"}\n',
+        encoding="utf-8",
+    )
+    journal_path = module.session_projection_publish_journal_path(
+        session_dir
+    )
+    module.write_json(
+        journal_path,
+        {
+            "schema_version": 1,
+            "status": "published",
+            "stage_dir": str(stage_dir),
+            "backup_root": str(backup_root),
+            "operations": [],
+            "outbox_record": {
+                "record_id": "a" * 64,
+                "path": str(
+                    aoa_root
+                    / module.PROJECTION_OUTBOX_RECORDS_DIR
+                    / f"{'a' * 64}.json"
+                ),
+                "written": True,
+            },
+        },
+    )
+
+    recovered = module.recover_interrupted_session_projection_publish(
+        session_dir
+    )
+
+    assert recovered["status"] == "finalized_committed_publish"
+    assert module.read_json(current, {}) == {"state": "committed"}
+    assert not stage_dir.exists()
+    assert not backup_root.exists()
+    assert not journal_path.exists()
+
+
+def test_progress_receipt_recovery_finalizes_publish_after_journal_gap(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    session_dir = aoa_root / "sessions" / "receipt-session"
+    session_dir.mkdir(parents=True)
+    current = session_dir / "session.manifest.json"
+    current.write_text('{"state":"committed"}\n', encoding="utf-8")
+    stage_dir = session_dir.parent / (
+        f".{session_dir.name}.projection-work-receipt"
+    )
+    backup_root = session_dir.parent / (
+        f".{session_dir.name}.projection-backup-receipt"
+    )
+    stage_dir.mkdir()
+    backup_root.mkdir()
+    (backup_root / "session.manifest.json").write_text(
+        '{"state":"old"}\n',
+        encoding="utf-8",
+    )
+    outbox_path = (
+        aoa_root
+        / module.PROJECTION_OUTBOX_RECORDS_DIR
+        / "receipt-record.json"
+    )
+    module.write_json(
+        outbox_path,
+        {
+            "record_id": "receipt-record",
+            "changes": [],
+            "required_consumers": [],
+        },
+    )
+    progress_receipt_path = module.session_projection_progress_receipt_path(
+        aoa_root,
+        execution_id="receipt-execution",
+        session_id="receipt-session",
+        publish_id="receipt-publish",
+    )
+    module.write_json(
+        progress_receipt_path,
+        {
+            "schema_version": module.SESSION_PROJECTION_PROGRESS_RECEIPT_SCHEMA_VERSION,
+            "artifact_type": "session_projection_publication_progress_receipt",
+            "status": "published",
+            "mutates": True,
+            "publish_id": "receipt-publish",
+            "outbox": {"record_id": "receipt-record"},
+        },
+    )
+    journal_path = module.session_projection_publish_journal_path(
+        session_dir
+    )
+    module.write_json(
+        journal_path,
+        {
+            "schema_version": 1,
+            "status": "publishing",
+            "publish_id": "receipt-publish",
+            "stage_dir": str(stage_dir),
+            "backup_root": str(backup_root),
+            "operations": [],
+            "outbox_record": {
+                "record_id": "receipt-record",
+                "path": str(outbox_path),
+                "preexisting": False,
+                "expected": True,
+                "written": True,
+            },
+            "progress_receipt": {
+                "path": str(progress_receipt_path),
+                "expected": True,
+                "written": False,
+            },
+        },
+    )
+
+    recovered = module.recover_interrupted_session_projection_publish(
+        session_dir
+    )
+
+    assert recovered["status"] == "finalized_committed_publish"
+    assert recovered["progress_receipt_recovered"] is True
+    assert module.read_json(current, {}) == {"state": "committed"}
+    assert outbox_path.is_file()
+    assert progress_receipt_path.is_file()
+    assert not stage_dir.exists()
+    assert not backup_root.exists()
+    assert not journal_path.exists()
 
 
 def test_segment_index_records_universal_facets_and_relationships(tmp_path: Path) -> None:
@@ -19768,7 +23084,6 @@ def test_raw_block_storage_compact_rolls_back_whole_projection_on_publish_failur
         aoa_root=aoa_root,
     )
     session_dir = Path(str(receipt["session_dir"]))
-
     def projection_bytes() -> dict[str, bytes]:
         included: dict[str, bytes] = {}
         for path in sorted(session_dir.rglob("*")):
@@ -19778,6 +23093,7 @@ def test_raw_block_storage_compact_rolls_back_whole_projection_on_publish_failur
             if relative.parts[0] not in {
                 "raw",
                 "segments",
+                module.SESSION_INDEX_SHARDS_DIR,
             } and relative.name not in {
                 "session.manifest.json",
                 module.SESSION_INDEX_JSON,
@@ -20024,7 +23340,7 @@ def test_raw_block_storage_compact_apply_uses_maintenance_lock(tmp_path: Path, m
     assert {"raw_blocks", "session_manifests", "session_registry"} <= set(calls["touched_surfaces"])
 
 
-def test_reindex_sessions_command_uses_maintenance_lock_for_mutation(
+def test_reindex_sessions_command_uses_split_publish_lock_for_mutation(
     tmp_path: Path,
     monkeypatch: Any,
 ) -> None:
@@ -20044,15 +23360,7 @@ def test_reindex_sessions_command_uses_maintenance_lock_for_mutation(
             "results": [],
         }
 
-    def fake_lock(root: Path, callback: Any, **kwargs: Any) -> dict[str, Any]:
-        calls["root"] = root
-        calls.update(kwargs)
-        payload = callback()
-        payload["maintenance_coordinator"] = {"status": "completed"}
-        return payload
-
     monkeypatch.setattr(module, "reindex_sessions", fake_reindex)
-    monkeypatch.setattr(module, "run_with_maintenance_lock", fake_lock)
     args = module.argparse.Namespace(
         workspace_root=str(workspace),
         aoa_root=str(aoa_root),
@@ -20071,18 +23379,10 @@ def test_reindex_sessions_command_uses_maintenance_lock_for_mutation(
     )
 
     assert module.command_reindex_sessions(args) == 0
-    assert calls["root"] == aoa_root
-    assert calls["owner_job"] == "reindex-sessions"
-    assert calls["mode"] == "manual-bulk"
-    assert calls["target"] == "session-id"
-    assert calls["reason"] == "operator_reindex_sessions"
-    assert {
-        "route_indexes",
-        "session_manifests",
-        "sessions",
-        "token_accounting",
-    } <= set(calls["touched_surfaces"])
-    assert calls["budget_seconds"] == 600
+    assert calls["reindex"]["aoa_root"] == aoa_root
+    assert calls["reindex"]["target"] == "session-id"
+    assert calls["reindex"]["budget_seconds"] == 600
+    assert calls["reindex"]["split_publish_lock"] is True
     assert calls["reindex"]["max_raw_bytes"] == 200 * 1024 * 1024
 
 
@@ -20093,10 +23393,8 @@ def test_reindex_sessions_command_does_not_report_lock_deferral_as_success(
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
 
-    def fail_reindex(**_kwargs: Any) -> dict[str, Any]:
-        raise AssertionError("deferred reindex must not enter the writer")
-
-    def defer_for_lock(_root: Path, _callback: Any, **_kwargs: Any) -> dict[str, Any]:
+    def defer_reindex(**kwargs: Any) -> dict[str, Any]:
+        assert kwargs["split_publish_lock"] is True
         return {
             "ok": True,
             "status": "skipped_lock_held",
@@ -20104,8 +23402,7 @@ def test_reindex_sessions_command_does_not_report_lock_deferral_as_success(
             "maintenance_coordinator": {"status": "skipped_lock_held"},
         }
 
-    monkeypatch.setattr(module, "reindex_sessions", fail_reindex)
-    monkeypatch.setattr(module, "run_with_maintenance_lock", defer_for_lock)
+    monkeypatch.setattr(module, "reindex_sessions", defer_reindex)
     args = module.argparse.Namespace(
         workspace_root=str(workspace),
         aoa_root=str(aoa_root),
@@ -20496,6 +23793,26 @@ def test_goal_lifecycle_indexes_search_graph_and_usage_routes(tmp_path: Path) ->
     assert blocked_work_episode["closeout_refs"][0]["raw_ref"] == "raw:line:13"
     assert blocked_work_episode["closeout_refs"][0]["source_type"] == "response_item"
 
+    catalog = module.goal_catalog_projection(
+        aoa_root=aoa_root,
+        target="latest",
+        limit=5,
+        order="chronological",
+    )
+    assert catalog["schema_version"] == module.GOAL_CATALOG_SCHEMA_VERSION
+    assert catalog["source"]["owner"] == "aoa-session-memory"
+    assert catalog["item_count"] == 2
+    assert catalog["counts_by_lifecycle_state"] == {"blocked": 1, "complete": 1}
+    assert catalog["items"][0]["title"] == "ship first class goal lifecycle"
+    assert catalog["items"][0]["title_state"] == "available"
+    assert catalog["items"][0]["first_observed_at"] == "2026-06-18T00:00:02Z"
+    assert catalog["items"][0]["last_observed_at"] == "2026-06-18T00:00:06Z"
+    assert catalog["items"][1]["goal_ref"] == "goal-lifecycle"
+    assert catalog["items"][1]["first_observed_at"] == "2026-05-28T20:26:40Z"
+    assert "objective" not in catalog["items"][0]
+    assert "raw_refs" not in catalog["items"][0]
+    assert catalog["omissions"]["host_paths"] is True
+
     module.build_agent_atlas(aoa_root=aoa_root, target="all")
     by_goal = json.loads((aoa_root / "maps" / "by-goal" / "index.json").read_text(encoding="utf-8"))
     assert {"goal_completed", "goal_blocked"}.issubset({entry["route_key"] for entry in by_goal["entries"]})
@@ -20527,6 +23844,92 @@ def test_goal_lifecycle_indexes_search_graph_and_usage_routes(tmp_path: Path) ->
     assert usage_audit["usage_event_count"] >= 1
     assert usage_audit["quality"]["direct_usage_present"] is True
     assert usage_audit["usage_events"][0]["session_act"] == "goal_completed"
+
+
+def test_goal_catalog_withholds_machine_shaped_and_redacted_objectives() -> None:
+    machine = module.goal_catalog_human_title(
+        "External Luna return ready: /workspace/return.json"
+    )
+    redacted_title = module.goal_catalog_human_title(
+        "Ship catalog with "
+        + "api"
+        + "_key="
+        + "sk-"
+        + "proj-abcdefghijklmnopqrstuvwxyz0123456789"
+    )
+    human = module.goal_catalog_human_title(
+        "Собрать спокойный интерфейс выбора активных и завершённых целей"
+    )
+    assert machine == {
+        "title": None,
+        "title_state": "withheld",
+        "reason": "machine_shaped_objective",
+    }
+    assert redacted_title == {
+        "title": None,
+        "title_state": "withheld",
+        "reason": "objective_redacted",
+    }
+    assert human == {
+        "title": "Собрать спокойный интерфейс выбора активных и завершённых целей",
+        "title_state": "available",
+        "reason": None,
+    }
+
+    payload = module.goal_catalog_item_from_lifecycle(
+        {
+            "goal_instance_id": "session-1:goal-0001",
+            "goal_id": "goal-0001",
+            "status": "active",
+            "objective": "/workspace/private/goal.md",
+            "sample_events": [],
+            "observed_goal": {},
+            "raw_refs": ["raw:line:1"],
+        }
+    )
+    assert payload is not None
+    assert payload["title"] is None
+    assert payload["title_state"] == "withheld"
+    assert "raw_refs" not in payload
+
+
+def test_goal_catalog_consolidates_replayed_thread_lifecycles(monkeypatch: Any, tmp_path: Path) -> None:
+    def route(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "generated_at": "2026-08-23T00:00:00Z",
+            "results": [
+                {
+                    "goal_instance_id": "session-new:goal-0003",
+                    "goal_id": "goal-0003",
+                    "status": "active",
+                    "objective": "Продолжить развитие пространства целей",
+                    "observed_goal": {"threadId": "thread-1", "updatedAt": 1787446800},
+                    "sample_events": [],
+                },
+                {
+                    "goal_instance_id": "session-old:goal-0001",
+                    "goal_id": "goal-0001",
+                    "status": "complete",
+                    "objective": "Старое наблюдение той же цели",
+                    "observed_goal": {"threadId": "thread-1", "updatedAt": 1787000000},
+                    "sample_events": [],
+                },
+            ],
+            "provider": {},
+            "diagnostics": [],
+            "incompatible_session_indexes": [],
+            "generation_identity": {"generation_id": "generation-1", "producer": "aoa_session_memory.py"},
+        }
+
+    monkeypatch.setattr(module, "goal_lifecycle_route_search", route)
+    catalog = module.goal_catalog_projection(aoa_root=tmp_path, limit=10)
+    assert catalog["source_item_count"] == 2
+    assert catalog["item_count"] == 1
+    assert catalog["items"][0]["goal_ref"] == "thread-1"
+    assert catalog["items"][0]["lifecycle_state"] == "active"
+    assert catalog["items"][0]["title"] == "Продолжить развитие пространства целей"
+    assert set(catalog["source"]["generation_identity"]) == {"generation_id", "producer"}
 
 
 def test_failed_create_goal_is_an_attempt_with_recovery_not_a_created_goal(
@@ -20683,7 +24086,10 @@ def test_failed_create_goal_is_an_attempt_with_recovery_not_a_created_goal(
     assert route_result["refs"]["failed"]["raw_ref"] == "raw:line:4"
     assert route_result["refs"]["created"] == {}
 
-    task_episode = session_index["task_episodes"][0]
+    task_episode = module.session_index_task_episode_components(
+        session_dir,
+        session_index,
+    )[0]
     tool_event_ids = {
         ref["event_id"]
         for ref in task_episode["tool_refs"]
@@ -21378,7 +24784,7 @@ def test_graph_neighborhood_explains_exact_store_miss_and_bounded_retrieval_seed
                     "id": "edge:bounded-seed",
                     "source": event_id,
                     "target": route_id,
-                    "type": "mentions_route_signal",
+                    "type": "event_has_route_signal",
                     "evidence_refs": [evidence],
                 }
             ],
@@ -21405,6 +24811,12 @@ def test_graph_neighborhood_explains_exact_store_miss_and_bounded_retrieval_seed
         "first_route_resolution": "indexed_exact_miss_requires_retrieval_seed",
         "selected_route": "bounded_trace_search",
         "fallback_reason": "exact_graph_anchor_unresolved",
+        "text_fallback_policy": None,
+        "text_search_attempted": False,
+        "text_search_skipped": False,
+        "text_search_skip_reason": None,
+        "text_fallback_already_attempted": False,
+        "duplicate_text_fallback_suppressed": False,
     }
     assert "graph_store_unindexed_payload_scan_skipped" in neighborhood["diagnostics"]
     assert "graph_store_exact_miss_used_bounded_retrieval_seed" in neighborhood["diagnostics"]
@@ -21412,13 +24824,453 @@ def test_graph_neighborhood_explains_exact_store_miss_and_bounded_retrieval_seed
     assert admission["admitted"] is False
     assert admission["answer_admissible"] is False
     assert admission["navigation_admissible"] is True
-    assert admission["relation_family_counts"] == {"mention": 1}
+    assert admission["relation_family_counts"] == {"derived_anchor": 1}
     assert (
         admission["claim_shape_gates"]["usage_or_consequence"][
             "mention_is_usage"
         ]
         is False
     )
+
+
+def test_trace_route_graph_seed_policy_skips_text_after_specific_route_hit(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def fake_search_sessions(**kwargs: Any) -> dict[str, Any]:
+        calls.append(kwargs)
+        if kwargs.get("query"):
+            raise AssertionError(
+                "graph seed policy must not start text search after a "
+                "specific typed route hit"
+            )
+        return {
+            "ok": True,
+            "result_count": 1,
+            "results": [
+                {
+                    "doc_id": "event:s:001:000010",
+                    "refs": {
+                        "raw": "raw:line:10",
+                        "segment": "001.md#event-000010",
+                    },
+                }
+            ],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr(module, "search_sessions", fake_search_sessions)
+
+    trace = module.trace_route(
+        aoa_root=tmp_path / ".aoa",
+        anchor="codex-hooks-status",
+        kind="auto",
+        limit=12,
+        per_route_limit=12,
+        text_fallback_policy=(
+            module.TRACE_TEXT_FALLBACK_SPECIFIC_ROUTE_HIT
+        ),
+    )
+
+    assert trace["result_count"] == 1
+    assert trace["route_hit_count_before_text_fallback"] == 1
+    assert trace["text_fallback_policy"] == (
+        module.TRACE_TEXT_FALLBACK_SPECIFIC_ROUTE_HIT
+    )
+    assert trace["text_search_skipped"] is True
+    assert trace["text_search_attempted"] is False
+    assert trace["text_search_skip_reason"] == (
+        "specific_route_hit_sufficient_for_bounded_seed"
+    )
+    assert all(not call.get("query") for call in calls)
+
+
+def test_trace_route_graph_seed_policy_rejects_auto_partial_candidate_without_text(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def fake_search_sessions(**kwargs: Any) -> dict[str, Any]:
+        calls.append(kwargs)
+        if kwargs.get("query"):
+            raise AssertionError(
+                "an inferred partial auto candidate is not permission for "
+                "payload-wide fuzzy graph seeding"
+            )
+        return {
+            "ok": True,
+            "result_count": 0,
+            "results": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr(module, "search_sessions", fake_search_sessions)
+
+    trace = module.trace_route(
+        aoa_root=tmp_path / ".aoa",
+        anchor="codex-hooks-status",
+        kind="auto",
+        limit=12,
+        per_route_limit=12,
+        text_fallback_policy=(
+            module.TRACE_TEXT_FALLBACK_SPECIFIC_ROUTE_HIT
+        ),
+    )
+
+    assert trace["result_count"] == 0
+    assert trace["specific_lookup_candidate_present"] is True
+    assert trace["exact_anchor_lookup_candidate_present"] is False
+    assert trace["text_search_skipped"] is True
+    assert trace["text_search_attempted"] is False
+    assert trace["text_search_skip_reason"] == (
+        "auto_partial_route_candidates_not_exact_graph_seed"
+    )
+    assert all(not call.get("query") for call in calls)
+
+
+def test_bounded_graph_preserves_exact_matched_posting_beyond_route_preview(
+    tmp_path: Path,
+) -> None:
+    exact_route = "skill:aoa_session_memory_evidence_route"
+    graph = module.graph_from_search_results(
+        aoa_root=tmp_path / ".aoa",
+        hits=[
+            {
+                "doc_id": "task_episode:s:task-0001",
+                "doc_type": "task_episode",
+                "session_id": "s",
+                "segment_id": "task-0001",
+                "route_signals": "|path:preview_only|",
+                "matched_routes": [exact_route],
+                "refs": {
+                    "raw": "raw:line:10",
+                    "segment": "001.md#event-000010",
+                    "session": "session.manifest.json",
+                },
+            },
+            {
+                "doc_id": (
+                    "entity_registry:skill:"
+                    "aoa_session_memory_evidence_route"
+                ),
+                "doc_type": "entity_registry",
+                "session_id": "entity-registry",
+                "segment_id": (
+                    "aoa_session_memory_evidence_route"
+                ),
+                "route_signals": f"|{exact_route}|",
+                "matched_routes": [exact_route],
+                "refs": {
+                    "segment": "maps/entity-registry.json",
+                    "session": "maps/entity-registry.json",
+                },
+            },
+        ],
+        source="bounded_trace_search",
+    )
+
+    route_id = module.graph_route_node_id(
+        "skill",
+        "aoa_session_memory_evidence_route",
+    )
+    assert route_id in {
+        str(node.get("id") or "")
+        for node in graph["nodes"]
+    }
+    episode = next(
+        node
+        for node in graph["nodes"]
+        if node.get("id") == "task_episode:s:task-0001"
+    )
+    assert episode["type"] == "task_episode"
+    assert episode["session_id"] == "s"
+    assert episode["task_episode_id"] == "task-0001"
+    assert episode["segment_id"] == ""
+    assert (
+        "segment_id"
+        not in episode["evidence_refs"][0]
+    )
+    assert not any(
+        str(node.get("id") or "").startswith(
+            "segment:s:task-0001"
+        )
+        for node in graph["nodes"]
+    )
+    assert not any(
+        node.get("id") == "session:entity-registry"
+        for node in graph["nodes"]
+    )
+    exact_edges = [
+        edge
+        for edge in graph["edges"]
+        if edge.get("target") == route_id
+    ]
+    assert len(exact_edges) == 2
+    episode_edge = next(
+        edge
+        for edge in exact_edges
+        if edge["source"] == "task_episode:s:task-0001"
+    )
+    assert episode_edge["source"] == (
+        "task_episode:s:task-0001"
+    )
+    assert episode_edge["type"] == (
+        "task_episode_has_route_signal"
+    )
+    assert episode_edge["route_signal"] == exact_route
+    assert episode_edge["evidence_refs"][0]["refs"]["raw"] == (
+        "raw:line:10"
+    )
+    registry_edge = next(
+        edge
+        for edge in exact_edges
+        if edge["type"] == "registry_entity_has_route_signal"
+    )
+    assert registry_edge["source"].startswith(
+        "entity_registry:"
+    )
+    registry = next(
+        node
+        for node in graph["nodes"]
+        if node.get("id") == registry_edge["source"]
+    )
+    assert registry["session_id"] == ""
+    assert registry["segment_id"] == ""
+    assert registry["entity_id"] == (
+        "skill:aoa_session_memory_evidence_route"
+    )
+    assert (
+        "session_id"
+        not in registry["evidence_refs"][0]
+    )
+    assert (
+        "segment_id"
+        not in registry["evidence_refs"][0]
+    )
+
+
+def test_graph_neighborhood_does_not_repeat_trace_text_fallback(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setattr(
+        module,
+        "graph_from_store_neighborhood",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        module,
+        "graph_source_verified_correlation_timeline",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        module,
+        "trace_route",
+        lambda **kwargs: (
+            {
+                "ok": False,
+                "result_count": 0,
+                "results": [],
+                "route_candidates": [],
+                "diagnostics": ["search_fts_query_timeout:8000ms"],
+                "text_fallback_policy": kwargs.get(
+                    "text_fallback_policy"
+                ),
+                "text_search_skipped": False,
+                "text_search_attempted": True,
+                "text_search_skip_reason": "",
+            }
+            if kwargs.get("doc_type") is None
+            else (_ for _ in ()).throw(
+                AssertionError(
+                    "graph route seed must query current route-posting "
+                    "projections, not only retired event postings"
+                )
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "search_sessions",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError(
+                "graph-neighborhood must not repeat trace text fallback"
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "graph_from_search_results",
+        lambda **_kwargs: {
+            "ok": False,
+            "source": "bounded_trace_search",
+            "generated_at": "2026-07-25T00:00:00Z",
+            "nodes": [],
+            "edges": [],
+            "diagnostics": [],
+        },
+    )
+
+    neighborhood = module.graph_neighborhood(
+        aoa_root=tmp_path / ".aoa",
+        anchor="aoa-session-memory-deliberately-absent-skill",
+        kind="skill",
+        limit=12,
+    )
+
+    assert neighborhood["ok"] is False
+    assert neighborhood["route_selection"][
+        "text_fallback_already_attempted"
+    ] is True
+    assert neighborhood["route_selection"][
+        "duplicate_text_fallback_suppressed"
+    ] is True
+
+
+def test_auto_graph_seed_keeps_partial_route_candidate_unadmitted(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    route_id = module.graph_route_node_id("entity", "codex")
+    event_id = "event:s:001:000010"
+    refs = {
+        "raw": "raw:line:10",
+        "segment": "001.md#event-000010",
+    }
+    monkeypatch.setattr(
+        module,
+        "graph_from_store_neighborhood",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        module,
+        "graph_source_verified_correlation_timeline",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        module,
+        "trace_route",
+        lambda **kwargs: {
+            "ok": True,
+            "result_count": 1,
+            "results": [{"doc_id": event_id, "refs": refs}],
+            "route_candidates": module.trace_route_lookup_candidates(
+                module.trace_route_candidates(
+                    "codex-hooks-status",
+                    kind="auto",
+                )
+            ),
+            "diagnostics": [],
+            "text_fallback_policy": kwargs.get("text_fallback_policy"),
+            "text_search_skipped": True,
+            "text_search_attempted": False,
+            "text_search_skip_reason": (
+                "specific_route_hit_sufficient_for_bounded_seed"
+            ),
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "graph_from_search_results",
+        lambda **_kwargs: {
+            "ok": True,
+            "source": "bounded_trace_search",
+            "generated_at": "2026-07-25T00:00:00Z",
+            "nodes": [
+                {
+                    "id": route_id,
+                    "type": "entity",
+                    "route_layer": "entity",
+                    "route_key": "codex",
+                    "evidence_refs": [{"refs": refs}],
+                },
+                {
+                    "id": event_id,
+                    "type": "event",
+                    "refs": refs,
+                    "evidence_refs": [{"refs": refs}],
+                },
+            ],
+            "edges": [
+                {
+                    "id": "edge:partial-auto-seed",
+                    "source": event_id,
+                    "target": route_id,
+                    "type": "event_has_route_signal",
+                    "evidence_refs": [{"refs": refs}],
+                }
+            ],
+            "diagnostics": [],
+        },
+    )
+
+    neighborhood = module.graph_neighborhood(
+        aoa_root=tmp_path / ".aoa",
+        anchor="codex-hooks-status",
+        kind="auto",
+        limit=12,
+    )
+
+    assert neighborhood["ok"] is False
+    assert neighborhood["nodes"] == []
+    assert route_id in [
+        node["id"] for node in neighborhood["candidate_nodes"]
+    ]
+    assert neighborhood["resolved"]["start_node_ids"] == []
+    assert neighborhood["resolved"]["resolver_strategy"] == (
+        "auto_anchor_unresolved_candidate_navigation"
+    )
+    assert neighborhood["route_selection"]["selected_route"] == (
+        "bounded_trace_search_candidate_only"
+    )
+    assert neighborhood["answer_admission"]["admitted"] is False
+
+
+def test_graph_store_auto_resolver_rejects_partial_inferred_route_as_exact(
+    tmp_path: Path,
+) -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE nodes (id TEXT PRIMARY KEY, payload_json TEXT NOT NULL)"
+    )
+    for layer, key in (
+        ("entity", "codex"),
+        ("mutation_surface", "hooks"),
+    ):
+        node_id = module.graph_route_node_id(layer, key)
+        conn.execute(
+            "INSERT INTO nodes(id, payload_json) VALUES (?, ?)",
+            (
+                node_id,
+                json.dumps(
+                    {
+                        "id": node_id,
+                        "route_layer": layer,
+                        "route_key": key,
+                    }
+                ),
+            ),
+        )
+
+    resolved = module.graph_store_resolve_anchor(
+        conn,
+        "codex-hooks-status",
+        kind="auto",
+        limit=12,
+    )
+    conn.close()
+
+    assert resolved["start_node_ids"] == []
+    assert resolved["resolver_strategy"] == (
+        "indexed_exact_miss_requires_retrieval_seed"
+    )
+    assert "graph_store_unindexed_payload_scan_skipped" in resolved[
+        "diagnostics"
+    ]
 
 
 def test_graph_neighborhood_uses_source_verified_exact_correlation_before_fuzzy_seed(
@@ -21720,6 +25572,9 @@ def test_graph_quality_treats_successful_message_mirror_dedup_as_informational()
     unknown = module.graph_quality_diagnostic_finding(
         "unexpected_graph_projection_failure"
     )
+    stale_gate = module.graph_quality_diagnostic_finding(
+        "answer_rule_gate:stale"
+    )
 
     assert finding == {
         "code": (
@@ -21729,7 +25584,74 @@ def test_graph_quality_treats_successful_message_mirror_dedup_as_informational()
         "severity": "informational",
         "category": "expected_bounded_route_posture",
     }
+    assert stale_gate == {
+        "code": "answer_rule_gate:stale",
+        "severity": "informational",
+        "category": "protective_answer_gate",
+    }
     assert unknown["severity"] == "critical"
+
+
+def test_graph_lexical_seed_uses_exact_postings_for_structured_identifier(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def fake_search_sessions(**kwargs: Any) -> dict[str, Any]:
+        calls.append(kwargs)
+        return {
+            "ok": True,
+            "result_count": 1,
+            "results": [{"doc_id": "event:s:001:000010"}],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr(module, "search_sessions", fake_search_sessions)
+    payload = module.graph_lexical_seed(
+        aoa_root=tmp_path / ".aoa",
+        query="call_7H5Kj9hF1qXr",
+        kind="auto",
+        limit=4,
+    )
+
+    assert payload["graph_seed_route"] == "exact_literal_postings"
+    assert len(calls) == 1
+    assert calls[0]["literal_postings_only"] is True
+    assert calls[0]["include_archived_raw_fallback"] is False
+    assert calls[0]["doc_type"] == "event"
+
+
+def test_graph_lexical_seed_skips_fts_for_resolved_typed_graph_anchor(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    def fail_search_sessions(**_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("resolved typed graph anchor must not invoke FTS")
+
+    monkeypatch.setattr(module, "search_sessions", fail_search_sessions)
+    payload = module.graph_lexical_seed(
+        aoa_root=tmp_path / ".aoa",
+        query="aoa-session-memory-evidence-route",
+        kind="skill",
+        limit=4,
+        neighborhood={
+            "resolved": {
+                "start_node_ids": [
+                    "route:skill:skill:aoa_session_memory_evidence_route"
+                ]
+            },
+            "evidence_refs": [{"refs": {"raw": "raw:line:10"}}],
+        },
+    )
+
+    assert payload["ok"] is True
+    assert payload["graph_seed_route"] == "typed_graph_anchor"
+    assert payload["cost_profile"]["uses_fts"] is False
+    assert payload["results"] == []
+    assert module.graph_quality_diagnostic_finding(
+        "graph_lexical_seed_skipped_specific_graph_anchor"
+    )["severity"] == "informational"
 
 
 def test_graph_store_typed_path_exact_key_wins_alias_and_fuzzy_collisions(tmp_path: Path) -> None:
@@ -22284,7 +26206,7 @@ def test_entity_registry_autodiscovers_skills_mcp_and_links_search_graph(tmp_pat
     ] is True
     assert registry_nodes[0]["identity_candidate_ids"]
     assert "session_has_registered_entity" in edge_types
-    assert "event_mentions_registered_entity" in edge_types
+    assert "event_has_registered_entity_signal" in edge_types
     neighborhood = module.graph_neighborhood(aoa_root=aoa_root, anchor="aoa-live-skill", kind="skill", depth=1, limit=20)
     assert neighborhood["ok"] is True
     assert any(node.get("type") == "entity_registry" for node in neighborhood["nodes"])
@@ -22438,6 +26360,103 @@ def test_entity_registry_autodiscovers_skills_mcp_and_links_search_graph(tmp_pat
     assert budgeted_noop_refresh["ok"] is True
     assert budgeted_noop_refresh["budget_policy"] == "soft_observed_atomic_sync_not_interrupted"
     assert budgeted_noop_refresh["diagnostics"] == []
+
+
+def test_entity_registry_search_sync_does_not_skip_requested_source_or_history_policy(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    monkeypatch.setattr(
+        module,
+        "entity_registry_runtime_source_entries",
+        lambda _aoa_root: [],
+    )
+
+    initial = module.refresh_entity_registry_search_documents_only(
+        aoa_root=aoa_root,
+        observed_source="none",
+        history_policy="authoritative-rebuild",
+    )
+    assert initial["ok"] is True
+    assert initial["skipped"] is False
+    initial_registry = module.read_json(
+        aoa_root / module.ENTITY_REGISTRY_PATH,
+        {},
+    )
+    assert initial_registry["observed_source"] == "none"
+    assert initial_registry["history_policy"] == (
+        module.ENTITY_REGISTRY_HISTORY_POLICY_AUTHORITATIVE_REBUILD
+    )
+
+    conn = sqlite3.connect(str(module.search_db_path(aoa_root)))
+    document = conn.execute(
+        """
+        INSERT INTO documents(
+            id, doc_type, session_label, title, body, payload_json
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "historical-skill-evidence",
+            "event",
+            "historical-session",
+            "historical skill evidence",
+            "historical skill evidence",
+            "{}",
+        ),
+    )
+    route = conn.execute(
+        """
+        INSERT INTO route_terms(layer, key, route_signal)
+        VALUES ('skill', 'historical_skill', 'skill:historical_skill')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO document_routes(doc_rowid, route_id)
+        VALUES (?, ?)
+        """,
+        (document.lastrowid, route.lastrowid),
+    )
+    conn.commit()
+    conn.close()
+
+    changed = module.refresh_entity_registry_search_documents_only(
+        aoa_root=aoa_root,
+        observed_source="route-terms",
+        history_policy="authoritative-rebuild",
+    )
+    assert changed["ok"] is True
+    assert changed["skipped"] is False
+    changed_registry = module.read_json(
+        aoa_root / module.ENTITY_REGISTRY_PATH,
+        {},
+    )
+    assert changed_registry["observed_source"] == "route-terms"
+    assert changed_registry["observed_route_source"] == (
+        "archived_route_terms"
+    )
+    assert any(
+        entry.get("entity_id") == "skill:historical_skill"
+        for entry in changed_registry["entries"]
+    )
+
+    policy_changed = (
+        module.refresh_entity_registry_search_documents_only(
+            aoa_root=aoa_root,
+            observed_source="route-terms",
+            history_policy="incremental",
+        )
+    )
+    assert policy_changed["ok"] is True
+    assert policy_changed["skipped"] is False
+    policy_changed_registry = module.read_json(
+        aoa_root / module.ENTITY_REGISTRY_PATH,
+        {},
+    )
+    assert policy_changed_registry["history_policy"] == (
+        module.ENTITY_REGISTRY_HISTORY_POLICY_INCREMENTAL
+    )
 
 
 def test_entity_registry_source_mcp_tool_keys_are_service_namespaced(tmp_path: Path) -> None:
@@ -23066,6 +27085,372 @@ def test_entity_registry_runtime_fingerprint_distinguishes_mtime_rewrite_from_ow
     )
 
 
+def test_graph_dependency_auto_refresh_preserves_authoritative_registry_policy(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    codex_home = tmp_path / "codex-home"
+    services_root = tmp_path / "empty-services"
+    codex_home.mkdir()
+    services_root.mkdir()
+    config_path = codex_home / "config.toml"
+    config_path.write_text(
+        "[mcp_servers.semantic_probe]\n"
+        'command = "before-command"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setenv(
+        "AOA_ENTITY_REGISTRY_MCP_SERVICES_ROOTS",
+        str(services_root),
+    )
+
+    initial = module.build_entity_registry(
+        aoa_root=aoa_root,
+        write=True,
+        include_runtime=True,
+        observed_source="none",
+        history_policy="authoritative-rebuild",
+        limit=1_000_000,
+    )
+    newer_mtime = float(initial["generated_at_epoch"]) + 10.0
+    config_path.write_text(
+        "[mcp_servers.semantic_probe]\n"
+        'command = "after-command"\n',
+        encoding="utf-8",
+    )
+    os.utime(config_path, (newer_mtime, newer_mtime))
+
+    refreshed = module.graph_entity_registry_dependency_snapshot(
+        aoa_root,
+        ensure_current=True,
+        allow_ephemeral=False,
+    )
+    persisted = module.read_json(
+        aoa_root / module.ENTITY_REGISTRY_PATH,
+        {},
+    )
+
+    assert refreshed["status"] == "current"
+    assert refreshed["refreshed"] is True
+    assert persisted["observed_source"] == "none"
+    assert (
+        persisted["history_policy"]
+        == module.ENTITY_REGISTRY_HISTORY_POLICY_AUTHORITATIVE_REBUILD
+    )
+
+
+def test_entity_registry_search_sync_fast_refreshes_runtime_only_drift(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    source_state = {
+        "source_path_count": 1,
+        "latest_source_mtime": 1.0,
+        "latest_source_mtime_iso": "1970-01-01T00:00:01Z",
+        "latest_source_path": "/fixture/runtime-owner",
+    }
+    runtime_entries = [
+        module.entity_registry_make_entry(
+            kind="skill",
+            key="existing-runtime-skill",
+            aliases=["existing-runtime-skill"],
+            source_refs=[
+                {
+                    "source_type": "fixture_runtime_owner",
+                    "path": "/fixture/existing/SKILL.md",
+                    "status": "active",
+                    "identity_sha256": "a" * 64,
+                }
+            ],
+            source_surface="fixture_runtime_owner",
+            owner="fixture",
+            status="active",
+        )
+    ]
+    monkeypatch.setattr(
+        module,
+        "entity_registry_source_surface_state",
+        lambda _aoa_root: dict(source_state),
+    )
+    monkeypatch.setattr(
+        module,
+        "entity_registry_runtime_source_entries",
+        lambda _aoa_root: list(runtime_entries),
+    )
+
+    initial = module.refresh_entity_registry_search_documents_only(
+        aoa_root=aoa_root,
+        observed_source="none",
+        history_policy="authoritative-rebuild",
+    )
+    assert initial["ok"] is True
+    before = module.read_json(
+        aoa_root / module.ENTITY_REGISTRY_PATH,
+        {},
+    )
+    before_dependency = before["observed_source_dependency"]
+
+    runtime_entries.append(
+        module.entity_registry_make_entry(
+            kind="skill",
+            key="phoenix-skill",
+            aliases=["phoenix-skill"],
+            source_refs=[
+                {
+                    "source_type": "fixture_runtime_owner",
+                    "path": "/fixture/new/SKILL.md",
+                    "status": "active",
+                    "identity_sha256": "b" * 64,
+                }
+            ],
+            source_surface="fixture_runtime_owner",
+            owner="fixture",
+            status="active",
+        )
+    )
+    source_state["latest_source_mtime"] = (
+        float(before["generated_at_epoch"]) + 10.0
+    )
+    source_state["latest_source_mtime_iso"] = (
+        "2099-01-01T00:00:00Z"
+    )
+
+    def fail_observed_rescan(*_args: Any, **_kwargs: Any) -> list[Any]:
+        raise AssertionError(
+            "runtime-only drift must not rescan archived route terms"
+        )
+
+    monkeypatch.setattr(
+        module,
+        "entity_registry_entries_from_route_terms",
+        fail_observed_rescan,
+    )
+    refreshed = module.refresh_entity_registry_search_documents_only(
+        aoa_root=aoa_root,
+        observed_source="none",
+        history_policy="authoritative-rebuild",
+    )
+    after = module.read_json(
+        aoa_root / module.ENTITY_REGISTRY_PATH,
+        {},
+    )
+
+    assert refreshed["ok"] is True
+    assert refreshed["runtime_overlay_refresh"]["status"] == (
+        "refreshed"
+    )
+    assert after["observed_source_dependency"] == before_dependency
+    assert module.entity_registry_maintenance_status(aoa_root)[
+        "status"
+    ] == "current"
+    assert any(
+        entry.get("canonical_key") == "phoenix_skill"
+        for entry in after["entries"]
+    )
+    search = module.search_sessions(
+        aoa_root=aoa_root,
+        query="phoenix-skill",
+        doc_type="entity_registry",
+        limit=5,
+    )
+    assert search["ok"] is True
+    assert search["results"][0]["doc_type"] == "entity_registry"
+
+
+def test_graph_dependency_snapshot_reuses_exact_semantic_digest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    monkeypatch.setattr(
+        module,
+        "entity_registry_runtime_source_entries",
+        lambda _aoa_root: [],
+    )
+    module.build_entity_registry(
+        aoa_root=aoa_root,
+        write=True,
+        include_runtime=True,
+        observed_source="none",
+    )
+    module._ENTITY_REGISTRY_SEMANTIC_DIGEST_PROCESS_CACHE.clear()
+    original = module.entity_registry_semantic_digest
+    calls = 0
+
+    def counted(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        module,
+        "entity_registry_semantic_digest",
+        counted,
+    )
+    first = module.graph_entity_registry_dependency_snapshot(
+        aoa_root,
+        include_index=False,
+    )
+    second = module.graph_entity_registry_dependency_snapshot(
+        aoa_root,
+        include_index=False,
+    )
+
+    assert first["semantic_digest_verified"] is True
+    assert first["index"] == {}
+    assert first["semantic_digest_verification_mode"] == (
+        "recomputed_exact_semantic_digest"
+    )
+    assert second["semantic_digest_verification_mode"] == (
+        "process_cache_exact_file_identity"
+    )
+    assert calls == 1
+
+
+def test_graph_registry_content_growth_preserves_semantic_epoch_and_routes_rebind(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    module.build_entity_registry(
+        aoa_root=aoa_root,
+        write=True,
+        include_runtime=True,
+        observed_source="none",
+        limit=1_000_000,
+    )
+    initial = module.graph_entity_registry_dependency_snapshot(
+        aoa_root,
+        ensure_current=False,
+        allow_ephemeral=False,
+    )
+
+    skill_path = (
+        aoa_root / "skills" / "incremental-arrival" / "SKILL.md"
+    )
+    skill_path.parent.mkdir(parents=True)
+    skill_path.write_text(
+        "---\n"
+        "name: incremental-arrival\n"
+        "description: A newly discovered registry entity.\n"
+        "---\n",
+        encoding="utf-8",
+    )
+    refreshed = module.graph_entity_registry_dependency_snapshot(
+        aoa_root,
+        ensure_current=True,
+        allow_ephemeral=False,
+    )
+    transition = module.graph_entity_registry_dependency_transition_state(
+        aoa_root,
+        str(initial["dependency_id"]),
+        module.graph_entity_registry_dependency_packet(initial),
+    )
+
+    assert initial["semantic_epoch_id"]
+    assert (
+        refreshed["semantic_epoch_id"]
+        == initial["semantic_epoch_id"]
+    )
+    assert (
+        refreshed["content_revision_id"]
+        != initial["content_revision_id"]
+    )
+    assert refreshed["dependency_id"] != initial["dependency_id"]
+    assert transition["status"] == "rebind_required"
+    assert transition["rebindable"] is True
+    assert transition["semantic_epoch_compatible"] is True
+    assert transition["refresh_required"] is False
+    assert transition["reasons"] == [
+        "graph_entity_registry_dependency_mismatch"
+    ]
+
+
+def test_graph_owner_source_growth_requests_rebind_without_full_rebuild(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    store = module.GraphSqliteStore(aoa_root, reset=True)
+    try:
+        store.rebuild(
+            [
+                {
+                    "source": {
+                        "source_key": "session:epoch-route",
+                        "source_type": "session",
+                        "session_id": "epoch-route",
+                        "session_label": "epoch-route",
+                        "segment_id": "",
+                        "source_path": str(tmp_path / "epoch-route.json"),
+                        "source_paths": [
+                            str(tmp_path / "epoch-route.json")
+                        ],
+                        "source_sha": "epoch-route-sha",
+                        "source_mtime": 1.0,
+                        "graph_schema_version": (
+                            module.GRAPH_SCHEMA_VERSION
+                        ),
+                        "graph_store_schema_version": (
+                            module.GRAPH_STORE_SCHEMA_VERSION
+                        ),
+                        "graph_event_route_signal_edge_policy": (
+                            module.GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY
+                        ),
+                        "route_signal_classifier_version": (
+                            module.ROUTE_SIGNAL_CLASSIFIER_VERSION
+                        ),
+                    },
+                    "nodes": [
+                        {"id": "session:epoch-route", "type": "session"},
+                        {"id": "event:epoch-route", "type": "event"},
+                    ],
+                    "edges": [
+                        {
+                            "id": "edge:epoch-route",
+                            "source": "session:epoch-route",
+                            "target": "event:epoch-route",
+                            "type": "session_has_event",
+                        }
+                    ],
+                }
+            ]
+        )
+    finally:
+        store.close()
+
+    registry = module.read_json(
+        aoa_root / module.ENTITY_REGISTRY_PATH,
+        {},
+    )
+    skill_path = (
+        aoa_root / "skills" / "owner-newer" / "SKILL.md"
+    )
+    skill_path.parent.mkdir(parents=True)
+    skill_path.write_text(
+        "---\n"
+        "name: owner-newer\n"
+        "description: New owner entity after graph publication.\n"
+        "---\n",
+        encoding="utf-8",
+    )
+    newer_mtime = float(registry["generated_at_epoch"]) + 10.0
+    os.utime(skill_path, (newer_mtime, newer_mtime))
+
+    state = module.graph_store_state(aoa_root=aoa_root)
+
+    assert state["status"] == "dirty"
+    assert state["needs_dependency_rebind"] is True
+    assert state["needs_full_rebuild"] is False
+    assert state["entity_registry_dependency"][
+        "refresh_required"
+    ] is True
+    assert state["entity_registry_dependency"][
+        "semantic_epoch_compatible"
+    ] is True
+
+
 def test_entity_registry_cli_identities_are_per_subcommand_contract(
     tmp_path: Path,
 ) -> None:
@@ -23426,6 +27811,90 @@ def test_entity_registry_lookup_falls_back_to_observed_route_terms(tmp_path: Pat
     assert any(candidate["route_signal"] == "route_next_action:repair" for candidate in next_action_candidates)
 
 
+def test_entity_registry_explicit_route_terms_fallback_is_not_top_k_truncated(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    conn = module.init_search_db(
+        module.search_db_path(aoa_root),
+        rebuild=True,
+    )
+    for ordinal in range(401):
+        key = f"historical_validator_{ordinal:04d}"
+        route_signal = f"validator:{key}"
+        conn.execute(
+            "INSERT INTO route_terms(layer, key, route_signal) "
+            "VALUES (?, ?, ?)",
+            ("validator", key, route_signal),
+        )
+        route_id = int(
+            conn.execute(
+                "SELECT id FROM route_terms "
+                "WHERE route_signal = ?",
+                (route_signal,),
+            ).fetchone()[0]
+        )
+        document = conn.execute(
+            """
+            INSERT INTO documents(
+              id, doc_type, session_id, session_label,
+              session_date, event_id, event_type, session_act,
+              usage_role, route_signals, raw_ref,
+              manifest_path, payload_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                f"event:historical-validator:{ordinal:06d}",
+                "event",
+                "historical-validator-session",
+                "historical-validator-session",
+                "2026-06-26",
+                f"{ordinal:06d}",
+                "COMMAND",
+                "tool_call",
+                "usage",
+                f"|{route_signal}|",
+                f"raw:line:{ordinal + 1}",
+                "session.manifest.json",
+                "{}",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO document_routes(doc_rowid, route_id) "
+            "VALUES (?, ?)",
+            (document.lastrowid, route_id),
+        )
+    conn.commit()
+    conn.close()
+
+    complete = module.entity_registry_entries_from_route_terms(
+        aoa_root
+    )
+    bounded = module.entity_registry_entries_from_route_terms(
+        aoa_root,
+        limit_per_layer=400,
+    )
+    complete_validators = [
+        entry
+        for entry in complete
+        if entry["kind"] == "validator"
+    ]
+    bounded_validators = [
+        entry
+        for entry in bounded
+        if entry["kind"] == "validator"
+    ]
+
+    assert len(complete_validators) == 401
+    assert len(bounded_validators) == 400
+    assert any(
+        entry["canonical_key"]
+        == "historical_validator_0400"
+        for entry in complete_validators
+    )
+
+
 def test_entity_registry_uses_rollup_observed_source_and_retains_previous_observed(
     tmp_path: Path,
     monkeypatch: Any,
@@ -23501,7 +27970,7 @@ def test_entity_registry_uses_rollup_observed_source_and_retains_previous_observ
             1,
         ),
     )
-    conn.execute(
+    conn.executemany(
         """
         INSERT INTO route_rollups(
             shard, layer, key, route_signal, posting_count, session_count,
@@ -23509,19 +27978,44 @@ def test_entity_registry_uses_rollup_observed_source_and_retains_previous_observ
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (
-            "month/2026-06",
-            "script",
-            "fast_rollup_script",
-            "script:fast_rollup_script",
-            3,
-            1,
-            "2026-06-26",
-            "2026-06-26",
-            json.dumps(["raw:line:1"]),
-            json.dumps(["000__initial-to-latest.md#event-000001"]),
-            json.dumps(["rollup-session"]),
-        ),
+        [
+            (
+                "month/2026-06",
+                "script",
+                "fast_rollup_script",
+                "script:fast_rollup_script",
+                3,
+                1,
+                "2026-06-26",
+                "2026-06-26",
+                json.dumps(["raw:line:1"]),
+                json.dumps(
+                    [
+                        "000__initial-to-latest.md"
+                        "#event-000001"
+                    ]
+                ),
+                json.dumps(["rollup-session"]),
+            ),
+            (
+                "month/2026-06",
+                "validator",
+                "replacement_rollup_validator",
+                "validator:replacement_rollup_validator",
+                8,
+                1,
+                "2026-06-26",
+                "2026-06-26",
+                json.dumps(["raw:line:2"]),
+                json.dumps(
+                    [
+                        "000__initial-to-latest.md"
+                        "#event-000002"
+                    ]
+                ),
+                json.dumps(["rollup-session"]),
+            ),
+        ],
     )
     conn.commit()
     conn.close()
@@ -23541,9 +28035,15 @@ def test_entity_registry_uses_rollup_observed_source_and_retains_previous_observ
 
     assert payload["observed_route_source"] == "operational_route_rollup"
     assert entries[("script", "fast_rollup_script")]["source_surface"] == "operational_route_rollup"
+    assert entries[
+        ("validator", "replacement_rollup_validator")
+    ]["source_surface"] == "operational_route_rollup"
     retained = entries[("validator", "legacy_full_route_validator")]
     assert retained["source_surface"] == "archived_route_terms"
     assert retained["retained_from_snapshot"]["reason"] == "fast_observed_route_uses_operational_rollup"
+    assert retained["retained_from_snapshot"][
+        "retention_basis"
+    ] == "stable_exact_identity_not_kind_cardinality"
     assert "observed_entity_retained_from_previous_snapshot" in retained["freshness"]["diagnostics"]
 
     rebuilt = module.build_entity_registry(
@@ -23752,6 +28252,176 @@ def test_entity_registry_freshness_tracks_observed_rollup_semantics(
     ] != dependency["semantic_sha256"]
 
 
+def test_entity_registry_route_terms_use_transactional_dirty_marker(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    monkeypatch.setattr(
+        module,
+        "entity_registry_runtime_source_entries",
+        lambda _aoa_root: [],
+    )
+    conn = module.init_search_db(module.search_db_path(aoa_root))
+    cursor = conn.execute(
+        "INSERT INTO documents(id, doc_type, session_id, session_label, "
+        "session_date, title, body, payload_json) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "observed-route-doc-1",
+            "event",
+            "observed-route-session-1",
+            "observed-route-session-1",
+            "2026-08-11",
+            "observed route one",
+            "observed route one",
+            "{}",
+        ),
+    )
+    conn.execute(
+        "INSERT INTO route_terms(layer, key, route_signal) VALUES (?, ?, ?)",
+        ("skill", "observed_route_one", "skill:observed_route_one"),
+    )
+    route_id = conn.execute(
+        "SELECT id FROM route_terms WHERE route_signal = ?",
+        ("skill:observed_route_one",),
+    ).fetchone()[0]
+    conn.execute(
+        "INSERT INTO document_routes(doc_rowid, route_id) VALUES (?, ?)",
+        (cursor.lastrowid, route_id),
+    )
+    conn.commit()
+    conn.close()
+
+    initial = module.refresh_entity_registry_search_documents_only(
+        aoa_root=aoa_root,
+        observed_source="route-terms",
+    )
+    assert initial["ok"] is True
+    assert initial["observed_route_tracking"]["status"] == "current"
+    assert initial["observed_route_tracking"]["dirty"] is False
+
+    module._ENTITY_REGISTRY_SEMANTIC_DIGEST_PROCESS_CACHE.clear()
+    original_semantic_digest = module.entity_registry_semantic_digest
+    semantic_digest_calls = 0
+
+    def counted_semantic_digest(*args: Any, **kwargs: Any) -> Any:
+        nonlocal semantic_digest_calls
+        semantic_digest_calls += 1
+        return original_semantic_digest(*args, **kwargs)
+
+    monkeypatch.setattr(
+        module,
+        "entity_registry_semantic_digest",
+        counted_semantic_digest,
+    )
+    first_status = module.entity_registry_maintenance_status(aoa_root)
+    second_status = module.entity_registry_maintenance_status(aoa_root)
+    assert first_status["semantic_digest_verification_mode"] == (
+        "recomputed_exact_semantic_digest"
+    )
+    assert second_status["semantic_digest_verification_mode"] == (
+        "process_cache_exact_file_identity"
+    )
+    assert semantic_digest_calls == 1
+
+    registry_path = aoa_root / module.ENTITY_REGISTRY_PATH
+    rewritten_registry = module.read_json(registry_path, {})
+    rewritten_registry["generated_at"] = "2026-08-11T00:00:01Z"
+    module.write_json(registry_path, rewritten_registry)
+    rewritten_status = module.entity_registry_maintenance_status(aoa_root)
+    assert rewritten_status["status"] == "current"
+    assert rewritten_status["semantic_digest_verification_mode"] == (
+        "recomputed_exact_semantic_digest"
+    )
+    assert semantic_digest_calls == 2
+    monkeypatch.setattr(
+        module,
+        "entity_registry_semantic_digest",
+        original_semantic_digest,
+    )
+
+    original_entries = module.entity_registry_entries_from_route_terms
+
+    def fail_full_route_scan(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError(
+            "clean transactional marker must avoid route-term aggregation"
+        )
+
+    monkeypatch.setattr(
+        module,
+        "entity_registry_entries_from_route_terms",
+        fail_full_route_scan,
+    )
+    current = module.entity_registry_maintenance_status(aoa_root)
+    assert current["status"] == "current"
+    assert current["observed_route_tracking"]["status"] == "current"
+    assert current["observed_dependency_verification_mode"] == (
+        "persisted_semantic_dependency_with_clean_transactional_dirty_marker"
+    )
+
+    monkeypatch.setattr(
+        module,
+        "entity_registry_entries_from_route_terms",
+        original_entries,
+    )
+    conn = sqlite3.connect(str(module.search_db_path(aoa_root)))
+    cursor = conn.execute(
+        "INSERT INTO documents(id, doc_type, session_id, session_label, "
+        "session_date, title, body, payload_json) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "observed-route-doc-2",
+            "event",
+            "observed-route-session-2",
+            "observed-route-session-2",
+            "2026-08-11",
+            "observed route two",
+            "observed route two",
+            "{}",
+        ),
+    )
+    conn.execute(
+        "INSERT INTO route_terms(layer, key, route_signal) VALUES (?, ?, ?)",
+        ("skill", "observed_route_two", "skill:observed_route_two"),
+    )
+    route_id = conn.execute(
+        "SELECT id FROM route_terms WHERE route_signal = ?",
+        ("skill:observed_route_two",),
+    ).fetchone()[0]
+    conn.execute(
+        "INSERT INTO document_routes(doc_rowid, route_id) VALUES (?, ?)",
+        (cursor.lastrowid, route_id),
+    )
+    conn.commit()
+    conn.close()
+
+    dirty = module.entity_registry_maintenance_status(aoa_root)
+    assert dirty["observed_route_tracking"]["status"] == "dirty"
+    assert dirty["observed_dependency_verification_mode"] == (
+        "recomputed_from_selected_observed_projection"
+    )
+    assert dirty["needs_maintenance"] is True
+    assert (
+        "entity_registry_observed_dependency_changed"
+        in dirty["diagnostics"]
+    )
+
+    refreshed = module.refresh_entity_registry_search_documents_only(
+        aoa_root=aoa_root,
+        observed_source="route-terms",
+    )
+    assert refreshed["ok"] is True
+    assert refreshed["observed_route_tracking"]["status"] == "current"
+    monkeypatch.setattr(
+        module,
+        "entity_registry_entries_from_route_terms",
+        fail_full_route_scan,
+    )
+    final = module.entity_registry_maintenance_status(aoa_root)
+    assert final["status"] == "current"
+
+
 def test_auto_maintenance_refreshes_stale_entity_registry_search_docs(tmp_path: Path, monkeypatch: Any) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
@@ -23813,8 +28483,9 @@ def test_auto_maintenance_refreshes_stale_entity_registry_search_docs(tmp_path: 
     payload = module.auto_maintenance(
         workspace_root=workspace,
         aoa_root=aoa_root,
-        profile="catchup",
+        profile="backlog",
         apply=True,
+        discovery_limit=0,
         max_raw_bytes=1,
         budget_seconds=30,
     )
@@ -25010,6 +29681,12 @@ def test_session_scoped_skill_prompt_visibility_is_context_only(
         module.ROUTE_SIGNAL_CLASSIFIER_VERSION - 1
     )
     module.write_json(segment_path, segment_index)
+    session_index_path = session_dir / module.SESSION_INDEX_JSON
+    session_index = module.read_json(session_index_path, {})
+    session_index["route_signal_classifier_version"] = (
+        module.ROUTE_SIGNAL_CLASSIFIER_VERSION - 1
+    )
+    module.write_json(session_index_path, session_index)
 
     stale_scan = module.session_query_source_event_scan(
         aoa_root=aoa_root,
@@ -25531,7 +30208,10 @@ def test_app_server_runtime_envelope_and_structured_skill_share_one_real_task_ep
     )
     assert session_index["task_episode_counts"]["total"] == 1
     assert session_index["task_episode_counts"]["by_status"] == {"open": 1}
-    episode = session_index["task_episodes"][0]
+    episode = module.session_index_task_episode_components(
+        Path(record["path"]),
+        session_index,
+    )[0]
     assert episode["start_user_ref"]["event_id"] == "000003"
     assert episode["event_range"] == {
         "from_event_id": "000003",
@@ -26112,7 +30792,11 @@ def test_skill_usage_chain_rejects_parallel_foreign_correlation(tmp_path: Path) 
         aoa_root=aoa_root,
     )
     record = module.resolve_session_record(aoa_root, fixture["session_id"])
-    indexed = module.search_index_sessions(aoa_root=aoa_root, target="all")
+    indexed = module.search_index_sessions(
+        aoa_root=aoa_root,
+        target="all",
+        include_entity_registry=False,
+    )
     assert indexed["ok"] is True
 
     expected = fixture["expected"]
@@ -26156,10 +30840,14 @@ def test_skill_usage_chain_rejects_parallel_foreign_correlation(tmp_path: Path) 
         (Path(record["path"]) / module.SESSION_INDEX_JSON).read_text(encoding="utf-8")
     )
     assert session_index["task_episode_counts"]["total"] == 1
-    assert session_index["task_episodes"][0]["episode_id"] == "task-0001"
+    task_episodes = module.session_index_task_episode_components(
+        Path(record["path"]),
+        session_index,
+    )
+    assert task_episodes[0]["episode_id"] == "task-0001"
     assert expected["structured_selection_event_id"] in {
         ref["event_id"]
-        for ref in session_index["task_episodes"][0]["transition_refs"]
+        for ref in task_episodes[0]["transition_refs"]
     }
 
     chain = module.entity_usage_chain(
@@ -29189,6 +33877,236 @@ def test_entity_usage_lifecycle_requires_correlation_owned_terminal_evidence() -
     assert lifecycle["answer_admission"]["umbrella_used_claim_admitted"] is False
 
 
+def test_hook_command_admission_requires_exact_session_memory_subcommand() -> None:
+    """Regression derived from UAP-HOOK-FAILED-001 raw refs 2944/2948."""
+    exact = (
+        "python3 /workspace/AbyssOS/.aoa/scripts/aoa_session_memory.py "
+        "codex-hooks-status --workspace-root /workspace/AbyssOS"
+    )
+    assert module.entity_usage_hook_command_proves_invocation(
+        exact,
+        anchor="codex-hooks-status",
+    )
+    assert not module.entity_usage_hook_command_proves_invocation(
+        "python3 scripts/aoa_session_memory.py doctor "
+        "--note codex-hooks-status",
+        anchor="codex-hooks-status",
+    )
+    assert not module.entity_usage_hook_command_proves_invocation(
+        "apply_patch docs/codex-hooks-status.md",
+        anchor="codex-hooks-status",
+    )
+
+
+def test_exact_source_hit_infers_task_episode_and_bounds_scan_generation() -> None:
+    scan = {
+        "session_id": "session-1",
+        "session_label": "session-label",
+        "session_manifest": "/archive/session.manifest.json",
+        "_session_dir": Path("/archive/session-label"),
+        "_record": {"date": "2026-07-29"},
+        "_task_episode_ranges": [
+            ("task-0043", 13796, 13853),
+        ],
+        "generation_identities": {
+            "expected": {"segment_index": {"generation_id": "gen-1"}},
+            "observed": {
+                "session_index": {"generation_id": "session-gen"},
+                "segment_indexes": {
+                    "065": {"generation_id": "gen-1"},
+                    "066": {"generation_id": "gen-1"},
+                },
+            },
+            "compatible": True,
+        },
+        "status": "complete",
+        "source_fingerprint": "raw-sha",
+    }
+    entry = {
+        "event": {
+            "event_id": "013803",
+            "type": "FILE_READ",
+            "raw_ref": "raw:line:13803",
+            "correlation_id": "call-skill-read",
+            "facets": {},
+        },
+        "segment": {
+            "segment_id": "066",
+            "markdown": "segments/066.md",
+        },
+        "segment_index": {"segment_id": "066"},
+        "index_path": Path("/archive/session-label/segments/066.index.json"),
+        "raw_block_ref": "raw/blocks/066.raw.jsonl",
+    }
+
+    hit = module.session_query_source_hit(
+        scan,
+        entry,
+        source="session_scoped_query_time_exact_correlation_probe",
+    )
+    summary = module.session_query_source_scan_summary(scan)
+
+    assert hit["task_episode_id"] == "task-0043"
+    assert hit["task_episode_ref"] == (
+        "task_episode:session-1:task-0043"
+    )
+    assert hit["refs"]["task_episode"] == (
+        "task_episode:session-1:task-0043"
+    )
+    assert summary["generation_identities"]["observed"] == {
+        "session_index": {"generation_id": "session-gen"},
+        "segment_index_generation_ids": ["gen-1"],
+        "segment_index_count": 2,
+    }
+    assert "segment_indexes" not in summary[
+        "generation_identities"
+    ]["observed"]
+
+
+def test_usage_chain_exact_correlation_selects_failed_hook_cli_instance(
+    tmp_path: Path,
+) -> None:
+    """Real-transcript invariant derived from the sealed failed-hook specimen."""
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-exact-hook-correlation.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-07-29T00:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "exact-hook-correlation",
+                    "cwd": str(workspace),
+                },
+            },
+            {
+                "timestamp": "2026-07-29T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": "call-hook-status-failed",
+                    "arguments": json.dumps(
+                        {
+                            "cmd": (
+                                "python3 scripts/aoa_session_memory.py "
+                                "codex-hooks-status --json"
+                            )
+                        }
+                    ),
+                },
+            },
+            {
+                "timestamp": "2026-07-29T00:00:02Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call-hook-status-failed",
+                    "output": (
+                        "Process exited with code 2\n"
+                        "error: unrecognized arguments: --json\n"
+                    ),
+                },
+            },
+            {
+                "timestamp": "2026-07-29T00:00:03Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "name": "apply_patch",
+                    "call_id": "call-unrelated-hook-patch",
+                    "input": (
+                        "*** Begin Patch\n"
+                        "*** Update File: docs/hooks.md\n"
+                        "@@\n"
+                        "+codex-hooks-status is documented here\n"
+                        "*** End Patch\n"
+                    ),
+                },
+            },
+            {
+                "timestamp": "2026-07-29T00:00:04Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call-unrelated-hook-patch",
+                    "output": "Done!",
+                },
+            },
+        ],
+    )
+    receipt = module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "exact-hook-correlation",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    assert receipt["ok"] is True
+
+    chain = module.entity_usage_chain(
+        aoa_root=aoa_root,
+        anchor="codex-hooks-status",
+        kind="hook",
+        session="exact-hook-correlation",
+        correlation_id="call-hook-status-failed",
+        limit=8,
+        consequence_window=8,
+    )
+
+    assert chain["ok"] is True
+    assert chain["selection_scope"] == {
+        "mode": "exact_session_correlation",
+        "session": "exact-hook-correlation",
+        "correlation_id": "call-hook-status-failed",
+        "source_probe_status": "resolved",
+        "candidate_count_exhaustive": True,
+        "absence_claim_allowed": False,
+    }
+    assert chain["counts"]["chain_count"] == 1
+    usage = chain["usage_chain"]["chains"][0]["usage_event"]
+    assert usage["correlation_id"] == "call-hook-status-failed"
+    assert usage["hook_usage_admission"] == (
+        "structured_hook_command_invocation_proven"
+    )
+    assert usage["refs"]["raw"] == "raw:line:2"
+    result = chain["usage_chain"]["chains"][0][
+        "result_or_consequence_events"
+    ][0]
+    assert result["correlation_id"] == "call-hook-status-failed"
+    assert result["refs"]["raw"] == "raw:line:3"
+    states = chain["usage_lifecycle"]["states"]
+    assert states["invoked"]["present"] is True
+    assert states["failed"]["present"] is True
+    assert states["completed"]["present"] is False
+    assert states["verified"]["present"] is False
+    assert states["consequence-producing"]["present"] is False
+    assert all(
+        event.get("correlation_id") != "call-unrelated-hook-patch"
+        for event in [
+            chain_item["usage_event"]
+            for chain_item in chain["usage_chain"]["chains"]
+        ]
+    )
+
+    missing_session = module.entity_usage_chain(
+        aoa_root=aoa_root,
+        anchor="codex-hooks-status",
+        kind="hook",
+        correlation_id="call-hook-status-failed",
+    )
+    assert missing_session["ok"] is False
+    assert missing_session["diagnostics"] == [
+        "exact correlation selection requires an explicit session"
+    ]
+
+
 def test_entity_usage_lifecycle_does_not_promote_selection_to_load_or_invocation() -> None:
     selected_event = {
         "doc_id": "event:session:001:000020",
@@ -29294,6 +34212,38 @@ def test_entity_usage_action_diverse_selection_preserves_usage_and_surfaces_read
     assert all_usage == ranked_pairs[:2]
     assert all_usage_quality["applied"] is False
     assert all_usage_quality["read_sample_present"] is False
+
+    repeated_usage_then_read = [
+        pair("1", "usage", event_type="COMMAND"),
+        pair("2", "usage", event_type="COMMAND"),
+        pair("3", "usage", event_type="COMMAND"),
+        pair("4", "usage", event_type="COMMAND"),
+        pair(
+            "5",
+            "context",
+            event_type="FILE_READ",
+            action="read",
+            session_act="file_inspection",
+            execution_entity_usage_admission="structured_inspection_read_proven",
+            execution_read_result_refs={"raw": "raw:line:571"},
+        ),
+    ]
+    repeated_selected, repeated_quality = module.entity_usage_action_diverse_selection(
+        repeated_usage_then_read,
+        normalized_kind="validator",
+        limit=4,
+    )
+    assert [
+        event["event_id"] for _hit, event, _index in repeated_selected
+    ] == ["1", "2", "3", "5"]
+    assert repeated_quality["applied"] is True
+    assert repeated_quality["read_sample_present"] is True
+    assert repeated_quality["selected_event_id"] == "5"
+    assert repeated_quality["replaced_event_id"] == "4"
+    assert sum(
+        event["role"] == "usage"
+        for _hit, event, _index in repeated_selected
+    ) == 3
 
 
 def test_live_scenario_usage_chain_audit_tracks_action_semantics(tmp_path: Path, monkeypatch: Any) -> None:
@@ -30055,6 +35005,81 @@ def test_entity_usage_scenario_candidates_use_operational_rollup_pool(tmp_path: 
     assert {candidate["candidate_source"] for candidate in candidates} == {"operational_route_rollup"}
     assert all(candidate["route_id"] > 0 for candidate in candidates)
     assert any(item == "candidate_selection_source:operational_route_rollup" for item in diagnostics)
+
+
+def test_entity_usage_scenario_candidates_trial_bounded_layer_pool_for_coverage(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir()
+    conn = module.init_search_db(module.search_db_path(aoa_root), rebuild=True)
+    for index, route_signal in enumerate(
+        ("mcp:narrow_mcp", "mcp:broad_mcp"),
+        start=1,
+    ):
+        layer, key = route_signal.split(":", 1)
+        conn.execute(
+            "INSERT INTO route_terms(layer, key, route_signal) VALUES (?, ?, ?)",
+            (layer, key, route_signal),
+        )
+        route_id = conn.execute(
+            "SELECT id FROM route_terms WHERE route_signal = ?",
+            (route_signal,),
+        ).fetchone()[0]
+        cursor = conn.execute(
+            """
+            INSERT INTO documents(
+              id, doc_type, session_id, session_label, session_date, event_id,
+              event_type, session_act, usage_role, route_signals, raw_ref,
+              manifest_path, payload_json
+            )
+            VALUES (?, 'event', 'scenario-session', 'scenario-session',
+                    '2026-06-21', ?, 'COMMAND', 'memory_read', 'usage', ?,
+                    'raw:line:1', 'session.manifest.json', '{}')
+            """,
+            (
+                f"mcp-doc-{index}",
+                f"mcp-doc-{index}",
+                f"|{route_signal}|",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO document_routes(doc_rowid, route_id) VALUES (?, ?)",
+            (cursor.lastrowid, route_id),
+        )
+    conn.commit()
+    conn.close()
+
+    rollup = module.init_search_operational_route_rollup_db(
+        module.search_operational_route_rollup_db_path(aoa_root)
+    )
+    rollup.execute(
+        """
+        INSERT INTO route_rollups(
+          shard, layer, key, route_signal, posting_count, session_count,
+          first_session_date, last_session_date
+        )
+        VALUES
+          ('month/2026-06', 'mcp', 'narrow_mcp', 'mcp:narrow_mcp',
+           1, 1, '2026-06-21', '2026-06-21'),
+          ('month/2026-06', 'mcp', 'broad_mcp', 'mcp:broad_mcp',
+           1, 5, '2026-06-01', '2026-06-21')
+        """
+    )
+    rollup.commit()
+    rollup.close()
+
+    candidates, diagnostics = module.entity_usage_scenario_candidates(
+        aoa_root=aoa_root,
+        layers=["mcp"],
+        sample_size=1,
+        seed="scenario-layer-trials",
+    )
+
+    assert [candidate["route_signal"] for candidate in candidates] == [
+        "mcp:broad_mcp"
+    ]
+    assert "candidate_layer_trial_width:4" in diagnostics
 
 
 def test_entity_usage_scenario_audit_is_layer_aware_for_hook_and_agent_events(tmp_path: Path, monkeypatch: Any) -> None:
@@ -34971,8 +39996,12 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(
     )
     archived_session_label = next(path.name for path in (aoa_root / "sessions").iterdir() if path.is_dir())
     search_index = module.search_index_sessions(aoa_root=aoa_root, target="all")
-    graph = module.build_session_graph(aoa_root=aoa_root, target="all", write=True)
-    streaming_graph = module.build_session_graph(aoa_root=aoa_root, target="all", write=True, include_rows=False)
+    graph = module.build_session_graph(
+        aoa_root=aoa_root,
+        target="all",
+        write=True,
+        include_rows=False,
+    )
     atlas = module.build_agent_atlas(aoa_root=aoa_root, target="all", clean=True)
     conn = sqlite3.connect(str(module.search_db_path(aoa_root)))
     conn.execute("UPDATE meta SET value = ? WHERE key = ?", ("2999-01-01T00:00:00Z", "generated_at"))
@@ -34981,12 +40010,17 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(
 
     assert search_index["ok"] is True
     assert graph["ok"] is True
-    assert streaming_graph["ok"] is True
-    assert streaming_graph["builder"] == "sqlite_graph_store"
-    assert streaming_graph["nodes_sample"]
-    assert streaming_graph["edges_sample"]
-    assert "nodes" not in streaming_graph
-    assert "edges" not in streaming_graph
+    assert graph["builder"] == "sqlite_graph_store"
+    assert graph["nodes_sample"]
+    assert graph["edges_sample"]
+    assert "nodes" not in graph
+    assert "edges" not in graph
+    graph_store = module.GraphSqliteStore(aoa_root)
+    try:
+        graph["nodes"] = graph_store.all_payloads("nodes")
+        graph["edges"] = graph_store.all_payloads("edges")
+    finally:
+        graph_store.close()
     assert atlas["ok"] is True
     assert (aoa_root / "graph" / "nodes.jsonl").exists()
     assert (aoa_root / "graph" / "edges.jsonl").exists()
@@ -35203,6 +40237,14 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(
     session_answer_literal_plan = module.literal_query_plan(
         aoa_root=aoa_root,
         query=f"найди ответы агента по сессии {archived_session_label}",
+        doc_type="event",
+    )
+    unresolved_session_answer_literal_plan = module.literal_query_plan(
+        aoa_root=aoa_root,
+        query=(
+            "найди ответы агента по сессии "
+            "2026-07-07__003__ноут-показывал-13-заряда-затем-резко"
+        ),
         doc_type="event",
     )
     path_phrase_literal_plan = module.literal_query_plan(
@@ -35598,6 +40640,24 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(
     assert session_answer_literal_plan["cost_profile"]["monolith_fallback_first"] is False
     assert session_answer_literal_plan["ordered_routes"][1]["route_id"] == "session_rehydrate"
     assert session_answer_literal_plan["literal_route_strategy"]["class_contract"]["cheapest_first_routes"][0] == "agent_event_route"
+    assert (
+        unresolved_session_answer_literal_plan["query_shape"]["session_target"]
+        == "2026-07-07__003__ноут-показывал-13-заряда-затем-резко"
+    )
+    assert (
+        unresolved_session_answer_literal_plan["primary_route"]["route_id"]
+        == "agent_event_route"
+    )
+    assert (
+        unresolved_session_answer_literal_plan["cost_profile"]["uses_fts_first"]
+        is False
+    )
+    assert (
+        unresolved_session_answer_literal_plan["cost_profile"][
+            "monolith_fallback_first"
+        ]
+        is False
+    )
     assert path_phrase_literal_plan["query_shape"]["primary"] == "path"
     assert path_phrase_literal_plan["query_shape"]["path_anchor"] == "validate_session_memory_mcp.py"
     assert path_phrase_literal_plan["route_anchor"] == "validate_session_memory_mcp.py"
@@ -35893,7 +40953,7 @@ def test_graph_bridge_does_not_accept_fuzzy_path_as_explicit_typed_target(
             },
             {
                 "id": "edge:fuzzy-path-event",
-                "type": "mentions_route_signal",
+                "type": "event_has_route_signal",
                 "source": target_candidate_event_id,
                 "target": fuzzy_target_node_id,
             },
@@ -36186,7 +41246,7 @@ def test_graph_bridge_defers_side_timeline_hydration_when_neighborhood_has_refs(
             "node_count": 2,
             "edge_count": 1,
             "nodes": [{"id": f"route:{kind}:{anchor}", "type": kind, "label": anchor}, event_node],
-            "edges": [{"id": f"edge:{session_id}", "type": "mentions_route_signal", "source": f"route:{kind}:{anchor}", "target": event_node["id"]}],
+            "edges": [{"id": f"edge:{session_id}", "type": "event_has_route_signal", "source": f"route:{kind}:{anchor}", "target": event_node["id"]}],
             "evidence_refs": [evidence_ref],
             "resolved": {
                 "anchor": anchor,
@@ -36570,6 +41630,158 @@ def test_maintenance_cleanup_removes_dead_session_stage_but_keeps_live_stage(
     module.remove_projection_publish_path(live_stage)
 
 
+def test_sweep_archive_resolution_never_selects_projection_stage(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    sessions_root = aoa_root / "sessions"
+    stage = sessions_root / (
+        ".canonical.projection-stage-987654-complete"
+    )
+    canonical = sessions_root / "canonical"
+    stage.mkdir(parents=True)
+    canonical.mkdir()
+    module.write_json(
+        stage / "session.manifest.json",
+        {"session_id": "same-session"},
+    )
+    module.write_json(
+        canonical / "session.manifest.json",
+        {"session_id": "same-session"},
+    )
+
+    resolved = module.sweep_archive_session_dirs(
+        aoa_root,
+        [{"session_id": "same-session"}],
+    )
+
+    assert resolved["same-session"] == canonical
+
+
+def test_complete_dead_session_stage_can_be_promoted_without_reindex(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "complete-orphan-stage.jsonl"
+    initial_rows = [
+        {
+            "timestamp": "2026-08-01T00:00:00Z",
+            "type": "session_meta",
+            "payload": {
+                "id": "complete-orphan-stage",
+                "cwd": str(workspace),
+            },
+        },
+        {
+            "timestamp": "2026-08-01T00:00:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "initial"}
+                ],
+            },
+        },
+    ]
+    write_jsonl(transcript, initial_rows)
+    first = module.sync_session_from_transcript(
+        aoa_root=aoa_root,
+        event={
+            "session_id": "complete-orphan-stage",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+        },
+        transcript_path=transcript,
+        hook_event_name="Stop",
+    )
+    session_dir = Path(first["session_dir"])
+    old_projection = tmp_path / "old-projection"
+    shutil.copytree(session_dir, old_projection)
+    write_jsonl(
+        transcript,
+        initial_rows
+        + [
+            {
+                "timestamp": "2026-08-01T00:00:02Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {"type": "output_text", "text": "new event"}
+                    ],
+                },
+            }
+        ],
+    )
+    second = module.sync_session_from_transcript(
+        aoa_root=aoa_root,
+        event={
+            "session_id": "complete-orphan-stage",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+        },
+        transcript_path=transcript,
+        hook_event_name="Stop",
+    )
+    assert second["event_count"] == 3
+    stage = session_dir.parent / (
+        f".{session_dir.name}.projection-stage-987654-complete"
+    )
+    session_dir.rename(stage)
+    shutil.copytree(old_projection, session_dir)
+    monkeypatch.setattr(
+        module,
+        "process_is_alive",
+        lambda _pid: False,
+    )
+
+    plan = module.session_projection_stage_promotion(
+        aoa_root=aoa_root,
+        stage_path=stage,
+    )
+
+    assert plan["ok"] is True
+    assert plan["status"] == "ready_to_promote"
+    assert plan["owner_to_stage_prefix"]["verified"] is True
+    assert plan["stage_to_source_prefix"]["verified"] is True
+    assert stage.exists()
+
+    unconfirmed = module.session_projection_stage_promotion(
+        aoa_root=aoa_root,
+        stage_path=stage,
+        apply=True,
+    )
+    assert unconfirmed["ok"] is False
+    assert unconfirmed["status"] == "blocked"
+    assert "stage_content_digest_confirmation_required" in unconfirmed[
+        "diagnostics"
+    ]
+    assert stage.exists()
+
+    applied = module.session_projection_stage_promotion(
+        aoa_root=aoa_root,
+        stage_path=stage,
+        confirmed_content_digest=plan["content_digest"],
+        apply=True,
+    )
+
+    assert applied["ok"] is True
+    assert applied["status"] == "promoted"
+    assert applied["registry_updated"] is True
+    assert not stage.exists()
+    manifest = module.read_json(
+        session_dir / "session.manifest.json", {}
+    )
+    assert manifest["latest_event_count"] == 3
+    assert module.sha256_file(
+        session_dir / "raw" / "session.raw.jsonl"
+    ) == module.sha256_file(transcript)
+
+
 def test_unowned_session_stage_requires_exact_digest_confirmation(
     tmp_path: Path,
 ) -> None:
@@ -36774,6 +41986,55 @@ def test_session_stage_cleanup_requires_verified_stronger_raw_authority(
     assert module.sha256_file(
         external_source
     ) == external_source_sha
+
+    capture_verified = sessions_root / (
+        ".raw-authority.projection-stage-987654-capture"
+    )
+    (capture_verified / "raw").mkdir(parents=True)
+    capture_payload = b"preserved captured authority\n"
+    (
+        capture_verified / "raw" / "session.raw.jsonl"
+    ).write_bytes(capture_payload)
+    capture_sha = hashlib.sha256(capture_payload).hexdigest()
+    capture_path = (
+        session_dir
+        / "raw"
+        / "captures"
+        / f"{capture_sha}.raw.jsonl"
+    )
+    capture_path.parent.mkdir(parents=True)
+    capture_path.write_bytes(capture_payload)
+    module.write_json(
+        session_dir / "raw" / "capture.latest.json",
+        {
+            "status": "preserved_unindexed",
+            "capture_path": str(capture_path),
+            "raw_sha256": capture_sha,
+        },
+    )
+
+    capture_plan = module.maintenance_cleanup(
+        aoa_root=aoa_root,
+        apply=False,
+    )
+    capture_entry = capture_plan[
+        "session_projection_stages"
+    ]["entries"][0]
+    assert capture_entry["status"] == "orphaned"
+    assert capture_entry["safe_to_remove"] is True
+    assert capture_entry["raw_authority"]["verified"] is True
+    assert capture_entry["raw_authority"]["status"] == (
+        "preserved_owner_capture_digest_match"
+    )
+
+    capture_apply = module.maintenance_cleanup(
+        aoa_root=aoa_root,
+        apply=True,
+    )
+    assert capture_apply["status"] == "applied"
+    assert capture_apply["operational_progress"] is True
+    assert not capture_verified.exists()
+    assert module.sha256_file(capture_path) == capture_sha
 
     unresolved_marked = sessions_root / (
         ".raw-authority.projection-stage-987654-unresolved"
@@ -37074,9 +42335,13 @@ def test_session_stage_cleanup_preserves_last_good_and_allows_reindex(
     ] == 1
     assert not dead_stage.exists()
     assert module.sha256_file(raw_path) == raw_sha
-    assert module.session_projection_semantic_digest(
+    restored_digest = module.session_projection_semantic_digest(
         session_dir
-    ) == last_good_digest
+    )
+    assert restored_digest["sha256"] == last_good_digest["sha256"]
+    assert restored_digest["component_count"] == (
+        last_good_digest["component_count"]
+    )
 
     record = module.resolve_session_record(
         aoa_root,
@@ -37092,6 +42357,256 @@ def test_session_stage_cleanup_preserves_last_good_and_allows_reindex(
     assert module.session_projection_stage_status(aoa_root)[
         "entry_count"
     ] == 0
+
+
+def test_session_projection_semantic_digest_matches_materialized_reference_without_bulk_normalizer(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    projection_dir = tmp_path / "session-projection"
+    raw_dir = projection_dir / "raw"
+    segments_dir = projection_dir / "segments"
+    raw_dir.mkdir(parents=True)
+    segments_dir.mkdir(parents=True)
+    payloads = {
+        "manifest": {
+            "session_id": "streamed-digest",
+            "updated_at": "volatile",
+            "segments": ["001", "002"],
+        },
+        "session_index": {
+            "session_id": "streamed-digest",
+            "generated_at": "volatile",
+            "task_episodes": [{"episode_id": "episode-1"}],
+        },
+        "raw_block_index": {
+            "blocks": [{"block_id": "block-1"}],
+            "generated_at": "volatile",
+        },
+        "raw_source": {"source_path": "/source/session.jsonl"},
+        "raw_capture_state": {
+            "status": "indexed_with_projection",
+            "captured_at": "volatile",
+        },
+        "segment_indexes": {
+            "001.index.json": {
+                "segment_id": "001",
+                "updated_at": "volatile",
+                "events": [1, 2],
+            },
+            "002.index.json": {
+                "segment_id": "002",
+                "events": [3],
+            },
+        },
+    }
+    write_json(
+        projection_dir / "session.manifest.json",
+        payloads["manifest"],
+    )
+    write_json(
+        projection_dir / module.SESSION_INDEX_JSON,
+        payloads["session_index"],
+    )
+    write_json(
+        raw_dir / module.RAW_BLOCK_INDEX_JSON,
+        payloads["raw_block_index"],
+    )
+    write_json(
+        raw_dir / module.RAW_SOURCE_JSON,
+        payloads["raw_source"],
+    )
+    write_json(
+        raw_dir / module.RAW_CAPTURE_STATE_JSON,
+        payloads["raw_capture_state"],
+    )
+    for name, payload in payloads["segment_indexes"].items():
+        write_json(segments_dir / name, payload)
+    (segments_dir / "001.md").write_text(
+        "first segment\n",
+        encoding="utf-8",
+    )
+    (segments_dir / "002.md").write_text(
+        "second segment\n",
+        encoding="utf-8",
+    )
+    component_digests = {
+        "manifest": module.session_projection_json_semantic_sha256(
+            payloads["manifest"]
+        ),
+        "session_index": (
+            module.session_projection_json_semantic_sha256(
+                payloads["session_index"]
+            )
+        ),
+        "raw_block_index": (
+            module.session_projection_json_semantic_sha256(
+                payloads["raw_block_index"]
+            )
+        ),
+        "raw_source": module.session_projection_json_semantic_sha256(
+            payloads["raw_source"]
+        ),
+        "raw_capture_state": (
+            module.session_projection_json_semantic_sha256(
+                payloads["raw_capture_state"]
+            )
+        ),
+    }
+    for name, payload in payloads["segment_indexes"].items():
+        component_digests[f"segment_index:{name}"] = (
+            module.session_projection_json_semantic_sha256(payload)
+        )
+    for name in ("001.md", "002.md"):
+        component_digests[f"segment_markdown:{name}"] = (
+            module.sha256_file(segments_dir / name)
+        )
+    expected_sha256 = hashlib.sha256(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "mode": "merkle_component_semantic_roots_v1",
+                "components": {
+                    key: component_digests[key]
+                    for key in sorted(component_digests)
+                },
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+    monkeypatch.setattr(
+        module,
+        "session_projection_semantic_digest_value",
+        lambda _value: (_ for _ in ()).throw(
+            AssertionError("bulk semantic normalization is forbidden")
+        ),
+    )
+    actual = module.session_projection_semantic_digest(
+        projection_dir
+    )
+
+    assert actual["sha256"] == expected_sha256
+    assert actual["version"] == 2
+    assert actual["segment_index_count"] == 2
+    assert actual["segment_markdown_count"] == 2
+
+
+def test_component_receipt_uses_bounded_materialized_semantic_hash_with_streaming_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    index_path = tmp_path / "001.index.json"
+    write_json(
+        index_path,
+        {
+            "segment_id": "001",
+            "updated_at": "volatile",
+            "events": [
+                {"event_id": f"event-{ordinal}", "tags": ["repeat"] * 8}
+                for ordinal in range(20)
+            ],
+        },
+    )
+    original = module.session_projection_json_semantic_sha256
+    modes: list[bool] = []
+
+    def observed(value: Any, **kwargs: Any) -> str:
+        modes.append(bool(kwargs.get("bounded_materialization")))
+        return original(value, **kwargs)
+
+    monkeypatch.setattr(
+        module,
+        "session_projection_json_semantic_sha256",
+        observed,
+    )
+    bounded = module.immutable_component_artifact_receipt(index_path)
+    monkeypatch.setattr(
+        module,
+        "SESSION_PROJECTION_SEMANTIC_HASH_MATERIALIZE_MAX_BYTES",
+        0,
+    )
+    streaming = module.immutable_component_artifact_receipt(index_path)
+
+    assert modes == [True, False]
+    assert bounded["semantic_sha256"] == streaming["semantic_sha256"]
+    assert bounded["sha256"] == streaming["sha256"]
+
+
+def test_session_projection_semantic_digest_admits_current_segment_receipts_without_content_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "semantic-receipts.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-08-11T02:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "semantic-receipts",
+                    "cwd": str(workspace),
+                },
+            },
+            {
+                "timestamp": "2026-08-11T02:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "prove bounded semantic receipts",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    synced = module.sync_session_from_transcript(
+        aoa_root=aoa_root,
+        event={
+            "session_id": "semantic-receipts",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+        },
+        transcript_path=transcript,
+        hook_event_name="Stop",
+    )
+    session_dir = Path(synced["session_dir"])
+    segments_dir = session_dir / "segments"
+    original_read_json = module.read_json
+    original_sha256_file = module.sha256_file
+
+    def guarded_read_json(path: Path, default: Any = None) -> Any:
+        if Path(path).parent == segments_dir:
+            raise AssertionError("segment index content reread")
+        return original_read_json(path, default)
+
+    def guarded_sha256_file(path: Path) -> str:
+        if Path(path).parent == segments_dir:
+            raise AssertionError("segment content rehashed")
+        return original_sha256_file(path)
+
+    monkeypatch.setattr(module, "read_json", guarded_read_json)
+    monkeypatch.setattr(module, "sha256_file", guarded_sha256_file)
+    digest = module.session_projection_semantic_digest(session_dir)
+
+    assert digest["segment_index_count"] >= 1
+    assert digest["metadata_admitted_index_count"] == digest[
+        "segment_index_count"
+    ]
+    assert digest["metadata_admitted_markdown_count"] == digest[
+        "segment_markdown_count"
+    ]
+    assert digest["content_read_index_count"] == 0
+    assert digest["content_read_markdown_count"] == 0
 
 
 def test_maintenance_cleanup_clears_stale_active_job_and_orphaned_graph_tmp(tmp_path: Path, monkeypatch: Any) -> None:
@@ -37162,6 +42677,220 @@ def test_storage_status_reports_orphaned_graph_rebuild_tmp(tmp_path: Path, monke
     assert storage["graph_rebuild_temps"]["status"] == "cleanup_needed"
     assert storage["graph_rebuild_temps"]["orphaned_count"] == 1
     assert storage["graph_rebuild_temps"]["orphaned_bytes"] == 256
+
+
+def test_maintenance_cleanup_graph_surface_skips_unrelated_scans(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    graph_root = aoa_root / module.GRAPH_ROOT
+    graph_root.mkdir(parents=True)
+    tmp_store = graph_root / ".graph.sqlite3.333444.rebuild.tmp"
+    tmp_store.write_bytes(b"g" * 256)
+    monkeypatch.setattr(module, "process_is_alive", lambda pid: False)
+
+    def unrelated_scan(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("unrelated cleanup surface scanned")
+
+    monkeypatch.setattr(module, "search_rebuild_tmp_status", unrelated_scan)
+    monkeypatch.setattr(
+        module,
+        "session_projection_stage_status",
+        unrelated_scan,
+    )
+    monkeypatch.setattr(
+        module,
+        "session_projection_work_status",
+        unrelated_scan,
+    )
+
+    applied = module.maintenance_cleanup(
+        aoa_root=aoa_root,
+        apply=True,
+        surface="graph",
+    )
+
+    assert applied["ok"] is True
+    assert applied["status"] == "applied"
+    assert applied["surface"] == "graph"
+    assert applied["graph_rebuild_temps"]["orphaned_count"] == 0
+    assert applied["search_rebuild_temps"]["status"] == "not_selected"
+    assert applied["session_projection_stages"]["status"] == (
+        "not_selected"
+    )
+    assert applied["action_counts"]["graph_rebuild_tmp_removed"] == 1
+    assert not tmp_store.exists()
+
+
+def test_maintenance_cleanup_can_skip_projection_work_identity_for_hot_status(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir(parents=True)
+
+    def deep_projection_work_scan(_aoa_root: Path) -> dict[str, Any]:
+        raise AssertionError("hot status parsed projection-work raw")
+
+    monkeypatch.setattr(
+        module,
+        "session_projection_work_status",
+        deep_projection_work_scan,
+    )
+
+    status = module.maintenance_cleanup(
+        aoa_root=aoa_root,
+        apply=False,
+        inspect_session_projection_work=False,
+    )
+
+    assert status["status"] == "nothing_to_do"
+    assert status["session_projection_work"]["status"] == "not_selected"
+
+
+def test_maintenance_cleanup_can_defer_stage_raw_authority_for_hot_status(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    sessions_root = aoa_root / "sessions"
+    owner = sessions_root / "owner"
+    owner.mkdir(parents=True)
+    stage = sessions_root / ".owner.projection-stage-987654-dead"
+    stage.mkdir()
+    monkeypatch.setattr(module, "process_is_alive", lambda _pid: False)
+
+    def deep_stage_raw_scan(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("hot status hashed staged raw")
+
+    monkeypatch.setattr(
+        module,
+        "session_projection_stage_raw_authority",
+        deep_stage_raw_scan,
+    )
+
+    status = module.maintenance_cleanup(
+        aoa_root=aoa_root,
+        apply=False,
+        inspect_session_projection_work=False,
+        session_stage_verification_limit=0,
+    )
+
+    stages = status["session_projection_stages"]
+    assert stages["status"] == "cleanup_verification_pending"
+    assert stages["raw_authority_verification_deferred_count"] == 1
+    assert stages["raw_authority_unresolved_count"] == 0
+
+
+def test_maintenance_cleanup_stage_raw_authority_limit_is_bounded(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    sessions_root = aoa_root / "sessions"
+    for name in ("first", "second"):
+        (sessions_root / name).mkdir(parents=True)
+        (sessions_root / f".{name}.projection-stage-987654-dead").mkdir()
+    monkeypatch.setattr(module, "process_is_alive", lambda _pid: False)
+    calls: list[str] = []
+
+    def verified_stage_raw(
+        stage_path: Path,
+        _owner_session_dir: Path,
+    ) -> dict[str, Any]:
+        calls.append(stage_path.name)
+        return {
+            "inspected": True,
+            "verified": True,
+            "status": "stage_raw_absent_generated_only",
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr(
+        module,
+        "session_projection_stage_raw_authority",
+        verified_stage_raw,
+    )
+
+    status = module.maintenance_cleanup(
+        aoa_root=aoa_root,
+        apply=False,
+        inspect_session_projection_work=False,
+        session_stage_verification_limit=1,
+    )
+
+    stages = status["session_projection_stages"]
+    assert len(calls) == 1
+    assert stages["orphaned_count"] == 1
+    assert stages["raw_authority_verification_deferred_count"] == 1
+
+
+def test_maintenance_cleanup_cli_exposes_resource_gated_cleanup_controls(
+    tmp_path: Path,
+    monkeypatch: Any,
+    capsys: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir()
+    captured: dict[str, Any] = {}
+
+    def fake_cleanup(**kwargs: Any) -> dict[str, Any]:
+        captured.update(kwargs)
+        return {"ok": True, "status": "nothing_to_do"}
+
+    monkeypatch.setattr(module, "maintenance_cleanup", fake_cleanup)
+    args = module.build_parser().parse_args(
+        [
+            "maintenance-cleanup",
+            "--aoa-root",
+            str(aoa_root),
+            "--surface",
+            "session-projection",
+            "--apply",
+            "--session-stage-verification-limit",
+            "4",
+            "--inspect-session-projection-work",
+        ]
+    )
+
+    assert args.func(args) == 0
+    assert captured["apply"] is True
+    assert captured["surface"] == "session-projection"
+    assert captured["session_stage_verification_limit"] == 4
+    assert captured["inspect_session_projection_work"] is True
+    assert json.loads(capsys.readouterr().out)["ok"] is True
+
+
+def test_maintenance_cleanup_cli_can_treat_lock_deferral_as_scheduled_success(
+    tmp_path: Path,
+    monkeypatch: Any,
+    capsys: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir()
+    monkeypatch.setattr(
+        module,
+        "maintenance_cleanup",
+        lambda **_kwargs: {
+            "ok": False,
+            "status": "deferred_active_writer",
+        },
+    )
+    args = module.build_parser().parse_args(
+        [
+            "maintenance-cleanup",
+            "--aoa-root",
+            str(aoa_root),
+            "--apply",
+            "--success-on-deferred-lock",
+        ]
+    )
+
+    assert args.func(args) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == (
+        "deferred_active_writer"
+    )
 
 
 def test_maintenance_cleanup_detects_orphaned_graph_rebuild_tmp_journal_without_base(tmp_path: Path, monkeypatch: Any) -> None:
@@ -37351,6 +43080,12 @@ def test_graph_store_rebuild_refreshes_duplicate_aggregate_evidence(tmp_path: Pa
 
     assert rebuilt["duplicate_node_refresh"]["requested_count"] == 1
     assert rebuilt["duplicate_edge_refresh"]["requested_count"] == 1
+    assert rebuilt["duplicate_node_refresh"]["refresh_strategy"] == (
+        "bulk_rebuild_inline_representative_set_based_finalize"
+    )
+    assert rebuilt["duplicate_edge_refresh"]["refresh_strategy"] == (
+        "bulk_rebuild_inline_representative_set_based_finalize"
+    )
     assert int(node_row["count"]) == 2
     assert int(edge_row["count"]) == 2
     assert stored_node["count"] == 2
@@ -37382,6 +43117,84 @@ def test_graph_store_rebuild_refreshes_duplicate_aggregate_evidence(tmp_path: Pa
     assert "segment_index" not in edge_contrib["evidence_refs"][0]["refs"]
     assert {ref["session_id"] for ref in hydrated_node["evidence_refs"]} == {"first", "second"}
     assert {ref["session_id"] for ref in hydrated_edge["evidence_refs"]} == {"first", "second"}
+
+
+def test_graph_store_rebuild_bulk_refresh_crosses_chunk_boundary(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    duplicate_count = 513
+    nodes = [
+        {
+            "id": f"route:tool:bulk-refresh-{index:04d}",
+            "type": "tool",
+        }
+        for index in range(duplicate_count)
+    ]
+    edges = [
+        {
+            "id": f"edge:bulk-refresh-{index:04d}",
+            "source": node["id"],
+            "target": node["id"],
+            "type": "route_signal_related_to_route_signal",
+        }
+        for index, node in enumerate(nodes)
+    ]
+
+    def contribution(source_key: str) -> dict[str, Any]:
+        return {
+            "source": {
+                "source_key": source_key,
+                "source_type": "segment",
+                "session_id": source_key,
+                "session_label": source_key,
+                "segment_id": "000",
+                "source_path": f"sessions/{source_key}/segments/000.index.json",
+                "source_paths": [
+                    f"sessions/{source_key}/segments/000.index.json"
+                ],
+                "source_sha": f"sha-{source_key}",
+                "source_mtime": 1,
+                "graph_schema_version": module.GRAPH_SCHEMA_VERSION,
+                "graph_store_schema_version": (
+                    module.GRAPH_STORE_SCHEMA_VERSION
+                ),
+                "route_signal_classifier_version": (
+                    module.ROUTE_SIGNAL_CLASSIFIER_VERSION
+                ),
+            },
+            "nodes": nodes,
+            "edges": edges,
+        }
+
+    store = module.GraphSqliteStore(aoa_root, reset=True)
+    try:
+        rebuilt = store.rebuild(
+            [contribution("bulk-first"), contribution("bulk-second")]
+        )
+        node_counts = store.conn.execute(
+            "SELECT COUNT(*), MIN(count), MAX(count) FROM nodes"
+        ).fetchone()
+        edge_counts = store.conn.execute(
+            "SELECT COUNT(*), MIN(count), MAX(count) FROM edges"
+        ).fetchone()
+    finally:
+        store.close()
+
+    node_refresh = rebuilt["duplicate_node_refresh"]
+    edge_refresh = rebuilt["duplicate_edge_refresh"]
+    assert node_refresh["requested_count"] == duplicate_count
+    assert edge_refresh["requested_count"] == duplicate_count
+    assert node_refresh["chunk_count"] == 1
+    assert edge_refresh["chunk_count"] == 1
+    assert node_refresh["refresh_strategy"] == (
+        "bulk_rebuild_inline_representative_set_based_finalize"
+    )
+    assert edge_refresh["refresh_strategy"] == (
+        "bulk_rebuild_inline_representative_set_based_finalize"
+    )
+    assert tuple(node_counts) == (duplicate_count, 2, 2)
+    assert tuple(edge_counts) == (duplicate_count, 2, 2)
 
 
 def test_graph_store_creates_edge_type_composite_indexes(tmp_path: Path) -> None:
@@ -37434,10 +43247,10 @@ def test_graph_cooccurrence_uses_direct_store_for_dense_route_anchor(tmp_path: P
 
     def mention_edge(event_id: str, route_id: str, raw_ref: str) -> dict[str, Any]:
         return {
-            "id": module.graph_edge_id(event_id, route_id, "mentions_route_signal"),
+            "id": module.graph_edge_id(event_id, route_id, "event_has_route_signal"),
             "source": event_id,
             "target": route_id,
-            "type": "mentions_route_signal",
+            "type": "event_has_route_signal",
             "evidence_refs": [
                 {
                     "session_id": "session-cooccurrence",
@@ -37635,7 +43448,7 @@ def test_graph_cooccurrence_prefers_aggregate_store_with_raw_ref_hydration(tmp_p
 
     payload = module.graph_cooccurrence(aoa_root=aoa_root, anchor="exec_command", kind="tool", limit=5)
 
-    assert "mentions_route_signal" not in edge_types
+    assert "event_has_route_signal" not in edge_types
     assert payload["ok"] is True
     assert payload["source"] == "sqlite_graph_store_aggregate_cooccurrence"
     assert payload["cooccurrence_basis"] == "aggregate_segment_route_signal_edges_session_diversified"
@@ -37647,7 +43460,7 @@ def test_graph_cooccurrence_prefers_aggregate_store_with_raw_ref_hydration(tmp_p
     assert payload["quality"]["uses_session_has_route_signal_edges"] is False
     assert payload["anchor_event_count_basis"] == "aggregate_route_contexts"
     assert payload["quality"]["aggregate_route_signal_query"] is True
-    assert payload["quality"]["uses_event_mentions_route_signal_edges"] is False
+    assert payload["quality"]["uses_event_has_route_signal_edges"] is False
     assert payload["quality"]["raw_ref_count"] >= 1
     assert payload["quality"]["segment_ref_count"] >= 1
     assert any(str(ref["refs"].get("raw", "")).startswith("raw:line:") for ref in payload["evidence_refs"])
@@ -37791,7 +43604,7 @@ def test_graph_cooccurrence_packet_diagnoses_truncated_empty_routes() -> None:
             "edges": [
                 {
                     "id": "edge:1",
-                    "type": "mentions_route_signal",
+                    "type": "event_has_route_signal",
                     "source": event_node["id"],
                     "target": anchor_node,
                 }
@@ -37997,7 +43810,7 @@ def test_graph_cardinality_projection_refreshes_and_tracks_incremental_changes(t
 
     store = module.GraphSqliteStore(aoa_root, reset=True)
     try:
-        rebuild = store.rebuild([contribution("source-one", "event", "mentions_route_signal")])
+        rebuild = store.rebuild([contribution("source-one", "event", "event_has_route_signal")])
         assert rebuild["type_counts_projection"]["status"] == "current"
     finally:
         store.close()
@@ -38005,7 +43818,7 @@ def test_graph_cardinality_projection_refreshes_and_tracks_incremental_changes(t
     initial = module.graph_cardinality(aoa_root=aoa_root)
     assert initial["ok"] is True
     assert initial["projection"]["counts"]["node"]["event"] == 1
-    assert initial["projection"]["counts"]["edge"]["mentions_route_signal"] == 1
+    assert initial["projection"]["counts"]["edge"]["event_has_route_signal"] == 1
 
     store = module.GraphSqliteStore(aoa_root)
     try:
@@ -38018,7 +43831,7 @@ def test_graph_cardinality_projection_refreshes_and_tracks_incremental_changes(t
     assert updated["ok"] is True
     assert "event" not in updated["projection"]["counts"]["node"]
     assert updated["projection"]["counts"]["node"]["task_episode"] == 1
-    assert "mentions_route_signal" not in updated["projection"]["counts"]["edge"]
+    assert "event_has_route_signal" not in updated["projection"]["counts"]["edge"]
     assert updated["projection"]["counts"]["edge"]["has_event"] == 1
 
 
@@ -38091,7 +43904,7 @@ def test_graph_state_read_does_not_upgrade_legacy_generation_metadata(
                 "id": "edge:legacy-generation",
                 "source": "event:legacy-generation:000:000001",
                 "target": "route:tool:legacy-generation",
-                "type": "mentions_route_signal",
+                "type": "event_has_route_signal",
             }
         ],
     }
@@ -38162,7 +43975,7 @@ def test_graph_incompatible_generation_is_not_a_query_candidate(
                 "id": "edge:incompatible-generation",
                 "source": event_id,
                 "target": "route:tool:incompatible-generation",
-                "type": "mentions_route_signal",
+                "type": "event_has_route_signal",
             }
         ],
     }
@@ -38235,7 +44048,7 @@ def test_graph_pins_entity_registry_dependency_per_store_and_source(
                 "id": "edge:registry-pinned",
                 "source": "event:registry-pinned:000:000001",
                 "target": "route:tool:registry-pinned",
-                "type": "mentions_route_signal",
+                "type": "event_has_route_signal",
             }
         ],
     }
@@ -38287,7 +44100,7 @@ def test_graph_rejects_stale_entity_registry_dependency_and_preserves_rows(
                 "id": "edge:registry-stale",
                 "source": event_id,
                 "target": "route:tool:registry-stale",
-                "type": "mentions_route_signal",
+                "type": "event_has_route_signal",
             }
         ],
     }
@@ -38354,10 +44167,10 @@ def test_graph_rejects_stale_entity_registry_dependency_and_preserves_rows(
     )
     assert stale["source_version_state"][
         "version_mismatch_source_count"
-    ] == 1
-    assert source_states["reason_group_counts"][
-        "graph_entity_registry_dependency_mismatch"
-    ] >= 1
+    ] == 0
+    assert source_states["reason_group_counts"].get(
+        "graph_entity_registry_dependency_mismatch", 0
+    ) == 0
     assert cardinality_refresh["projection"]["status"] == "blocked"
     assert prune["status"] == "blocked"
     assert neighborhood is None
@@ -38394,7 +44207,7 @@ def test_graph_atomic_rebuild_preserves_published_store_when_dependency_changes(
                     "id": f"edge:{source_name}",
                     "source": event_id,
                     "target": f"route:tool:{source_name}",
-                    "type": "mentions_route_signal",
+                    "type": "event_has_route_signal",
                 }
             ],
         }
@@ -38473,6 +44286,148 @@ def test_graph_atomic_rebuild_preserves_published_store_when_dependency_changes(
     assert after_digest == before_digest
 
 
+def test_graph_rebuild_reconciles_registry_only_drift_before_commit(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    module.build_entity_registry(
+        aoa_root=aoa_root,
+        write=True,
+        include_runtime=True,
+        observed_source="none",
+        limit=1_000_000,
+    )
+    initial_dependency = (
+        module.graph_entity_registry_dependency_snapshot(
+            aoa_root,
+            ensure_current=True,
+            allow_ephemeral=False,
+        )
+    )
+    route_node_id = module.graph_route_node_id(
+        "skill",
+        "registry-late-arrival",
+    )
+    event_id = "event:registry-late-arrival:000:000001"
+    contribution = {
+        "source": {
+            "source_key": "segment:registry-late-arrival:000",
+            "source_type": "segment",
+            "session_id": "registry-late-arrival",
+            "session_label": (
+                "2026-07-19__001__registry-late-arrival"
+            ),
+            "segment_id": "000",
+            "source_path": str(
+                tmp_path / "registry-late-arrival.json"
+            ),
+            "source_paths": [
+                str(tmp_path / "registry-late-arrival.json")
+            ],
+            "source_sha": "registry-late-arrival-sha",
+            "source_mtime": 1.0,
+            "graph_schema_version": module.GRAPH_SCHEMA_VERSION,
+            "graph_store_schema_version": (
+                module.GRAPH_STORE_SCHEMA_VERSION
+            ),
+            "graph_event_route_signal_edge_policy": (
+                module.GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY
+            ),
+            "route_signal_classifier_version": (
+                module.ROUTE_SIGNAL_CLASSIFIER_VERSION
+            ),
+        },
+        "nodes": [
+            {"id": event_id, "type": "event"},
+            {
+                "id": route_node_id,
+                "type": "skill",
+                "route_layer": "skill",
+                "route_key": "registry-late-arrival",
+                "route_signal": "skill:registry-late-arrival",
+            },
+        ],
+        "edges": [
+            {
+                "source": event_id,
+                "target": route_node_id,
+                "type": "event_has_route_signal",
+                "route_signal": "skill:registry-late-arrival",
+            }
+        ],
+    }
+
+    def drifting_contributions() -> Any:
+        yield contribution
+        time.sleep(0.02)
+        skill_path = (
+            aoa_root
+            / "skills"
+            / "registry-late-arrival"
+            / "SKILL.md"
+        )
+        skill_path.parent.mkdir(parents=True)
+        skill_path.write_text(
+            "---\n"
+            "name: registry-late-arrival\n"
+            "description: Appears while the graph rebuild is active.\n"
+            "---\n",
+            encoding="utf-8",
+        )
+
+    store = module.GraphSqliteStore(
+        aoa_root,
+        reset=True,
+        entity_registry_dependency=initial_dependency,
+    )
+    try:
+        rebuilt = store.rebuild(drifting_contributions())
+        final_dependency = (
+            module.graph_entity_registry_dependency_snapshot(
+                aoa_root,
+                ensure_current=False,
+                allow_ephemeral=False,
+            )
+        )
+        registry_node_count = store.conn.execute(
+            "SELECT COUNT(*) FROM node_contribs "
+            "WHERE node_type = 'entity_registry'"
+        ).fetchone()[0]
+        registry_route_edge_count = store.conn.execute(
+            "SELECT COUNT(*) FROM edge_contribs "
+            "WHERE edge_type = 'registry_entity_has_route_signal'"
+        ).fetchone()[0]
+        stored_dependency_ids = {
+            str(row[0] or "")
+            for row in store.conn.execute(
+                "SELECT DISTINCT entity_registry_dependency_id "
+                "FROM graph_sources"
+            )
+        }
+    finally:
+        store.close()
+
+    reconciliation = rebuilt["entity_registry_reconciliation"]
+    attempt = reconciliation["attempts"][-1]
+    assert reconciliation["status"] == "reconciled"
+    assert reconciliation["reconciled"] is True
+    assert (
+        initial_dependency["dependency_id"]
+        != final_dependency["dependency_id"]
+    )
+    assert final_dependency["status"] == "current"
+    assert registry_node_count == 1
+    assert registry_route_edge_count == 1
+    assert stored_dependency_ids == {
+        final_dependency["dependency_id"]
+    }
+    assert attempt["proof_compatible"] is True
+    assert (
+        attempt["non_registry_content_digest_before"]["sha256"]
+        == attempt["non_registry_content_digest_after"]["sha256"]
+    )
+
+
 def test_graph_progress_broken_pipe_does_not_abort_semantic_publish(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -38523,7 +44478,7 @@ def test_graph_progress_broken_pipe_does_not_abort_semantic_publish(
                 "id": f"edge:{source_name}",
                 "source": event_id,
                 "target": f"route:tool:{source_name}",
-                "type": "mentions_route_signal",
+                "type": "event_has_route_signal",
             }
         ],
     }
@@ -38622,7 +44577,7 @@ def test_graph_atomic_rebuild_preserves_store_when_producer_changes(
                     "id": f"edge:{source_name}",
                     "source": event_id,
                     "target": f"route:tool:{source_name}",
-                    "type": "mentions_route_signal",
+                    "type": "event_has_route_signal",
                 }
             ],
         }
@@ -38979,7 +44934,7 @@ def test_graph_sidecar_stage_is_not_published_before_store_commit(
                     "id": f"edge:sidecar-stage:{event_number}",
                     "source": event_id,
                     "target": "route:tool:sidecar-stage",
-                    "type": "mentions_route_signal",
+                    "type": "event_has_route_signal",
                 }
             ],
         }
@@ -39086,7 +45041,7 @@ def test_graph_sidecar_manifest_rejects_tampered_snapshot(
                     "event:sidecar-tamper:000:000001"
                 ),
                 "target": "route:tool:sidecar-tamper",
-                "type": "mentions_route_signal",
+                "type": "event_has_route_signal",
             }
         ],
     }
@@ -39173,7 +45128,7 @@ def test_graph_scoped_generation_can_be_current_while_global_is_stale(
                     "id": f"edge:{source_name}",
                     "source": event_id,
                     "target": f"route:tool:{source_name}",
-                    "type": "mentions_route_signal",
+                    "type": "event_has_route_signal",
                 }
             ],
         }
@@ -39298,7 +45253,7 @@ def test_graph_scoped_freshness_keeps_contribution_lookup_truncation_unverified(
                             f"route:tool:{session_id}"
                         ),
                         "type": (
-                            "mentions_route_signal"
+                            "event_has_route_signal"
                         ),
                     }
                 ],
@@ -39399,7 +45354,7 @@ def test_graph_double_rebuild_is_semantically_deterministic(
                 "id": "edge:deterministic-graph",
                 "source": "event:deterministic-graph:000:000001",
                 "target": "route:tool:deterministic-graph",
-                "type": "mentions_route_signal",
+                "type": "event_has_route_signal",
                 "evidence_refs": ["raw:deterministic-graph:1"],
             }
         ],
@@ -39435,7 +45390,7 @@ def test_graph_raw_ref_prune_removes_generated_materialization_only(tmp_path: Pa
     raw_node_id = module.graph_raw_ref_node_id(session_id, refs["raw"])
     route_node_id = module.graph_route_node_id("skill", "aoa-decision")
     has_raw_ref_edge_id = module.graph_edge_id(event_node_id, raw_node_id, "has_raw_ref")
-    route_edge_id = module.graph_edge_id(event_node_id, route_node_id, "mentions_route_signal")
+    route_edge_id = module.graph_edge_id(event_node_id, route_node_id, "event_has_route_signal")
     contribution = {
         "source": {
             "source_key": "segment:session-raw-ref-prune:000",
@@ -39486,7 +45441,7 @@ def test_graph_raw_ref_prune_removes_generated_materialization_only(tmp_path: Pa
                 "id": route_edge_id,
                 "source": event_node_id,
                 "target": route_node_id,
-                "type": "mentions_route_signal",
+                "type": "event_has_route_signal",
                 "evidence_refs": [{"session_id": session_id, "refs": refs}],
             },
         ],
@@ -39932,6 +45887,25 @@ def test_graph_maintenance_replaces_dirty_segment_contribution(tmp_path: Path) -
     assert conn.execute("SELECT COUNT(*) FROM nodes WHERE id = ?", (new_node_id,)).fetchone()[0] == 1
     conn.close()
 
+    exact_source_key = next(
+        str(item["source_key"])
+        for item in maintained["selected"]
+        if item.get("source_type") == "segment"
+    )
+    exact_refreshed = module.graph_maintenance(
+        aoa_root=aoa_root,
+        source_keys=[exact_source_key],
+        apply=True,
+        batch_limit=1,
+        write_report=True,
+    )
+    assert exact_refreshed["ok"] is True
+    assert exact_refreshed["selected_count"] == 1
+    assert exact_refreshed["selected"][0]["source_key"] == exact_source_key
+    assert exact_refreshed["selected"][0]["forced_materialization_refresh"] is True
+    assert exact_refreshed["maintenance_detail"]["force_source_refresh"] is True
+    assert exact_refreshed["post_actionable_count"] == 0
+
     gates = module.graph_freshness_gates(aoa_root=aoa_root, ref_sample_limit=20)
     assert gates["graph_store"]["status"] == "current"
     assert gates["graph_sidecar"]["status"] == "stale"
@@ -39976,7 +45950,10 @@ def test_graph_maintenance_replaces_dirty_segment_contribution(tmp_path: Path) -
     conn.close()
 
 
-def test_graph_store_replace_sources_uses_append_only_for_new_sources(tmp_path: Path) -> None:
+def test_graph_store_replace_sources_uses_append_only_for_new_sources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     aoa_root = tmp_path / ".aoa"
     aoa_root.mkdir()
     shared_node_id = module.graph_route_node_id("entity", "append_only_shared")
@@ -40017,16 +45994,61 @@ def test_graph_store_replace_sources_uses_append_only_for_new_sources(tmp_path: 
             ],
             "edges": [
                 {
-                    "id": module.graph_edge_id(event_node_id, shared_node_id, "event_mentions_registered_entity"),
+                    "id": module.graph_edge_id(event_node_id, shared_node_id, "event_has_registered_entity_signal"),
                     "source": event_node_id,
                     "target": shared_node_id,
-                    "type": "event_mentions_registered_entity",
+                    "type": "event_has_registered_entity_signal",
                     "count": 1,
                 }
             ],
         }
 
     store = module.GraphSqliteStore(aoa_root)
+    original_insert = store._insert_contrib_rows
+    original_append = store._append_aggregate_contribution
+    insert_caches: list[dict[tuple[str, str], str] | None] = []
+    append_caches: list[dict[tuple[str, str], str] | None] = []
+
+    def reject_redundant_expected_rows(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError(
+            "append-only sources must not build unused expected row maps"
+        )
+
+    def observed_insert(
+        item: dict[str, Any],
+        *,
+        redaction_text_cache: dict[tuple[str, str], str] | None = None,
+    ) -> tuple[set[str], set[str]]:
+        insert_caches.append(redaction_text_cache)
+        return original_insert(
+            item,
+            redaction_text_cache=redaction_text_cache,
+        )
+
+    def observed_append(
+        item: dict[str, Any],
+        *,
+        budget_deadline: float | None = None,
+        redaction_text_cache: dict[tuple[str, str], str] | None = None,
+    ) -> dict[str, Any]:
+        append_caches.append(redaction_text_cache)
+        return original_append(
+            item,
+            budget_deadline=budget_deadline,
+            redaction_text_cache=redaction_text_cache,
+        )
+
+    monkeypatch.setattr(
+        store,
+        "_expected_contrib_row_maps",
+        reject_redundant_expected_rows,
+    )
+    monkeypatch.setattr(store, "_insert_contrib_rows", observed_insert)
+    monkeypatch.setattr(
+        store,
+        "_append_aggregate_contribution",
+        observed_append,
+    )
     try:
         first = store.replace_sources([contribution("segment:append-only-session:001", "001")])
         store.refresh_type_counts(commit=False)
@@ -40048,9 +46070,118 @@ def test_graph_store_replace_sources_uses_append_only_for_new_sources(tmp_path: 
     assert second["node_refresh"]["row_count"] == 0
     assert second["edge_refresh"]["row_count"] == 0
     assert second["results"][0]["aggregate_update"] == "append_only"
+    assert len(insert_caches) == len(append_caches) == 2
+    assert insert_caches[0] is append_caches[0]
+    assert insert_caches[1] is append_caches[1]
+    assert insert_caches[0] is not insert_caches[1]
+    assert all(cache for cache in insert_caches)
     assert shared_row is not None
     assert shared_row[0] == 2
     assert event_count == 2
+
+
+def test_graph_store_replace_sources_batches_append_only_aggregate_refresh(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir()
+    shared_node_id = module.graph_route_node_id("entity", "batched_append_shared")
+    original_append = module.GraphSqliteStore._append_aggregate_contribution
+    append_calls: list[str] = []
+
+    def observed_append(
+        self: Any,
+        contribution: dict[str, Any],
+        *,
+        budget_deadline: float | None = None,
+    ) -> dict[str, Any]:
+        append_calls.append(str(contribution["source"]["source_key"]))
+        return original_append(
+            self,
+            contribution,
+            budget_deadline=budget_deadline,
+        )
+
+    monkeypatch.setattr(
+        module.GraphSqliteStore,
+        "_append_aggregate_contribution",
+        observed_append,
+    )
+
+    def contribution(index: int) -> dict[str, Any]:
+        event_node_id = f"event:batched-append:001:{index:06d}"
+        return {
+            "source": {
+                "source_key": f"segment:batched-append:{index:03d}",
+                "source_type": "segment",
+                "session_id": "batched-append",
+                "session_label": "2026-08-12__001__batched-append",
+                "segment_id": f"{index:03d}",
+                "source_path": str(aoa_root / f"segment-{index}.json"),
+                "source_paths": [str(aoa_root / f"segment-{index}.json")],
+                "source_sha": f"sha-{index}",
+                "source_mtime": 1.0,
+                "graph_schema_version": module.GRAPH_SCHEMA_VERSION,
+                "graph_store_schema_version": module.GRAPH_STORE_SCHEMA_VERSION,
+                "route_signal_classifier_version": module.ROUTE_SIGNAL_CLASSIFIER_VERSION,
+            },
+            "nodes": [
+                {
+                    "id": shared_node_id,
+                    "type": "route_signal",
+                    "label": "entity:batched_append_shared",
+                    "count": 1,
+                },
+                {
+                    "id": event_node_id,
+                    "type": "event",
+                    "label": f"event {index}",
+                    "count": 1,
+                },
+            ],
+            "edges": [
+                {
+                    "id": module.graph_edge_id(
+                        event_node_id,
+                        shared_node_id,
+                        "event_has_route_signal",
+                    ),
+                    "source": event_node_id,
+                    "target": shared_node_id,
+                    "type": "event_has_route_signal",
+                    "count": 1,
+                }
+            ],
+        }
+
+    store = module.GraphSqliteStore(aoa_root)
+    try:
+        result = store.replace_sources([contribution(index) for index in range(12)])
+        store.conn.commit()
+        shared_count = store.conn.execute(
+            "SELECT count FROM nodes WHERE id = ?",
+            (shared_node_id,),
+        ).fetchone()[0]
+        event_count = store.conn.execute(
+            "SELECT COUNT(*) FROM nodes WHERE node_type = 'event'"
+        ).fetchone()[0]
+        edge_count = store.conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
+    finally:
+        store.close()
+
+    assert append_calls == []
+    assert result["append_only_source_count"] == 12
+    assert result["append_only_aggregate_strategy"] == "batch_set_wise_refresh"
+    assert result["append_only_node_count"] == 24
+    assert result["append_only_edge_count"] == 12
+    assert result["append_only_inserted_node_count"] == 13
+    assert result["append_only_inserted_edge_count"] == 12
+    assert result["refreshed_node_count"] == 13
+    assert result["refreshed_edge_count"] == 12
+    assert shared_count == 12
+    assert event_count == 12
+    assert edge_count == 12
 
 
 def test_graph_store_replace_sources_uses_metadata_only_when_payloads_match(tmp_path: Path) -> None:
@@ -40062,7 +46193,7 @@ def test_graph_store_replace_sources_uses_metadata_only_when_payloads_match(tmp_
     edge_id = module.graph_edge_id(
         event_node_id,
         entity_node_id,
-        "mentions_route_signal",
+        "event_has_route_signal",
     )
 
     def contribution(
@@ -40108,7 +46239,7 @@ def test_graph_store_replace_sources_uses_metadata_only_when_payloads_match(tmp_
                     "id": edge_id,
                     "source": event_node_id,
                     "target": entity_node_id,
-                    "type": "mentions_route_signal",
+                    "type": "event_has_route_signal",
                     "count": 1,
                 }
             ],
@@ -40200,10 +46331,10 @@ def test_graph_store_replace_sources_uses_metadata_only_when_payloads_match(tmp_
     assert repaired_event_payload_row is not None
     assert json.loads(str(repaired_event_payload_row[0]))["label"] == "original event"
     assert repaired_edge_row is not None
-    assert repaired_edge_row[0] == "mentions_route_signal"
+    assert repaired_edge_row[0] == "event_has_route_signal"
     assert repaired_edge_row[1] == event_node_id
     assert repaired_edge_row[2] == entity_node_id
-    assert json.loads(str(repaired_edge_row[3]))["type"] == "mentions_route_signal"
+    assert json.loads(str(repaired_edge_row[3]))["type"] == "event_has_route_signal"
     assert changed_payload["metadata_only_source_count"] == 0
     assert changed_payload["refreshed_node_count"] >= 1
     assert "elapsed_ms" in changed_payload["node_refresh"]
@@ -40373,7 +46504,7 @@ def test_graph_route_signal_materialization_keeps_wide_facets_at_segment_level(t
     skill_route_node_id = module.graph_route_node_id("skill", "aoa_decision")
     scope_route_node_id = module.graph_route_node_id("scope_contract", "wide_summary_probe")
     first_event_node_id = f"event:{session_id}:{segment_id}:{events[0]['event_id']}"
-    mention_edges = [edge for edge in edges if edge["type"] == "mentions_route_signal"]
+    mention_edges = [edge for edge in edges if edge["type"] == "event_has_route_signal"]
     assert any(edge["source"] == first_event_node_id and edge["target"] == skill_route_node_id for edge in mention_edges)
     assert not any(edge["target"] == scope_route_node_id for edge in mention_edges)
     summary_edges = [edge for edge in edges if edge["type"] == "segment_has_route_signal"]
@@ -40439,7 +46570,7 @@ def test_graph_route_signal_materialization_caps_high_fanout_edges(tmp_path: Pat
     segment_node_id = f"segment:{session_id}:{segment_id}"
     edges = segment_contribution["edges"]
     nodes = {node["id"]: node for node in segment_contribution["nodes"]}
-    mention_edges = [edge for edge in edges if edge["type"] == "mentions_route_signal"]
+    mention_edges = [edge for edge in edges if edge["type"] == "event_has_route_signal"]
     summary_edges = [edge for edge in edges if edge["type"] == "segment_has_route_signal"]
 
     assert len(mention_edges) == module.GRAPH_EVENT_ROUTE_SIGNAL_EDGE_LIMIT
@@ -40682,7 +46813,121 @@ def test_graph_projection_links_only_same_correlation_agent_activity_status(tmp_
     assert status_node["refs"]["raw"] == status_event["raw_ref"]
 
 
-def test_graph_relation_contract_keeps_mentions_out_of_usage_and_consequence() -> None:
+def test_graph_projection_keeps_ambiguous_work_context_as_navigation_candidate(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    transcript = (
+        tmp_path
+        / "rollout-2026-07-29T00-00-00-ambiguous-work-context.jsonl"
+    )
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-07-29T00:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "ambiguous-work-context",
+                    "cwd": str(repo),
+                    "model": "gpt-5",
+                },
+            },
+            {
+                "timestamp": "2026-07-29T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Inspect the current work context.",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "ambiguous-work-context",
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    record = module.resolve_session_record(
+        aoa_root,
+        "ambiguous-work-context",
+    )
+    session_dir = Path(record["path"])
+    ambiguous_work_context = {
+        "schema_version": module.WORK_CONTEXT_SCHEMA_VERSION,
+        "status": "ambiguous",
+        "work_root": str(repo),
+        "work_name": "aoa-session-memory",
+        "work_family": "aoa-session-memory",
+        "confidence": "low",
+        "score": 40,
+        "evidence": [],
+        "alternates": [
+            {
+                "work_root": str(workspace),
+                "work_name": "AbyssOS",
+                "work_family": "abyssos-workspace",
+                "score": 38,
+            }
+        ],
+    }
+    for path in (
+        session_dir / "session.manifest.json",
+        session_dir / "session.index.json",
+    ):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["work_context"] = ambiguous_work_context
+        path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    contributions, diagnostics = module.graph_contributions_for_record(
+        record
+    )
+
+    assert diagnostics == []
+    session_contribution = next(
+        contribution
+        for contribution in contributions
+        if contribution["source"]["source_type"] == "session"
+    )
+    edge = next(
+        edge
+        for edge in session_contribution["edges"]
+        if edge["type"] == "has_work_context"
+    )
+    node = next(
+        node
+        for node in session_contribution["nodes"]
+        if node["id"] == edge["target"]
+    )
+    assert edge["source_projection_status"] == "ambiguous"
+    assert edge["source_projection_confidence"] == "low"
+    assert edge["source_projection_candidate"] is True
+    assert edge["relation_state"] == "inferred_candidate"
+    assert edge["navigation_admissible"] is True
+    assert edge["answer_admissible"] is False
+    assert node["status"] == "ambiguous"
+    assert node["source_projection_candidate"] is True
+
+
+def test_graph_relation_contract_keeps_route_signals_out_of_usage_and_consequence() -> None:
     edge = module.graph_relation_contract_payload(
         {
             "source": "event:session:000:000001",
@@ -40690,7 +46935,7 @@ def test_graph_relation_contract_keeps_mentions_out_of_usage_and_consequence() -
                 "tool",
                 "exec_command",
             ),
-            "type": "mentions_route_signal",
+            "type": "event_has_route_signal",
             "evidence_refs": [
                 {
                     "session_id": "session",
@@ -40704,10 +46949,32 @@ def test_graph_relation_contract_keeps_mentions_out_of_usage_and_consequence() -
     assert edge["direction"] == "source_to_target"
     assert edge["domain_range_status"] == "valid"
     assert edge["relation_state"] == "observed_projection"
-    assert edge["relation_family"] == "mention"
-    assert edge["semantic_boundary"] == "mention_only_never_usage_or_consequence"
+    assert edge["relation_family"] == "derived_anchor"
+    assert edge["semantic_boundary"] == (
+        "derived_navigation_never_usage_ownership_or_causality"
+    )
     assert edge["navigation_admissible"] is True
     assert edge["answer_admissible"] is False
+
+    registered_signal = module.graph_relation_contract_payload(
+        {
+            "source": "event:session:000:000001",
+            "target": "entity_registry:goal:goal_completed",
+            "type": "event_has_registered_entity_signal",
+            "signal_source": "goal_tool",
+            "evidence_refs": [
+                {
+                    "session_id": "session",
+                    "refs": {"raw": "raw:line:1"},
+                }
+            ],
+        }
+    )
+    assert registered_signal["relation_family"] == "derived_anchor"
+    assert registered_signal["semantic_boundary"] == (
+        "derived_navigation_never_usage_ownership_or_causality"
+    )
+    assert registered_signal["answer_admissible"] is False
 
 
 def test_graph_relation_contract_rejects_known_wrong_domain_and_range() -> None:
@@ -40717,7 +46984,7 @@ def test_graph_relation_contract_rejects_known_wrong_domain_and_range() -> None:
             "tool",
             "exec_command",
         ),
-        "type": "mentions_route_signal",
+        "type": "event_has_route_signal",
         "evidence_refs": [
             {
                 "session_id": "wrong-domain",
@@ -41053,6 +47320,47 @@ def test_graph_source_recommendation_routes_budget_rollback_to_heavy_tail_drip()
     assert recommendation["candidate_pool_limit"] == module.GRAPH_MAINTENANCE_HEAVY_TAIL_CANDIDATE_POOL_LIMIT
     assert "small_candidate_pool_preserves_progress_when_exact_planning_is_expensive" in recommendation["notes"]
     assert "interactive_drip_uses_aggregate_refresh_caps" in recommendation["notes"]
+
+
+def test_graph_source_recommendation_circuit_breaks_explicit_semantic_no_progress() -> None:
+    recommendation = module.graph_source_maintenance_recommendation(
+        source_count=16_864,
+        existing_source_count=16_864,
+        dirty_count=16_786,
+        missing_count=0,
+        orphaned_count=0,
+        blocked_count=25,
+        reason_group_counts={
+            "route_signal_classifier_mismatch": 16_786,
+            "graph_generation_mismatch": 16_864,
+        },
+        workspace_root="/srv/example/AbyssOS",
+        aoa_root="/srv/example/AbyssOS/.aoa",
+        latest_maintenance={
+            "usable_for_hot_gate": True,
+            "remaining_count": 10_309,
+            "actionable_remaining_count": 10_309,
+            "selected_count": 25,
+            "batch_limit": 25,
+            "candidate_pool_limit": 250,
+            "budget_exhausted": False,
+            "mutation_rolled_back": False,
+            "semantic_progress": False,
+        },
+    )
+
+    assert recommendation["route"] == "paused_no_semantic_progress"
+    assert recommendation["command"] == ""
+    assert (
+        recommendation["reason"]
+        == "latest_graph_maintenance_selected_sources_without_"
+        "semantic_progress"
+    )
+    assert (
+        "automatic_graph_retries_are_circuit_broken_until_"
+        "freshness_or_dependency_state_changes"
+        in recommendation["notes"]
+    )
 
 
 def test_graph_source_recommendation_keeps_recent_no_progress_sticky() -> None:
@@ -41729,7 +48037,7 @@ def test_maintenance_next_actions_requires_review_for_unowned_session_stage(
     assert "--confirm-unowned-session-stage-digest" not in command
 
 
-def test_maintenance_next_actions_routes_unresolved_stage_raw_to_review(
+def test_hot_maintenance_next_actions_does_not_hash_unresolved_stage_raw(
     tmp_path: Path,
     monkeypatch: Any,
 ) -> None:
@@ -41755,6 +48063,13 @@ def test_maintenance_next_actions_routes_unresolved_stage_raw_to_review(
         module,
         "process_is_alive",
         lambda _pid: False,
+    )
+    monkeypatch.setattr(
+        module,
+        "session_projection_stage_raw_authority",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("hot planner hashed staged raw")
+        ),
     )
 
     recommendation, actions = (
@@ -41783,16 +48098,36 @@ def test_maintenance_next_actions_routes_unresolved_stage_raw_to_review(
         )
     )
 
-    assert recommendation == "review_maintenance_cleanup"
-    assert actions[0]["id"] == (
-        "review_unresolved_session_projection_stage"
+    assert recommendation != "review_maintenance_cleanup"
+    assert all(
+        action.get("id") != "repair_maintenance_cleanup"
+        for action in actions
     )
-    assert actions[0]["reason"] == (
-        "session_projection_stage_stronger_raw_"
-        "authority_unverified"
+
+    monkeypatch.setattr(
+        module,
+        "session_projection_stage_raw_authority",
+        lambda *_args, **_kwargs: {
+            "inspected": True,
+            "verified": False,
+            "status": "stronger_raw_digest_mismatch",
+            "diagnostics": [
+                "session_projection_stage_stronger_raw_authority_unverified"
+            ],
+        },
     )
-    assert "--apply" not in actions[0]["command"]
-    assert "Do not remove the stage" in actions[0]["note"]
+    explicit = module.maintenance_cleanup(
+        aoa_root=aoa_root,
+        apply=False,
+        inspect_session_projection_work=False,
+    )
+    assert explicit["status"] == "cleanup_needed"
+    assert explicit["session_projection_stages"]["status"] == (
+        "blocked_raw_authority_unresolved"
+    )
+    assert explicit["session_projection_stages"][
+        "raw_authority_unresolved_count"
+    ] == 1
 
 
 def test_maintenance_next_actions_prioritizes_runtime_cleanup(tmp_path: Path, monkeypatch: Any) -> None:
@@ -41897,6 +48232,30 @@ def test_graph_status_preserves_latest_queue_aggregate_refresh_ms(tmp_path: Path
     )
 
     assert summary["latest_queue_maintenance"]["aggregate_refresh_ms"] == 103_360
+
+
+def test_graph_force_exact_source_refresh_marks_only_named_clean_sources() -> None:
+    states = [
+        {"source_key": "session:alpha", "status": "clean", "reasons": []},
+        {"source_key": "session:blocked", "status": "blocked", "reasons": ["unsafe"]},
+        {"source_key": "session:orphaned", "status": "orphaned", "reasons": []},
+        {"source_key": "session:untouched", "status": "clean", "reasons": []},
+    ]
+
+    refreshed = module.graph_force_exact_source_refresh_states(
+        states,
+        {"session:alpha", "session:blocked", "session:orphaned"},
+    )
+
+    by_key = {item["source_key"]: item for item in refreshed}
+    assert by_key["session:alpha"]["status"] == "dirty"
+    assert by_key["session:alpha"]["forced_materialization_refresh"] is True
+    assert "operator_exact_materialization_refresh" in by_key["session:alpha"]["reasons"]
+    assert by_key["session:blocked"] == states[1]
+    assert by_key["session:orphaned"] == states[2]
+    assert by_key["session:untouched"] == states[3]
+    assert states[0]["status"] == "clean"
+    assert module.graph_force_exact_source_refresh_states(states, set()) == states
 
 
 def test_graph_maintenance_selects_cheap_sources_before_oversized_backlog(tmp_path: Path, monkeypatch: Any) -> None:
@@ -42800,10 +49159,11 @@ def test_graph_maintenance_inserts_missing_session_and_removes_orphaned_sources(
     assert inserted["maintenance_detail"]["append_only_source_count"] >= 2
     assert inserted["maintenance_detail"]["append_only_node_count"] >= 1
     assert inserted["maintenance_detail"]["append_only_edge_count"] >= 1
-    assert inserted["maintenance_detail"]["replaced_node_refresh"]["requested_count"] == 0
-    assert inserted["maintenance_detail"]["replaced_node_refresh"]["chunk_count"] == 0
-    assert inserted["maintenance_detail"]["replaced_edge_refresh"]["requested_count"] == 0
-    assert inserted["maintenance_detail"]["replaced_edge_refresh"]["chunk_count"] == 0
+    assert inserted["maintenance_detail"]["append_only_aggregate_strategy"] == "batch_set_wise_refresh"
+    assert inserted["maintenance_detail"]["replaced_node_refresh"]["requested_count"] >= 1
+    assert inserted["maintenance_detail"]["replaced_node_refresh"]["chunk_count"] >= 1
+    assert inserted["maintenance_detail"]["replaced_edge_refresh"]["requested_count"] >= 1
+    assert inserted["maintenance_detail"]["replaced_edge_refresh"]["chunk_count"] >= 1
     conn = sqlite3.connect(str(aoa_root / "graph" / "graph.sqlite3"))
     assert conn.execute("SELECT COUNT(*) FROM nodes WHERE id = ?", ("session:second-graph-source",)).fetchone()[0] == 1
     assert conn.execute("SELECT COUNT(*) FROM graph_sources WHERE session_id = ?", ("second-graph-source",)).fetchone()[0] >= 2
@@ -44109,6 +50469,211 @@ def test_graph_maintenance_seed_queue_then_uses_queue_source_filters(tmp_path: P
     assert payload["maintenance_detail"]["matched_source_keys"] == observed["source_key_filters"]
 
 
+def test_graph_maintenance_queue_candidate_window_honors_explicit_pool_limit(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    source_items = {
+        f"segment:bounded-window:{index:03d}": {
+            "source_key": f"segment:bounded-window:{index:03d}",
+            "source_type": "segment",
+            "session_id": "bounded-window",
+            "segment_id": f"{index:03d}",
+            "status": "dirty",
+            "stored_node_count": index,
+            "stored_edge_count": index,
+        }
+        for index in range(12)
+    }
+    module.write_graph_maintenance_queue(aoa_root, {"items": source_items})
+    observed: dict[str, Any] = {}
+
+    monkeypatch.setattr(
+        module,
+        "graph_queue_source_records",
+        lambda *_args, **_kwargs: [],
+    )
+
+    def fake_graph_source_states(**kwargs: Any) -> dict[str, Any]:
+        source_key_filters = list(kwargs.get("source_key_filters") or [])
+        observed["source_key_filters"] = source_key_filters
+        return {
+            "states": [dict(source_items[source_key]) for source_key in source_key_filters],
+            "diagnostics": [],
+            "existing_source_count": len(source_key_filters),
+        }
+
+    monkeypatch.setattr(module, "graph_source_states", fake_graph_source_states)
+
+    payload = module.graph_maintenance(
+        aoa_root=aoa_root,
+        use_queue=True,
+        batch_limit=2,
+        candidate_pool_limit=4,
+    )
+
+    assert payload["selected_count"] == 2
+    assert payload["maintenance_detail"]["queue_candidate_window_limit"] == 4
+    assert payload["maintenance_detail"]["queue_selected_source_count"] == 4
+    assert len(observed["source_key_filters"]) == 4
+
+
+def test_graph_maintenance_session_coherent_queue_window_packs_complete_sessions() -> None:
+    candidates = [
+        {
+            "source_key": f"segment:{session_id}:{index:03d}",
+            "session_id": session_id,
+        }
+        for session_id, count in (("large", 4), ("does-not-fit", 3), ("small", 1))
+        for index in range(count)
+    ]
+
+    selected, detail = module.graph_maintenance_session_coherent_queue_window(
+        candidates,
+        limit=5,
+    )
+
+    assert [item["session_id"] for item in selected] == [
+        "large",
+        "large",
+        "large",
+        "large",
+        "small",
+    ]
+    assert detail["selected_source_count"] == 5
+    assert detail["selected_session_count"] == 2
+    assert detail["skipped_session_group_count"] == 1
+    assert detail["oversized_split_group_count"] == 0
+    assert detail["session_coherent"] is True
+
+
+def test_graph_maintenance_session_coherent_queue_window_bounds_oversized_session() -> None:
+    candidates = [
+        {
+            "source_key": f"segment:oversized:{index:03d}",
+            "session_id": "oversized",
+        }
+        for index in range(7)
+    ]
+
+    selected, detail = module.graph_maintenance_session_coherent_queue_window(
+        candidates,
+        limit=5,
+    )
+
+    assert len(selected) == 5
+    assert detail["oversized_split_group_count"] == 1
+    assert detail["session_coherent"] is False
+
+
+def test_graph_maintenance_preserves_last_good_contribution_when_reindex_is_required(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    source_key = "segment:last-good-blocked:000"
+    seed_current_graph_store(aoa_root, [source_key])
+    old_node_ids: set[str]
+    old_edge_ids: set[str]
+    store = module.GraphSqliteStore(aoa_root)
+    try:
+        old_node_ids, old_edge_ids = store.source_contribution_ids(source_key)
+    finally:
+        store.close()
+    assert old_node_ids
+    assert old_edge_ids
+
+    session_dir = aoa_root / "sessions" / "2026-06-22__004__last-good-blocked"
+    source_path = session_dir / "segments" / "000.index.json"
+    source_path.parent.mkdir(parents=True)
+    source_path.write_text("{}", encoding="utf-8")
+    dirty_state = {
+        "source_key": source_key,
+        "source_type": "segment",
+        "session_id": "last-good-blocked",
+        "session_label": session_dir.name,
+        "segment_id": "000",
+        "session_dir": str(session_dir),
+        "source_path": str(source_path),
+        "status": "dirty",
+        "stored_node_count": len(old_node_ids),
+        "stored_edge_count": len(old_edge_ids),
+    }
+    module.write_graph_maintenance_queue(
+        aoa_root,
+        {"items": {source_key: dirty_state}},
+    )
+
+    monkeypatch.setattr(
+        module,
+        "graph_queue_source_records",
+        lambda *_args, **_kwargs: [
+            {"session_id": "last-good-blocked", "path": str(session_dir)}
+        ],
+    )
+    monkeypatch.setattr(
+        module,
+        "graph_source_states",
+        lambda **_kwargs: {
+            "states": [dict(dirty_state)],
+            "diagnostics": [],
+            "existing_source_count": 1,
+        },
+    )
+    blocked_diagnostic = "graph_source_generation_incompatible:last-good-blocked:reindex-required"
+    monkeypatch.setattr(
+        module,
+        "graph_contributions_for_record",
+        lambda *_args, **_kwargs: (
+            [
+                {
+                    "source": {
+                        **dirty_state,
+                        "status": "blocked",
+                        "diagnostics": [blocked_diagnostic],
+                    },
+                    "nodes": [],
+                    "edges": [],
+                }
+            ],
+            [],
+        ),
+    )
+
+    payload = module.graph_maintenance(
+        aoa_root=aoa_root,
+        apply=True,
+        use_queue=True,
+        batch_limit=1,
+        candidate_pool_limit=1,
+    )
+
+    assert payload["ok"] is False
+    assert payload["semantic_progress"] is False
+    assert payload["selected_count"] == 0
+    assert payload["results"] == [
+        {
+            "source_key": source_key,
+            "status": "blocked",
+            "diagnostics": [blocked_diagnostic],
+        }
+    ]
+    store = module.GraphSqliteStore(aoa_root)
+    try:
+        current_node_ids, current_edge_ids = store.source_contribution_ids(source_key)
+        source_row = store.conn.execute(
+            "SELECT status FROM graph_sources WHERE source_key = ?",
+            (source_key,),
+        ).fetchone()
+    finally:
+        store.close()
+    assert current_node_ids == old_node_ids
+    assert current_edge_ids == old_edge_ids
+    assert source_row is not None
+    assert source_row["status"] == "current"
+
+
 def test_graph_maintenance_hot_noop_all_is_cached_without_source_scan(tmp_path: Path, monkeypatch: Any) -> None:
     aoa_root = tmp_path / ".aoa"
     (aoa_root / "graph").mkdir(parents=True)
@@ -44301,6 +50866,140 @@ def test_graph_maintenance_mutating_scan_writes_hash_cache_by_default(tmp_path: 
     assert payload["source_hash_cache_update"]["updated_count"] == 3
     warmed = module.read_graph_source_hash_cache(aoa_root)
     assert len(warmed["entries"]) == 3
+
+
+def test_graph_contributions_reuse_shared_source_hashes_within_one_record(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    transcript = (
+        tmp_path
+        / "rollout-2026-06-21T00-30-00-graph-hash-reuse.jsonl"
+    )
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-06-21T00:30:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "graph-hash-reuse",
+                    "cwd": str(repo),
+                    "model": "gpt-5",
+                },
+            },
+            {
+                "timestamp": "2026-06-21T00:30:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Build a graph fingerprint.",
+                        }
+                    ],
+                },
+            },
+            {
+                "timestamp": "2026-06-21T00:30:02Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "The graph fingerprint is ready.",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "graph-hash-reuse",
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    record = module.resolve_session_record(
+        aoa_root,
+        "graph-hash-reuse",
+    )
+    observed_caches: list[dict[str, dict[str, Any]]] = []
+    observed_stats: list[dict[str, int]] = []
+    original = module.graph_source_hash_stat_item
+
+    def observed_hash(
+        path: Path,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        cache_entries = kwargs.get("cache_entries")
+        cache_updates = kwargs.get("cache_updates")
+        stats = kwargs.get("stats")
+        if isinstance(stats, dict):
+            assert isinstance(cache_entries, dict)
+            assert cache_entries is cache_updates
+            observed_caches.append(cache_entries)
+            observed_stats.append(stats)
+        return original(path, **kwargs)
+
+    monkeypatch.setattr(
+        module,
+        "graph_source_hash_stat_item",
+        observed_hash,
+    )
+    first, diagnostics = module.graph_contributions_for_record(record)
+
+    assert diagnostics == []
+    segment_count = sum(
+        1
+        for item in first
+        if item["source"]["source_type"] == "segment"
+    )
+    assert segment_count >= 1
+    assert observed_caches
+    assert len({id(item) for item in observed_caches}) == 1
+    assert len({id(item) for item in observed_stats}) == 1
+    stats = observed_stats[0]
+    unique_path_count = 2 + segment_count
+    assert stats["computed"] == unique_path_count
+    assert stats["persistent_miss"] == unique_path_count
+    assert stats["persistent_hit"] == 2 * segment_count
+    assert len(observed_caches[0]) == unique_path_count
+    first_cache = observed_caches[0]
+    first_source_shas = {
+        item["source"]["source_key"]: item["source"]["source_sha"]
+        for item in first
+    }
+    assert all(first_source_shas.values())
+
+    observed_caches.clear()
+    observed_stats.clear()
+    second, second_diagnostics = (
+        module.graph_contributions_for_record(record)
+    )
+    second_source_shas = {
+        item["source"]["source_key"]: item["source"]["source_sha"]
+        for item in second
+    }
+
+    assert second_diagnostics == []
+    assert second_source_shas == first_source_shas
+    assert observed_stats[0]["computed"] == unique_path_count
+    assert observed_stats[0]["persistent_hit"] == 2 * segment_count
+    assert observed_caches[0] is not first_cache
 
 
 def test_graph_source_hash_cache_reuses_stat_matched_hashes_and_exact_bypasses(tmp_path: Path, monkeypatch: Any) -> None:
@@ -44869,10 +51568,10 @@ def test_graph_hot_state_detects_ledger_store_source_count_mismatch(tmp_path: Pa
         ],
         "edges": [
             {
-                "id": "event:partial-store:000:000001->route:skill:aoa_decision:mentions_route_signal",
+                "id": "event:partial-store:000:000001->route:skill:aoa_decision:event_has_route_signal",
                 "source": "event:partial-store:000:000001",
                 "target": "route:skill:aoa_decision",
-                "type": "mentions_route_signal",
+                "type": "event_has_route_signal",
             }
         ],
     }
@@ -44960,10 +51659,10 @@ def test_graph_hot_state_uses_latest_graph_maintenance_remaining_count(tmp_path:
         ],
         "edges": [
             {
-                "id": "event:remaining-report:000:000001->route:skill:aoa_decision:mentions_route_signal",
+                "id": "event:remaining-report:000:000001->route:skill:aoa_decision:event_has_route_signal",
                 "source": "event:remaining-report:000:000001",
                 "target": "route:skill:aoa_decision",
-                "type": "mentions_route_signal",
+                "type": "event_has_route_signal",
             }
         ],
     }
@@ -45034,10 +51733,10 @@ def test_graph_hot_state_keeps_recent_no_progress_report_for_heavy_tail_route(tm
         ],
         "edges": [
             {
-                "id": "event:recent-no-progress:000:000001->route:skill:aoa_decision:mentions_route_signal",
+                "id": "event:recent-no-progress:000:000001->route:skill:aoa_decision:event_has_route_signal",
                 "source": "event:recent-no-progress:000:000001",
                 "target": "route:skill:aoa_decision",
-                "type": "mentions_route_signal",
+                "type": "event_has_route_signal",
             }
         ],
     }
@@ -45178,10 +51877,10 @@ def test_graph_hot_state_ignores_scoped_latest_graph_maintenance_remaining_count
         ],
         "edges": [
             {
-                "id": "event:scoped-report:000:000001->route:skill:aoa_decision:mentions_route_signal",
+                "id": "event:scoped-report:000:000001->route:skill:aoa_decision:event_has_route_signal",
                 "source": "event:scoped-report:000:000001",
                 "target": "route:skill:aoa_decision",
-                "type": "mentions_route_signal",
+                "type": "event_has_route_signal",
             }
         ],
     }
@@ -46205,6 +52904,206 @@ def test_route_signals_ignore_null_byte_path_mentions(tmp_path: Path) -> None:
             assert "\x00" not in str(signal.get("detail", ""))
 
 
+def test_archived_path_routing_does_not_depend_on_live_owner_markers(
+    monkeypatch,
+) -> None:
+    def fail_on_exists(_path: Path) -> bool:
+        raise AssertionError("projection-time path routing inspected the live filesystem")
+
+    with monkeypatch.context() as isolated:
+        isolated.setattr(Path, "exists", fail_on_exists)
+
+        assert (
+            module.archived_path_route_owner_root(
+                "/home/example/.codex/skills/aoa-eval/SKILL.md"
+            )
+            == "/home/example/.codex/skills"
+        )
+        assert (
+            module.archived_path_route_owner_root(
+                "/home/example/src/aoa-session-memory/scripts/aoa_session_memory.py"
+            )
+            == "/home/example/src/aoa-session-memory"
+        )
+        assert (
+            module.archived_path_route_owner_root(
+                "/srv/example/AbyssOS/aoa-session-memory/scripts/aoa_session_memory.py"
+            )
+            == "/srv/example/AbyssOS/aoa-session-memory"
+        )
+        assert (
+            module.archived_path_route_owner_root(
+                "~/.codex/skills/aoa-eval/SKILL.md"
+            )
+            == "~/.codex/skills"
+        )
+        assert (
+            module.archived_path_route_owner_root(
+                "~operator/src/aoa-session-memory/scripts/aoa_session_memory.py"
+            )
+            == "~operator/src/aoa-session-memory"
+        )
+
+
+def test_archived_path_routing_is_stable_for_existing_and_missing_codex_paths(
+    tmp_path: Path,
+) -> None:
+    account_root = tmp_path / "home" / "example"
+    existing = account_root / ".codex" / "skills" / "aoa-eval" / "SKILL.md"
+    missing = account_root / ".codex" / "skills" / "missing" / "SKILL.md"
+    existing.parent.mkdir(parents=True)
+    existing.write_text("skill\n", encoding="utf-8")
+    (account_root / ".codex" / "AGENTS.md").write_text(
+        "owner marker\n",
+        encoding="utf-8",
+    )
+
+    # The temporary path belongs to the stable /srv owner namespace. The
+    # nested live marker must not make the existing path more specific than
+    # its missing sibling.
+    expected = module.lexical_owner_root_for_path(str(existing))
+    assert expected == module.lexical_owner_root_for_path(str(missing))
+    assert module.archived_path_route_owner_root(str(existing)) == expected
+    assert module.archived_path_route_owner_root(str(missing)) == expected
+
+
+def test_archived_session_context_projections_do_not_read_live_owner_markers(
+    monkeypatch,
+) -> None:
+    archived_path = "/home/example/.codex/skills/aoa-eval/SKILL.md"
+    transcript_path = (
+        "/home/example/.codex/sessions/2026/07/23/"
+        "rollout-archived.jsonl"
+    )
+    event = module.RawEvent(
+        event_id="evt-archived-owner",
+        line_no=1,
+        raw="{}",
+        parsed={"payload": {"cwd": archived_path}},
+        event_type="SESSION_META",
+        source_type="session_meta",
+        title=archived_path,
+        timestamp="2026-07-23T00:00:00Z",
+        tags=[],
+        importance="medium",
+        compaction_boundary=False,
+        facets={"path": archived_path},
+    )
+
+    def fail_on_exists(_path: Path) -> bool:
+        raise AssertionError(
+            "archived context projection inspected the live filesystem"
+        )
+
+    with monkeypatch.context() as isolated:
+        isolated.setattr(Path, "exists", fail_on_exists)
+        route_signals = module.route_signals_for_event(
+            event.event_type,
+            event.source_type,
+            event.parsed["payload"],
+            event.title,
+            event.raw,
+            set(event.tags),
+            event.facets,
+            event.outcome,
+            event.correlation_id,
+        )
+        work_context = module.work_context_for_session_events(
+            {
+                "cwd": archived_path,
+                "transcript_path": transcript_path,
+            },
+            [event],
+        )
+
+    assert {
+        (signal["layer"], signal["key"], signal.get("detail"))
+        for signal in route_signals
+        if signal["layer"] == "owner_route"
+    } == {
+        (
+            "owner_route",
+            "skills",
+            "/home/example/.codex/skills",
+        )
+    }
+    assert work_context["schema_version"] == 4
+    assert work_context["work_root"] == "/home/example/.codex/skills"
+    assert work_context["work_name"] == "skills"
+    assert work_context["work_family"] == "codex-memory"
+
+
+def test_archived_home_routes_are_independent_of_current_home(
+    monkeypatch,
+) -> None:
+    archived_path = "~/.codex/skills/aoa-eval/SKILL.md"
+
+    monkeypatch.setenv("HOME", "/home/example/alpha")
+    first_route = module.archived_path_route_owner_root(archived_path)
+    first_context = module.work_context_for_session_events(
+        {"cwd": archived_path},
+        [],
+    )
+
+    monkeypatch.setenv("HOME", "/srv/example/home/example/beta")
+    second_route = module.archived_path_route_owner_root(archived_path)
+    second_context = module.work_context_for_session_events(
+        {"cwd": archived_path},
+        [],
+    )
+
+    assert first_route == second_route == "~/.codex/skills"
+    assert first_context == second_context
+    assert first_context["schema_version"] == 4
+    assert first_context["work_root"] == "~/.codex/skills"
+    assert first_context["work_name"] == "skills"
+    assert first_context["work_family"] == "codex-memory"
+
+
+def test_archived_memory_surfaces_ignore_current_home_and_codex_home(
+    monkeypatch,
+) -> None:
+    def event_for(surface: str) -> module.RawEvent:
+        return module.RawEvent(
+            event_id=f"evt-{surface}",
+            line_no=1,
+            raw="{}",
+            parsed={},
+            event_type="ASSISTANT_MESSAGE",
+            source_type="message",
+            title=surface,
+            timestamp="2026-07-23T00:00:00Z",
+            tags=[],
+            importance="medium",
+            compaction_boundary=False,
+            facets={"session_act": {"memory_surface": surface}},
+        )
+
+    expected_roots = {
+        "codex_memories": "~/.codex/memories",
+        "codex_transcripts": "~/.codex/sessions",
+        "aoa_session_memory": ".aoa",
+    }
+    for surface, expected_root in expected_roots.items():
+        monkeypatch.setenv("HOME", "/home/example/alpha")
+        monkeypatch.setenv("CODEX_HOME", "/runtime/alpha/.codex")
+        first = module.work_context_for_session_events(
+            {},
+            [event_for(surface)],
+        )
+
+        monkeypatch.setenv("HOME", "/srv/example/home/example/beta")
+        monkeypatch.setenv("CODEX_HOME", "/runtime/beta/.codex")
+        second = module.work_context_for_session_events(
+            {},
+            [event_for(surface)],
+        )
+
+        assert first == second
+        assert first["schema_version"] == 4
+        assert first["work_root"] == expected_root
+
+
 def test_agent_atlas_build_generates_route_entries(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     repo = workspace / "aoa-techniques"
@@ -46594,7 +53493,11 @@ def test_route_layer_readiness_audits_operational_layers(tmp_path: Path, monkeyp
     assert refreshed["session_lineage_schema_version"] == module.SESSION_LINEAGE_SCHEMA_VERSION
     assert isinstance(refreshed["agent_event_counts"], dict)
     assert isinstance(refreshed["task_episode_counts"], dict)
-    assert isinstance(refreshed["task_episodes"], list)
+    assert refreshed["task_episodes"] == []
+    assert module.session_index_task_episode_components(
+        stale_session_index_path.parent,
+        refreshed,
+    )
     assert module.sha256_file(stale_raw_path) == stale_raw_sha_before
 
     scope_identity = module.route_sample_identity(sample_by_layer["scope_contract"])
@@ -46902,7 +53805,7 @@ def test_index_maintenance_worker_refreshes_secondary_indexes_after_semantic_nam
     assert worker["processed"] == 1
     assert worker["results"][0]["status"] == "maintained_indexes"
     assert worker["results"][0]["action_counts"]["applied"] >= 2
-    assert worker["results"][0]["action_counts"]["remaining"] == 1
+    assert worker["results"][0]["action_counts"]["observed_evidence_gap"] == 1
     assert Path(worker["results"][0]["report_json"]).exists()
 
     refreshed_plan = module.maintain_indexes(aoa_root=aoa_root, target="all")
@@ -48163,8 +55066,221 @@ def test_search_index_partial_update_reports_budget_exhausted_on_sqlite_interrup
     assert result["active_session"]["session_id"] == "budgeted-search"
     assert result["active_session"]["active_phase"] == "delete_existing_documents"
     assert result["active_session"]["candidate_document_count"] > 0
+    assert result["sessions"] == []
     assert result["remaining_sessions"][0]["session_id"] == "budgeted-search"
     assert result["remaining_sessions"][0]["active_phase"] == "delete_existing_documents"
+    assert result["semantic_completion"] is False
+    assert result["consumer_acknowledged"] is False
+    checkpoint_receipt = result["search_progress_checkpoint"]
+    assert checkpoint_receipt["status"] == "written"
+    assert checkpoint_receipt["next_record_index"] == 0
+    assert checkpoint_receipt["active_session_id"] == "budgeted-search"
+    assert checkpoint_receipt["semantic_completion"] is False
+    checkpoint = module.read_json(Path(checkpoint_receipt["path"]), {})
+    assert checkpoint["status"] == "interrupted"
+    assert checkpoint["cursor"]["next_record_index"] == 0
+    assert checkpoint["cursor"]["active_session_id"] == "budgeted-search"
+    assert checkpoint["progress"]["checkpoint_sequence"] > 0
+    assert checkpoint["truth_status"] == (
+        "search_progress_checkpoint_not_consumer_ack_or_global_freshness"
+    )
+
+
+def test_search_index_same_execution_resumes_from_committed_session_cursor(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    sessions = [
+        ("resume-first", "2026-06-15T00:00:00Z"),
+        ("resume-second", "2026-06-16T00:00:00Z"),
+    ]
+    for session_id, timestamp in sessions:
+        transcript = tmp_path / f"rollout-{session_id}.jsonl"
+        write_jsonl(
+            transcript,
+            [
+                {
+                    "timestamp": timestamp,
+                    "type": "session_meta",
+                    "payload": {"id": session_id, "cwd": str(repo)},
+                },
+                {
+                    "timestamp": timestamp,
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": f"Index {session_id}.",
+                            }
+                        ],
+                    },
+                },
+                {
+                    "timestamp": timestamp,
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Indexed."}],
+                    },
+                },
+            ],
+        )
+        module.handle_hook_event(
+            "Stop",
+            {
+                "session_id": session_id,
+                "transcript_path": str(transcript),
+                "cwd": str(repo),
+                "hook_event_name": "Stop",
+            },
+            workspace_root=workspace,
+            aoa_root=aoa_root,
+        )
+
+    initial = module.search_index_sessions(aoa_root=aoa_root, target="all")
+    assert initial["ok"] is True
+    records = [module.resolve_session_record(aoa_root, session_id) for session_id, _ in sessions]
+    original_delete = module.delete_search_documents_for_session
+    delete_calls: list[str] = []
+
+    def budget_boundary_delete(*args: Any, **kwargs: Any) -> int:
+        session_id = str(kwargs.get("session_id") or "")
+        delete_calls.append(session_id)
+        return original_delete(*args, **kwargs)
+
+    monkeypatch.setattr(
+        module,
+        "delete_search_documents_for_session",
+        budget_boundary_delete,
+    )
+    execution_id = "same-execution-resume"
+    interrupted = module.search_index_sessions(
+        aoa_root=aoa_root,
+        target="all",
+        selected_records=records,
+        rebuild=False,
+        budget_seconds=1e-9,
+        execution_id=execution_id,
+    )
+    assert interrupted["budget_exhausted"] is True
+    assert interrupted["processed_count"] == 1
+    assert interrupted["remaining_count"] == 1
+    assert interrupted["search_progress_checkpoint"]["next_record_index"] == 1
+    assert interrupted["semantic_completion"] is False
+    durable_checkpoint = module.read_json(
+        Path(interrupted["search_progress_checkpoint"]["path"]),
+        {},
+    )
+    assert durable_checkpoint["status"] == "interrupted"
+    assert durable_checkpoint["cursor"]["next_record_index"] == 1
+    assert durable_checkpoint["completed_sessions"][0]["session_id"] == (
+        "resume-first"
+    )
+
+    resumed = module.search_index_sessions(
+        aoa_root=aoa_root,
+        target="all",
+        selected_records=records,
+        rebuild=False,
+        budget_seconds=30,
+        execution_id=execution_id,
+    )
+    assert resumed["ok"] is True
+    assert resumed["resumed_from_checkpoint"] is True
+    assert resumed["resume_cursor"] == 1
+    assert resumed["processed_count"] == 2
+    assert resumed["remaining_count"] == 0
+    assert resumed["semantic_completion"] is True
+    assert resumed["consumer_acknowledged"] is True
+    assert resumed["search_progress_checkpoint"]["next_record_index"] == 2
+    assert delete_calls == ["resume-first", "resume-second"]
+
+
+def test_index_maintenance_full_rebuild_receives_remaining_budget(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-07-29T00-00-00-budgeted-rebuild.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-07-29T00:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "budgeted-rebuild",
+                    "cwd": str(repo),
+                },
+            },
+            {
+                "timestamp": "2026-07-29T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Keep automatic full rebuilds bounded.",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "budgeted-rebuild",
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    search_calls: list[dict[str, Any]] = []
+
+    def fake_search_index_sessions(**kwargs: Any) -> dict[str, Any]:
+        search_calls.append(kwargs)
+        return {
+            "ok": False,
+            "selected_count": 1,
+            "processed_count": 0,
+            "remaining_count": 1,
+            "budget_exhausted": True,
+            "document_count": 0,
+            "removed_document_count": 0,
+            "diagnostics": ["search_index_budget_exhausted"],
+        }
+
+    monkeypatch.setattr(module, "search_index_sessions", fake_search_index_sessions)
+
+    module.maintain_indexes(
+        aoa_root=aoa_root,
+        target="all",
+        apply=True,
+        repair_token_accounting=False,
+        repair_graph=False,
+        budget_seconds=30,
+    )
+
+    rebuild_calls = [call for call in search_calls if call.get("rebuild") is True]
+    assert rebuild_calls
+    assert all(call.get("budget_seconds") is not None for call in rebuild_calls)
+    assert all(0 < float(call["budget_seconds"]) <= 30 for call in rebuild_calls)
 
 
 def test_auto_maintenance_profile_runs_session_memory_route_without_mcp_mutation(tmp_path: Path, monkeypatch: Any) -> None:
@@ -48241,6 +55357,17 @@ def test_auto_maintenance_profile_runs_session_memory_route_without_mcp_mutation
     assert calls["maintenance"]["repair_graph"] is True
     assert calls["maintenance"]["reason"] == "auto_maintenance:backlog:timer"
     assert len(calls["freshness"]) == 2
+    assert all(call["selected_records"] == [] for call in calls["freshness"])
+    assert all(
+        call["selection_scope"]["mode"]
+        == "bounded_dirty_first_round_robin_v1"
+        for call in calls["freshness"]
+    )
+    assert (
+        calls["maintenance"]["discovery_limit"]
+        == module.AUTO_MAINTENANCE_PROFILES["backlog"]["discovery_limit"]
+    )
+    assert calls["maintenance"]["selected_records"] == []
     assert payload["resource_launcher"][:3] == ["abyss-machine", "resource", "launch"]
     assert "aoa_session_memory MCP remains read-only" in payload["mcp_boundary"]
     assert Path(payload["report_json"]).exists()
@@ -48339,6 +55466,13 @@ def test_maintenance_status_returns_agent_route_without_mutating(tmp_path: Path,
     monkeypatch.setattr(module, "graph_freshness_gates", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("hot status should not run deep graph gates")))
     monkeypatch.setattr(module, "session_memory_timer_status", lambda: {"ok": True, "status": "available", "timer_count": 1, "timers": [], "diagnostics": []})
     monkeypatch.setattr(module, "latest_diagnostic_summary", lambda *_args, **_kwargs: {"exists": False})
+    monkeypatch.setattr(
+        module,
+        "session_projection_work_status",
+        lambda _aoa_root: (_ for _ in ()).throw(
+            AssertionError("hot status parsed projection-work raw")
+        ),
+    )
     monkeypatch.setattr(
         module,
         "session_memory_search_shard_projection_summary",
@@ -48510,6 +55644,34 @@ def test_compact_maintenance_status_keeps_graph_live_tail_bounded() -> None:
     assert compact["graph"]["latest_maintenance"]["remaining_count"] == 7
     assert compact["live_tail"]["sampled_graph_source_count"] == 7
     assert compact["live_tail"]["samples"][0]["source_key"] == "segment:live:000"
+
+
+def test_maintenance_status_markdown_renders_automatic_retry_summary() -> None:
+    rendered = module.maintenance_status_markdown(
+        {
+            "generated_at": "2026-07-26T00:00:00Z",
+            "ok": True,
+            "automatic_retry": {
+                "status": "scheduled",
+                "queued_count": 2,
+                "due_count": 1,
+                "in_flight_count": 0,
+                "freshness_obligation_count": 1,
+                "freshness_obligation_due_count": 1,
+                "oldest_freshness_obligation_age_seconds": 42.0,
+                "next_attempt_at": "2026-07-26T00:01:00Z",
+            },
+        }
+    )
+
+    assert (
+        "- automatic_retry: `scheduled` queued=`2` due=`1` "
+        "in_flight=`0` next=`2026-07-26T00:01:00Z`"
+    ) in rendered
+    assert (
+        "- freshness_obligations: queued=`1` due=`1` "
+        "oldest_age_sec=`42.0`"
+    ) in rendered
 
 
 def test_maintenance_status_waits_for_recent_graph_live_tail_before_catchup(tmp_path: Path, monkeypatch: Any) -> None:
@@ -49520,7 +56682,7 @@ def test_auto_maintenance_resource_launch_scopes_hot_demand_identity(tmp_path: P
 
     assert command[command.index("--class") + 1] == "medium"
     assert command[command.index("--demand-key") + 1] == (
-        "aoa-session-memory:auto-maintenance:hot:auto-maintenance-v2"
+        "aoa-session-memory:auto-maintenance:hot:auto-maintenance-v5"
     )
     assert command[command.index("--demand-owner") + 1] == "aoa-session-memory"
     assert command[command.index("--memory-demand-mib") + 1] == "3400"
@@ -49544,16 +56706,23 @@ def test_auto_maintenance_resource_launch_scopes_hot_demand_identity(tmp_path: P
     assert parsed.resource_estimate_confidence == "medium"
 
 
-def test_auto_maintenance_resource_demand_epoch_changes_only_the_bounded_hot_envelope() -> None:
-    hot_command = ["python3", str(Path(module.__file__).resolve()), "auto-maintenance", "hot"]
-    backlog_command = ["python3", str(Path(module.__file__).resolve()), "auto-maintenance", "backlog"]
-
-    assert module.auto_maintenance_resource_demand_key("hot", hot_command) == (
-        "aoa-session-memory:auto-maintenance:hot:auto-maintenance-v2"
-    )
-    assert module.auto_maintenance_resource_demand_key("backlog", backlog_command) == (
-        "aoa-session-memory:auto-maintenance:backlog:auto-maintenance"
-    )
+def test_auto_maintenance_resource_demand_epoch_tracks_each_bounded_profile_envelope() -> None:
+    expected_epochs = {
+        "hot": "v5",
+        "backlog": "v4",
+        "catchup": "v8",
+        "deep": "v4",
+    }
+    for profile, epoch in expected_epochs.items():
+        child_command = [
+            "python3",
+            str(Path(module.__file__).resolve()),
+            "auto-maintenance",
+            profile,
+        ]
+        assert module.auto_maintenance_resource_demand_key(profile, child_command) == (
+            f"aoa-session-memory:auto-maintenance:{profile}:auto-maintenance-{epoch}"
+        )
 
 
 def test_session_memory_resource_floor_uses_larger_learned_demand(monkeypatch: Any) -> None:
@@ -49612,12 +56781,684 @@ def test_projection_catchup_resource_launch_has_separate_demand_identity(tmp_pat
         apply=True,
         write_report=True,
         reason="timer_catchup",
+        execution_id="route-identity-test",
     )
 
     assert command[command.index("--demand-key") + 1] == (
         "aoa-session-memory:projection-catchup:catchup"
     )
     assert command[command.index("--demand-owner") + 1] == "aoa-session-memory"
+    child = command[command.index("--") + 1 :]
+    assert child[child.index("--execution-id") + 1] == "route-identity-test"
+
+
+def test_projection_catchup_parser_preserves_execution_id() -> None:
+    args = module.build_parser().parse_args(
+        [
+            "projection-catchup",
+            "session-1",
+            "--execution-id",
+            "parser-identity-test",
+        ]
+    )
+    assert args.execution_id == "parser-identity-test"
+
+
+def test_auto_maintenance_runtime_envelope_preserves_startup_and_completion_grace() -> None:
+    assert module.auto_maintenance_runtime_envelope("hot") == {
+        "budget_seconds": 600.0,
+        "resource_startup_grace_seconds": 180.0,
+        "hard_timeout_grace_seconds": 120.0,
+        "configured_timeout_ceiling_seconds": 900.0,
+        "hard_timeout_seconds": 900.0,
+        "wrapper_timeout_seconds": 1020.0,
+    }
+    assert module.auto_maintenance_runtime_envelope("backlog") == {
+        "budget_seconds": 900.0,
+        "resource_startup_grace_seconds": 180.0,
+        "hard_timeout_grace_seconds": 180.0,
+        "configured_timeout_ceiling_seconds": 3600.0,
+        "hard_timeout_seconds": 1260,
+        "wrapper_timeout_seconds": 1380.0,
+    }
+    assert module.auto_maintenance_runtime_envelope(
+        "backlog",
+        budget_seconds=30,
+    )["hard_timeout_seconds"] == 390
+    assert module.auto_maintenance_runtime_envelope(
+        "catchup",
+        budget_seconds=900,
+    ) == {
+        "budget_seconds": 900.0,
+        "resource_startup_grace_seconds": 180.0,
+        "hard_timeout_grace_seconds": 60.0,
+        "configured_timeout_ceiling_seconds": 1800.0,
+        "hard_timeout_seconds": 1140,
+        "wrapper_timeout_seconds": 1260.0,
+    }
+    assert module.auto_maintenance_runtime_envelope(
+        "deep",
+        budget_seconds=10000,
+    )["hard_timeout_seconds"] == module.AUTO_MAINTENANCE_PROFILES["deep"]["timeout_sec"]
+
+
+def test_auto_maintenance_resource_launch_reports_host_hard_timeout_and_retries(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    calls: dict[str, Any] = {}
+
+    def fake_run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls["command"] = command
+        calls["timeout"] = kwargs.get("timeout")
+        stdout = json.dumps(
+            {
+                "schema": "abyss_machine_resource_launch_v1",
+                "generated_at": "2026-07-29T03:00:00Z",
+                "ok": False,
+                "blocked_reasons": [],
+                "denied_reasons": [],
+                "request": {
+                    "class": "medium",
+                    "kind": "indexing",
+                    "timeout_sec": 390,
+                },
+                "execution": {
+                    "ok": False,
+                    "returncode": 124,
+                    "stdout_tail": "",
+                    "stderr_tail": "timeout",
+                    "timeout_cleanup": {
+                        "unit": "bounded-maintenance.service",
+                        "kill": {"returncode": 0},
+                    },
+                },
+            }
+        )
+        return subprocess.CompletedProcess(command, 1, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    payload = module.auto_maintenance_resource_launch(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        profile="backlog",
+        target="all",
+        apply=True,
+        write_report=True,
+        reason="timer_backlog",
+        budget_seconds=30,
+        graph_drip_on_block=False,
+    )
+
+    command = calls["command"]
+    assert command[command.index("--timeout") + 1] == "390"
+    assert calls["timeout"] == 510.0
+    assert command[command.index("--budget-seconds") + 1] == "30"
+    assert payload["ok"] is False
+    assert payload["status"] == "resource_hard_timeout"
+    assert payload["budget_seconds"] == 30.0
+    assert payload["timeout_sec"] == 390.0
+    assert payload["resource_startup_grace_seconds"] == 180.0
+    assert payload["hard_timeout_grace_seconds"] == 180.0
+    assert payload["configured_timeout_ceiling_sec"] == 3600.0
+    assert payload["execution"]["returncode"] == 124
+    assert payload["execution"]["timeout_cleanup"]["kill"]["returncode"] == 0
+    assert payload["automatic_retry"]["status"] == "scheduled"
+    assert payload["automatic_retry"]["retryable"] is True
+    assert payload["recommended_exit_code"] == 1
+    queue = module.auto_maintenance_retry_queue_status(aoa_root)
+    assert queue["items"]["backlog:all"]["last_status"] == "resource_hard_timeout"
+    assert "resource_hard_timeout" in payload["diagnostics"]
+    assert "execution_timeout_cleanup: `True`" in Path(
+        payload["report_markdown"]
+    ).read_text(encoding="utf-8")
+
+
+def test_auto_maintenance_resource_launch_recovers_persisted_publication_progress_without_child_stdout(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    execution_id = "resource-hard-timeout-run"
+    session_dir = aoa_root / "sessions" / "session-1"
+    session_dir.mkdir(parents=True)
+    fixture = current_projection_fixture_contract(
+        raw_sha256="a" * 64,
+        raw_line_count=4,
+    )
+    fixture["manifest"].update(
+        {
+            "session_id": "session-1",
+            "session_label": "session-1",
+            "archive_status": "indexed",
+        }
+    )
+    module.write_json(session_dir / "session.manifest.json", fixture["manifest"])
+    publish_identity = fixture["projection_publish"]
+    publish_id = str(publish_identity["publish_id"])
+    outbox_record = {
+        "schema_version": module.PROJECTION_OUTBOX_SCHEMA_VERSION,
+        "artifact_type": "session_projection_component_outbox",
+        "record_id": "",
+        "session_id": "session-1",
+        "old_publish_id": "",
+        "new_publish_id": publish_id,
+        "changes": [
+            {
+                "component_id": "session-index",
+                "component_type": "session_index",
+                "operation": "replace",
+                "old_digest": "",
+                "new_digest": "b" * 64,
+                "source_ref": "session.index.json",
+                "generation_identity": {},
+                "required_consumers": [
+                    "exact_and_lexical_search",
+                    "episode_semantic",
+                    "entity_registry",
+                    "graph",
+                ],
+            }
+        ],
+        "required_consumers": [
+            "exact_and_lexical_search",
+            "episode_semantic",
+            "entity_registry",
+            "graph",
+        ],
+        "created_at": "2026-08-22T00:00:00Z",
+        "status": "pending",
+        "retry_policy": {
+            "mode": "bounded_idempotent_consumer_replay_v1",
+            "max_attempts_per_cycle": 3,
+        },
+        "publication_receipt": {
+            "session_dir": str(session_dir),
+            "publish_id": publish_id,
+        },
+        "truth_status": "changed_component_work_intent_not_downstream_completion",
+    }
+    outbox_record["record_id"] = module._projection_outbox_record_recomputed_id(
+        outbox_record
+    )
+    outbox_write = module.write_projection_outbox_record(
+        session_dir,
+        outbox_record,
+    )
+    progress = module.write_session_projection_progress_receipt(
+        aoa_root=aoa_root,
+        session_dir=session_dir,
+        session_id="session-1",
+        session_label="session-1",
+        work_id="work-1",
+        execution_id=execution_id,
+        publish_identity=publish_identity,
+        outbox_record=outbox_record,
+        outbox_write=outbox_write,
+    )
+    assert Path(progress["path"]).is_file()
+
+    def fake_run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        stdout = json.dumps(
+            {
+                "schema": "abyss_machine_resource_launch_v1",
+                "ok": False,
+                "blocked_reasons": [],
+                "denied_reasons": [],
+                "execution": {
+                    "ok": False,
+                    "returncode": 124,
+                    "stdout_tail": "",
+                    "stderr_tail": "hard timeout after atomic publication",
+                    "timeout_cleanup": {
+                        "unit": "bounded-maintenance.service",
+                        "kill": {"returncode": 0},
+                    },
+                },
+            }
+        )
+        return subprocess.CompletedProcess(command, 1, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    payload = module.auto_maintenance_resource_launch(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        profile="backlog",
+        target="session-1",
+        apply=True,
+        reason="timer_backlog",
+        graph_drip_on_block=False,
+        execution_id=execution_id,
+    )
+
+    assert payload["status"] == "resource_hard_timeout_progress_recovered"
+    assert payload["ok"] is False
+    assert payload["mutates"] is True
+    assert payload["child_result_verified"] is False
+    assert payload["result_verified"] is False
+    assert payload["persisted_progress_recovered"] is True
+    assert payload["persisted_progress_evidence"]["receipt_count"] == 1
+    assert payload["completion_semantics"]["semantic_progress"]["proven"] is True
+    assert payload["completion_semantics"]["global_freshness"]["proven"] is False
+    assert payload["automatic_retry"]["status"] == "scheduled"
+    queue = module.auto_maintenance_retry_queue_status(aoa_root)
+    assert queue["items"]["backlog:session-1"]["last_status"] == (
+        "resource_hard_timeout_progress_recovered"
+    )
+
+
+def test_persistent_freshness_retry_preserves_execution_id_through_timeout_recovery(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    session_id = "composed-timeout-session"
+    session_dir = aoa_root / "sessions" / session_id
+    session_dir.mkdir(parents=True)
+    initial_fixture = current_projection_fixture_contract(
+        raw_sha256="a" * 64,
+        raw_line_count=2,
+    )
+    initial_fixture["manifest"].update(
+        {
+            "session_id": session_id,
+            "session_label": session_id,
+            "archive_status": "indexed",
+        }
+    )
+    initial_fixture["manifest"]["raw"].update(
+        {
+            "bytes": 10,
+            "capture_ledger": {
+                "epoch_id": "epoch-1",
+                "processed_watermark_bytes": 10,
+            },
+        }
+    )
+    module.write_json(session_dir / "session.manifest.json", initial_fixture["manifest"])
+    options = {
+        "persistent_obligation": True,
+        "obligation_kind": module.SESSION_PROJECTION_FRESHNESS_OBLIGATION_KIND,
+        "session_id": session_id,
+        "session_dir": str(session_dir),
+        "required_capture_epoch_id": "epoch-1",
+        "required_capture_bytes": 20,
+        "required_capture_sha256": "b" * 64,
+        "required_stable_projection": False,
+        "required_search_consumer": False,
+    }
+
+    def schedule(queue_payload: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        return (
+            module.auto_maintenance_retry_upsert_item(
+                queue_payload,
+                profile="catchup",
+                target=session_id,
+                reason="composed_timeout_regression",
+                launch_status="freshness_obligation_enqueued",
+                options=options,
+                now_epoch=100.0,
+                initial_delay_seconds=0,
+            ),
+            True,
+        )
+
+    module.mutate_auto_maintenance_retry_queue(
+        aoa_root,
+        schedule,
+        now_epoch=100.0,
+    )
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        child = command[command.index("--") + 1 :]
+        assert child[0:3] == [
+            "python3",
+            str(Path(module.__file__).resolve()),
+            "projection-catchup",
+        ]
+        assert child.count("--execution-id") == 1
+        execution_id = child[child.index("--execution-id") + 1]
+        completed_fixture = current_projection_fixture_contract(
+            raw_sha256="b" * 64,
+            raw_line_count=4,
+        )
+        completed_fixture["manifest"].update(
+            {
+                "session_id": session_id,
+                "session_label": session_id,
+                "archive_status": "indexed",
+            }
+        )
+        completed_fixture["manifest"]["raw"].update(
+            {
+                "bytes": 20,
+                "indexing_status": "indexed",
+                "capture_ledger": {
+                    "epoch_id": "epoch-1",
+                    "processed_watermark_bytes": 20,
+                },
+            }
+        )
+        module.write_json(
+            session_dir / "session.manifest.json",
+            completed_fixture["manifest"],
+        )
+        publish_identity = completed_fixture["projection_publish"]
+        publish_id = str(publish_identity["publish_id"])
+        outbox_record = module.session_projection_outbox_record(
+            session_dir=session_dir,
+            old_snapshot={},
+            new_snapshot={
+                "session:index": {
+                    "component_type": "session_index",
+                    "digest": "b" * 64,
+                    "source_ref": "session.index.json",
+                    "generation_identity": {},
+                }
+            },
+            old_publish_id=str(
+                initial_fixture["projection_publish"]["publish_id"]
+            ),
+            new_publish_id=publish_id,
+            session_id=session_id,
+        )
+        outbox_write = module.write_projection_outbox_record(
+            session_dir,
+            outbox_record,
+        )
+        module.write_session_projection_progress_receipt(
+            aoa_root=aoa_root,
+            session_dir=session_dir,
+            session_id=session_id,
+            session_label=session_id,
+            work_id="composed-timeout-work",
+            execution_id=execution_id,
+            publish_identity=publish_identity,
+            outbox_record=outbox_record,
+            outbox_write=outbox_write,
+        )
+        return subprocess.CompletedProcess(
+            command,
+            1,
+            stdout=json.dumps(
+                {
+                    "schema": "abyss_machine_resource_launch_v1",
+                    "ok": False,
+                    "blocked_reasons": [],
+                    "denied_reasons": [],
+                    "execution": {
+                        "ok": False,
+                        "returncode": 124,
+                        "stdout_tail": "",
+                        "stderr_tail": "hard timeout after publication",
+                        "timeout_cleanup": {
+                            "unit": "bounded-maintenance.service",
+                            "kill": {"returncode": 0},
+                        },
+                    },
+                }
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    dispatched = module.auto_maintenance_retry_dispatch(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        apply=True,
+        limit=1,
+        now_epoch=101.0,
+    )
+
+    assert len(calls) == 1
+    child = calls[0][calls[0].index("--") + 1 :]
+    execution_id = child[child.index("--execution-id") + 1]
+    result = dispatched["results"][0]
+    assert result["execution_id"] == execution_id
+    assert result["reported_launch_status"] == "resource_hard_timeout_progress_recovered"
+    assert result["launch_status"] == "freshness_obligation_satisfied"
+    assert result["disposition"] == "completed"
+    assert result["freshness_obligation_after"]["status"] == "satisfied"
+    assert result["freshness_obligation_after"]["proof_mode"] == (
+        "append_only_capture_epoch_watermark"
+    )
+    recovered = module.recover_session_projection_progress_evidence(
+        aoa_root=aoa_root,
+        execution_id=execution_id,
+        target=session_id,
+    )
+    assert recovered["verified"] is True
+    assert recovered["receipt_observed_count"] == 1
+    assert recovered["authoritative_publication_verified"] is True
+    assert recovered["receipt_count"] == 1
+    assert recovered["receipts"][0]["path"].startswith(
+        str(aoa_root / module.SESSION_PROJECTION_PROGRESS_RECEIPTS_ROOT / module.safe_slug(execution_id))
+    )
+    assert not (
+        aoa_root
+        / module.SESSION_PROJECTION_PROGRESS_RECEIPTS_ROOT
+        / "unbound"
+    ).exists()
+    assert module.auto_maintenance_retry_queue_status(aoa_root)["queued_count"] == 0
+
+
+def test_progress_receipt_recovery_rejects_missing_authoritative_publication(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    session_dir = aoa_root / "sessions" / "receipt-only"
+    session_dir.mkdir(parents=True)
+    execution_id = "receipt-only-run"
+    publish_id = "d" * 64
+    record_id = "e" * 64
+    module.write_session_projection_progress_receipt(
+        aoa_root=aoa_root,
+        session_dir=session_dir,
+        session_id="receipt-only",
+        session_label="receipt-only",
+        work_id="work-only",
+        execution_id=execution_id,
+        publish_identity={"publish_id": publish_id},
+        outbox_record={
+            "record_id": record_id,
+            "changes": [],
+            "required_consumers": [],
+        },
+        outbox_write={
+            "status": "written",
+            "path": str(
+                module.projection_outbox_record_path(
+                    session_dir,
+                    record_id,
+                )
+            ),
+        },
+    )
+
+    recovered = module.recover_session_projection_progress_evidence(
+        aoa_root=aoa_root,
+        execution_id=execution_id,
+        target="receipt-only",
+    )
+
+    assert recovered["receipt_observed_count"] == 1
+    assert recovered["authoritative_publication_verified"] is False
+    assert recovered["authority_rejected_count"] == 1
+    assert recovered["receipt_count"] == 0
+    assert recovered["mutation_units"] == 0
+    assert recovered["verified"] is False
+    assert recovered["truth_status"] == (
+        "receipt_observed_without_authoritative_publication_verification"
+    )
+
+
+def test_live_tail_fast_status_uses_persisted_search_state_before_graph_or_global_status(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    session_label = "2026-08-11__001__persisted-live-tail"
+
+    monkeypatch.setattr(
+        module,
+        "search_provider_status_fast",
+        lambda **_kwargs: {
+            "ok": True,
+            "status_mode": "fast_presence_probe",
+            "providers": {
+                "portable_sqlite": {
+                    "ok": True,
+                    "status": "ready_with_deferred_live_updates",
+                    "has_documents": True,
+                    "has_route_index": True,
+                    "has_route_terms": True,
+                    "count_mode": "not_counted_fast",
+                    "freshness": {
+                        "status": "current_with_deferred_live_updates",
+                        "source_scan": False,
+                        "deferred_live_session_count": 1,
+                        "deferred_live_sessions": [
+                            {
+                                "session_id": "live-fast-1",
+                                "session_label": session_label,
+                                "latest_source_mtime": 1.0,
+                            }
+                        ],
+                        "reasons": [
+                            "recent_live_projection_updates_deferred"
+                        ],
+                    },
+                    "diagnostics": [],
+                }
+            },
+            "diagnostics": [],
+        },
+    )
+
+    def fail_global_or_graph(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("pre-admission live-tail status must stay narrow")
+
+    monkeypatch.setattr(module, "session_memory_maintenance_status", fail_global_or_graph)
+    monkeypatch.setattr(module, "graph_store_hot_state", fail_global_or_graph)
+
+    payload = module.session_memory_live_tail_fast_status(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    assert payload["ok"] is True
+    assert payload["source_scan"] is False
+    assert payload["graph_status_loaded"] is False
+    assert payload["status_mode"] == (
+        "persisted_scheduling_state_no_global_source_scan"
+    )
+    assert payload["recommendation"] == "run_live_catchup"
+    assert payload["live_tail"]["catchup_ready_to_run"] is True
+    assert payload["live_tail"]["catchup_target"] == session_label
+    assert payload["live_tail"]["catchup_command_kind"] == (
+        "targeted_index_maintenance_without_graph"
+    )
+
+
+def test_auto_maintenance_resource_launch_honors_explicit_reindex_child(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    child_command = [
+        "python3",
+        str(Path(module.__file__).resolve()),
+        "reindex-sessions",
+        "session-1",
+        "--workspace-root",
+        str(workspace),
+        "--aoa-root",
+        str(aoa_root),
+        "--budget-seconds",
+        "600",
+    ]
+    calls: list[list[str]] = []
+
+    def fake_run(
+        command: list[str],
+        **_kwargs: Any,
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        child = {
+            "schema_version": 1,
+            "artifact_type": "session_reindex",
+            "ok": True,
+            "status": "applied",
+            "processed_count": 1,
+            "remaining_count": 0,
+            "counts": {"reindexed": 1},
+        }
+        stdout = json.dumps(
+            {
+                "schema": "abyss_machine_resource_launch_v1",
+                "ok": True,
+                "blocked_reasons": [],
+                "denied_reasons": [],
+                "execution": {
+                    "ok": True,
+                    "returncode": 0,
+                    "stdout_tail": json.dumps(child),
+                    "stderr_tail": "",
+                },
+            }
+        )
+        return subprocess.CompletedProcess(
+            command, 0, stdout=stdout, stderr=""
+        )
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    payload = module.auto_maintenance_resource_launch(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        profile="deep",
+        target="session-1",
+        apply=True,
+        reason="automatic_retry:deep:attempt_1",
+        index_drip_on_block=False,
+        graph_drip_on_block=False,
+        repair_indexes=False,
+        repair_graph=False,
+        schedule_automatic_retry=False,
+        child_command_override=child_command,
+    )
+
+    command = calls[0]
+    separator = command.index("--")
+    actual_child_command = command[separator + 1 :]
+    assert actual_child_command[:-2] == child_command
+    assert actual_child_command[-2:] == [
+        "--execution-id",
+        payload["execution_id"],
+    ]
+    assert payload["status"] == "completed"
+    assert payload["result_verified"] is True
+    assert payload["explicit_child_command"] is True
+    assert payload["live_tail_fast_path"]["status"] == (
+        "skipped_explicit_child_command"
+    )
+    assert payload["resource_demand_key"].endswith(
+        ":deep:reindex-sessions-v4"
+    )
 
 
 def test_auto_maintenance_resource_launch_uses_live_tail_fast_path_for_catchup(tmp_path: Path, monkeypatch: Any) -> None:
@@ -49629,8 +57470,10 @@ def test_auto_maintenance_resource_launch_uses_live_tail_fast_path_for_catchup(t
 
     def fake_maintenance_status(**_kwargs: Any) -> dict[str, Any]:
         return {
-            "ok": True,
-            "recommendation": "run_live_catchup",
+            "ok": False,
+            "recommendation": "review_maintenance_cleanup",
+            "status_mode": "persisted_scheduling_state_no_global_source_scan",
+            "source_scan": False,
             "live_tail": {
                 "status": "ready_for_catchup",
                 "catchup_ready_to_run": True,
@@ -49672,7 +57515,15 @@ def test_auto_maintenance_resource_launch_uses_live_tail_fast_path_for_catchup(t
         )
         return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
 
-    monkeypatch.setattr(module, "session_memory_maintenance_status", fake_maintenance_status)
+    monkeypatch.setattr(module, "session_memory_live_tail_fast_status", fake_maintenance_status)
+    monkeypatch.setattr(
+        module,
+        "resolve_session_record",
+        lambda _aoa_root, _target: {
+            "session_id": "live-1",
+            "raw": {"bytes": 32 * 1024 * 1024},
+        },
+    )
     monkeypatch.setattr(module.subprocess, "run", fake_run)
 
     payload = module.auto_maintenance_resource_launch(
@@ -49694,10 +57545,18 @@ def test_auto_maintenance_resource_launch_uses_live_tail_fast_path_for_catchup(t
     assert payload["live_tail_fast_path"]["used"] is True
     assert payload["live_tail_fast_path"]["command_kind"] == "targeted_index_maintenance_without_graph"
     assert payload["live_tail_fast_path"]["target"] == session_label
+    assert payload["live_tail_fast_path"]["top_level_recommendation"] == "review_maintenance_cleanup"
+    assert payload["live_tail_fast_path"]["independent_of_top_level_recommendation"] is True
+    assert payload["live_tail_fast_path"]["target_raw_bytes"] == 32 * 1024 * 1024
+    assert payload["live_tail_fast_path"]["route_max_raw_bytes"] == 512 * 1024 * 1024
+    assert payload["live_tail_fast_path"]["pre_admission_status_mode"] == (
+        "persisted_scheduling_state_no_global_source_scan"
+    )
+    assert payload["live_tail_fast_path"]["pre_admission_source_scan"] is False
     assert calls["command"][:3] == ["abyss-machine", "resource", "launch"]
     assert "--force" in calls["command"]
     assert calls["command"][calls["command"].index("--demand-key") + 1] == (
-        "aoa-session-memory:auto-maintenance:catchup:index-maintenance"
+        "aoa-session-memory:auto-maintenance:catchup:index-maintenance-v8"
     )
     assert calls["command"][calls["command"].index("--demand-owner") + 1] == "aoa-session-memory"
     assert child[:4] == ["python3", str(Path(module.__file__).resolve()), "index-maintenance", session_label]
@@ -49777,7 +57636,7 @@ def test_auto_maintenance_resource_launch_uses_graph_live_tail_fast_path_for_cat
         )
         return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
 
-    monkeypatch.setattr(module, "session_memory_maintenance_status", fake_maintenance_status)
+    monkeypatch.setattr(module, "session_memory_live_tail_fast_status", fake_maintenance_status)
     monkeypatch.setattr(module.subprocess, "run", fake_run)
 
     payload = module.auto_maintenance_resource_launch(
@@ -49833,7 +57692,7 @@ def test_auto_maintenance_resource_live_tail_fast_path_respects_explicit_graph_s
             },
         }
 
-    monkeypatch.setattr(module, "session_memory_maintenance_status", fake_maintenance_status)
+    monkeypatch.setattr(module, "session_memory_live_tail_fast_status", fake_maintenance_status)
 
     payload = module.auto_maintenance_live_tail_resource_route(
         workspace_root=workspace,
@@ -49849,11 +57708,88 @@ def test_auto_maintenance_resource_live_tail_fast_path_respects_explicit_graph_s
         repair_graph=False,
         reason="timer_catchup",
         budget_seconds=None,
+        route_max_raw_bytes=512 * 1024 * 1024,
     )
 
     assert payload["used"] is False
     assert payload["reason"] == "graph_repair_disabled_for_graph_live_tail"
     assert payload["command_kind"] == "graph_queue_maintenance"
+
+
+def test_auto_maintenance_resource_live_tail_fast_path_defers_oversized_session(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    session_label = "2026-07-23__060__oversized-live-session"
+
+    monkeypatch.setattr(
+        module,
+        "session_memory_live_tail_fast_status",
+        lambda **_kwargs: {
+            "ok": False,
+            "recommendation": "run_live_catchup",
+            "live_tail": {
+                "status": "ready_for_catchup",
+                "catchup_ready_to_run": True,
+                "catchup_command_kind": (
+                    "targeted_index_maintenance_without_graph"
+                ),
+                "catchup_scope": "single_search_deferred_session",
+                "catchup_target": session_label,
+                "catchup_target_session_id": "oversized-1",
+                "catchup_target_session_label": session_label,
+                "catchup_command": [
+                    "python3",
+                    "scripts/aoa_session_memory.py",
+                    "index-maintenance",
+                    session_label,
+                    "--apply",
+                ],
+            },
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "resolve_session_record",
+        lambda _aoa_root, _target: {
+            "session_id": "oversized-1",
+            "raw": {"bytes": 708 * 1024 * 1024},
+        },
+    )
+
+    payload = module.auto_maintenance_live_tail_resource_route(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        profile="catchup",
+        target="all",
+        apply=True,
+        since=None,
+        since_days=None,
+        until=None,
+        limit=None,
+        repair_indexes=None,
+        repair_graph=None,
+        reason="timer_catchup",
+        budget_seconds=900,
+        route_max_raw_bytes=512 * 1024 * 1024,
+    )
+
+    assert payload["used"] is False
+    assert payload["reason"] == (
+        "live_tail_target_exceeds_route_raw_limit"
+    )
+    assert payload["target"] == session_label
+    assert payload["target_raw_bytes"] == 708 * 1024 * 1024
+    assert payload["route_max_raw_bytes"] == 512 * 1024 * 1024
+    assert payload["fallback_route"] == (
+        "bounded_profile_auto_maintenance"
+    )
+    assert payload["oversized_target_next_route"] == (
+        "explicit_heavy_or_resumable_session_projection_repair"
+    )
 
 
 def test_auto_maintenance_resource_launch_records_blocked_resource_gate(tmp_path: Path, monkeypatch: Any) -> None:
@@ -50735,6 +58671,7 @@ def test_catchup_auto_maintenance_resource_can_disable_profile_graph_drip(
         workspace_root=workspace,
         aoa_root=aoa_root,
         profile="catchup",
+        target="bounded-target",
         apply=True,
         write_report=True,
         reason="timer_catchup",
@@ -50758,7 +58695,7 @@ def test_catchup_auto_maintenance_resource_can_disable_profile_graph_drip(
     assert Path(payload["report_markdown"]).exists()
 
 
-def test_catchup_auto_maintenance_resource_uses_explicit_index_drip_fallback(
+def test_catchup_auto_maintenance_resource_prefers_explicit_bounded_index_drip(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
     workspace = tmp_path / "AbyssOS"
@@ -50768,34 +58705,21 @@ def test_catchup_auto_maintenance_resource_uses_explicit_index_drip_fallback(
 
     def fake_run(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
         calls.append(command)
-        if len(calls) == 1:
-            stdout = json.dumps(
-                {
-                    "schema": "abyss_machine_resource_plan_v1",
-                    "generated_at": "2026-06-26T00:00:00-06:00",
-                    "ok": False,
-                    "blocked_reasons": ["indexing_unattended_swap_used_pressure"],
-                    "denied_reasons": [],
-                    "request": {"class": "medium", "kind": "indexing"},
-                    "execution": {"ok": None, "returncode": None},
-                }
-            )
-        else:
-            stdout = json.dumps(
-                {
-                    "schema": "abyss_machine_resource_launch_v1",
-                    "generated_at": "2026-06-26T00:00:10-06:00",
+        stdout = json.dumps(
+            {
+                "schema": "abyss_machine_resource_launch_v1",
+                "generated_at": "2026-06-26T00:00:10-06:00",
+                "ok": True,
+                "blocked_reasons": [],
+                "denied_reasons": [],
+                "request": {"class": "probe", "kind": "indexing"},
+                "execution": {
                     "ok": True,
-                    "blocked_reasons": [],
-                    "denied_reasons": [],
-                    "request": {"class": "probe", "kind": "indexing"},
-                    "execution": {
-                        "ok": True,
-                        "returncode": 0,
-                        "stdout_tail": "{\"ok\": true, \"search_dirty_session_count\": 119}",
-                    },
-                }
-            )
+                    "returncode": 0,
+                    "stdout_tail": "{\"ok\": true, \"search_dirty_session_count\": 119}",
+                },
+            }
+        )
         return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
 
     monkeypatch.setattr(module.subprocess, "run", fake_run)
@@ -50811,33 +58735,626 @@ def test_catchup_auto_maintenance_resource_uses_explicit_index_drip_fallback(
     )
 
     assert payload["ok"] is False
-    assert payload["status"] == "resource_blocked_index_drip_completed"
+    assert payload["status"] == "bounded_index_drip_completed"
     assert payload["mutates"] is True
     assert payload["recommended_exit_code"] == 0
+    assert payload["bounded_index_drip_preferred"] is True
+    assert payload["bounded_index_drip_preference_reason"] == (
+        "catchup_live_tail_not_ready"
+    )
     assert payload["index_drip_on_block"] is True
     assert payload["index_drip_on_block_source"] == "explicit"
     assert payload["fallback_index_drip"]["ok"] is True
     assert payload["fallback_index_drip"]["status"] == "completed"
+    assert payload["fallback_index_drip"]["route_mode"] == (
+        "preferred_freshness_lane"
+    )
     assert payload["fallback_index_drip"]["repair_limit"] == 12
     assert payload["search_shard_repair_limit"] == 24
     assert payload["fallback_index_drip"]["search_shard_repair_limit"] == 24
-    assert calls[0][3:5] == ["--class", "medium"]
-    assert calls[1][3:5] == ["--class", "probe"]
-    assert calls[1][calls[1].index("--demand-key") + 1] == (
-        "aoa-session-memory:auto-maintenance:catchup:index-drip"
+    assert payload["fallback_index_drip"]["search_max_cost_class"] == "light"
+    assert payload["fallback_index_drip"]["route_max_raw_mb"] == 32
+    assert len(calls) == 1
+    assert calls[0][3:5] == ["--class", "probe"]
+    assert calls[0][calls[0].index("--demand-key") + 1] == (
+        "aoa-session-memory:auto-maintenance:catchup:index-drip-v8"
     )
-    assert calls[1][calls[1].index("--demand-owner") + 1] == "aoa-session-memory"
-    assert "index-maintenance" in calls[1]
-    assert "graph-maintenance" not in calls[1]
-    assert "--observe-query-demand" in calls[1]
-    assert "--skip-token-accounting" in calls[1]
-    assert "--skip-graph-repair" in calls[1]
-    assert "--repair-limit" in calls[1]
-    assert "12" in calls[1]
-    assert calls[1][calls[1].index("--search-shard-repair-limit") + 1] == "24"
+    assert calls[0][calls[0].index("--demand-owner") + 1] == "aoa-session-memory"
+    assert "index-maintenance" in calls[0]
+    assert "graph-maintenance" not in calls[0]
+    assert "--observe-query-demand" in calls[0]
+    assert calls[0][calls[0].index("--discovery-limit") + 1] == "24"
+    assert "--skip-token-accounting" in calls[0]
+    assert "--skip-graph-repair" in calls[0]
+    assert calls[0][calls[0].index("--search-max-cost-class") + 1] == "light"
+    assert calls[0][calls[0].index("--route-max-raw-mb") + 1] == "32"
+    assert "--repair-limit" in calls[0]
+    assert "12" in calls[0]
+    assert calls[0][calls[0].index("--search-shard-repair-limit") + 1] == "24"
+    assert (
+        "catchup_live_tail_not_ready_bounded_index_drip_preferred"
+        in payload["diagnostics"]
+    )
     assert "index_drip_fallback_completed" in payload["diagnostics"]
     assert Path(payload["report_json"]).exists()
     assert Path(payload["report_markdown"]).exists()
+
+
+def test_index_maintenance_cli_forwards_bounded_search_cost_controls(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir()
+    calls: dict[str, Any] = {}
+
+    def fake_maintain_indexes(**kwargs: Any) -> dict[str, Any]:
+        calls.update(kwargs)
+        return {"ok": True}
+
+    monkeypatch.setattr(module, "maintain_indexes", fake_maintain_indexes)
+    args = module.build_parser().parse_args(
+        [
+            "index-maintenance",
+            "all",
+            "--aoa-root",
+            str(aoa_root),
+            "--search-max-cost-class",
+            "light",
+            "--route-max-raw-mb",
+            "32",
+        ]
+    )
+
+    assert args.func(args) == 0
+    assert calls["search_max_cost_class"] == "light"
+    assert calls["route_max_raw_bytes"] == 32 * 1024 * 1024
+
+
+def test_bounded_index_maintenance_discovery_is_dirty_first_and_fair(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    records = [
+        {
+            "session_id": f"session-{index:03d}",
+            "session_label": f"2026-07-01__{index:03d}__session",
+        }
+        for index in range(100)
+    ]
+    dirty_ids = [f"session-{index:03d}" for index in range(80, 100)]
+    state_path = module.index_maintenance_discovery_state_path(aoa_root)
+
+    planned, planned_scope = (
+        module.bounded_index_maintenance_discovery_records(
+            aoa_root=aoa_root,
+            records=records,
+            discovery_limit=8,
+            priority_session_ids=["session-099"],
+            dirty_session_ids=dirty_ids,
+            cursor_key="catchup",
+            advance_cursor=False,
+        )
+    )
+
+    assert len(planned) == 8
+    assert planned[0]["session_id"] == "session-099"
+    assert {
+        record["session_id"] for record in planned
+    }.issuperset(
+        {
+            "session-080",
+            "session-081",
+            "session-082",
+            "session-083",
+            "session-084",
+        }
+    )
+    assert planned_scope["cursor_reserve"] == 1
+    assert planned_scope["global_scope_complete"] is False
+    assert not state_path.exists()
+
+    first, first_scope = (
+        module.bounded_index_maintenance_discovery_records(
+            aoa_root=aoa_root,
+            records=records,
+            discovery_limit=8,
+            priority_session_ids=["session-099"],
+            dirty_session_ids=dirty_ids,
+            cursor_key="catchup",
+            advance_cursor=True,
+        )
+    )
+    assert [record["session_id"] for record in first] == [
+        record["session_id"] for record in planned
+    ]
+    assert first_scope["cursor_advanced"] is True
+    assert first_scope["dirty_cursor_after"] == "session-080"
+    assert state_path.exists()
+
+    second, second_scope = (
+        module.bounded_index_maintenance_discovery_records(
+            aoa_root=aoa_root,
+            records=records,
+            discovery_limit=8,
+            priority_session_ids=["session-099"],
+            dirty_session_ids=dirty_ids,
+            cursor_key="catchup",
+            advance_cursor=True,
+        )
+    )
+    second_ids = [record["session_id"] for record in second]
+    assert len(second_ids) == 8
+    assert second_ids[0] == "session-099"
+    assert "session-085" in second_ids
+    assert "session-080" not in second_ids
+    assert second_scope["cursor_before"] == first_scope["cursor_after"]
+    assert second_scope["dirty_cursor_before"] == "session-080"
+    assert second_scope["dirty_cursor_after"] == "session-081"
+
+
+def test_bounded_search_cost_prefilter_rejects_heavy_registry_records_before_fingerprints() -> None:
+    light_record = {
+        "session_id": "light-session",
+        "session_label": "2026-07-02__001__light-session",
+        "event_count": 50,
+        "segment_count": 2,
+        "raw": {"bytes": 1024},
+    }
+    warm_record = {
+        "session_id": "warm-session",
+        "session_label": "2026-07-02__002__warm-session",
+        "event_count": 500,
+        "segment_count": 8,
+        "raw": {"bytes": module.SEARCH_REPAIR_COST_WARM_RAW_BYTES},
+    }
+    admitted, scope = module.bounded_search_cost_prefilter(
+        [warm_record, light_record],
+        max_cost_class="light",
+    )
+
+    assert [record["session_id"] for record in admitted] == ["light-session"]
+    assert scope["mode"] == "registry_metadata_pre_admission"
+    assert scope["admitted_count"] == 1
+    assert scope["deferred_count"] == 1
+    assert scope["deferred_sessions"][0]["session_id"] == "warm-session"
+    assert scope["deferred_sessions"][0]["cost_class"] == "warm"
+
+
+def test_bounded_search_cost_prefilter_uses_persisted_document_count(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    db_path = module.search_db_path(aoa_root)
+    db_path.parent.mkdir(parents=True)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE session_index_state "
+        "(session_id TEXT PRIMARY KEY, document_count INTEGER)"
+    )
+    conn.execute(
+        "INSERT INTO session_index_state(session_id, document_count) VALUES (?, ?)",
+        ("persisted-heavy-session", module.SEARCH_REPAIR_COST_HEAVY_DOCUMENT_COUNT),
+    )
+    conn.commit()
+    conn.close()
+    record = {
+        "session_id": "persisted-heavy-session",
+        "session_label": "2026-07-02__003__persisted-heavy-session",
+        "raw": {"bytes": 1024},
+    }
+
+    admitted, scope = module.bounded_search_cost_prefilter(
+        [record],
+        max_cost_class="warm",
+        aoa_root=aoa_root,
+    )
+
+    assert admitted == []
+    assert scope["mode"] == "registry_and_persisted_search_state_pre_admission"
+    assert scope["persisted_document_count_hint_count"] == 1
+    assert scope["deferred_sessions"][0]["cost_class"] == "heavy"
+    assert scope["deferred_sessions"][0]["persisted_document_count"] == (
+        module.SEARCH_REPAIR_COST_HEAVY_DOCUMENT_COUNT
+    )
+
+
+def test_bounded_search_cost_prefilter_excludes_persisted_deferred_live(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    db_path = module.search_db_path(aoa_root)
+    db_path.parent.mkdir(parents=True)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE search_freshness_state "
+        "(session_id TEXT PRIMARY KEY, document_count INTEGER, status TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO search_freshness_state(session_id, document_count, status) "
+        "VALUES (?, ?, ?)",
+        ("live-session", 8, "deferred_live"),
+    )
+    conn.commit()
+    conn.close()
+    record = {
+        "session_id": "live-session",
+        "session_label": "2026-07-02__004__live-session",
+        "raw": {"bytes": 1024},
+    }
+
+    admitted, scope = module.bounded_search_cost_prefilter(
+        [record],
+        max_cost_class="warm",
+        aoa_root=aoa_root,
+    )
+
+    assert admitted == []
+    assert scope["deferred_live_count"] == 1
+    assert scope["deferred_sessions"][0]["reason"] == (
+        "persisted_deferred_live_excluded_from_bounded_discovery"
+    )
+
+
+def test_light_freshness_selection_defers_priority_warm_session() -> None:
+    light_record = {
+        "session_id": "light-session",
+        "session_label": "2026-07-02__001__light-session",
+    }
+    warm_record = {
+        "session_id": "warm-session",
+        "session_label": "2026-07-02__002__warm-session",
+    }
+    selected, selection = module.search_repair_selection(
+        [warm_record, light_record],
+        dirty_sessions=[
+            {
+                **warm_record,
+                "estimated_raw_bytes": module.SEARCH_REPAIR_COST_WARM_RAW_BYTES,
+                "reasons": ["source_fingerprint_changed"],
+            },
+            {
+                **light_record,
+                "estimated_raw_bytes": 1024,
+                "reasons": ["source_fingerprint_changed"],
+            },
+        ],
+        limit=1,
+        max_cost_class="light",
+        priority_session_ids=["warm-session"],
+    )
+
+    assert [record["session_id"] for record in selected] == ["light-session"]
+    assert selection["deferred_priority_cost_session_ids"] == ["warm-session"]
+    assert selection["selected_cost_class_counts"] == {"light": 1}
+
+
+def test_bounded_search_update_defers_global_derivatives_and_falls_back_to_monolith(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-07-02T00-00-00-bounded-search.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-07-02T00:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "bounded-search-session",
+                    "cwd": str(workspace),
+                },
+            },
+            {
+                "timestamp": "2026-07-02T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "bounded availability phrase",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "bounded-search-session",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    baseline = module.search_index_sessions(
+        aoa_root=aoa_root,
+        target="all",
+    )
+    assert baseline["ok"] is True
+    assert module.read_search_catalog(aoa_root)["status"] == "current"
+    record = module.resolve_session_record(aoa_root, "bounded-search-session")
+
+    def forbidden_global_derivative(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("bounded search update entered a global derivative")
+
+    monkeypatch.setattr(module, "build_search_catalog", forbidden_global_derivative)
+    monkeypatch.setattr(
+        module,
+        "entity_registry_maintenance_status",
+        forbidden_global_derivative,
+    )
+    incremental = module.search_index_sessions(
+        aoa_root=aoa_root,
+        target="all",
+        rebuild=False,
+        selected_records=[record],
+        defer_global_derivatives=True,
+    )
+
+    assert incremental["ok"] is True
+    assert incremental["processed_count"] == 1
+    assert incremental["global_derivatives"]["status"] == "deferred_bounded_scope"
+    catalog = module.read_search_catalog(aoa_root)
+    assert catalog["status"] == "stale"
+    assert catalog["bounded_global_refresh_deferred"]["session_ids"] == [
+        "bounded-search-session"
+    ]
+    routed = module.search_sessions_shard_fanout(
+        aoa_root=aoa_root,
+        query="bounded availability phrase",
+        limit=2,
+    )
+    assert routed["ok"] is True
+    assert routed["result_count"] >= 1
+    assert routed["search_projection"]["mode"] == module.SEARCH_ACTIVE_PROJECTION_MONOLITH
+    assert routed["search_projection"]["fallback_reason"] == (
+        "search_catalog_not_current_fallback_monolith"
+    )
+
+
+def test_search_index_cli_can_defer_global_derivatives(
+    tmp_path: Path, monkeypatch: Any, capsys: Any
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    seen: dict[str, Any] = {}
+
+    def fake_search_index_sessions(**kwargs: Any) -> dict[str, Any]:
+        seen.update(kwargs)
+        return {"ok": True}
+
+    monkeypatch.setattr(module, "search_index_sessions", fake_search_index_sessions)
+    monkeypatch.setattr(
+        module,
+        "run_with_maintenance_lock",
+        lambda _root, operation, **_kwargs: operation(),
+    )
+    monkeypatch.setenv(
+        "AOA_SESSION_MEMORY_SEARCH_DEFER_GLOBAL_DERIVATIVES",
+        "1",
+    )
+    args = module.build_parser().parse_args(
+        [
+            "search-index",
+            "target-session",
+            "--workspace-root",
+            str(workspace),
+            "--aoa-root",
+            str(aoa_root),
+            "--no-rebuild",
+        ]
+    )
+
+    assert module.command_search_index(args) == 0
+    assert seen["target"] == "target-session"
+    assert seen["rebuild"] is False
+    assert seen["defer_global_derivatives"] is True
+    assert json.loads(capsys.readouterr().out)["ok"] is True
+
+
+def test_bounded_maintenance_planning_never_reads_global_derivative_state(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    session_dir = aoa_root / "sessions" / "2026-07-02__001__bounded-plan"
+    session_dir.mkdir(parents=True)
+    record = {
+        "session_id": "bounded-plan-session",
+        "session_label": session_dir.name,
+        "session_dir": str(session_dir),
+        "display": {"path": str(session_dir)},
+        "raw": {"bytes": 1024},
+    }
+    heavy_record = {
+        "session_id": "bounded-heavy-session",
+        "session_label": "2026-07-02__002__bounded-heavy",
+        "session_dir": str(aoa_root / "sessions" / "2026-07-02__002__bounded-heavy"),
+        "raw": {"bytes": module.SEARCH_REPAIR_COST_WARM_RAW_BYTES},
+    }
+    fingerprinted_session_ids: list[str] = []
+
+    def forbidden_global_derivative(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("bounded planning entered a global derivative")
+
+    monkeypatch.setattr(
+        module,
+        "entity_registry_maintenance_status",
+        forbidden_global_derivative,
+    )
+    monkeypatch.setattr(module, "build_search_catalog", forbidden_global_derivative)
+    monkeypatch.setattr(
+        module,
+        "latest_index_source_mtime",
+        lambda _aoa_root, _records: (0.0, []),
+    )
+    monkeypatch.setattr(module, "route_index_drift_records", lambda _records: [])
+    monkeypatch.setattr(
+        module,
+        "sqlite_search_index_hot_state",
+        lambda _aoa_root: {"needs_refresh": False, "reasons": []},
+    )
+    monkeypatch.setattr(
+        module,
+        "atlas_index_hot_state",
+        lambda _aoa_root: {"status": "missing", "needs_refresh": False},
+    )
+    def fake_search_fingerprints(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        fingerprinted_session_ids.extend(
+            str(item.get("session_id") or "") for item in records
+        )
+        return []
+
+    monkeypatch.setattr(
+        module,
+        "search_projection_fingerprints_for_records",
+        fake_search_fingerprints,
+    )
+    monkeypatch.setattr(
+        module,
+        "sqlite_search_index_state",
+        lambda *_args, **_kwargs: {
+            "status": "missing",
+            "needs_refresh": False,
+            "dirty_session_ids": [],
+            "dirty_sessions": [],
+            "reasons": [],
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "graph_store_state",
+        lambda **_kwargs: {
+            "status": "deferred_not_checked",
+            "needs_maintenance": None,
+            "needs_full_rebuild": False,
+            "reasons": [],
+            "diagnostics": [],
+        },
+    )
+
+    planned = module.maintain_indexes(
+        aoa_root=aoa_root,
+        target="all",
+        selected_records=[heavy_record, record],
+        selection_scope={"global_scope_complete": False, "profile": "catchup"},
+        apply=False,
+        repair_token_accounting=False,
+        repair_graph=False,
+        search_max_cost_class="light",
+    )
+
+    assert fingerprinted_session_ids == ["bounded-plan-session"]
+    assert planned["selection_scope"]["bounded_search_cost_pre_admission"]["deferred_count"] == 1
+    assert planned["entity_registry"]["status"] == "deferred_bounded_scope"
+    assert planned["final_entity_registry"]["status"] == "deferred_bounded_scope"
+    assert planned["final_snapshot_scope"] == (
+        "selected_records_global_derivatives_unresolved"
+    )
+    assert planned["global_derivatives"]["status"] == "deferred_bounded_scope"
+
+    monkeypatch.setattr(
+        module,
+        "sqlite_search_index_state",
+        lambda *_args, **_kwargs: {
+            "status": "current",
+            "needs_refresh": False,
+            "dirty_session_ids": [],
+            "dirty_sessions": [],
+            "reasons": [],
+            "diagnostics": [],
+            "search_schema_version": str(module.SEARCH_SCHEMA_VERSION),
+            "expected_search_schema_version": module.SEARCH_SCHEMA_VERSION,
+        },
+    )
+    planned_with_preflight = module.maintain_indexes(
+        aoa_root=aoa_root,
+        target="all",
+        selected_records=[record],
+        selection_scope={
+            "global_scope_complete": False,
+            "profile": "backlog",
+        },
+        apply=False,
+        repair_token_accounting=False,
+        repair_graph=False,
+        preflight_entity_registry_state={
+            "status": "needs_maintenance",
+            "needs_maintenance": True,
+            "diagnostics": ["source_newer_than_entity_registry"],
+        },
+    )
+    registry_action = next(
+        action
+        for action in planned_with_preflight["actions"]
+        if action["id"] == "refresh_entity_registry"
+    )
+    assert registry_action["needed"] is True
+    assert (
+        planned_with_preflight["entity_registry"]["planning_source"]
+        == "auto_maintenance_preflight"
+    )
+
+
+def test_search_action_does_not_cover_deferred_entity_registry_derivative(
+) -> None:
+    base = {
+        "status": "applied",
+        "result": {
+            "ok": True,
+            "entity_registry_document_count": 0,
+        },
+    }
+    assert (
+        module.maintenance_search_action_refreshed_entity_registry(base)
+        is True
+    )
+
+    deferred = json.loads(json.dumps(base))
+    deferred["result"]["global_derivatives"] = {
+        "status": "deferred_bounded_scope",
+        "entity_registry": {
+            "status": "deferred_bounded_scope",
+        },
+    }
+    assert (
+        module.maintenance_search_action_refreshed_entity_registry(
+            deferred
+        )
+        is False
+    )
+
+
+def test_automatic_maintenance_profiles_bound_discovery() -> None:
+    assert {
+        profile: settings["discovery_limit"]
+        for profile, settings in module.AUTO_MAINTENANCE_PROFILES.items()
+    } == {
+        "hot": 8,
+        "backlog": 16,
+        "catchup": 16,
+        "deep": 32,
+    }
+
+
+def test_maintenance_parsers_accept_discovery_limit() -> None:
+    parser = module.build_parser()
+    index_args = parser.parse_args(
+        ["index-maintenance", "all", "--discovery-limit", "17"]
+    )
+    auto_args = parser.parse_args(
+        ["auto-maintenance", "catchup", "all", "--discovery-limit", "19"]
+    )
+
+    assert index_args.discovery_limit == 17
+    assert auto_args.discovery_limit == 19
 
 
 def test_catchup_index_drip_reports_bounded_progress_without_false_failure(
@@ -50902,6 +59419,7 @@ def test_catchup_index_drip_reports_bounded_progress_without_false_failure(
         workspace_root=workspace,
         aoa_root=aoa_root,
         profile="catchup",
+        target="bounded-target",
         apply=True,
         reason="timer_catchup",
         index_drip_on_block=True,
@@ -51053,6 +59571,7 @@ def test_catchup_index_drip_floor_prefers_larger_learned_demand_and_is_retryable
         workspace_root=workspace,
         aoa_root=aoa_root,
         profile="catchup",
+        target="bounded-target",
         apply=True,
         reason="timer_catchup",
         index_drip_on_block=True,
@@ -51151,6 +59670,7 @@ def test_index_drip_fallback_reports_child_lock_conflict(tmp_path: Path, monkeyp
         workspace_root=workspace,
         aoa_root=aoa_root,
         profile="catchup",
+        target="bounded-target",
         apply=True,
         reason="timer_catchup",
         index_drip_on_block=True,
@@ -51483,7 +60003,11 @@ def test_graph_queue_apply_tops_up_demanded_sources_from_nonempty_ledger(
         "segment:demanded:000",
         "segment:demanded:001",
     ]
-    assert set(observed["source_key_filters"]) == set(sources)
+    assert set(observed["source_key_filters"]) == {
+        "segment:demanded:000",
+        "segment:demanded:001",
+    }
+    assert payload["maintenance_detail"]["queue_selection"]["session_coherent"] is True
     remaining_queue = module.read_graph_maintenance_queue(aoa_root)["items"]
     assert {item["session_id"] for item in remaining_queue.values()} == {"backlog"}
 
@@ -51559,6 +60083,518 @@ def test_hook_worker_automatic_maintenance_jobs_observe_query_demand(
     assert payload["processed"] == 2
     assert calls["index"]["observe_query_demand"] is True
     assert calls["graph"]["observe_query_demand"] is True
+    assert calls["graph"]["use_queue"] is True
+    assert calls["graph"]["seed_queue_from_ledger"] is True
+    assert calls["graph"]["write_queue"] is True
+    assert calls["graph"]["write_ledger"] is True
+    assert calls["graph"]["candidate_pool_limit"] == 30
+    assert calls["graph"]["queue_seed_limit"] == 30
+    assert calls["graph"]["priority_session_ids"] is None
+
+
+def test_hook_worker_graph_block_queues_bounded_upstream_reindex(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    dirs = module.hook_worker_dirs(aoa_root)
+    for path in dirs.values():
+        path.mkdir(parents=True, exist_ok=True)
+    write_json(
+        dirs["pending"] / "001-graph.json",
+        {
+            "job_type": "graph_maintenance",
+            "target": "all",
+            "reason": "automatic_graph_predecessor_test",
+        },
+    )
+    blocked_session_id = "blocked-session-generation"
+    blocked_diagnostic = (
+        "graph_source_generation_incompatible:"
+        f"{blocked_session_id}:"
+        "session_index_generation_identity_changed:"
+        "recovery=aoa-session-memory reindex-sessions "
+        f"{blocked_session_id}"
+    )
+
+    monkeypatch.setattr(
+        module,
+        "graph_automatic_drip_circuit_state",
+        lambda _aoa_root: {"open": False},
+    )
+    monkeypatch.setattr(
+        module,
+        "graph_maintenance",
+        lambda **kwargs: {
+            "ok": False,
+            "target": kwargs.get("target"),
+            "reason": kwargs.get("reason"),
+            "source_state": {},
+            "selected_count": 0,
+            "remaining_count": 1,
+            "budget_exhausted": False,
+            "refresh_chunk_size": kwargs.get("refresh_chunk_size"),
+            "query_demand_count": 0,
+            "query_demand_priority_session_ids": [],
+            "maintenance_detail": {},
+            "results": [
+                {
+                    "source_key": f"session:{blocked_session_id}",
+                    "status": "blocked",
+                    "diagnostics": [blocked_diagnostic],
+                }
+            ],
+            "diagnostics": [],
+        },
+    )
+
+    payload = module.run_hook_worker(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        limit=1,
+    )
+
+    assert payload["ok"] is True
+    assert payload["results"][0]["status"] == (
+        "blocked_upstream_reindex_queued"
+    )
+    assert payload["results"][0]["upstream_reindex_session_ids"] == [
+        blocked_session_id
+    ]
+    pending_jobs = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in dirs["pending"].glob("*.json")
+    ]
+    assert len(pending_jobs) == 1
+    assert pending_jobs[0]["job_type"] == (
+        "session_generation_reindex"
+    )
+    assert pending_jobs[0]["session_id"] == blocked_session_id
+    assert pending_jobs[0]["followup_graph_target"] == blocked_session_id
+
+
+def test_hook_worker_reindex_predecessor_resumes_then_queues_graph_followup(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    session_id = "checkpointed-predecessor"
+    session_dir = aoa_root / "sessions" / session_id
+    session_dir.mkdir(parents=True)
+    (session_dir / module.SESSION_INDEX_JSON).write_text(
+        "{}\n", encoding="utf-8"
+    )
+    queued = module.enqueue_session_generation_reindex_job(
+        aoa_root,
+        session_id=session_id,
+        reason="test_graph_predecessor",
+    )
+    assert queued is not None
+    attempts = {"count": 0}
+    reindex_kwargs: list[dict[str, Any]] = []
+
+    def fake_reindex_sessions(**kwargs: Any) -> dict[str, Any]:
+        reindex_kwargs.append(kwargs)
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            return {
+                "status": "checkpointed",
+                "budget_exhausted": True,
+                "completed_session_ids": [],
+                "results": [{"status": "checkpointed"}],
+                "diagnostics": [],
+            }
+        return {
+            "status": "completed",
+            "budget_exhausted": False,
+            "completed_session_ids": [session_id],
+            "results": [{"status": "reindexed"}],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr(module, "reindex_sessions", fake_reindex_sessions)
+    monkeypatch.setattr(
+        module,
+        "resolve_session_record",
+        lambda *_args, **_kwargs: {
+            "session_id": session_id,
+            "path": str(session_dir),
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "generated_session_index_stale_reasons_from_file",
+        lambda _path: (
+            ["session_index_generation_identity_changed"]
+            if attempts["count"] == 1
+            else []
+        ),
+    )
+
+    first = module.run_hook_worker(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        limit=1,
+    )
+    dirs = module.hook_worker_dirs(aoa_root)
+    assert first["ok"] is True
+    assert first["results"][0]["status"] == (
+        "deferred_session_generation_reindex"
+    )
+    assert len(list(dirs["deferred"].glob("*.json"))) == 1
+
+    second = module.run_hook_worker(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        limit=1,
+    )
+
+    assert second["ok"] is True
+    assert second["promoted_deferred"][0]["reason"] == (
+        "resume_checkpointed_session_generation_reindex"
+    )
+    assert second["results"][0]["status"] == (
+        "reindexed_session_generation"
+    )
+    assert second["results"][0][
+        "session_index_generation_current"
+    ] is True
+    assert all(
+        kwargs["split_publish_lock"] is False
+        for kwargs in reindex_kwargs
+    )
+    pending_jobs = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in dirs["pending"].glob("*.json")
+    ]
+    assert len(pending_jobs) == 1
+    assert pending_jobs[0]["job_type"] == "graph_maintenance"
+    assert pending_jobs[0]["target"] == session_id
+
+
+def test_hook_worker_reindex_predecessor_lock_conflict_stays_deferred(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    session_id = "temporarily-locked-predecessor"
+    session_dir = aoa_root / "sessions" / session_id
+    session_dir.mkdir(parents=True)
+    (session_dir / module.SESSION_INDEX_JSON).write_text(
+        "{}\n", encoding="utf-8"
+    )
+    assert module.enqueue_session_generation_reindex_job(
+        aoa_root,
+        session_id=session_id,
+        reason="test_temporary_lock_conflict",
+    ) is not None
+
+    monkeypatch.setattr(
+        module,
+        "reindex_sessions",
+        lambda **_kwargs: {
+            "status": "completed",
+            "budget_exhausted": False,
+            "completed_session_ids": [],
+            "results": [{"status": "skipped_lock_held"}],
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "resolve_session_record",
+        lambda *_args, **_kwargs: {
+            "session_id": session_id,
+            "path": str(session_dir),
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "generated_session_index_stale_reasons_from_file",
+        lambda _path: ["session_index_generation_identity_changed"],
+    )
+
+    payload = module.run_hook_worker(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        limit=1,
+    )
+    dirs = module.hook_worker_dirs(aoa_root)
+
+    assert payload["ok"] is True
+    assert payload["results"][0]["status"] == (
+        "deferred_session_generation_reindex"
+    )
+    assert payload["results"][0]["retry_required"] is True
+    assert len(list(dirs["deferred"].glob("*.json"))) == 1
+    assert not list(dirs["done"].glob("*.json"))
+    assert not list(dirs["failed"].glob("*.json"))
+
+
+def test_hook_worker_reindex_predecessor_hard_failure_is_not_done(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    session_id = "broken-predecessor"
+    session_dir = aoa_root / "sessions" / session_id
+    session_dir.mkdir(parents=True)
+    (session_dir / module.SESSION_INDEX_JSON).write_text(
+        "{}\n", encoding="utf-8"
+    )
+    assert module.enqueue_session_generation_reindex_job(
+        aoa_root,
+        session_id=session_id,
+        reason="test_hard_failure",
+    ) is not None
+
+    monkeypatch.setattr(
+        module,
+        "reindex_sessions",
+        lambda **_kwargs: {
+            "status": "completed",
+            "budget_exhausted": False,
+            "completed_session_ids": [],
+            "results": [{"status": "diagnostic"}],
+            "diagnostics": ["unrecoverable_test_failure"],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "resolve_session_record",
+        lambda *_args, **_kwargs: {
+            "session_id": session_id,
+            "path": str(session_dir),
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "generated_session_index_stale_reasons_from_file",
+        lambda _path: ["session_index_generation_identity_changed"],
+    )
+
+    payload = module.run_hook_worker(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        limit=1,
+    )
+    dirs = module.hook_worker_dirs(aoa_root)
+
+    assert payload["ok"] is False
+    assert payload["results"][0]["status"] == "failed"
+    assert len(list(dirs["failed"].glob("*.json"))) == 1
+    assert not list(dirs["done"].glob("*.json"))
+
+
+def test_hook_worker_defers_graph_job_until_drip_circuit_closes(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    dirs = module.hook_worker_dirs(aoa_root)
+    for path in dirs.values():
+        path.mkdir(parents=True, exist_ok=True)
+    write_json(
+        dirs["pending"] / "001-graph.json",
+        {
+            "job_type": "graph_maintenance",
+            "target": "all",
+            "reason": "automatic_graph_circuit_test",
+        },
+    )
+    circuit_open = {"value": True}
+    maintenance_calls: list[dict[str, Any]] = []
+
+    def fake_circuit(_aoa_root: Path) -> dict[str, Any]:
+        if circuit_open["value"]:
+            return {
+                "open": True,
+                "reason": "graph_registry_dependency_rebind_required",
+                "next_route": "graph-registry-rebind",
+            }
+        return {
+            "open": False,
+            "reason": "no_blocking_graph_drip_evidence",
+        }
+
+    def fake_graph_maintenance(**kwargs: Any) -> dict[str, Any]:
+        maintenance_calls.append(kwargs)
+        return {
+            "ok": True,
+            "target": kwargs.get("target"),
+            "reason": kwargs.get("reason"),
+            "source_state": {},
+            "selected_count": 1,
+            "remaining_count": 0,
+            "budget_exhausted": False,
+            "refresh_chunk_size": kwargs.get("refresh_chunk_size"),
+            "query_demand_count": 0,
+            "query_demand_priority_session_ids": [],
+            "maintenance_detail": {},
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr(
+        module,
+        "graph_automatic_drip_circuit_state",
+        fake_circuit,
+    )
+    monkeypatch.setattr(
+        module,
+        "graph_maintenance",
+        fake_graph_maintenance,
+    )
+
+    deferred = module.run_hook_worker(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        limit=1,
+    )
+
+    assert deferred["ok"] is True
+    assert deferred["processed"] == 1
+    assert deferred["results"][0]["status"] == (
+        "deferred_graph_drip_circuit_open"
+    )
+    assert deferred["results"][0]["job_disposition"] == "deferred"
+    assert maintenance_calls == []
+    assert len(list(dirs["deferred"].glob("*.json"))) == 1
+
+    circuit_open["value"] = False
+    resumed = module.run_hook_worker(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        limit=1,
+    )
+
+    assert resumed["ok"] is True
+    assert resumed["processed"] == 1
+    assert resumed["promoted_deferred"][0]["reason"] == (
+        "graph_drip_circuit_closed"
+    )
+    assert resumed["results"][0]["status"] == "maintained_graph"
+    assert len(maintenance_calls) == 1
+    assert maintenance_calls[0]["use_queue"] is True
+    assert maintenance_calls[0]["seed_queue_from_ledger"] is True
+    assert maintenance_calls[0]["candidate_pool_limit"] == 30
+    assert not list(dirs["deferred"].glob("*.json"))
+
+
+def test_deferred_graph_probe_waits_for_pending_predecessor_and_is_cached(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    dirs = module.hook_worker_dirs(aoa_root)
+    for path in dirs.values():
+        path.mkdir(parents=True, exist_ok=True)
+    write_json(
+        dirs["pending"] / "001-reindex.json",
+        {
+            "job_type": "session_generation_reindex",
+            "session_id": "blocked-session",
+        },
+    )
+    for index in range(3):
+        write_json(
+            dirs["deferred"] / f"{index:03d}-graph.json",
+            {
+                "job_type": "graph_maintenance",
+                "target": "all",
+            },
+        )
+    calls = {"count": 0}
+
+    def fake_circuit(_root: Path) -> dict[str, Any]:
+        calls["count"] += 1
+        return {
+            "open": False,
+            "reason": "graph_state_changed",
+        }
+
+    monkeypatch.setattr(
+        module,
+        "graph_automatic_drip_circuit_state",
+        fake_circuit,
+    )
+
+    blocked = module.promote_deferred_hook_jobs(
+        aoa_root=aoa_root,
+        dirs=dirs,
+    )
+
+    assert blocked == []
+    assert calls["count"] == 0
+    assert len(list(dirs["deferred"].glob("*.json"))) == 3
+
+    (dirs["pending"] / "001-reindex.json").unlink()
+    promoted = module.promote_deferred_hook_jobs(
+        aoa_root=aoa_root,
+        dirs=dirs,
+    )
+
+    assert calls["count"] == 1
+    assert len(promoted) == 3
+    assert not list(dirs["deferred"].glob("*.json"))
+
+
+def test_hook_worker_no_progress_circuit_queues_named_predecessor(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    dirs = module.hook_worker_dirs(aoa_root)
+    for path in dirs.values():
+        path.mkdir(parents=True, exist_ok=True)
+    write_json(
+        dirs["pending"] / "001-graph.json",
+        {
+            "job_type": "graph_maintenance",
+            "target": "all",
+            "reason": "automatic_graph_circuit_predecessor_test",
+        },
+    )
+    blocked_session_id = "circuit-blocked-session"
+    maintenance_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        module,
+        "graph_automatic_drip_circuit_state",
+        lambda _aoa_root: {
+            "open": True,
+            "reason": "latest_graph_queue_drip_no_semantic_progress",
+            "next_route": "session_generation_reindex_handoff",
+            "recoverable_upstream_session_ids": [blocked_session_id],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "graph_maintenance",
+        lambda **kwargs: maintenance_calls.append(kwargs),
+    )
+
+    payload = module.run_hook_worker(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        limit=1,
+    )
+
+    assert payload["ok"] is True
+    assert payload["results"][0]["status"] == (
+        "blocked_upstream_reindex_queued"
+    )
+    assert payload["results"][0]["upstream_reindex_session_ids"] == [
+        blocked_session_id
+    ]
+    assert maintenance_calls == []
+    pending_jobs = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in dirs["pending"].glob("*.json")
+    ]
+    assert len(pending_jobs) == 1
+    assert pending_jobs[0]["job_type"] == (
+        "session_generation_reindex"
+    )
+    assert not list(dirs["deferred"].glob("*.json"))
 
 
 def test_catchup_auto_maintenance_resource_defaults_to_profile_graph_drip(tmp_path: Path, monkeypatch: Any) -> None:
@@ -51642,6 +60678,280 @@ def test_catchup_auto_maintenance_resource_defaults_to_profile_graph_drip(tmp_pa
     assert payload["fallback_graph_drip"]["queue_had_items"] is False
     assert payload["fallback_graph_drip"]["queue_seed_from_ledger"] is True
     assert "graph_drip_fallback_completed" in payload["diagnostics"]
+
+
+def test_auto_maintenance_graph_drip_circuit_prevents_launch_and_retry(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    calls: list[list[str]] = []
+
+    def fake_run(
+        command: list[str],
+        **_kwargs: Any,
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps(
+                {
+                    "schema": "abyss_machine_resource_plan_v1",
+                    "ok": False,
+                    "blocked_reasons": [
+                        "indexing_unattended_swap_used_pressure"
+                    ],
+                    "denied_reasons": [],
+                    "request": {
+                        "class": "medium",
+                        "kind": "indexing",
+                    },
+                    "execution": {
+                        "ok": None,
+                        "returncode": None,
+                    },
+                }
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        module,
+        "graph_automatic_drip_circuit_state",
+        lambda _root: {
+            "open": True,
+            "reason": "graph_registry_dependency_rebind_required",
+            "next_route": "graph-registry-rebind",
+        },
+    )
+
+    payload = module.auto_maintenance_resource_launch(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        profile="backlog",
+        apply=True,
+        reason="timer_backlog",
+    )
+
+    assert len(calls) == 1
+    assert (
+        payload["status"]
+        == "resource_blocked_graph_drip_circuit_open"
+    )
+    assert payload["fallback_graph_drip"]["status"] == "circuit_open"
+    assert payload["fallback_graph_drip"]["enabled"] is False
+    assert payload["graph_drip_circuit"]["open"] is True
+    assert payload["automatic_retry"]["retryable"] is False
+    assert payload["automatic_retry"]["status"] in {
+        "circuit_open_not_queued",
+        "cleared_circuit_open",
+    }
+    assert (
+        module.auto_maintenance_resource_status_retryable(
+            payload["status"]
+        )
+        is False
+    )
+
+
+def test_auto_maintenance_graph_drip_circuit_queues_upstream_reindex(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    calls: list[list[str]] = []
+    blocked_session_id = "019graph-predecessor"
+
+    def fake_run(
+        command: list[str],
+        **_kwargs: Any,
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps(
+                {
+                    "schema": "abyss_machine_resource_plan_v1",
+                    "ok": False,
+                    "blocked_reasons": [
+                        "indexing_unattended_swap_used_pressure"
+                    ],
+                    "denied_reasons": [],
+                    "execution": {
+                        "ok": None,
+                        "returncode": None,
+                    },
+                }
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        module,
+        "hook_sync_queue_enabled",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        module,
+        "graph_automatic_drip_circuit_state",
+        lambda _root: {
+            "open": True,
+            "reason": "latest_graph_queue_drip_no_semantic_progress",
+            "next_route": "session_generation_reindex_handoff",
+            "recoverable_upstream_session_ids": [
+                blocked_session_id
+            ],
+        },
+    )
+
+    payload = module.auto_maintenance_resource_launch(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        profile="backlog",
+        apply=True,
+        reason="timer_backlog",
+    )
+
+    assert len(calls) == 1
+    assert payload["status"] == (
+        "resource_blocked_graph_drip_upstream_reindex_queued"
+    )
+    assert payload["mutates"] is True
+    assert payload["fallback_graph_drip"]["status"] == (
+        "upstream_reindex_queued"
+    )
+    assert payload["fallback_graph_drip"][
+        "predecessor_handoff_queued"
+    ] is True
+    assert payload["fallback_graph_drip"][
+        "upstream_reindex_session_ids"
+    ] == [blocked_session_id]
+    queued_jobs = sorted(
+        module.hook_worker_dirs(aoa_root)["pending"].glob("*.json")
+    )
+    assert len(queued_jobs) == 1
+    queued = json.loads(queued_jobs[0].read_text(encoding="utf-8"))
+    assert queued["job_type"] == "session_generation_reindex"
+    assert queued["session_id"] == blocked_session_id
+    assert queued["followup_graph_target"] == blocked_session_id
+    assert payload["automatic_retry"]["retryable"] is True
+
+
+def test_auto_maintenance_graph_drip_circuit_preserves_in_flight_retry(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir(parents=True)
+    scheduled = module.auto_maintenance_retry_reconcile(
+        aoa_root=aoa_root,
+        profile="backlog",
+        target="all",
+        reason="timer_backlog",
+        apply=True,
+        launch_ok=False,
+        launch_status="resource_blocked",
+        options={},
+        now_epoch=2_000.0,
+    )
+    attempts_started = 4
+
+    def mark_in_flight(
+        queue_payload: dict[str, Any],
+    ) -> tuple[None, bool]:
+        item = queue_payload["items"]["backlog:all"]
+        item["in_flight"] = True
+        item["attempts_started"] = attempts_started
+        return None, True
+
+    module.mutate_auto_maintenance_retry_queue(
+        aoa_root,
+        mark_in_flight,
+        now_epoch=2_001.0,
+    )
+
+    reconciled = module.auto_maintenance_retry_reconcile(
+        aoa_root=aoa_root,
+        profile="backlog",
+        target="all",
+        reason="timer_backlog",
+        apply=True,
+        launch_ok=False,
+        launch_status="resource_blocked_graph_drip_circuit_open",
+        options={},
+        now_epoch=2_002.0,
+    )
+
+    after = module.auto_maintenance_retry_queue_status(
+        aoa_root,
+        now_epoch=2_002.0,
+    )
+    retry_item = after["items"]["backlog:all"]
+    assert scheduled["status"] == "scheduled"
+    assert reconciled["status"] == "circuit_open_in_flight_preserved"
+    assert reconciled["in_flight"] is True
+    assert after["queued_count"] == 1
+    assert retry_item["in_flight"] is True
+    assert retry_item["attempts_started"] == attempts_started
+
+
+def test_graph_drip_circuit_reopens_after_selected_upstream_source_changes(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    store_path = module.graph_paths(aoa_root)["store"]
+    store_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path = tmp_path / "segment.index.json"
+    source_path.write_text("{}\n", encoding="utf-8")
+    os.utime(source_path, (900.0, 900.0))
+    conn = sqlite3.connect(store_path)
+    try:
+        conn.execute(
+            "CREATE TABLE graph_sources ("
+            "source_key TEXT PRIMARY KEY, "
+            "source_path TEXT NOT NULL, "
+            "source_paths_json TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO graph_sources VALUES (?, ?, ?)",
+            (
+                "segment:test:000",
+                str(source_path),
+                json.dumps([str(source_path)]),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    report = {
+        "_diagnostic_mtime": 1000.0,
+        "maintenance_detail": {
+            "selected_sources": ["segment:test:000"],
+        },
+    }
+
+    unchanged = module.graph_queue_report_selected_sources_advanced(
+        aoa_root,
+        report,
+    )
+    assert unchanged["checked"] is True
+    assert unchanged["advanced"] is False
+
+    os.utime(source_path, (1100.0, 1100.0))
+    advanced = module.graph_queue_report_selected_sources_advanced(
+        aoa_root,
+        report,
+    )
+    assert advanced["checked"] is True
+    assert advanced["advanced"] is True
+    assert advanced["advanced_source_keys"] == ["segment:test:000"]
 
 
 def test_graph_drip_fallback_does_not_mutate_without_apply(tmp_path: Path, monkeypatch: Any) -> None:
@@ -51863,6 +61173,601 @@ def test_session_memory_timer_status_uses_unit_file_fallback_when_systemctl_prob
     assert payload["unit_contracts"][0]["status"] == "current"
 
 
+def test_rendered_capture_topology_is_capture_only_and_sweep_is_resource_gated(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    units = module.render_session_memory_systemd_units(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        source_root=tmp_path / "codex" / "sessions",
+    )
+
+    assert set(units) == {
+        module.SESSION_MEMORY_CAPTURE_SERVICE,
+        module.SESSION_MEMORY_CAPTURE_TIMER,
+        module.SESSION_MEMORY_RESOURCE_GATED_SWEEP_SERVICE,
+        module.SESSION_MEMORY_RESOURCE_GATED_SWEEP_TIMER,
+        module.SESSION_MEMORY_RETRY_DISPATCH_SERVICE,
+        module.SESSION_MEMORY_RETRY_DISPATCH_TIMER,
+    }
+    capture = units[module.SESSION_MEMORY_CAPTURE_SERVICE]
+    sweep = units[module.SESSION_MEMORY_RESOURCE_GATED_SWEEP_SERVICE]
+    retry = units[module.SESSION_MEMORY_RETRY_DISPATCH_SERVICE]
+    retry_timer = units[module.SESSION_MEMORY_RETRY_DISPATCH_TIMER]
+    assert module.session_memory_capture_unit_contract(
+        module.SESSION_MEMORY_CAPTURE_SERVICE,
+        capture,
+    )["status"] == "current"
+    assert module.session_memory_capture_unit_contract(
+        module.SESSION_MEMORY_RESOURCE_GATED_SWEEP_SERVICE,
+        sweep,
+    )["status"] == "current"
+    assert len(module.systemd_unit_execstart_lines(capture)) == 1
+    assert "capture-watch" in capture
+    assert "sweep-codex-sessions" not in capture
+    assert module.SESSION_MEMORY_RESOURCE_GATED_SWEEP_SERVICE not in capture
+    assert "resource launch" in sweep
+    assert "sweep-codex-sessions" in sweep
+    assert "capture-watch" not in sweep
+    assert module.session_memory_retry_dispatch_unit_contract(
+        module.SESSION_MEMORY_RETRY_DISPATCH_SERVICE,
+        retry,
+    )["status"] == "current"
+    assert module.session_memory_retry_dispatch_timer_contract(
+        module.SESSION_MEMORY_RETRY_DISPATCH_TIMER,
+        retry_timer,
+    )["status"] == "current"
+    assert "OnActiveSec=2min" in retry_timer
+    assert "OnBootSec=2min" not in retry_timer
+    assert "OnUnitInactiveSec=1min" in retry_timer
+    assert "capture-watch" not in retry
+    assert "sweep-codex-sessions" not in retry
+    assert "projection-catchup" not in retry
+    assert f"--limit {module.AUTO_MAINTENANCE_RETRY_DISPATCH_LIMIT}" in retry
+
+    output_dir = tmp_path / "systemd-user"
+    write_payload = module.write_session_memory_systemd_units(
+        output_dir,
+        units,
+        overwrite=False,
+    )
+    assert write_payload["ok"] is True
+    assert sorted(path.name for path in output_dir.iterdir()) == sorted(units)
+    assert "activation" not in write_payload
+    activation = module.session_memory_retry_dispatch_activation_contract(
+        output_dir
+    )
+    assert activation["status"] == "current"
+    assert activation["activation"] == "not_probed"
+
+
+def test_retry_dispatch_activation_contract_fails_closed_when_named_units_are_missing(
+    tmp_path: Path,
+) -> None:
+    activation = module.session_memory_retry_dispatch_activation_contract(
+        tmp_path / "empty-systemd-user"
+    )
+
+    assert activation["status"] == "missing_source_units"
+    assert activation["activation"] == "not_probed"
+    assert activation["diagnostics"] == [
+        "retry_dispatch_source_topology_incomplete"
+    ]
+    assert set(activation["missing"]) == {
+        str(
+            tmp_path
+            / "empty-systemd-user"
+            / module.SESSION_MEMORY_RETRY_DISPATCH_SERVICE
+        ),
+        str(
+            tmp_path
+            / "empty-systemd-user"
+            / module.SESSION_MEMORY_RETRY_DISPATCH_TIMER
+        ),
+    }
+
+
+def test_auto_maintenance_retry_current_epoch_priority_precedes_historical_debt() -> None:
+    current_options = {
+        "persistent_obligation": True,
+        "obligation_kind": module.SESSION_PROJECTION_FRESHNESS_OBLIGATION_KIND,
+        "current_epoch_priority": True,
+    }
+    items = {
+        "backlog:historical": {
+            "profile": "backlog",
+            "target": "historical",
+            "next_attempt_epoch": 3_000.0,
+            "in_flight": False,
+            "options": {},
+        },
+        "deep:historical": {
+            "profile": "deep",
+            "target": "historical-heavy",
+            "next_attempt_epoch": 0.0,
+            "in_flight": False,
+            "options": {},
+        },
+        "hot:current": {
+            "profile": "hot",
+            "target": "current-session",
+            "next_attempt_epoch": 0.0,
+            "in_flight": False,
+            "options": current_options,
+        },
+    }
+
+    ordered = module.auto_maintenance_retry_ordered_due_items(
+        items,
+        now_epoch=4_000.0,
+    )
+
+    assert [row["queue_key"] for row in ordered] == [
+        "hot:current",
+        "deep:historical",
+        "backlog:historical",
+    ]
+    assert ordered[0]["current_epoch_priority"] is True
+    assert ordered[0]["fairness_reason"] == "current_epoch_freshness_priority"
+    assert ordered[1]["aged_heavy_fairness_reserved"] is True
+
+
+def test_auto_maintenance_retry_bounded_batch_reserves_historical_heavy_slot() -> None:
+    current_options = {
+        "persistent_obligation": True,
+        "obligation_kind": module.SESSION_PROJECTION_FRESHNESS_OBLIGATION_KIND,
+        "current_epoch_priority": True,
+    }
+    items = {
+        f"backlog:current-{index}": {
+            "profile": "backlog",
+            "target": f"current-{index}",
+            "next_attempt_epoch": 0.0,
+            "in_flight": False,
+            "options": current_options,
+        }
+        for index in range(5)
+    }
+    items["deep:historical"] = {
+        "profile": "deep",
+        "target": "historical-heavy",
+        "next_attempt_epoch": 0.0,
+        "in_flight": False,
+        "options": {},
+    }
+
+    ordered = module.auto_maintenance_retry_ordered_due_items(
+        items,
+        now_epoch=4_000.0,
+        selection_limit=4,
+    )
+
+    assert [row["queue_key"] for row in ordered[:4]] == [
+        "backlog:current-0",
+        "backlog:current-1",
+        "backlog:current-2",
+        "deep:historical",
+    ]
+    assert ordered[3]["aged_heavy_fairness_reserved"] is True
+    assert ordered[3]["current_epoch_priority"] is False
+
+
+@pytest.mark.parametrize("selection_limit", [0, 1, 2, 4])
+def test_auto_maintenance_retry_selection_boundaries_are_stable(
+    selection_limit: int,
+) -> None:
+    current_options = {
+        "persistent_obligation": True,
+        "obligation_kind": module.SESSION_PROJECTION_FRESHNESS_OBLIGATION_KIND,
+        "current_epoch_priority": True,
+    }
+    items = {
+        f"backlog:current-{index}": {
+            "profile": "backlog",
+            "target": f"current-{index}",
+            "next_attempt_epoch": 0.0,
+            "in_flight": False,
+            "options": current_options,
+        }
+        for index in range(2)
+    }
+    items["deep:historical"] = {
+        "profile": "deep",
+        "target": "historical-heavy",
+        "next_attempt_epoch": 0.0,
+        "in_flight": False,
+        "options": {},
+    }
+
+    first = module.auto_maintenance_retry_ordered_due_items(
+        items,
+        now_epoch=4_000.0,
+        selection_limit=selection_limit,
+    )
+    repeated = module.auto_maintenance_retry_ordered_due_items(
+        items,
+        now_epoch=4_000.0,
+        selection_limit=selection_limit,
+    )
+
+    assert [item["queue_key"] for item in first] == [
+        item["queue_key"] for item in repeated
+    ]
+    assert [item["queue_key"] for item in first[:selection_limit]] == (
+        []
+        if selection_limit == 0
+        else ["backlog:current-0"]
+        if selection_limit == 1
+        else ["backlog:current-0", "deep:historical"]
+        if selection_limit == 2
+        else [
+            "backlog:current-0",
+            "backlog:current-1",
+            "deep:historical",
+        ]
+    )
+
+
+def test_auto_maintenance_retry_reserves_new_current_arrival_and_rotates_cursor() -> None:
+    current_options = {
+        "persistent_obligation": True,
+        "obligation_kind": module.SESSION_PROJECTION_FRESHNESS_OBLIGATION_KIND,
+        "current_epoch_priority": True,
+    }
+    items = {
+        f"backlog:old-{index:03d}": {
+            "profile": "backlog",
+            "target": f"old-{index:03d}",
+            "next_attempt_epoch": 0.0,
+            "enqueued_at_epoch": 1_000.0 + index,
+            "attempts_started": 0,
+            "in_flight": False,
+            "options": current_options,
+        }
+        for index in range(370)
+    }
+    items["backlog:natural-successor"] = {
+        "profile": "backlog",
+        "target": "natural-successor",
+        "next_attempt_epoch": 0.0,
+        "enqueued_at_epoch": 5_000.0,
+        "attempts_started": 0,
+        "in_flight": False,
+        "options": current_options,
+    }
+    items["deep:historical-heavy"] = {
+        "profile": "deep",
+        "target": "historical-heavy",
+        "next_attempt_epoch": 0.0,
+        "in_flight": False,
+        "options": {},
+    }
+
+    state = {
+        "current_epoch_turn": "fresh_arrival",
+        "current_epoch_cursor": "",
+    }
+    ordered = module.auto_maintenance_retry_ordered_due_items(
+        items,
+        now_epoch=6_000.0,
+        selection_limit=4,
+        scheduler_state=state,
+    )
+
+    assert ordered[0]["queue_key"] == "backlog:natural-successor"
+    assert ordered[0]["dispatch_rank"] == 1
+    assert ordered[0]["current_epoch_fairness_lane"] == (
+        "fresh_arrival_reserve"
+    )
+    assert ordered[0]["fairness_reason"] == (
+        "current_epoch_fresh_arrival_reservation"
+    )
+    assert ordered[3]["queue_key"] == "deep:historical-heavy"
+    assert ordered[3]["aged_heavy_fairness_reserved"] is True
+
+    state_payload = {"dispatch_state": state}
+    module._auto_maintenance_retry_advance_dispatch_state(
+        state_payload,
+        ordered[0],
+        now_epoch=6_000.0,
+    )
+    next_state = state_payload["dispatch_state"]
+    items["backlog:natural-successor"]["attempts_started"] = 1
+    next_order = module.auto_maintenance_retry_ordered_due_items(
+        items,
+        now_epoch=6_000.0,
+        selection_limit=1,
+        scheduler_state=next_state,
+    )
+
+    assert next_order[0]["queue_key"] == "backlog:old-000"
+    assert next_order[0]["current_epoch_fairness_lane"] == (
+        "current_round_robin"
+    )
+
+
+def test_auto_maintenance_retry_dispatch_persists_current_lane_cursor(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    current_options = {
+        "persistent_obligation": True,
+        "obligation_kind": module.SESSION_PROJECTION_FRESHNESS_OBLIGATION_KIND,
+        "current_epoch_priority": True,
+    }
+    items = {
+        "backlog:old": {
+            "queue_key": "backlog:old",
+            "profile": "backlog",
+            "target": "old",
+            "next_attempt_epoch": 0.0,
+            "enqueued_at_epoch": 1_000.0,
+            "attempts_started": 0,
+            "in_flight": False,
+            "options": current_options,
+        },
+        "backlog:natural-successor": {
+            "queue_key": "backlog:natural-successor",
+            "profile": "backlog",
+            "target": "natural-successor",
+            "next_attempt_epoch": 0.0,
+            "enqueued_at_epoch": 2_000.0,
+            "attempts_started": 0,
+            "in_flight": False,
+            "options": current_options,
+        },
+    }
+    module.write_auto_maintenance_retry_queue(
+        aoa_root,
+        {"items": items, "history": []},
+        now_epoch=3_000.0,
+    )
+    monkeypatch.setattr(
+        module,
+        "session_projection_freshness_obligation_status",
+        lambda *_args, **_kwargs: {"ok": True, "status": "satisfied"},
+    )
+
+    dispatched = module.auto_maintenance_retry_dispatch(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        apply=True,
+        limit=1,
+        now_epoch=3_000.0,
+    )
+
+    assert dispatched["results"][0]["queue_key"] == (
+        "backlog:natural-successor"
+    )
+    after = module.auto_maintenance_retry_queue_status(
+        aoa_root,
+        now_epoch=3_000.0,
+        selection_limit=1,
+    )
+    assert after["dispatch_state"]["current_epoch_cursor"] == (
+        "backlog:natural-successor"
+    )
+    assert after["dispatch_state"]["current_epoch_turn"] == (
+        "current_round_robin"
+    )
+    assert after["dispatch_order_due_keys"] == ["backlog:old"]
+
+
+def test_auto_maintenance_retry_skips_unactionable_current_without_consuming_slots(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    now_epoch = 4_000.0
+    current_count = 441
+    blocked_count = current_count - 1
+
+    def current_item(target: str) -> dict[str, Any]:
+        return {
+            "queue_key": f"backlog:{target}",
+            "profile": "backlog",
+            "target": target,
+            "status": "pending",
+            "in_flight": False,
+            "attempts_started": 0,
+            "max_attempts": 4,
+            "occurrence_count": 1,
+            "base_delay_seconds": 300,
+            "max_delay_seconds": 3_600,
+            "next_attempt_epoch": 0.0,
+            "next_attempt_at": module.auto_maintenance_retry_iso(0.0),
+            "options": {
+                "persistent_obligation": True,
+                "obligation_kind": (
+                    module.SESSION_PROJECTION_FRESHNESS_OBLIGATION_KIND
+                ),
+                "current_epoch_priority": True,
+                "session_id": target,
+                "session_dir": str(aoa_root / "sessions" / target),
+                "transcript_path": str(tmp_path / f"{target}.jsonl"),
+                "capture_identity_contract": (
+                    module.SESSION_CAPTURE_RETRY_IDENTITY_CONTRACT
+                ),
+                "required_capture_epoch_id": f"epoch-{target}",
+                "required_capture_epoch_index": 0,
+                "required_capture_bytes": 1,
+                "required_capture_sha256": f"sha-{target}",
+                "required_capture_chain_sha256": f"chain-{target}",
+                "required_capture_ref": f"raw-ledger:epoch-{target}:chain-{target}",
+                "required_capture_stable": True,
+                "required_stable_projection": True,
+                "required_search_consumer": True,
+            },
+        }
+
+    items = {
+        f"backlog:current-{index:03d}": current_item(
+            f"current-{index:03d}"
+        )
+        for index in range(blocked_count)
+    }
+    actionable_target = "current-440"
+    items[f"backlog:{actionable_target}"] = current_item(actionable_target)
+    for profile, target in (
+        ("backlog", "historical-aged"),
+        ("deep", "historical-heavy"),
+        ("backlog", "historical-later"),
+    ):
+        queue_key = f"{profile}:{target}"
+        items[queue_key] = {
+            "queue_key": queue_key,
+            "profile": profile,
+            "target": target,
+            "status": "pending",
+            "in_flight": False,
+            "attempts_started": 0,
+            "max_attempts": 4,
+            "occurrence_count": 1,
+            "base_delay_seconds": 300,
+            "max_delay_seconds": 3_600,
+            "next_attempt_epoch": 0.0,
+            "next_attempt_at": module.auto_maintenance_retry_iso(0.0),
+            "options": {},
+        }
+    module.write_auto_maintenance_retry_queue(
+        aoa_root,
+        {"items": items, "history": []},
+        now_epoch=now_epoch,
+    )
+
+    baseline = module.auto_maintenance_retry_queue_status(
+        aoa_root,
+        now_epoch=now_epoch,
+        selection_limit=4,
+    )
+    baseline_target = next(
+        item
+        for item in baseline["due_items"]
+        if item["queue_key"] == f"backlog:{actionable_target}"
+    )
+    assert baseline_target["dispatch_rank"] == 442
+    assert [item["queue_key"] for item in baseline["due_items"][:4]] == [
+        "backlog:current-000",
+        "backlog:current-001",
+        "backlog:current-002",
+        "backlog:historical-aged",
+    ]
+
+    def reconcile(**kwargs: Any) -> tuple[dict[str, Any], bool]:
+        session_id = str(kwargs["session_id"])
+        if session_id != actionable_target:
+            return (
+                {
+                    "status": "identity_reconciliation_unresolved",
+                    "diagnostic": (
+                        module.SESSION_CAPTURE_RETRY_IDENTITY_RECONCILIATION_DIAGNOSTIC
+                    ),
+                    "reason": "synthetic_non_actionable_identity",
+                    "session_id": session_id,
+                    "changed": False,
+                    "persistent_obligation": True,
+                },
+                False,
+            )
+        return (
+            {
+                "status": "identity_already_current",
+                "session_id": session_id,
+                "changed": False,
+                "persistent_obligation": True,
+            },
+            False,
+        )
+
+    monkeypatch.setattr(
+        module,
+        "_reconcile_session_projection_freshness_obligation_in_payload",
+        reconcile,
+    )
+    monkeypatch.setattr(
+        module,
+        "session_projection_freshness_obligation_status",
+        lambda *_args, **_kwargs: {
+            "ok": False,
+            "status": "remaining",
+            "projected_capture_bytes": 0,
+            "satisfied_axes": [],
+        },
+    )
+    launches: list[dict[str, Any]] = []
+
+    def resource_denial(**kwargs: Any) -> dict[str, Any]:
+        launches.append(kwargs)
+        return {
+            "ok": False,
+            "status": "resource_blocked",
+            "child_result_verified": False,
+        }
+
+    monkeypatch.setattr(module, "auto_maintenance_resource_launch", resource_denial)
+    dispatched = module.auto_maintenance_retry_dispatch(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        apply=True,
+        limit=4,
+        now_epoch=now_epoch,
+    )
+
+    assert dispatched["dispatch_policy"]["version"] == 7
+    assert dispatched["skipped_admission_count"] == blocked_count
+    assert dispatched["examined_count"] == blocked_count + 4
+    assert dispatched["dispatch_slots_used"] == 4
+    assert dispatched["processed_count"] == 4
+    assert len(launches) == 4
+    assert launches[0]["target"] == actionable_target
+    assert {call["target"] for call in launches[1:]} == {
+        "historical-aged",
+        "historical-heavy",
+        "historical-later",
+    }
+
+    refusal_rows = [
+        row
+        for row in dispatched["results"]
+        if row["disposition"] == "admission_refused"
+    ]
+    assert len(refusal_rows) == blocked_count
+    assert all(row["attempt"] == 0 for row in refusal_rows)
+    assert all(
+        row["dispatch_selection"]["current_epoch_priority"] is True
+        for row in refusal_rows
+    )
+    target_result = next(
+        row
+        for row in dispatched["results"]
+        if row["queue_key"] == f"backlog:{actionable_target}"
+    )
+    assert target_result["dispatch_selection"]["current_epoch_priority"] is True
+    assert target_result["dispatch_selection"]["dispatch_rank"] == 1
+
+    after = module.auto_maintenance_retry_queue_status(
+        aoa_root,
+        now_epoch=now_epoch,
+        selection_limit=4,
+    )
+    assert all(
+        after["items"][f"backlog:current-{index:03d}"]["attempts_started"] == 0
+        and after["items"][f"backlog:current-{index:03d}"]["in_flight"] is False
+        for index in range(blocked_count)
+    )
+    target_item = after["items"][f"backlog:{actionable_target}"]
+    assert target_item["attempts_started"] == 1
+    assert target_item["in_flight"] is False
+    assert target_item["next_attempt_epoch"] > now_epoch
+
+
 def test_graph_maintenance_compact_stdout_keeps_report_marker_in_bounded_tail(tmp_path: Path) -> None:
     aoa_root = tmp_path / ".aoa"
     diagnostics_dir = aoa_root / "diagnostics"
@@ -51972,7 +61877,13 @@ def test_auto_maintenance_resource_launch_can_run_graph_drip_fallback(tmp_path: 
                         "ok": True,
                         "returncode": 0,
                         "stderr_tail": "Memory peak: 5.3G (swap: 0B)",
-                        "stdout_tail": "{\"ok\": true}",
+                        "stdout_tail": json.dumps(
+                            {
+                                "artifact_type": "session_memory_graph_maintenance",
+                                "ok": True,
+                                "status": "applied",
+                            }
+                        ),
                     },
                 }
             )
@@ -51993,8 +61904,10 @@ def test_auto_maintenance_resource_launch_can_run_graph_drip_fallback(tmp_path: 
         graph_drip_candidate_pool_limit=150,
     )
 
-    assert payload["ok"] is False
+    assert payload["ok"] is True
     assert payload["status"] == "resource_blocked_graph_drip_completed"
+    assert payload["fallback_completion_verified"] is True
+    assert payload["result_verified"] is True
     assert payload["mutates"] is True
     assert payload["recommended_exit_code"] == 0
     assert payload["fallback_graph_drip"]["ok"] is True
@@ -52015,6 +61928,121 @@ def test_auto_maintenance_resource_launch_can_run_graph_drip_fallback(tmp_path: 
     assert "graph_drip_fallback_completed" in payload["diagnostics"]
     assert Path(payload["report_json"]).exists()
     assert Path(payload["report_markdown"]).exists()
+
+
+def test_graph_drip_fallback_queues_named_upstream_reindex(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    blocked_session_id = "fallback-blocked-session"
+    calls: list[list[str]] = []
+
+    def fake_run(
+        command: list[str],
+        **_kwargs: Any,
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if len(calls) == 1:
+            stdout = json.dumps(
+                {
+                    "schema": "abyss_machine_resource_plan_v1",
+                    "ok": False,
+                    "blocked_reasons": [
+                        "indexing_unattended_swap_used_pressure"
+                    ],
+                    "denied_reasons": [],
+                    "execution": {
+                        "ok": None,
+                        "returncode": None,
+                    },
+                }
+            )
+        else:
+            child = {
+                "artifact_type": (
+                    "session_memory_graph_maintenance"
+                ),
+                "ok": False,
+                "status": "blocked",
+                "results": [
+                    {
+                        "status": "blocked",
+                        "diagnostics": [
+                            "graph_source_generation_incompatible:"
+                            f"{blocked_session_id}:"
+                            "session_index_generation_identity_changed:"
+                            "recovery=reindex-sessions"
+                        ],
+                    }
+                ],
+                "diagnostics": ["upstream_generation_blocked"],
+            }
+            stdout = json.dumps(
+                {
+                    "schema": "abyss_machine_resource_launch_v1",
+                    "ok": False,
+                    "blocked_reasons": [],
+                    "denied_reasons": [],
+                    "execution": {
+                        "ok": False,
+                        "returncode": 1,
+                        "stdout_tail": json.dumps(child),
+                    },
+                }
+            )
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=stdout,
+            stderr="",
+        )
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        module,
+        "hook_sync_queue_enabled",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        module,
+        "graph_automatic_drip_circuit_state",
+        lambda _root: {
+            "open": False,
+            "reason": "no_blocking_graph_drip_evidence",
+        },
+    )
+
+    payload = module.auto_maintenance_resource_launch(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        profile="backlog",
+        apply=True,
+        reason="timer_backlog",
+        graph_drip_on_block=True,
+    )
+
+    assert len(calls) == 2
+    assert payload["status"] == (
+        "resource_blocked_graph_drip_upstream_reindex_queued"
+    )
+    assert payload["mutates"] is True
+    assert payload["fallback_graph_drip"][
+        "predecessor_handoff_queued"
+    ] is True
+    assert payload["fallback_graph_drip"][
+        "upstream_reindex_session_ids"
+    ] == [blocked_session_id]
+    queued_jobs = sorted(
+        module.hook_worker_dirs(aoa_root)["pending"].glob("*.json")
+    )
+    assert len(queued_jobs) == 1
+    queued = json.loads(queued_jobs[0].read_text(encoding="utf-8"))
+    assert queued["job_type"] == "session_generation_reindex"
+    assert queued["session_id"] == blocked_session_id
+    assert payload["automatic_retry"]["retryable"] is True
 
 
 def test_graph_drip_fallback_reports_ledger_progress_with_remaining_work(
@@ -52642,7 +62670,7 @@ def test_auto_maintenance_retry_dispatch_uses_profile_deadlines_with_aging(
     compact = module.compact_maintenance_status_payload(
         {"automatic_retry": initial}
     )
-    assert compact["automatic_retry"]["dispatch_policy"]["version"] == 3
+    assert compact["automatic_retry"]["dispatch_policy"]["version"] == 7
     assert compact["automatic_retry"]["dispatch_order_due_keys"] == [
         "catchup:all",
         "backlog:all",
@@ -52656,7 +62684,7 @@ def test_auto_maintenance_retry_dispatch_uses_profile_deadlines_with_aging(
         limit=1,
         now_epoch=now_epoch,
     )
-    assert plan["dispatch_policy"]["version"] == 3
+    assert plan["dispatch_policy"]["version"] == 7
     assert plan["planned_queue_keys"] == ["catchup:all"]
     assert plan["planned_items"][0]["dispatch_deadline_epoch"] == 2_295.0
 
@@ -52730,7 +62758,7 @@ def test_auto_maintenance_retry_fairness_lab_bounds_aged_heavy_dispatch_under_ho
     }
     backlog = dispatched_by_key["backlog:all"]
     deep = dispatched_by_key["deep:all"]
-    assert report["dispatch_policy"]["version"] == 3
+    assert report["dispatch_policy"]["version"] == 7
     assert backlog["wait_seconds"] == 1_200.0
     assert backlog["aged_heavy_fairness_reserved"] is True
     assert deep["wait_seconds"] == 3_600.0
@@ -52741,6 +62769,57 @@ def test_auto_maintenance_retry_fairness_lab_bounds_aged_heavy_dispatch_under_ho
     assert report["truth_status"] == (
         "deterministic_queue_selection_lab_under_declared_"
         "dispatcher_capacity_not_runtime_semantic_progress"
+    )
+
+
+def test_auto_maintenance_retry_fairness_lab_bounds_natural_successors_under_current_debt() -> None:
+    current_options = {
+        "persistent_obligation": True,
+        "obligation_kind": module.SESSION_PROJECTION_FRESHNESS_OBLIGATION_KIND,
+        "current_epoch_priority": True,
+    }
+    arrivals: list[dict[str, Any]] = [
+        {
+            "queue_key": f"backlog:old-{index:03d}",
+            "profile": "backlog",
+            "target": f"old-{index:03d}",
+            "arrival_epoch": 1_000.0,
+            "options": current_options,
+        }
+        for index in range(12)
+    ]
+    for tick in range(1_060, 1_661, 60):
+        arrivals.append(
+            {
+                "queue_key": f"backlog:natural-{tick}",
+                "profile": "backlog",
+                "target": f"natural-{tick}",
+                "arrival_epoch": float(tick),
+                "options": current_options,
+            }
+        )
+
+    report = module.auto_maintenance_retry_fairness_lab(
+        arrivals,
+        start_epoch=1_000.0,
+        end_epoch=1_660.0,
+        dispatch_interval_seconds=60.0,
+        dispatch_capacity_per_tick=1,
+    )
+
+    natural_waits = [
+        float(item["wait_seconds"])
+        for item in report["dispatched"]
+        if str(item["queue_key"]).startswith("backlog:natural-")
+    ]
+    assert natural_waits
+    assert max(natural_waits) <= 60.0
+    assert report["dispatch_policy"]["version"] == 7
+    assert report["dispatch_policy"]["strategy"].startswith(
+        "current_epoch_fresh_arrival_reservation"
+    )
+    assert report["dispatch_state"]["current_epoch_dispatch_count"] == len(
+        report["dispatched"]
     )
 
 
@@ -52947,6 +63026,79 @@ def test_auto_maintenance_retry_dispatch_reschedules_retryable_block_with_backof
     assert retry_item["last_status"] == "resource_blocked"
     assert retry_item["next_attempt_epoch"] > due_epoch
     assert retry_item["next_delay_seconds"] > retry_item["base_delay_seconds"]
+
+
+def test_auto_maintenance_retry_lock_contention_never_exhausts_owner_work(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    scheduled = module.auto_maintenance_retry_reconcile(
+        aoa_root=aoa_root,
+        profile="backlog",
+        target="all",
+        reason="timer_backlog",
+        apply=True,
+        launch_ok=False,
+        launch_status="skipped_lock_held",
+        options={},
+        now_epoch=2_000.0,
+    )
+    due_epoch = float(scheduled["next_attempt_epoch"]) + 1
+
+    def put_on_last_attempt(
+        queue_payload: dict[str, Any],
+    ) -> tuple[None, bool]:
+        item = queue_payload["items"]["backlog:all"]
+        item["attempts_started"] = item["max_attempts"] - 1
+        item["next_attempt_epoch"] = due_epoch - 1
+        item["next_attempt_at"] = module.auto_maintenance_retry_iso(
+            due_epoch - 1
+        )
+        return None, True
+
+    module.mutate_auto_maintenance_retry_queue(
+        aoa_root,
+        put_on_last_attempt,
+        now_epoch=due_epoch - 1,
+    )
+    monkeypatch.setattr(
+        module,
+        "auto_maintenance_resource_launch",
+        lambda **_kwargs: {
+            "schema_version": 1,
+            "artifact_type": "auto_maintenance_resource_launch",
+            "ok": False,
+            "status": "skipped_lock_held",
+            "diagnostics": ["lock_held"],
+        },
+    )
+
+    dispatched = module.auto_maintenance_retry_dispatch(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        apply=True,
+        limit=1,
+        now_epoch=due_epoch,
+    )
+
+    after = module.auto_maintenance_retry_queue_status(
+        aoa_root,
+        now_epoch=due_epoch,
+    )
+    result = dispatched["results"][0]
+    retry_item = after["items"]["backlog:all"]
+    assert result["attempt"] == retry_item["max_attempts"]
+    assert result["launch_contended"] is True
+    assert result["disposition"] == "contention_rescheduled"
+    assert retry_item["attempts_started"] == 0
+    assert retry_item["contention_cycles"] == 1
+    assert retry_item["next_delay_seconds"] == retry_item[
+        "base_delay_seconds"
+    ]
+    assert retry_item["next_attempt_epoch"] > due_epoch
 
 
 def test_auto_maintenance_retry_dispatch_starts_new_cycle_after_bounded_progress(
@@ -53348,6 +63500,66 @@ def test_auto_maintenance_retry_dispatch_preserves_timer_reassertion_during_in_f
     assert retry_item["next_attempt_epoch"] > due_epoch
 
 
+def test_auto_maintenance_retry_dispatch_retires_verified_completed_graph_drip(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    scheduled = module.auto_maintenance_retry_reconcile(
+        aoa_root=aoa_root,
+        profile="backlog",
+        target="all",
+        reason="timer_backlog",
+        apply=True,
+        launch_ok=False,
+        launch_status="resource_blocked",
+        options={"graph_drip_on_block": True},
+        now_epoch=100.0,
+    )
+    due_epoch = float(scheduled["next_attempt_epoch"]) + 1
+
+    def completed_launch(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "schema_version": 1,
+            "artifact_type": "auto_maintenance_resource_launch",
+            "ok": True,
+            "status": "resource_blocked_graph_drip_completed",
+            "child_result_verified": False,
+            "fallback_graph_drip": {
+                "ok": True,
+                "status": "completed",
+                "child_result_verified": True,
+                "made_progress": True,
+                "remaining_work": False,
+                "child": {
+                    "artifact_type": "session_memory_graph_maintenance",
+                    "ok": True,
+                    "status": "applied",
+                },
+            },
+        }
+
+    monkeypatch.setattr(module, "auto_maintenance_resource_launch", completed_launch)
+    dispatched = module.auto_maintenance_retry_dispatch(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        apply=True,
+        limit=1,
+        now_epoch=due_epoch,
+    )
+
+    assert scheduled["queue_key"] == "backlog:all"
+    assert dispatched["results"][0]["launch_ok"] is True
+    assert dispatched["results"][0]["launch_result_verified"] is True
+    assert dispatched["results"][0]["disposition"] == "completed"
+    assert module.auto_maintenance_retry_queue_status(
+        aoa_root,
+        now_epoch=due_epoch,
+    )["queued_count"] == 0
+
+
 def test_auto_maintenance_retry_dispatch_records_finish_time_and_backs_off_from_completion(
     tmp_path: Path,
     monkeypatch: Any,
@@ -53412,6 +63624,804 @@ def test_auto_maintenance_retry_dispatch_records_finish_time_and_backs_off_from_
     assert dispatched["completed_at"] == module.auto_maintenance_retry_iso(finish_epoch)
     assert dispatched["elapsed_ms"] == 37_000
     assert dispatched["results"][0]["completed_at"] == module.auto_maintenance_retry_iso(finish_epoch)
+
+
+def test_freshness_obligation_survives_bounded_retry_exhaustion(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    session_id = "persistent-freshness"
+    session_dir = aoa_root / module.SESSION_ROOT / session_id
+    session_dir.mkdir(parents=True)
+    module.write_json(
+        session_dir / "session.manifest.json",
+        {
+            "session_id": session_id,
+            "archive_status": "indexed",
+            "raw": {
+                "indexing_status": "indexed",
+                "bytes": 10,
+                "sha256": "old",
+                "capture_ledger": {
+                    "epoch_id": "epoch-1",
+                    "processed_watermark_bytes": 10,
+                },
+            },
+        },
+    )
+    options = {
+        "persistent_obligation": True,
+        "obligation_kind": (
+            module.SESSION_PROJECTION_FRESHNESS_OBLIGATION_KIND
+        ),
+        "session_id": session_id,
+        "session_dir": str(session_dir),
+        "required_capture_epoch_id": "epoch-1",
+        "required_capture_bytes": 20,
+        "required_capture_sha256": "new",
+        "required_stable_projection": False,
+        "required_search_consumer": False,
+    }
+
+    def schedule(queue_payload: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        item = module.auto_maintenance_retry_upsert_item(
+            queue_payload,
+            profile="deep",
+            target=session_id,
+            reason="test_freshness_obligation",
+            launch_status="freshness_obligation_enqueued",
+            options=options,
+            now_epoch=100.0,
+            initial_delay_seconds=0,
+        )
+        queue_payload["items"][item["queue_key"]][
+            "attempts_started"
+        ] = item["max_attempts"] - 1
+        return item, True
+
+    module.mutate_auto_maintenance_retry_queue(
+        aoa_root,
+        schedule,
+        now_epoch=100.0,
+    )
+    monkeypatch.setattr(
+        module,
+        "auto_maintenance_resource_launch",
+        lambda **_kwargs: {
+            "ok": False,
+            "status": "resource_blocked",
+        },
+    )
+    dispatched = module.auto_maintenance_retry_dispatch(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        apply=True,
+        limit=1,
+        now_epoch=101.0,
+    )
+    queue = module.auto_maintenance_retry_queue_status(
+        aoa_root,
+        now_epoch=101.0,
+    )
+    item = queue["items"][f"deep:{session_id}"]
+    assert dispatched["results"][0]["disposition"] == (
+        "persistent_obligation_rescheduled_after_bounded_cycle"
+    )
+    assert item["attempts_started"] == 0
+    assert item["exhaustion_cycles"] == 1
+    assert item["status"] == "blocked_persistent_obligation"
+    assert queue["freshness_obligation_count"] == 1
+    assert queue["oldest_freshness_obligation_age_seconds"] == 1.0
+
+
+def test_freshness_obligation_closes_only_after_watermark_proof(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    session_id = "watermark-proof"
+    session_dir = aoa_root / module.SESSION_ROOT / session_id
+    session_dir.mkdir(parents=True)
+    manifest_path = session_dir / "session.manifest.json"
+    manifest = {
+        "session_id": session_id,
+        "archive_status": "indexed",
+        "raw": {
+            "indexing_status": "indexed",
+            "bytes": 10,
+            "sha256": "old",
+            "capture_ledger": {
+                "epoch_id": "epoch-1",
+                "processed_watermark_bytes": 10,
+            },
+        },
+    }
+    module.write_json(manifest_path, manifest)
+    options = {
+        "persistent_obligation": True,
+        "obligation_kind": (
+            module.SESSION_PROJECTION_FRESHNESS_OBLIGATION_KIND
+        ),
+        "session_id": session_id,
+        "session_dir": str(session_dir),
+        "required_capture_epoch_id": "epoch-1",
+        "required_capture_bytes": 20,
+        "required_capture_sha256": "new",
+        "required_stable_projection": False,
+        "required_search_consumer": False,
+    }
+
+    def schedule(queue_payload: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        return (
+            module.auto_maintenance_retry_upsert_item(
+                queue_payload,
+                profile="backlog",
+                target=session_id,
+                reason="test_watermark_proof",
+                launch_status="freshness_obligation_enqueued",
+                options=options,
+                now_epoch=200.0,
+                initial_delay_seconds=0,
+            ),
+            True,
+        )
+
+    module.mutate_auto_maintenance_retry_queue(
+        aoa_root,
+        schedule,
+        now_epoch=200.0,
+    )
+
+    launch_kwargs: list[dict[str, Any]] = []
+
+    def publish_required_watermark(**kwargs: Any) -> dict[str, Any]:
+        launch_kwargs.append(kwargs)
+        manifest["raw"].update(
+            {
+                "bytes": 20,
+                "sha256": "new",
+                "capture_ledger": {
+                    "epoch_id": "epoch-1",
+                    "processed_watermark_bytes": 20,
+                },
+            }
+        )
+        module.write_json(manifest_path, manifest)
+        return {
+            "ok": True,
+            "status": "completed",
+            "result_verified": True,
+        }
+
+    monkeypatch.setattr(
+        module,
+        "auto_maintenance_resource_launch",
+        publish_required_watermark,
+    )
+    dispatched = module.auto_maintenance_retry_dispatch(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        apply=True,
+        limit=1,
+        now_epoch=201.0,
+    )
+    result = dispatched["results"][0]
+    assert result["reported_launch_status"] == "completed"
+    assert result["launch_status"] == "freshness_obligation_satisfied"
+    assert result["freshness_obligation_before"]["status"] == "remaining"
+    assert result["freshness_obligation_after"]["status"] == "satisfied"
+    assert result["disposition"] == "completed"
+    child_command = launch_kwargs[0]["child_command_override"]
+    assert "projection-catchup" in child_command
+    assert "--apply" in child_command
+    assert session_id in child_command
+    assert launch_kwargs[0]["execution_id"] == child_command[
+        child_command.index("--execution-id") + 1
+    ]
+    assert launch_kwargs[0]["repair_indexes"] is False
+    assert launch_kwargs[0]["repair_graph"] is False
+    queue = module.auto_maintenance_retry_queue_status(
+        aoa_root,
+        now_epoch=201.0,
+    )
+    assert queue["queued_count"] == 0
+    assert queue["freshness_obligation_count"] == 0
+
+
+def test_freshness_obligation_accepts_exact_legacy_monolithic_projection(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    session_id = "legacy-monolithic-proof"
+    session_dir = aoa_root / module.SESSION_ROOT / session_id
+    session_dir.mkdir(parents=True)
+    module.write_json(
+        session_dir / "session.manifest.json",
+        {
+            "session_id": session_id,
+            "archive_status": "indexed",
+            "raw": {
+                "indexing_status": "indexed",
+                "bytes": 20,
+                "sha256": "exact-capture-digest",
+                "storage_mode": "monolithic_snapshot_v1",
+            },
+        },
+    )
+    options = {
+        "persistent_obligation": True,
+        "obligation_kind": (
+            module.SESSION_PROJECTION_FRESHNESS_OBLIGATION_KIND
+        ),
+        "session_id": session_id,
+        "session_dir": str(session_dir),
+        "required_capture_epoch_id": "capture-epoch-unavailable-in-legacy-manifest",
+        "required_capture_bytes": 20,
+        "required_capture_sha256": "exact-capture-digest",
+        "required_stable_projection": False,
+        "required_search_consumer": False,
+    }
+
+    status = module.session_projection_freshness_obligation_status(
+        aoa_root,
+        options,
+    )
+
+    assert status["ok"] is True
+    assert status["status"] == "satisfied"
+    assert status["proof_mode"] == (
+        "exact_monolithic_capture_digest_fallback"
+    )
+    assert status["projected_capture_epoch_id"] == ""
+
+    manifest = module.read_json(
+        session_dir / "session.manifest.json",
+        {},
+    )
+    manifest["raw"]["capture_ledger"] = {
+        "epoch_id": "different-published-epoch",
+        "processed_watermark_bytes": 20,
+    }
+    module.write_json(
+        session_dir / "session.manifest.json",
+        manifest,
+    )
+    mismatched_epoch = (
+        module.session_projection_freshness_obligation_status(
+            aoa_root,
+            options,
+        )
+    )
+    assert mismatched_epoch["ok"] is False
+    assert mismatched_epoch["proof_mode"] == (
+        "append_only_capture_epoch_watermark"
+    )
+
+
+def test_freshness_obligation_does_not_relaunch_when_session_watermarks_are_current(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    session_id = "watermarks-current"
+    session_dir = aoa_root / module.SESSION_ROOT / session_id
+    session_dir.mkdir(parents=True)
+    module.write_json(
+        session_dir / "session.manifest.json",
+        {
+            "session_id": session_id,
+            "archive_status": "indexed",
+            "raw": {
+                "indexing_status": "indexed",
+                "bytes": 20,
+                "sha256": "capture-current",
+            },
+        },
+    )
+    options = {
+        "persistent_obligation": True,
+        "obligation_kind": module.SESSION_PROJECTION_FRESHNESS_OBLIGATION_KIND,
+        "session_id": session_id,
+        "session_dir": str(session_dir),
+        "required_capture_bytes": 20,
+        "required_capture_sha256": "capture-current",
+    }
+    current_vector = {
+        "axes": {
+            "stable_session_projection": {"current": True},
+            "search": {"current": True},
+        }
+    }
+    monkeypatch.setattr(
+        module,
+        "session_projection_freshness_vector",
+        lambda **_kwargs: current_vector,
+    )
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        module,
+        "auto_maintenance_resource_launch",
+        lambda **kwargs: calls.append(kwargs),
+    )
+
+    def schedule(queue_payload: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        return (
+            module.auto_maintenance_retry_upsert_item(
+                queue_payload,
+                profile="backlog",
+                target=session_id,
+                reason="test_current_watermarks",
+                launch_status="freshness_obligation_enqueued",
+                options=options,
+                now_epoch=300.0,
+                initial_delay_seconds=0,
+            ),
+            True,
+        )
+
+    module.mutate_auto_maintenance_retry_queue(
+        aoa_root,
+        schedule,
+        now_epoch=300.0,
+    )
+    dispatched = module.auto_maintenance_retry_dispatch(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        apply=True,
+        limit=1,
+        now_epoch=301.0,
+    )
+
+    assert calls == []
+    result = dispatched["results"][0]
+    assert result["launch_status"] == "freshness_obligation_satisfied"
+    assert result["freshness_obligation_before"]["remaining_axes"] == []
+    assert result["freshness_obligation_before"]["satisfied_axes"] == [
+        "capture",
+        "stable_session_projection",
+        "search",
+    ]
+    assert result["disposition"] == "completed"
+
+
+def _targeted_freshness_vector(
+    *,
+    stable: bool,
+    search: bool,
+    episode: bool,
+) -> dict[str, Any]:
+    return {
+        "axes": {
+            "raw_capture": {"current": True},
+            "live_overlay": {"current": True},
+            "stable_session_projection": {"current": stable},
+            "search": {"current": search},
+            "episode_semantic": {"current": episode},
+            "entity_registry": {"current": False},
+            "graph": {"current": False},
+        }
+    }
+
+
+def test_targeted_projection_catchup_skips_a_current_session(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    session_id = "targeted-current"
+    session_dir = aoa_root / module.SESSION_ROOT / session_id
+    session_dir.mkdir(parents=True)
+    module.write_json(
+        aoa_root / module.REGISTRY_NAME,
+        {
+            "sessions": [
+                {
+                    "session_id": session_id,
+                    "session_label": session_id,
+                    "path": str(session_dir),
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "session_projection_freshness_vector",
+        lambda **_kwargs: _targeted_freshness_vector(
+            stable=True,
+            search=True,
+            episode=True,
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "session_memory_search_shard_projection_summary",
+        lambda _aoa_root: {"status": "deferred"},
+    )
+    for name in (
+        "reconcile_capture_watch",
+        "reindex_sessions",
+        "search_index_sessions",
+        "episode_semantic_index_sessions",
+    ):
+        monkeypatch.setattr(
+            module,
+            name,
+            lambda **_kwargs: pytest.fail(f"unexpected targeted route: {name}"),
+        )
+
+    payload = module.projection_catchup(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        target=session_id,
+        profile="catchup",
+        apply=True,
+    )
+
+    assert payload["targeted"] is True
+    assert payload["status"] == "freshness_obligation_already_satisfied"
+    assert payload["mutates"] is False
+    assert payload["routed_axes"] == []
+    assert payload["actions"] == []
+    assert payload["required_stale_axes_after"] == []
+    assert set(payload["deferred_global_derivatives"]) == {
+        "search_catalog",
+        "entity_registry",
+        "graph",
+    }
+
+
+def test_targeted_projection_catchup_routes_only_stale_local_axes(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    session_id = "targeted-stale-local"
+    session_dir = aoa_root / module.SESSION_ROOT / session_id
+    session_dir.mkdir(parents=True)
+    module.write_json(
+        aoa_root / module.REGISTRY_NAME,
+        {
+            "sessions": [
+                {
+                    "session_id": session_id,
+                    "session_label": session_id,
+                    "path": str(session_dir),
+                }
+            ]
+        },
+    )
+    phase = {"stable_done": False, "search_done": False}
+
+    def vector(**_kwargs: Any) -> dict[str, Any]:
+        if phase["search_done"]:
+            return _targeted_freshness_vector(
+                stable=True,
+                search=True,
+                episode=True,
+            )
+        return _targeted_freshness_vector(
+            stable=phase["stable_done"],
+            search=False,
+            episode=True,
+        )
+
+    monkeypatch.setattr(module, "session_projection_freshness_vector", vector)
+    monkeypatch.setattr(
+        module,
+        "session_memory_search_shard_projection_summary",
+        lambda _aoa_root: {"status": "deferred"},
+    )
+    monkeypatch.setattr(
+        module,
+        "targeted_projection_catchup_search_gate",
+        lambda _aoa_root: {"admitted": True, "status": "incremental_search_admitted"},
+    )
+    calls: list[str] = []
+
+    def stable_route(**_kwargs: Any) -> dict[str, Any]:
+        calls.append("stable_session_projection")
+        phase["stable_done"] = True
+        return {
+            "ok": True,
+            "mutates": True,
+            "status": "applied",
+            "processed_count": 1,
+        }
+
+    def search_route(**_kwargs: Any) -> dict[str, Any]:
+        calls.append("search")
+        phase["search_done"] = True
+        return {
+            "ok": True,
+            "mutates": True,
+            "status": "applied",
+            "processed_count": 1,
+        }
+
+    monkeypatch.setattr(module, "reindex_sessions", stable_route)
+    monkeypatch.setattr(module, "search_index_sessions", search_route)
+    monkeypatch.setattr(
+        module,
+        "episode_semantic_index_sessions",
+        lambda **_kwargs: pytest.fail("episode semantic axis was current"),
+    )
+    monkeypatch.setattr(
+        module,
+        "reconcile_capture_watch",
+        lambda **_kwargs: pytest.fail("capture axis was current"),
+    )
+
+    payload = module.projection_catchup(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        target=session_id,
+        profile="catchup",
+        apply=True,
+    )
+
+    assert calls == ["stable_session_projection", "search"]
+    assert payload["required_stale_axes_before"] == [
+        "stable_session_projection",
+        "search",
+    ]
+    assert payload["required_stale_axes_after"] == []
+    assert payload["routed_axes"] == [
+        "stable_session_projection",
+        "search",
+    ]
+    assert payload["status"] == (
+        "targeted_catchup_applied_with_deferred_global_derivatives"
+    )
+    assert payload["mutates"] is True
+    assert all(
+        item["status"] == "deferred_bounded_session_scope"
+        for item in payload["deferred_global_derivatives"].values()
+    )
+
+
+def test_targeted_search_resume_consumes_stable_snapshot_without_republish_for_live_tail(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    session_id = "targeted-search-only-resume"
+    session_dir = aoa_root / module.SESSION_ROOT / session_id
+    session_dir.mkdir(parents=True)
+    stable_publish_id = "stable-publish-before-live-tail"
+    module.write_json(
+        session_dir / "session.manifest.json",
+        {
+            "session_id": session_id,
+            "archive_status": "indexed",
+            "index_schema": {
+                "projection_publish": {"publish_id": stable_publish_id}
+            },
+        },
+    )
+    module.write_json(
+        aoa_root / module.REGISTRY_NAME,
+        {
+            "sessions": [
+                {
+                    "session_id": session_id,
+                    "session_label": session_id,
+                    "path": str(session_dir),
+                }
+            ]
+        },
+    )
+    execution_id = "targeted-search-only-execution"
+    expected_generation_digest = module.search_index_progress_digest(
+        module.session_memory_expected_generation_identities(aoa_root)
+    )
+    monkeypatch.setattr(
+        module,
+        "search_index_progress_checkpoint_for_target",
+        lambda **_kwargs: {
+            "status": "present",
+            "path": "checkpoint.json",
+            "execution_id": execution_id,
+            "checkpoint": {
+                "status": "interrupted",
+                "execution_id": execution_id,
+                "binding": {
+                    "target": session_id,
+                    "rebuild": False,
+                    "db_path": str(module.search_db_path(aoa_root)),
+                    "search_schema_version": module.SEARCH_SCHEMA_VERSION,
+                    "generation_digest": expected_generation_digest,
+                    "stable_publish_ids": [stable_publish_id],
+                    "selection": [{"session_id": session_id}],
+                },
+                "cursor": {"next_record_index": 0},
+            },
+        },
+    )
+    phases = {"search_done": False}
+
+    def vector(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "axes": {
+                "raw_capture": {"current": False},
+                "live_overlay": {"current": True},
+                "stable_session_projection": {"current": True},
+                "search": {"current": phases["search_done"]},
+                "episode_semantic": {"current": True},
+                "entity_registry": {"current": False},
+                "graph": {"current": False},
+            }
+        }
+
+    monkeypatch.setattr(module, "session_projection_freshness_vector", vector)
+    monkeypatch.setattr(
+        module,
+        "targeted_projection_catchup_search_gate",
+        lambda _aoa_root: {
+            "admitted": True,
+            "status": "incremental_search_admitted",
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "session_memory_search_shard_projection_summary",
+        lambda _aoa_root: {"status": "deferred"},
+    )
+    monkeypatch.setattr(
+        module,
+        "reconcile_capture_watch",
+        lambda **_kwargs: pytest.fail("live tail must remain a later overlay"),
+    )
+    monkeypatch.setattr(
+        module,
+        "reindex_sessions",
+        lambda **_kwargs: pytest.fail(
+            "search-only resume must not republish the stable projection"
+        ),
+    )
+    search_calls: list[dict[str, Any]] = []
+
+    def search_route(**kwargs: Any) -> dict[str, Any]:
+        search_calls.append(kwargs)
+        phases["search_done"] = True
+        return {
+            "ok": True,
+            "mutates": True,
+            "status": "applied",
+            "processed_count": 1,
+        }
+
+    monkeypatch.setattr(module, "search_index_sessions", search_route)
+    monkeypatch.setattr(
+        module,
+        "episode_semantic_index_sessions",
+        lambda **_kwargs: pytest.fail("episode semantic axis was current"),
+    )
+
+    payload = module.projection_catchup(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        target=session_id,
+        profile="catchup",
+        apply=True,
+        execution_id=execution_id,
+    )
+
+    assert payload["search_only_resume"] is True
+    assert payload["search_only_resume_blocked"] is False
+    assert payload["search_resume_checkpoint"]["compatible"] is True
+    assert search_calls and search_calls[0]["execution_id"] == execution_id
+    assert payload["routed_axes"] == ["search"]
+    assert payload["freshness_after"]["axes"]["raw_capture"]["current"] is False
+    assert payload["freshness_after"]["axes"]["stable_session_projection"]["current"] is True
+    assert payload["required_stale_axes_after"] == ["raw_capture"]
+
+
+def test_search_index_incompatible_generation_checkpoint_fails_closed(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    session_id = "incompatible-search-generation"
+    transcript = tmp_path / "rollout-incompatible-search-generation.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-06-17T00:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": session_id, "cwd": str(repo)},
+            },
+            {
+                "timestamp": "2026-06-17T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "Generation fence."}],
+                },
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": session_id,
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    initial = module.search_index_sessions(aoa_root=aoa_root, target="all")
+    assert initial["ok"] is True
+    record = module.resolve_session_record(aoa_root, session_id)
+    raw_policy = module.search_raw_lexical_policy(None, use_default_budget=True)
+    binding = module.search_index_progress_binding(
+        target=session_id,
+        rebuild=False,
+        db_path=module.search_db_path(aoa_root),
+        records=[record],
+        generation_identities=module.session_memory_expected_generation_identities(aoa_root),
+        source_scope_complete=False,
+        max_raw_bytes=raw_policy.get("effective_max_raw_bytes"),
+        include_raw_event_text=True,
+        store_raw_text=True,
+        projection_storage_mode=None,
+        context_tail_omission_policy=module.SEARCH_CONTEXT_TAIL_OMISSION_POLICY_KEEP_ALL,
+        defer_global_derivatives=False,
+    )
+    binding["generation_digest"] = "stale-generation-digest"
+    execution_id = "incompatible-generation-execution"
+    checkpoint_path = module.search_index_progress_checkpoint_path(
+        aoa_root,
+        execution_id=execution_id,
+        target=session_id,
+        rebuild=False,
+        db_path=module.search_db_path(aoa_root),
+    )
+    module.write_search_index_progress_checkpoint(
+        path=checkpoint_path,
+        execution_id=execution_id,
+        binding=binding,
+        sequence=1,
+        status="interrupted",
+        phase="budget_boundary",
+        next_record_index=0,
+        active_record_index=1,
+        active_session_id=session_id,
+        completed_sessions=[],
+    )
+    monkeypatch.setattr(
+        module,
+        "init_search_db",
+        lambda **_kwargs: pytest.fail("incompatible checkpoint must not mutate search DB"),
+    )
+
+    result = module.search_index_sessions(
+        aoa_root=aoa_root,
+        target=session_id,
+        selected_records=[record],
+        rebuild=False,
+        budget_seconds=30,
+        execution_id=execution_id,
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == "incompatible_search_progress_checkpoint"
+    assert "search_progress_checkpoint_generation_incompatible" in result["diagnostics"]
+    assert result["semantic_completion"] is False
 
 
 def test_deep_auto_maintenance_resource_defaults_to_graph_drip_fallback(tmp_path: Path, monkeypatch: Any) -> None:
@@ -53550,6 +64560,50 @@ def test_live_tail_status_reports_ready_after_quiet_window() -> None:
     assert status["waiting_count"] == 0
     assert status["max_quiet_remaining_seconds"] == 0
     assert status["samples"][0]["ready_for_catchup"] is True
+
+
+def test_live_tail_status_rechecks_recent_transcript_before_catchup(
+    tmp_path: Path,
+) -> None:
+    now = time.time()
+    transcript = tmp_path / "live.jsonl"
+    transcript.write_text('{"type":"event_msg"}\n', encoding="utf-8")
+    os.utime(transcript, (now - 30, now - 30))
+
+    status = module.session_memory_live_tail_status(
+        search={
+            "deferred_live_session_count": 1,
+            "deferred_live_sessions": [
+                {
+                    "session_id": "persisted-quiet-but-live-now",
+                    "session_label": (
+                        "2026-06-18__001__persisted-quiet-but-live-now"
+                    ),
+                    "source_latest_mtime": now - 900,
+                    "live_transcript_mtime": now - 900,
+                    "live_transcript_path": str(transcript),
+                    "deferred_live_reason": (
+                        "recent_live_codex_transcript_update"
+                    ),
+                }
+            ],
+        },
+        graph={"deferred_live_source_count": 0},
+        quiet_seconds=600,
+        now_ts=now,
+    )
+
+    assert status["status"] == "waiting_for_quiet_window"
+    assert status["ready_count"] == 0
+    assert status["waiting_count"] == 1
+    assert status["samples"][0]["live_transcript_rechecked"] is True
+    assert status["samples"][0]["persisted_live_transcript_mtime"] == (
+        now - 900
+    )
+    assert status["samples"][0]["observed_live_transcript_mtime"] == (
+        now - 30
+    )
+    assert status["samples"][0]["quiet_remaining_seconds"] == 570
 
 
 def test_live_tail_status_runs_catchup_when_any_session_is_ready() -> None:
@@ -57080,6 +68134,13 @@ def test_search_operational_route_rollup_materializes_ref_samples(tmp_path: Path
         route_layer="goal",
         event_type="TOOL_OUTPUT",
     )
+    insert_event(
+        "direct-tool-doc",
+        usage_role="usage",
+        route_signal=module.route_signal_token("tool", "exec_command"),
+        route_layer="tool",
+        event_type="TOOL_CALL",
+    )
     conn.commit()
     conn.close()
 
@@ -57102,7 +68163,7 @@ def test_search_operational_route_rollup_materializes_ref_samples(tmp_path: Path
                     "shard_db_path": str(shard_db),
                     "materialized": True,
                     "status": "current",
-                    "document_count": 6,
+                    "document_count": 7,
                     "total_with_wal_bytes": shard_db.stat().st_size,
                     "total_with_wal_human": module.human_size(shard_db.stat().st_size),
                 }
@@ -57137,7 +68198,7 @@ def test_search_operational_route_rollup_materializes_ref_samples(tmp_path: Path
     assert applied["status"] == "current"
     assert applied["written"] is True
     assert applied["totals"]["route_rollup_row_count"] == 4
-    assert applied["totals"]["candidate_route_posting_count"] == 4
+    assert applied["totals"]["candidate_route_posting_count"] == 5
     assert Path(applied["report_json"]).exists()
     assert Path(applied["report_markdown"]).exists()
     assert not Path(str(target_db) + "-wal").exists()
@@ -57152,8 +68213,9 @@ def test_search_operational_route_rollup_materializes_ref_samples(tmp_path: Path
     rollup_conn.close()
 
     assert row is not None
-    assert row["posting_count"] == 1
+    assert row["posting_count"] == 2
     assert "raw:line:candidate-with-route" in json.loads(row["raw_refs_json"])
+    assert "raw:line:direct-tool-doc" in json.loads(row["raw_refs_json"])
     assert "segments/000__initial-to-latest.md" in json.loads(row["segment_refs_json"])
     assert "rollup-session" in json.loads(row["session_ids_json"])
     assert decision_row is not None
@@ -58500,11 +69562,11 @@ def test_graph_pressure_summary_routes_cardinality_before_physical_compaction(tm
             "status": "current",
             "counts": {
                 "node": {"event": 1_500_000, "entity": 50_000},
-                "edge": {"mentions_route_signal": 13_000_000, "has_event": 1_500_000},
+                "edge": {"event_has_route_signal": 13_000_000, "has_event": 1_500_000},
             },
             "top": {
                 "node": [{"type": "event", "count": 1_500_000}],
-                "edge": [{"type": "mentions_route_signal", "count": 13_000_000}],
+                "edge": [{"type": "event_has_route_signal", "count": 13_000_000}],
             },
             "diagnostics": [],
         },
@@ -58539,7 +69601,7 @@ def test_graph_pressure_summary_routes_cardinality_before_physical_compaction(tm
     assert summary["status"] == "large_cardinality_dominates"
     assert summary["node_count"] == 1_550_000
     assert summary["edge_count"] == 14_500_000
-    assert summary["top_edge_types"][0]["type"] == "mentions_route_signal"
+    assert summary["top_edge_types"][0]["type"] == "event_has_route_signal"
     assert summary["physical_compaction"]["status"] == "blocked_low_disk_headroom"
     assert summary["physical_compaction"]["reclaim_ratio"] < 0.1
     assert "cardinality reduction" in summary["next_route"]
@@ -58558,15 +69620,15 @@ def test_graph_pressure_summary_surfaces_cardinality_before_size_warning(tmp_pat
             "counts": {
                 "node": {"event": 2_000_000, "path": 220_000},
                 "edge": {
-                    "event_mentions_registered_entity": 3_700_000,
-                    "mentions_route_signal": 3_000_000,
+                    "event_has_registered_entity_signal": 3_700_000,
+                    "event_has_route_signal": 3_000_000,
                     "has_event": 2_100_000,
                     "session_has_route_signal": 1_400_000,
                 },
             },
             "top": {
                 "node": [{"type": "event", "count": 2_000_000}],
-                "edge": [{"type": "event_mentions_registered_entity", "count": 3_700_000}],
+                "edge": [{"type": "event_has_registered_entity_signal", "count": 3_700_000}],
             },
             "diagnostics": [],
         },
@@ -58604,8 +69666,8 @@ def test_graph_pressure_summary_surfaces_cardinality_before_size_warning(tmp_pat
     assert summary["physical_compaction"]["conservative_reclaimable_bytes"] == 0
     assert summary["high_fanout_policy"]["status"] == "large_cardinality_dominates"
     assert summary["high_fanout_policy"]["dominant_edge_types"][:2] == [
-        "event_mentions_registered_entity",
-        "mentions_route_signal",
+        "event_has_registered_entity_signal",
+        "event_has_route_signal",
     ]
     assert summary["high_fanout_policy"]["replacement_readiness"]["status"] == "not_ready_for_prune"
     assert summary["high_fanout_policy"]["replacement_readiness"]["candidate_count"] == 3
@@ -58626,15 +69688,15 @@ def test_graph_high_fanout_policy_keeps_replacement_boundary(tmp_path: Path, mon
             "counts": {
                 "node": {"event": 2_000_000, "entity": 220_000},
                 "edge": {
-                    "event_mentions_registered_entity": 3_700_000,
-                    "mentions_route_signal": 3_000_000,
+                    "event_has_registered_entity_signal": 3_700_000,
+                    "event_has_route_signal": 3_000_000,
                     "has_event": 2_100_000,
                     "session_has_route_signal": 1_400_000,
                 },
             },
             "top": {
                 "node": [{"type": "event", "count": 2_000_000}],
-                "edge": [{"type": "event_mentions_registered_entity", "count": 3_700_000}],
+                "edge": [{"type": "event_has_registered_entity_signal", "count": 3_700_000}],
             },
             "diagnostics": [],
         },
@@ -58647,15 +69709,15 @@ def test_graph_high_fanout_policy_keeps_replacement_boundary(tmp_path: Path, mon
     assert payload["mutates"] is False
     assert payload["status"] == "large_cardinality_dominates"
     assert payload["edge_count"] == 10_200_000
-    assert payload["dominant_edge_types"][:2] == ["event_mentions_registered_entity", "mentions_route_signal"]
-    assert payload["edge_policies"][0]["edge_type"] == "event_mentions_registered_entity"
+    assert payload["dominant_edge_types"][:2] == ["event_has_registered_entity_signal", "event_has_route_signal"]
+    assert payload["edge_policies"][0]["edge_type"] == "event_has_registered_entity_signal"
     assert payload["edge_policies"][0]["can_prune_now"] is False
     assert payload["edge_policies"][0]["replacement_required_before_prune"] is True
     assert payload["edge_policies"][0]["compact_query_route"] == "usage-chain"
     assert payload["edge_policies"][0]["replacement_plan"]["status"] == "replacement_projection_required"
     assert payload["edge_policies"][0]["replacement_plan"]["target_projection"] == "entity_usage_rollup_by_anchor_session_segment"
     assert "raw_or_segment_refs_preserved" in payload["edge_policies"][0]["replacement_plan"]["missing_proof_gates"]
-    assert payload["edge_policies"][1]["edge_type"] == "mentions_route_signal"
+    assert payload["edge_policies"][1]["edge_type"] == "event_has_route_signal"
     assert payload["edge_policies"][1]["current_policy"] == module.GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY
     assert "segment_has_route_signal" in payload["edge_policies"][1]["replacement_layers"]
     assert payload["edge_policies"][1]["replacement_plan"]["status"] == "compact_layers_exist_replacement_projection_unproven"
@@ -58663,8 +69725,8 @@ def test_graph_high_fanout_policy_keeps_replacement_boundary(tmp_path: Path, mon
     assert payload["high_fanout_nodes"][0]["node_type"] == "event"
     assert payload["replacement_readiness"]["status"] == "not_ready_for_prune"
     assert payload["replacement_readiness"]["candidate_edge_types"] == [
-        "event_mentions_registered_entity",
-        "mentions_route_signal",
+        "event_has_registered_entity_signal",
+        "event_has_route_signal",
         "has_event",
     ]
     assert payload["replacement_readiness"]["proof_gap_count"] >= 6
@@ -58794,8 +69856,8 @@ def test_graph_high_fanout_policy_reads_entity_replacement_corpus_evidence(
             "counts": {
                 "node": {"event": 2_000_000},
                 "edge": {
-                    "event_mentions_registered_entity": 3_700_000,
-                    "mentions_route_signal": 3_000_000,
+                    "event_has_registered_entity_signal": 3_700_000,
+                    "event_has_route_signal": 3_000_000,
                     "has_event": 2_100_000,
                     "session_has_route_signal": 1_400_000,
                 },
@@ -58808,7 +69870,7 @@ def test_graph_high_fanout_policy_reads_entity_replacement_corpus_evidence(
     payload = module.graph_high_fanout_policy(aoa_root=aoa_root, limit=4)
 
     entity_plan = payload["edge_policies"][0]["replacement_plan"]
-    assert entity_plan["edge_type"] == "event_mentions_registered_entity"
+    assert entity_plan["edge_type"] == "event_has_registered_entity_signal"
     assert entity_plan["missing_proof_gates"] == ["before_after_cardinality_comparison"]
     assert "entity_usage_rollup_samples_match_event_refs" in entity_plan["proven_proof_gates"]
     assert "usage_chain_preserves_consequence_links" in entity_plan["proven_proof_gates"]
@@ -58940,8 +70002,8 @@ def test_graph_high_fanout_policy_reads_route_signal_replacement_corpus_evidence
             "counts": {
                 "node": {"event": 2_000_000},
                 "edge": {
-                    "event_mentions_registered_entity": 3_700_000,
-                    "mentions_route_signal": 3_000_000,
+                    "event_has_registered_entity_signal": 3_700_000,
+                    "event_has_route_signal": 3_000_000,
                     "has_event": 2_100_000,
                     "session_has_route_signal": 1_400_000,
                 },
@@ -58956,7 +70018,7 @@ def test_graph_high_fanout_policy_reads_route_signal_replacement_corpus_evidence
     route_plan = next(
         row["replacement_plan"]
         for row in payload["edge_policies"]
-        if row["edge_type"] == "mentions_route_signal"
+        if row["edge_type"] == "event_has_route_signal"
     )
     assert route_plan["status"] == "compact_layers_exist_replacement_quality_proven_cardinality_unproven"
     assert route_plan["missing_proof_gates"] == ["before_after_cardinality_comparison"]
@@ -59107,8 +70169,8 @@ def test_graph_high_fanout_policy_reads_structural_event_chain_corpus_evidence(
             "counts": {
                 "node": {"event": 2_000_000},
                 "edge": {
-                    "event_mentions_registered_entity": 3_700_000,
-                    "mentions_route_signal": 3_000_000,
+                    "event_has_registered_entity_signal": 3_700_000,
+                    "event_has_route_signal": 3_000_000,
                     "has_event": 2_100_000,
                     "session_has_route_signal": 1_400_000,
                 },
@@ -59160,9 +70222,9 @@ def test_graph_high_fanout_cardinality_comparison_proves_configured_targets(
         "counts": {
             "node": {"event": 700},
             "edge": {
-                "event_mentions_registered_entity": 1000,
+                "event_has_registered_entity_signal": 1000,
                 "session_has_registered_entity": 50,
-                "mentions_route_signal": 800,
+                "event_has_route_signal": 800,
                 "segment_has_route_signal": 500,
                 "session_has_route_signal": 350,
                 "has_event": 700,
@@ -59244,9 +70306,9 @@ def test_graph_high_fanout_cardinality_uses_explicit_counterfactual_for_default_
         "counts": {
             "node": {"event": 700},
             "edge": {
-                "event_mentions_registered_entity": 1000,
+                "event_has_registered_entity_signal": 1000,
                 "session_has_registered_entity": 50,
-                "mentions_route_signal": 800,
+                "event_has_route_signal": 800,
                 "answered_by": 100,
                 "responds_to": 100,
                 "has_task_episode": 5,
@@ -59322,9 +70384,9 @@ def test_graph_high_fanout_cardinality_blocks_partial_episode_replacement(
         "counts": {
             "node": {"event": 700},
             "edge": {
-                "event_mentions_registered_entity": 1000,
+                "event_has_registered_entity_signal": 1000,
                 "session_has_registered_entity": 50,
-                "mentions_route_signal": 800,
+                "event_has_route_signal": 800,
                 "segment_has_route_signal": 500,
                 "session_has_route_signal": 350,
                 "has_event": 700,
@@ -59391,9 +70453,9 @@ def test_graph_high_fanout_policy_closes_cardinality_gate_but_not_prune_apply(
         "counts": {
             "node": {"event": 2_000_000},
             "edge": {
-                "event_mentions_registered_entity": 3_700_000,
+                "event_has_registered_entity_signal": 3_700_000,
                 "session_has_registered_entity": 58_000,
-                "mentions_route_signal": 3_000_000,
+                "event_has_route_signal": 3_000_000,
                 "segment_has_route_signal": 340_000,
                 "session_has_route_signal": 810_000,
                 "has_event": 2_100_000,
@@ -59473,7 +70535,7 @@ def test_graph_high_fanout_policy_closes_cardinality_gate_but_not_prune_apply(
         for action in payload["next_actions"]
         if isinstance(action, dict)
     }
-    for edge_type in ("event_mentions_registered_entity", "mentions_route_signal", "has_event"):
+    for edge_type in ("event_has_registered_entity_signal", "event_has_route_signal", "has_event"):
         plan = next(row["replacement_plan"] for row in payload["edge_policies"] if row["edge_type"] == edge_type)
         assert plan["missing_proof_gates"] == []
         assert "before_after_cardinality_comparison" in plan["proven_proof_gates"]
@@ -60676,6 +71738,95 @@ def test_catchup_auto_maintenance_treats_route_readiness_remaining_as_expected_b
     assert "index_maintenance_needed" in payload["diagnostics"]
 
 
+def test_route_readiness_evidence_absence_does_not_schedule_maintenance_retry() -> None:
+    maintenance = {
+        "action_counts": {"applied": 5, "observed_evidence_gap": 1},
+        "actions": [
+            {
+                "id": "route_readiness",
+                "needed": True,
+                "status": "observed_evidence_gap",
+                "dirty_count": 2,
+                "result": {
+                    "ok": False,
+                    "remaining_count": 3,
+                    "actionable_remaining_count": 0,
+                    "evidence_absence_count": 3,
+                    "retry_recommended": False,
+                },
+            }
+        ],
+    }
+
+    assert (
+        module.auto_maintenance_has_remaining_route_readiness_backlog(
+            maintenance
+        )
+        is False
+    )
+
+
+def test_route_readiness_structural_gap_remains_retryable() -> None:
+    maintenance = {
+        "action_counts": {"remaining": 1},
+        "actions": [
+            {
+                "id": "route_readiness",
+                "needed": True,
+                "status": "remaining",
+                "result": {
+                    "remaining_count": 1,
+                    "actionable_remaining_count": 1,
+                    "evidence_absence_count": 0,
+                    "retry_recommended": True,
+                },
+            }
+        ],
+    }
+
+    assert (
+        module.auto_maintenance_has_remaining_route_readiness_backlog(
+            maintenance
+        )
+        is True
+    )
+
+
+def test_current_post_probe_retires_bounded_global_derivative_deferral() -> None:
+    maintenance = {
+        "action_counts": {"applied": 4},
+        "global_derivatives": {
+            "status": "deferred_bounded_scope",
+            "query_availability": (
+                "monolith_search_current_shard_routes_fail_closed_to_monolith"
+            ),
+        },
+    }
+
+    assert (
+        module.auto_maintenance_deferred_global_derivatives_retryable(
+            maintenance,
+            post_freshness={
+                "ok": True,
+                "needs_index_maintenance": False,
+                "diagnostics": [],
+            },
+        )
+        is False
+    )
+    assert (
+        module.auto_maintenance_deferred_global_derivatives_retryable(
+            maintenance,
+            post_freshness={
+                "ok": False,
+                "needs_index_maintenance": True,
+                "diagnostics": ["index_maintenance_needed"],
+            },
+        )
+        is True
+    )
+
+
 def test_search_schema_transition_21_to_22_stays_incremental_when_structurally_ready() -> None:
     freshness = {
         "search_index": {
@@ -60796,6 +71947,585 @@ def test_index_maintenance_plans_declared_search_schema_transition_incrementally
     assert search_action["action_kind"] == "incremental_update"
     assert "--no-rebuild" in search_action["command"]
     assert search_action["selection_count"] == 1
+
+
+def test_atlas_clean_rebuild_policy_separates_structural_drift_from_session_drift() -> None:
+    assert module.atlas_clean_rebuild_reasons_for_state(
+        {
+            "status": "stale",
+            "reasons": [
+                "atlas_generation_identity_changed",
+                "session_projection_dirty",
+            ],
+        }
+    ) == ["atlas_generation_identity_changed"]
+    assert module.atlas_clean_rebuild_reasons_for_state(
+        {
+            "status": "stale",
+            "reasons": [
+                "atlas_publish_epoch_incomplete",
+                "atlas_axis_publish_epoch_mismatch",
+            ],
+        }
+    ) == [
+        "atlas_axis_publish_epoch_mismatch",
+        "atlas_publish_epoch_incomplete",
+    ]
+    assert module.atlas_clean_rebuild_reasons_for_state(
+        {
+            "status": "stale",
+            "reasons": ["session_projection_dirty"],
+        }
+    ) == []
+
+
+def test_index_maintenance_defers_incompatible_atlas_to_deep_and_deep_plans_clean(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "atlas-incompatible-generation.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-07-18T02:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "atlas-incompatible-generation",
+                    "cwd": str(workspace),
+                },
+            },
+            {
+                "timestamp": "2026-07-18T02:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Find the Atlas migration evidence.",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "atlas-incompatible-generation",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    assert module.search_index_sessions(
+        aoa_root=aoa_root,
+        target="all",
+    )["ok"] is True
+    assert module.build_agent_atlas(
+        aoa_root=aoa_root,
+        target="all",
+        clean=True,
+    )["ok"] is True
+    root_path = aoa_root / "maps" / "index.json"
+    root_payload = module.read_json(root_path, {})
+    root_payload["generation_identity"]["generation_id"] = (
+        "legacy-incompatible-atlas-generation"
+    )
+    module.write_json(root_path, root_payload)
+    records = module.chronological_session_records(aoa_root)
+
+    producer_calls: list[dict[str, Any]] = []
+
+    def forbidden_incremental_atlas(**kwargs: Any) -> dict[str, Any]:
+        producer_calls.append(kwargs)
+        raise AssertionError(
+            "bounded catchup must defer incompatible Atlas before producer invocation"
+        )
+
+    monkeypatch.setattr(
+        module,
+        "build_agent_atlas",
+        forbidden_incremental_atlas,
+    )
+    catchup = module.maintain_indexes(
+        aoa_root=aoa_root,
+        target="all",
+        apply=True,
+        repair_token_accounting=False,
+        repair_graph=False,
+        selected_records=records,
+        selection_scope={
+            "profile": "catchup",
+            "global_scope_complete": False,
+        },
+        budget_seconds=30.0,
+    )
+    catchup_atlas = next(
+        action
+        for action in catchup["actions"]
+        if action["id"] == "rebuild_agent_atlas"
+    )
+    assert producer_calls == []
+    assert catchup_atlas["status"] == "deferred"
+    assert catchup_atlas["action_kind"] == "full_rebuild"
+    assert catchup_atlas["result"]["status"] == (
+        "deferred_clean_rebuild_to_deep"
+    )
+    assert catchup_atlas["result"]["processed_count"] == 0
+    assert catchup_atlas["result"]["remaining_count"] == 1
+    assert catchup_atlas["command"][2:5] == [
+        "auto-maintenance",
+        "deep",
+        "all",
+    ]
+    assert "--no-clean" not in catchup_atlas["command"]
+    assert "<workspace>" not in catchup_atlas["command"]
+    assert str(workspace.resolve()) in catchup_atlas["command"]
+    assert catchup["atlas_rebuild_deferred_to_deep"] is True
+    assert catchup["atlas_repair_remaining_count"] == 1
+
+    deep = module.maintain_indexes(
+        aoa_root=aoa_root,
+        target="all",
+        apply=False,
+        repair_token_accounting=False,
+        repair_graph=False,
+        selected_records=records,
+        selection_scope={
+            "profile": "deep",
+            "global_scope_complete": False,
+        },
+        budget_seconds=30.0,
+    )
+    deep_atlas = next(
+        action
+        for action in deep["actions"]
+        if action["id"] == "rebuild_agent_atlas"
+    )
+    assert deep["atlas_clean_rebuild_required"] is True
+    assert deep["atlas_rebuild_deferred_to_deep"] is False
+    assert deep_atlas["status"] == "planned"
+    assert deep_atlas["action_kind"] == "full_rebuild"
+    assert deep_atlas["command"][2:5] == ["atlas", "build", "all"]
+    assert "--no-clean" not in deep_atlas["command"]
+
+
+def test_projection_source_set_retirement_fails_closed_and_deep_rebuilds_without_raw_loss(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    sessions = (
+        (
+            "lifecycle-keep",
+            "KEEP-LIFECYCLE-7A91",
+            "2026-07-18T03:00:00Z",
+        ),
+        (
+            "lifecycle-retire",
+            "RETIRE-LIFECYCLE-9F3B",
+            "2026-07-18T04:00:00Z",
+        ),
+    )
+    for session_id, marker, timestamp in sessions:
+        transcript = tmp_path / f"{session_id}.jsonl"
+        write_jsonl(
+            transcript,
+            [
+                {
+                    "timestamp": timestamp,
+                    "type": "session_meta",
+                    "payload": {
+                        "id": session_id,
+                        "cwd": str(repo),
+                    },
+                },
+                {
+                    "timestamp": timestamp,
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": f"Investigate {marker} and preserve evidence.",
+                            }
+                        ],
+                    },
+                },
+                {
+                    "timestamp": timestamp,
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": f"Verified {marker} in the owner source.",
+                            }
+                        ],
+                    },
+                },
+            ],
+        )
+        module.handle_hook_event(
+            "Stop",
+            {
+                "session_id": session_id,
+                "transcript_path": str(transcript),
+                "cwd": str(repo),
+                "hook_event_name": "Stop",
+            },
+            workspace_root=workspace,
+            aoa_root=aoa_root,
+        )
+
+    indexed = module.search_index_sessions(aoa_root=aoa_root, target="all")
+    assert indexed["ok"] is True
+    assert indexed["source_scope_complete"] is True
+    assert indexed["source_set_identity"]["session_count"] == 2
+    assert module.build_agent_atlas(
+        aoa_root=aoa_root,
+        target="all",
+        clean=True,
+    )["ok"] is True
+    assert module.build_session_graph(
+        aoa_root=aoa_root,
+        target="all",
+        write=True,
+        include_rows=False,
+    )["ok"] is True
+    sharded = module.materialize_search_shards(
+        aoa_root=aoa_root,
+        target="all",
+        rebuild_shards=True,
+        dirty_only=False,
+        structured_only=True,
+    )
+    assert sharded["ok"] is True
+
+    registry_path = aoa_root / module.REGISTRY_NAME
+    registry = module.read_json(registry_path, {})
+    retired_record = next(
+        item
+        for item in registry["sessions"]
+        if item.get("session_id") == "lifecycle-retire"
+    )
+    retired_raw = (
+        Path(str(retired_record["path"]))
+        / "raw"
+        / "session.raw.jsonl"
+    )
+    raw_sha_before = module.sha256_file(retired_raw)
+    registry["sessions"] = [
+        item
+        for item in registry["sessions"]
+        if item.get("session_id") != "lifecycle-retire"
+    ]
+    module.write_json(registry_path, registry)
+    current_records = module.chronological_session_records(aoa_root)
+    latest_source_mtime, _ = module.latest_index_source_mtime(
+        aoa_root,
+        current_records,
+    )
+
+    bounded_state = module.sqlite_search_index_state(
+        aoa_root,
+        latest_source_mtime,
+        current_records,
+        source_scope_complete=False,
+    )
+    assert bounded_state["status"] == "stale"
+    assert bounded_state["orphaned_session_ids"] == [
+        "lifecycle-retire"
+    ]
+    assert module.SEARCH_SOURCE_SET_REMOVED_REASON in bounded_state["reasons"]
+    atlas_state = module.atlas_index_state(
+        aoa_root,
+        latest_source_mtime,
+        current_records,
+        source_scope_complete=False,
+    )
+    assert atlas_state["orphaned_session_ids"] == ["lifecycle-retire"]
+    assert "atlas_source_set_removed" in atlas_state["reasons"]
+
+    withheld = module.search_sessions(
+        aoa_root=aoa_root,
+        query="RETIRE-LIFECYCLE-9F3B",
+        limit=5,
+    )
+    assert withheld["result_count"] == 0
+    assert withheld["answer_admission"]["admitted"] is False
+    assert withheld["search_projection"]["source_set_state"][
+        "removed_session_ids"
+    ] == ["lifecycle-retire"]
+    episode_withheld = module.episode_semantic_search(
+        aoa_root=aoa_root,
+        query="RETIRE-LIFECYCLE-9F3B",
+        limit=5,
+    )
+    assert episode_withheld["result_count"] == 0
+    assert episode_withheld["answer_admission"]["admitted"] is False
+
+    original_search_index_sessions = module.search_index_sessions
+    producer_calls: list[dict[str, Any]] = []
+
+    def forbidden_bounded_replacement(**kwargs: Any) -> dict[str, Any]:
+        producer_calls.append(kwargs)
+        raise AssertionError(
+            "bounded catchup must defer source-set replacement"
+        )
+
+    monkeypatch.setattr(
+        module,
+        "search_index_sessions",
+        forbidden_bounded_replacement,
+    )
+    catchup = module.maintain_indexes(
+        aoa_root=aoa_root,
+        target="all",
+        apply=True,
+        repair_token_accounting=False,
+        repair_graph=False,
+        selected_records=current_records,
+        selection_scope={
+            "profile": "catchup",
+            "global_scope_complete": False,
+        },
+        budget_seconds=30.0,
+    )
+    catchup_search = next(
+        action
+        for action in catchup["actions"]
+        if action["id"] == "rebuild_search_index"
+    )
+    assert producer_calls == []
+    assert catchup_search["status"] == "deferred"
+    assert catchup_search["result"]["status"] == (
+        "deferred_clean_rebuild_to_deep"
+    )
+    assert catchup_search["result"][
+        "source_set_tombstone_session_ids"
+    ] == ["lifecycle-retire"]
+    assert catchup_search["command"][2:5] == [
+        "auto-maintenance",
+        "deep",
+        "all",
+    ]
+    monkeypatch.setattr(
+        module,
+        "search_index_sessions",
+        original_search_index_sessions,
+    )
+
+    deep = module.maintain_indexes(
+        aoa_root=aoa_root,
+        target="all",
+        apply=True,
+        repair_token_accounting=False,
+        repair_graph=True,
+        selected_records=current_records,
+        selection_scope={
+            "profile": "deep",
+            "global_scope_complete": False,
+        },
+        graph_batch_limit=20,
+        budget_seconds=60.0,
+    )
+    deep_search = next(
+        action
+        for action in deep["actions"]
+        if action["id"] == "rebuild_search_index"
+    )
+    deep_atlas = next(
+        action
+        for action in deep["actions"]
+        if action["id"] == "rebuild_agent_atlas"
+    )
+    deep_graph = next(
+        action
+        for action in deep["actions"]
+        if action["id"] == "graph_maintenance"
+    )
+    deep_shards = next(
+        action
+        for action in deep["actions"]
+        if action["id"] == "refresh_search_shards"
+    )
+    assert deep_search["status"] == "applied"
+    assert deep_search["result"]["source_set_tombstone_count"] == 1
+    assert deep_search["result"]["source_set_tombstones"][0][
+        "session_id"
+    ] == "lifecycle-retire"
+    assert deep_atlas["status"] == "applied"
+    assert deep_atlas["action_kind"] == "full_rebuild"
+    assert deep_graph["status"] == "applied"
+    graph_mode_index = deep_graph["command"].index("--mode")
+    assert deep_graph["command"][graph_mode_index + 1] == "deep"
+    assert deep_graph["result"]["maintenance_detail"][
+        "selection_strategy"
+    ] == "cheap_first_exact_refresh_cost"
+    assert deep_shards["status"] == "applied"
+    assert module.sha256_file(retired_raw) == raw_sha_before
+
+    conn = module.connect_existing_search_db(
+        module.search_db_path(aoa_root)
+    )
+    for table in (
+        "session_index_state",
+        "exact_literal_session_state",
+        "episode_semantic_session_state",
+    ):
+        assert conn.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE session_id = ?",
+            ("lifecycle-retire",),
+        ).fetchone()[0] == 0
+    first_digest = module.search_projection_semantic_digest(conn)
+    conn.close()
+    graph_conn = sqlite3.connect(str(aoa_root / "graph" / "graph.sqlite3"))
+    assert graph_conn.execute(
+        "SELECT COUNT(*) FROM graph_sources WHERE session_id = ?",
+        ("lifecycle-retire",),
+    ).fetchone()[0] == 0
+    graph_conn.close()
+    catalog = module.build_search_catalog(aoa_root, write=False)
+    assert "lifecycle-retire" not in {
+        str(item.get("session_id") or "")
+        for item in catalog["sessions"]
+    }
+    assert catalog["retired_projection_session_count"] == 0
+
+    repeated = module.search_index_sessions(
+        aoa_root=aoa_root,
+        target="all",
+    )
+    assert repeated["ok"] is True
+    assert repeated["source_set_tombstone_count"] == 0
+    conn = module.connect_existing_search_db(
+        module.search_db_path(aoa_root)
+    )
+    second_digest = module.search_projection_semantic_digest(conn)
+    conn.close()
+    assert second_digest == first_digest
+
+    restored_registry = module.read_json(registry_path, {})
+    restored_registry["sessions"].append(retired_record)
+    module.write_json(registry_path, restored_registry)
+    added_state = module.search_source_set_change_state(aoa_root=aoa_root)
+    assert added_state["status"] == "stale_readable_added_sources"
+    assert added_state["added_session_ids"] == ["lifecycle-retire"]
+    corrected = module.search_index_sessions(
+        aoa_root=aoa_root,
+        target="all",
+        rebuild=False,
+        selected_records=[retired_record],
+    )
+    assert corrected["ok"] is True
+    assert corrected["source_set_identity"]["session_count"] == 2
+    restored = module.search_sessions(
+        aoa_root=aoa_root,
+        query="RETIRE-LIFECYCLE-9F3B",
+        limit=5,
+    )
+    assert any(
+        item.get("session_id") == "lifecycle-retire"
+        for item in restored["results"]
+    )
+    assert module.sha256_file(retired_raw) == raw_sha_before
+
+
+def test_search_source_set_can_rebuild_to_authoritative_empty_registry(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "last-source.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-07-18T05:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "last-source",
+                    "cwd": str(repo),
+                },
+            },
+            {
+                "timestamp": "2026-07-18T05:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Find LAST-SOURCE-31D7.",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "last-source",
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    indexed = module.search_index_sessions(aoa_root=aoa_root, target="all")
+    assert indexed["ok"] is True
+    record = module.registry_sessions(aoa_root)[0]
+    raw_path = Path(str(record["path"])) / "raw" / "session.raw.jsonl"
+    raw_sha_before = module.sha256_file(raw_path)
+    registry_path = aoa_root / module.REGISTRY_NAME
+    registry = module.read_json(registry_path, {})
+    registry["sessions"] = []
+    module.write_json(registry_path, registry)
+
+    rebuilt = module.search_index_sessions(
+        aoa_root=aoa_root,
+        target="all",
+        include_entity_registry=False,
+    )
+
+    assert rebuilt["ok"] is True
+    assert rebuilt["selected_count"] == 0
+    assert rebuilt["document_count"] == 0
+    assert rebuilt["source_set_identity"]["session_count"] == 0
+    assert rebuilt["source_set_tombstone_count"] == 1
+    assert rebuilt["source_set_tombstones"][0]["session_id"] == "last-source"
+    assert rebuilt["search_catalog"]["status"] == "current"
+    source_set_state = module.search_source_set_change_state(
+        aoa_root=aoa_root
+    )
+    assert source_set_state["status"] == "current"
+    assert source_set_state["current"]["session_count"] == 0
+    assert module.search_sessions(
+        aoa_root=aoa_root,
+        query="LAST-SOURCE-31D7",
+        limit=5,
+    )["result_count"] == 0
+    assert module.sha256_file(raw_path) == raw_sha_before
 
 
 def test_search_schema_transition_unknown_or_structural_drift_still_requires_deep() -> None:
@@ -61019,6 +72749,173 @@ def test_catchup_auto_maintenance_defers_full_search_rebuild_to_deep(tmp_path: P
     assert Path(payload["report_json"]).exists()
     assert Path(payload["report_markdown"]).exists()
     assert len(calls["freshness"]) == 2
+
+
+def test_deep_auto_maintenance_prioritizes_structural_search_bootstrap_over_token_accounting(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    aoa_root.mkdir(parents=True)
+    calls: dict[str, Any] = {}
+
+    def fake_freshness(**kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "target": kwargs["target"],
+            "selected_count": 304,
+            "needs_index_maintenance": True,
+            "needs_graph_maintenance": True,
+            "diagnostics": ["index_maintenance_needed", "graph_maintenance_needed"],
+            "search_index": {
+                "status": "empty",
+                "needs_refresh": True,
+                "has_documents": False,
+                "has_route_index": False,
+                "has_route_terms": False,
+                "reasons": ["search_schema_mismatch", "search_documents_empty"],
+                "diagnostics": ["search_schema_mismatch", "search_documents_empty"],
+                "dirty_session_count": 0,
+            },
+            "atlas_index": {"status": "current", "needs_refresh": False},
+            "graph_store": {"status": "missing", "needs_maintenance": True},
+        }
+
+    def fake_maintenance(**kwargs: Any) -> dict[str, Any]:
+        calls["maintenance"] = kwargs
+        return {
+            "ok": True,
+            "apply": kwargs["apply"],
+            "target": kwargs["target"],
+            "selected_count": 304,
+            "repair_indexes": kwargs["repair_indexes"],
+            "repair_graph": kwargs["repair_graph"],
+            "index_repair_needed": True,
+            "graph_repair_needed": True,
+            "search_repair_remaining_count": 0,
+            "atlas_repair_remaining_count": 0,
+            "search_shards_repair_remaining_count": 0,
+            "action_counts": {"applied": 1},
+            "actions": [],
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr(module, "graph_freshness_gates", fake_freshness)
+    monkeypatch.setattr(module, "route_cache_freshness_gates", fake_freshness)
+    monkeypatch.setattr(module, "maintain_indexes", fake_maintenance)
+
+    payload = module.auto_maintenance(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        profile="deep",
+        apply=True,
+    )
+
+    assert payload["structural_search_bootstrap_priority"] is True
+    assert payload["repair_token_accounting"] is True
+    assert payload["maintenance_repair_token_accounting"] is False
+    assert payload["token_accounting_deferred_reason"] == "structural_search_bootstrap_has_priority"
+    assert calls["maintenance"]["repair_token_accounting"] is False
+
+
+def test_deep_index_maintenance_runs_structural_search_bootstrap_before_episode_sidecar(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    repo = workspace / "aoa-session-memory"
+    repo.mkdir(parents=True)
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-08-08T00-00-00-search-first.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-08-08T00:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": "search-first", "cwd": str(repo)},
+            },
+            {
+                "timestamp": "2026-08-08T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "Bootstrap lexical search before sidecars"}],
+                },
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "search-first",
+            "transcript_path": str(transcript),
+            "cwd": str(repo),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    assert module.search_index_sessions(aoa_root=aoa_root, target="all")["ok"] is True
+    with sqlite3.connect(module.search_db_path(aoa_root)) as conn:
+        conn.execute(
+            "UPDATE meta SET value = ? WHERE key = 'schema_version'",
+            (str(module.SEARCH_SCHEMA_VERSION - 3),),
+        )
+        conn.commit()
+
+    call_order: list[str] = []
+    episode_completed = False
+    original_search_index_sessions = module.search_index_sessions
+
+    def tracked_search_index_sessions(**kwargs: Any) -> dict[str, Any]:
+        call_order.append("search")
+        return original_search_index_sessions(**kwargs)
+
+    def fake_episode_state(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {
+            "status": "current" if episode_completed else "partial",
+            "needs_refresh": not episode_completed,
+            "dirty_session_count": 0 if episode_completed else 1,
+            "dirty_session_ids": [] if episode_completed else ["search-first"],
+        }
+
+    def fake_episode_index(**_kwargs: Any) -> dict[str, Any]:
+        nonlocal episode_completed
+        call_order.append("episode")
+        episode_completed = True
+        return {
+            "ok": True,
+            "selected_count": 1,
+            "processed_count": 1,
+            "successful_count": 1,
+            "completed_session_ids": ["search-first"],
+            "remaining_count": 0,
+            "budget_exhausted": False,
+            "indexed_episode_count": 1,
+            "elapsed_ms": 1,
+            "queue": {},
+            "diagnostics": [],
+        }
+
+    monkeypatch.setattr(module, "search_index_sessions", tracked_search_index_sessions)
+    monkeypatch.setattr(module, "episode_semantic_projection_state", fake_episode_state)
+    monkeypatch.setattr(module, "episode_semantic_index_sessions", fake_episode_index)
+
+    payload = module.maintain_indexes(
+        aoa_root=aoa_root,
+        target="all",
+        apply=True,
+        repair_graph=False,
+        repair_token_accounting=False,
+        reason="auto_maintenance:deep:test_search_first",
+        selection_scope={"mode": "target_filters", "profile": "deep"},
+    )
+
+    assert payload["search_clean_rebuild_required"] is True
+    assert call_order[:2] == ["search", "episode"]
 
 
 def test_catchup_full_rebuild_guard_shares_outer_budget_and_skips_post_probe_after_exhaustion(
@@ -63091,7 +74988,13 @@ def test_hot_auto_maintenance_treats_deferred_live_remaining_as_expected(tmp_pat
         lambda records, **_kwargs: ([stable_record], {}, [active_record], {"deferred_live_session_count": 1}),
     )
 
-    payload = module.auto_maintenance(workspace_root=workspace, aoa_root=aoa_root, profile="hot", apply=True)
+    payload = module.auto_maintenance(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        profile="hot",
+        since_days=1,
+        apply=True,
+    )
 
     assert payload["ok"] is True
     assert payload["status"] == "applied_with_deferred_live"
@@ -64055,6 +75958,19 @@ def test_search_index_routes_queries_to_evidence_refs_and_freshness(tmp_path: Pa
     assert indexed["session_document_count"] == 2
     assert indexed["event_document_count"] == 6
     assert indexed["incident_document_count"] >= 1
+    indexed_session = next(
+        item
+        for item in indexed["sessions"]
+        if item.get("session_id") == "search-index-session"
+    )
+    redaction_execution = indexed_session["derived_text_redaction"][
+        "execution"
+    ]
+    assert redaction_execution[
+        "mode"
+    ] == "bounded_process_local_text_cache_v1"
+    assert redaction_execution["entry_count"] > 0
+    assert redaction_execution["values_persisted"] is False
     assert Path(indexed["db_path"]).exists()
     assert module.search_catalog_path(aoa_root).exists()
     assert Path(indexed["report_json"]).exists()
@@ -64317,6 +76233,10 @@ def test_memory_query_plan_current_state_requires_stronger_owner_runtime_evidenc
         aoa_root=aoa_root,
         query="Ghostty сейчас установлен и какая сейчас версия?",
     )
+    current_negative = module.memory_query_plan(
+        aoa_root=aoa_root,
+        query="Ghostty сейчас не установлен?",
+    )
     historical = module.memory_query_plan(
         aoa_root=aoa_root,
         query="Какая версия Ghostty была зафиксирована в той сессии?",
@@ -64344,6 +76264,23 @@ def test_memory_query_plan_current_state_requires_stronger_owner_runtime_evidenc
         "requires_current_owner_evidence"
     )
     assert current["answer_admission"]["required_next_route_packet"] == handoff
+    assert current_negative["query_intent"]["primary"] == "current_state"
+    assert current_negative["query_intent"]["claim_shape"]["kind"] == (
+        "current_state"
+    )
+    assert current_negative["query_intent"]["claim_shape"]["polarity"] == (
+        "negative"
+    )
+    assert current_negative["query_intent"]["claim_shape"][
+        "negative_polarity_detected"
+    ] is True
+    assert current_negative["primary_route"]["route_id"] == (
+        "external_current_owner_handoff"
+    )
+    assert current_negative["answer_admission"]["admitted"] is False
+    assert current_negative["answer_admission"]["status"] == (
+        "requires_current_owner_evidence"
+    )
     envelope = current["evidence_envelope"]
     assert envelope["schema"] == "aoa_session_memory_evidence_packet_v1"
     assert envelope["selected_route"]["route_id"] == (
@@ -64532,7 +76469,2454 @@ def test_generation_identity_is_canonical_deterministic_and_dependency_bound(
     )
 
 
-def test_generation_identity_uses_process_loaded_producer_snapshot(
+def test_core_generation_dag_is_stage_scoped_and_acyclic(
+    tmp_path: Path,
+) -> None:
+    identities = module.session_memory_expected_generation_identities(
+        tmp_path / ".aoa"
+    )
+    classification = identities["event_classification"]
+    segment = identities["segment_index"]
+    episode = identities["task_episode_source"]
+    review = identities["review_rendering"]
+    goals = identities["goal_lifecycles"]
+    session = identities["session_index"]
+
+    assert classification["dependency_generations"] == {}
+    assert segment["dependency_generations"] == {
+        "event_classification": classification["generation_id"]
+    }
+    assert episode["dependency_generations"] == {
+        "event_classification": classification["generation_id"]
+    }
+    assert review["dependency_generations"] == {
+        "segment_index": segment["generation_id"]
+    }
+    assert goals["dependency_generations"] == {
+        "segment_index": segment["generation_id"],
+        "task_episode_source": episode["generation_id"],
+    }
+    assert session["dependency_generations"] == {
+        "goal_lifecycles": goals["generation_id"],
+        "segment_index": segment["generation_id"],
+        "task_episode_source": episode["generation_id"],
+    }
+    assert all(
+        identity["generation_dag_version"]
+        == module.PROJECTION_GENERATION_DAG_VERSION
+        for identity in (
+            classification,
+            segment,
+            review,
+            episode,
+            goals,
+            session,
+        )
+    )
+    assert all(
+        identity["producer_contract_status"] == "current"
+        for identity in (classification, segment, episode, session)
+    )
+    assert len(
+        {
+            classification["producer_sha256"],
+            segment["producer_sha256"],
+            episode["producer_sha256"],
+            session["producer_sha256"],
+        }
+    ) == 4
+
+
+def test_projection_predecessor_admission_is_exact_and_restamp_only() -> None:
+    projection = "raw_event_classification_cache"
+    expected = module.event_classification_generation_identity()
+    predecessor = (
+        "bbe6dcc2fd98e1db25ea866eafbf79b242b0caf06ffbc05274f0f2c0ccfa7644"
+    )
+    predecessor_identity = {
+        "schema_version": module.EVENT_CLASSIFICATION_CACHE_SCHEMA_VERSION,
+        "projection": projection,
+        "segment_index_generation_id": (
+            "0b23900190fd835ee724c548900dc5984bc0aa1f03c1cbcd395a4bf09c18a6d5"
+        ),
+        "derived_text_privacy_policy_version": (
+            module.DERIVED_TEXT_PRIVACY_POLICY_VERSION
+        ),
+        "derived_text_redaction_policy_version": (
+            module.DERIVED_TEXT_REDACTION_POLICY_VERSION
+        ),
+        "normalization": (
+            "content_addressed_line_blocks_without_raw_or_parsed_payload_v1"
+        ),
+        "generation_id": predecessor,
+    }
+
+    current = module.projection_generation_admission(
+        projection=projection,
+        stored_identity=expected,
+        expected_identity=expected,
+    )
+    declared = module.projection_generation_admission(
+        projection=projection,
+        stored_identity=predecessor_identity,
+        expected_identity=expected,
+    )
+    unknown = module.projection_generation_admission(
+        projection=projection,
+        stored_identity={"generation_id": "f" * 64},
+        expected_identity=expected,
+    )
+    forged_current = module.projection_generation_admission(
+        projection=projection,
+        stored_identity={"generation_id": expected["generation_id"]},
+        expected_identity=expected,
+    )
+
+    assert current["status"] == "current"
+    assert current["compatible"] is True
+    assert current["requires_restamp"] is False
+    assert declared["status"] == "declared_predecessor"
+    assert declared["compatible"] is True
+    assert declared["requires_restamp"] is True
+    assert declared["attestation"]["scope"] == "reuse_then_restamp_only"
+    assert unknown["compatible"] is False
+    assert forged_current["compatible"] is False
+    assert forged_current["diagnostics"] == [
+        "generation_identity_payload_mismatch"
+    ]
+
+
+def test_prior_broad_classification_contract_is_exact_predecessor() -> None:
+    stored = {
+        "schema_version": 1,
+        "projection": "raw_event_classification_cache",
+        "generation_dag_version": 2,
+        "derived_text_privacy_policy_version": 1,
+        "derived_text_redaction_policy_version": 5,
+        "normalization": (
+            "content_addressed_line_blocks_without_raw_or_parsed_payload_v1"
+        ),
+        "dependency_generations": {},
+        "producer": "aoa_session_memory.py",
+        "producer_identity_mode": (
+            "projection_source_contract_ranges_v1"
+        ),
+        "producer_sha256": (
+            "ee9a714dd7af97699c59df61be06e3cd4d08b07721d3713e53802cc001f66dcf"
+        ),
+        "producer_contract_version": 1,
+        "producer_contract_status": "current",
+        "producer_contract_chunks": [
+            {
+                "ordinal": 0,
+                "start_anchor": "def command_classifier(",
+                "end_anchor": "def event_msg_type(",
+                "byte_count": 140067,
+                "sha256": (
+                    "757def05695e202e7ded46c7237158c247b98c0ac26d354aaee8d10d5ce96f80"
+                ),
+            }
+        ],
+        "generation_id": (
+            "511c2bb32d50f1f499cadfca390e3acf9852b56dee0d3efc99fd60ec6e53b67f"
+        ),
+    }
+
+    admission = module.projection_generation_admission(
+        projection="raw_event_classification_cache",
+        stored_identity=stored,
+        expected_identity=module.event_classification_generation_identity(),
+    )
+
+    assert admission["status"] == "declared_predecessor"
+    assert admission["compatible"] is True
+    assert admission["requires_restamp"] is True
+
+
+def test_predecessor_migration_receipt_is_exact_and_content_addressed() -> None:
+    publish_identity = {
+        "schema_version": (
+            module.SESSION_PROJECTION_PUBLISH_IDENTITY_VERSION
+        ),
+        "publish_id": "1" * 64,
+        "source": {
+            "raw_sha256": "2" * 64,
+            "raw_bytes": 100,
+            "raw_line_count": 4,
+        },
+    }
+    receipt = module.session_projection_predecessor_migration_receipt(
+        session_id="migration-session",
+        publish_identity=publish_identity,
+        classification_execution={
+            "migrated_predecessor_block_count": 2,
+        },
+        segment_execution={
+            "migrated_component_restamp_count": 1,
+        },
+        session_index_execution={
+            "task_episode_shards": {
+                "migrated_predecessor_shard_count": 3,
+            }
+        },
+        recorded_at="2026-08-10T00:00:00Z",
+    )
+    repeated = module.session_projection_predecessor_migration_receipt(
+        session_id="migration-session",
+        publish_identity=publish_identity,
+        classification_execution={
+            "migrated_predecessor_block_count": 2,
+        },
+        segment_execution={
+            "migrated_component_restamp_count": 1,
+        },
+        session_index_execution={
+            "task_episode_shards": {
+                "migrated_predecessor_shard_count": 3,
+            }
+        },
+        recorded_at="2026-08-10T00:01:00Z",
+    )
+
+    assert receipt["status"] == "published_after_atomic_validation"
+    assert receipt["artifact_count"] == 6
+    assert receipt["raw_authority_changed"] is False
+    assert receipt["unknown_generation_admission"] is False
+    assert receipt["receipt_id"] == repeated["receipt_id"]
+    assert {
+        transition["projection"]: transition["artifact_count"]
+        for transition in receipt["transitions"]
+    } == {
+        "raw_event_classification_cache": 2,
+        "segment_index": 1,
+        "task_episode_source": 3,
+    }
+    assert all(
+        transition["from_generation_ids"]
+        == sorted(
+            module.DECLARED_PROJECTION_PREDECESSOR_GENERATION_IDS[
+                transition["projection"]
+            ]
+        )
+        for transition in receipt["transitions"]
+    )
+    assert module.session_projection_predecessor_migration_receipt(
+        session_id="migration-session",
+        publish_identity=publish_identity,
+        classification_execution={},
+        segment_execution={},
+        session_index_execution={},
+        recorded_at="2026-08-10T00:00:00Z",
+    ) == {}
+
+
+def test_classification_predecessor_cache_is_restamped_without_payload_change(
+    tmp_path: Path,
+) -> None:
+    block = {
+        "cache_key": "block-one",
+        "line_count": 1,
+    }
+    predecessor = (
+        "bbe6dcc2fd98e1db25ea866eafbf79b242b0caf06ffbc05274f0f2c0ccfa7644"
+    )
+    predecessor_identity = {
+        "schema_version": module.EVENT_CLASSIFICATION_CACHE_SCHEMA_VERSION,
+        "projection": "raw_event_classification_cache",
+        "segment_index_generation_id": (
+            "0b23900190fd835ee724c548900dc5984bc0aa1f03c1cbcd395a4bf09c18a6d5"
+        ),
+        "derived_text_privacy_policy_version": (
+            module.DERIVED_TEXT_PRIVACY_POLICY_VERSION
+        ),
+        "derived_text_redaction_policy_version": (
+            module.DERIVED_TEXT_REDACTION_POLICY_VERSION
+        ),
+        "normalization": (
+            "content_addressed_line_blocks_without_raw_or_parsed_payload_v1"
+        ),
+        "generation_id": predecessor,
+    }
+    path = tmp_path / "block.json.gz"
+    classification = {
+        "line_no": 1,
+        "event_id": "event:fixture:000001",
+    }
+    module.write_deterministic_gzip_json(
+        path,
+        {
+            "schema_version": (
+                module.EVENT_CLASSIFICATION_CACHE_SCHEMA_VERSION
+            ),
+            "artifact_type": "raw_event_classification_block",
+            "generation_identity": predecessor_identity,
+            "block": block,
+            "classifications": [classification],
+        },
+    )
+    expected = module.event_classification_generation_identity()
+
+    module.sanitize_event_classification_cache_artifact(
+        artifact_path=path,
+        block=block,
+        generation_identity=expected,
+        literal_policy=module.DerivedSessionSensitiveLiteralPolicy(
+            values_by_kind={}
+        ),
+    )
+
+    restamped = module.read_gzip_json(path)
+    assert restamped["generation_identity"] == expected
+    assert restamped["classifications"] == [classification]
+
+
+def test_raw_capture_ledger_reads_only_append_and_preserves_immutable_blocks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_dir = tmp_path / ".aoa" / "sessions" / "ledger-session"
+    transcript = tmp_path / "ledger-session.jsonl"
+    initial = b'{"row":1}\n{"row":2}\n{"row":3}\n'
+    appended = b'{"row":4}\n'
+    transcript.write_bytes(initial)
+    monkeypatch.setattr(module, "RAW_CAPTURE_BLOCK_TARGET_BYTES", 9)
+
+    first = module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id="ledger-session",
+        transcript_path=transcript,
+        manifest={},
+        hook_event_name="Stop",
+        now="2026-08-10T00:00:00Z",
+    )
+    first_ledger = module.read_json(
+        module.raw_capture_ledger_path(session_dir), {}
+    )
+    first_epoch = first_ledger["epochs"][-1]
+    first_blocks = [dict(item) for item in first_epoch["blocks"]]
+    first_artifacts = {
+        item["path"]: Path(item["path"]).read_bytes()
+        for item in first_blocks
+    }
+
+    with transcript.open("ab") as handle:
+        handle.write(appended)
+    second = module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id="ledger-session",
+        transcript_path=transcript,
+        manifest={},
+        hook_event_name="PostToolUse",
+        now="2026-08-10T00:01:00Z",
+    )
+    second_ledger = module.read_json(
+        module.raw_capture_ledger_path(session_dir), {}
+    )
+    second_epoch = second_ledger["epochs"][-1]
+
+    assert first["appended_bytes"] == len(initial)
+    assert second["appended_bytes"] == len(appended)
+    assert first["sha256_state_bootstrap_bytes_read"] == 0
+    assert second["sha256_state_bootstrap_bytes_read"] == 0
+    assert second["sha256_delta_bytes_hashed"] == len(appended)
+    assert second["raw_sha256"] == hashlib.sha256(
+        initial + appended
+    ).hexdigest()
+    assert second["ledger_epoch_id"] == first["ledger_epoch_id"]
+    assert second_epoch["blocks"][: len(first_blocks)] == first_blocks
+    assert all(
+        Path(path).read_bytes() == payload
+        for path, payload in first_artifacts.items()
+    )
+    assert Path(second["capture_path"]).read_bytes() == initial + appended
+    assert second["raw_digest_status"] == "complete_sha256"
+    assert second["persistent_live_tail_index_written"] is True
+    assert first["persistent_live_tail"]["postings"][
+        "source_bytes_read"
+    ] == len(initial)
+    assert second["persistent_live_tail"]["postings"][
+        "source_bytes_read"
+    ] == len(appended)
+    assert second["persistent_live_tail"]["postings"][
+        "reused_frontier"
+    ] is True
+    assert second_epoch["raw_line_count"] == 4
+
+
+def test_raw_capture_replays_uncommitted_tail_after_ledger_write_crash(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_dir = tmp_path / ".aoa" / "sessions" / "capture-crash"
+    transcript = tmp_path / "capture-crash.jsonl"
+    payload = b'{"row":1}\n{"row":2}\n'
+    transcript.write_bytes(payload)
+    ledger_path = module.raw_capture_ledger_path(session_dir)
+    original_durable_write = module.write_json_durable
+    failed_once = False
+
+    def fail_before_watermark(path: Path, value: Any) -> None:
+        nonlocal failed_once
+        if path == ledger_path and not failed_once:
+            failed_once = True
+            raise OSError("injected ledger watermark crash")
+        original_durable_write(path, value)
+
+    monkeypatch.setattr(
+        module, "write_json_durable", fail_before_watermark
+    )
+    with pytest.raises(OSError, match="injected ledger watermark crash"):
+        module.append_raw_capture_ledger(
+            session_dir=session_dir,
+            session_id="capture-crash",
+            transcript_path=transcript,
+            now="2026-08-10T00:00:00Z",
+            projection_raw_bytes=0,
+            projection_raw_sha256="",
+        )
+    assert not ledger_path.exists()
+
+    recovered = module.append_raw_capture_ledger(
+        session_dir=session_dir,
+        session_id="capture-crash",
+        transcript_path=transcript,
+        now="2026-08-10T00:00:00Z",
+        projection_raw_bytes=0,
+        projection_raw_sha256="",
+    )
+    epoch = recovered["epoch"]
+    assert recovered["appended_bytes"] == len(payload)
+    assert Path(recovered["materialization_path"]).read_bytes() == payload
+    assert epoch["captured_bytes"] == len(payload)
+    assert epoch["raw_line_count"] == 2
+    assert epoch["full_raw_sha256"] == hashlib.sha256(payload).hexdigest()
+    assert len(epoch["blocks"]) == 1
+
+
+def test_native_sha256_exports_portable_aligned_continuation_state() -> None:
+    prefix = (b"native-portable-state" * 65539) + b"tail"
+    suffix = b"append-only-delta"
+    native = module.native_persistable_sha256()
+    if native is None:
+        pytest.skip("optional OpenSSL SHA256_CTX accelerator unavailable")
+
+    native.update(prefix)
+    assert native.hexdigest() == hashlib.sha256(prefix).hexdigest()
+    payload = native.aligned_state_payload()
+    assert payload["pending_hex"] == ""
+    assert payload["total_bytes"] == len(prefix) - (len(prefix) % 64)
+
+    portable = module.PersistableSha256.from_payload(payload)
+    resumed = module.native_persistable_sha256(state=portable)
+    assert resumed is not None
+    resumed.update(prefix[portable.total_bytes :] + suffix)
+    assert resumed.hexdigest() == hashlib.sha256(
+        prefix + suffix
+    ).hexdigest()
+
+
+def test_large_raw_capture_uses_native_portable_continuation_when_available(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        module,
+        "RAW_CAPTURE_PERSISTABLE_SHA256_MAX_BYTES",
+        1,
+    )
+    session_dir = tmp_path / ".aoa" / "sessions" / "large-digest"
+    transcript = tmp_path / "large-digest.jsonl"
+    initial = b'{"row":"initial large capture"}\n'
+    appended = b'{"row":"delta one"}\n'
+    final_delta = b'{"row":"delta two"}\n'
+    transcript.write_bytes(initial)
+
+    first = module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id="large-digest",
+        transcript_path=transcript,
+        manifest={},
+        hook_event_name="PostToolUse",
+        now="2026-08-10T00:00:00Z",
+    )
+    assert first["raw_digest_status"] == "complete_sha256"
+    assert first["raw_sha256"] == hashlib.sha256(initial).hexdigest()
+    assert first["sha256_continuation_mode"] == (
+        "native_portable_aligned_sha256_v1"
+    )
+    with transcript.open("ab") as handle:
+        handle.write(appended)
+
+    second = module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id="large-digest",
+        transcript_path=transcript,
+        manifest={},
+        hook_event_name="PostToolUse",
+        now="2026-08-10T00:01:00Z",
+    )
+    current_bytes = len(initial + appended)
+    current_sha256 = hashlib.sha256(initial + appended).hexdigest()
+    assert second["raw_digest_status"] == "complete_sha256"
+    assert second["raw_sha256"] == current_sha256
+    assert second["sha256_state_bootstrap_bytes_read"] < 64
+    assert second["sha256_delta_bytes_hashed"] == len(appended)
+    assert second["sha256_continuation_mode"] == (
+        "native_portable_aligned_sha256_v1"
+    )
+    ledger = module.read_json(
+        module.raw_capture_ledger_path(session_dir), {}
+    )
+    continuation = ledger["epochs"][-1]["full_raw_sha256_state"]
+    assert continuation["pending_hex"] == ""
+    assert continuation["total_bytes"] % 64 == 0
+
+    attested = module.attest_raw_capture_projection_digest(
+        session_dir=session_dir,
+        session_id="large-digest",
+        capture_path=Path(second["capture_path"]),
+        raw_sha256=current_sha256,
+        raw_bytes=current_bytes,
+        now="2026-08-10T00:01:30Z",
+    )
+    assert attested == {
+        "status": "attested",
+        "raw_bytes": current_bytes,
+        "source_bytes_read": 0,
+        "continuation_state_added": False,
+    }
+    with transcript.open("ab") as handle:
+        handle.write(final_delta)
+    third = module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id="large-digest",
+        transcript_path=transcript,
+        manifest={
+            "archive_status": "indexed",
+            "raw": {
+                "indexing_status": "indexed",
+                "bytes": current_bytes,
+                "line_count": 2,
+                "sha256": current_sha256,
+            },
+        },
+        hook_event_name="PostToolUse",
+        now="2026-08-10T00:02:00Z",
+    )
+    prefix = third["persistent_live_tail"]["archive_prefixes"][
+        str(current_bytes)
+    ]
+    assert prefix["matches"] is True
+    assert prefix["sha256"] == current_sha256
+    assert prefix["source_bytes_read"] == 0
+    assert third["sha256_state_bootstrap_bytes_read"] < 64
+    assert third["sha256_delta_bytes_hashed"] == len(final_delta)
+
+
+def test_projection_attestation_migrates_deferred_large_capture_to_portable_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        module,
+        "RAW_CAPTURE_PERSISTABLE_SHA256_MAX_BYTES",
+        1,
+    )
+    native_factory = module.native_persistable_sha256
+    monkeypatch.setattr(
+        module,
+        "native_persistable_sha256",
+        lambda **_kwargs: None,
+    )
+    session_dir = tmp_path / ".aoa" / "sessions" / "deferred-migration"
+    transcript = tmp_path / "deferred-migration.jsonl"
+    initial = (b'{"row":"deferred migration"}\n' * 3)
+    delta = b'{"row":"first delta"}\n'
+    final_delta = b'{"row":"second delta"}\n'
+    transcript.write_bytes(initial)
+
+    first = module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id="deferred-migration",
+        transcript_path=transcript,
+        manifest={},
+        hook_event_name="PostToolUse",
+        now="2026-08-10T00:00:00Z",
+    )
+    with transcript.open("ab") as handle:
+        handle.write(delta)
+    second = module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id="deferred-migration",
+        transcript_path=transcript,
+        manifest={},
+        hook_event_name="PostToolUse",
+        now="2026-08-10T00:01:00Z",
+    )
+    assert first["raw_digest_status"] == "complete_sha256"
+    assert second["raw_digest_status"] == "deferred_to_projection"
+
+    current = initial + delta
+    portable = module.PersistableSha256()
+    portable.update(current)
+    attested = module.attest_raw_capture_projection_digest(
+        session_dir=session_dir,
+        session_id="deferred-migration",
+        capture_path=Path(second["capture_path"]),
+        raw_sha256=hashlib.sha256(current).hexdigest(),
+        raw_bytes=len(current),
+        now="2026-08-10T00:01:30Z",
+        raw_sha256_continuation_state=(
+            portable.aligned_state_payload()
+        ),
+    )
+    assert attested["status"] == "attested"
+    assert attested["continuation_state_added"] is True
+    assert 0 <= attested["source_bytes_read"] < 64
+
+    monkeypatch.setattr(
+        module,
+        "native_persistable_sha256",
+        native_factory,
+    )
+    with transcript.open("ab") as handle:
+        handle.write(final_delta)
+    third = module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id="deferred-migration",
+        transcript_path=transcript,
+        manifest={
+            "archive_status": "indexed",
+            "raw": {
+                "indexing_status": "indexed",
+                "bytes": len(current),
+                "line_count": 4,
+                "sha256": hashlib.sha256(current).hexdigest(),
+            },
+        },
+        hook_event_name="PostToolUse",
+        now="2026-08-10T00:02:00Z",
+    )
+    assert third["raw_digest_status"] == "complete_sha256"
+    assert third["raw_sha256"] == hashlib.sha256(
+        current + final_delta
+    ).hexdigest()
+    assert third["sha256_state_bootstrap_bytes_read"] < 64
+    assert third["sha256_delta_bytes_hashed"] == len(final_delta)
+
+
+def test_raw_capture_ledger_starts_new_epoch_on_boundary_rewrite(
+    tmp_path: Path,
+) -> None:
+    session_dir = tmp_path / ".aoa" / "sessions" / "epoch-session"
+    transcript = tmp_path / "epoch-session.jsonl"
+    transcript.write_bytes(b'{"row":"original"}\n')
+    first = module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id="epoch-session",
+        transcript_path=transcript,
+        manifest={},
+        hook_event_name="Stop",
+        now="2026-08-10T00:00:00Z",
+    )
+    transcript.write_bytes(b'{"row":"rewritten"}\n')
+    second = module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id="epoch-session",
+        transcript_path=transcript,
+        manifest={},
+        hook_event_name="Stop",
+        now="2026-08-10T00:02:00Z",
+    )
+    ledger = module.read_json(
+        module.raw_capture_ledger_path(session_dir), {}
+    )
+
+    assert first["ledger_epoch_id"] != second["ledger_epoch_id"]
+    assert len(ledger["epochs"]) == 2
+    assert ledger["epochs"][-1]["start_reason"] == (
+        "source_epoch_changed_or_boundary_unverifiable"
+    )
+    assert (
+        "capture_ledger_boundary_digest_mismatch"
+        in ledger["epochs"][-1]["start_diagnostics"]
+    )
+    assert Path(first["capture_path"]).read_bytes() == (
+        b'{"row":"original"}\n'
+    )
+    assert Path(second["capture_path"]).read_bytes() == (
+        b'{"row":"rewritten"}\n'
+    )
+
+
+def test_raw_capture_ledger_continues_incomplete_final_line_across_hooks(
+    tmp_path: Path,
+) -> None:
+    session_dir = tmp_path / ".aoa" / "sessions" / "partial-line"
+    transcript = tmp_path / "partial-line.jsonl"
+    prefix = b'{"row":1}\n{"row":"par'
+    suffix = b'tial"}\n{"row":3}\n'
+    transcript.write_bytes(prefix)
+    first = module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id="partial-line",
+        transcript_path=transcript,
+        manifest={},
+        hook_event_name="PostToolUse",
+        now="2026-08-10T00:00:00Z",
+    )
+    with transcript.open("ab") as handle:
+        handle.write(suffix)
+    second = module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id="partial-line",
+        transcript_path=transcript,
+        manifest={},
+        hook_event_name="Stop",
+        now="2026-08-10T00:01:00Z",
+    )
+    ledger = module.read_json(
+        module.raw_capture_ledger_path(session_dir), {}
+    )
+    epoch = ledger["epochs"][-1]
+
+    assert first["has_incomplete_tail"] is True
+    assert second["has_incomplete_tail"] is False
+    assert second["appended_bytes"] == len(suffix)
+    assert second["ledger_epoch_id"] == first["ledger_epoch_id"]
+    assert epoch["blocks"][-1]["starts_on_line_boundary"] is False
+    assert epoch["raw_line_count"] == 3
+    assert Path(second["capture_path"]).read_bytes() == prefix + suffix
+
+
+def test_capture_watch_recovers_missed_hook_without_archive_scan(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    transcript = tmp_path / "watch-recovery.jsonl"
+    initial = (
+        json.dumps(
+            {
+                "timestamp": "2026-08-10T00:00:00Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "watch start"}
+                    ],
+                },
+            }
+        ).encode("utf-8")
+        + b"\n"
+    )
+    appended = (
+        json.dumps(
+            {
+                "timestamp": "2026-08-10T00:01:00Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {"type": "output_text", "text": "missed hook tail"}
+                    ],
+                },
+            }
+        ).encode("utf-8")
+        + b"\n"
+    )
+    transcript.write_bytes(initial)
+    mirrored = module.mirror_transcript_without_indexing(
+        aoa_root=aoa_root,
+        event={
+            "session_id": "watch-recovery",
+            "transcript_path": str(transcript),
+        },
+        transcript_path=transcript,
+        hook_event_name="SessionStart",
+        now="2026-08-10T00:00:01Z",
+    )
+    session_dir = Path(str(mirrored["session_dir"]))
+    module.register_capture_watch(
+        aoa_root=aoa_root,
+        session_id="watch-recovery",
+        session_dir=session_dir,
+        transcript_path=transcript,
+        observed_at="2026-08-10T00:00:02Z",
+    )
+    with transcript.open("ab") as handle:
+        handle.write(appended)
+
+    planned = module.reconcile_capture_watch(
+        aoa_root=aoa_root,
+        limit=4,
+        apply=False,
+        now="2026-08-10T00:01:01Z",
+    )
+    recovered = module.reconcile_capture_watch(
+        aoa_root=aoa_root,
+        limit=4,
+        apply=True,
+        now="2026-08-10T00:01:02Z",
+    )
+    repeated = module.reconcile_capture_watch(
+        aoa_root=aoa_root,
+        limit=4,
+        apply=True,
+        now="2026-08-10T00:01:03Z",
+    )
+
+    assert planned["changed_count"] == 1
+    assert planned["archive_manifest_scan_performed"] is False
+    assert planned["raw_payload_read_for_unchanged_sources"] is False
+    assert recovered["recovered_count"] == 1
+    assert recovered["results"][0]["status"] == (
+        "missed_hook_capture_recovered"
+    )
+    assert recovered["results"][0]["appended_bytes"] == len(appended)
+    assert repeated["changed_count"] == 0
+    assert repeated["recovered_count"] == 0
+    capture = module.raw_capture_state_for_session(session_dir)
+    assert capture["raw_bytes"] == len(initial + appended)
+    assert Path(str(capture["capture_path"])).read_bytes() == (
+        initial + appended
+    )
+    assert module.raw_capture_state_receipt_valid(capture) is True
+    assert capture["state_receipt"]["status"] == "published"
+    assert capture["state_receipt"]["state_digest"]
+    assert capture["capture_execution"]["state_receipt"] == (
+        capture["state_receipt"]
+    )
+
+
+def test_capture_watch_cli_routes_only_the_bounded_frontier(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    args = module.build_parser().parse_args(
+        [
+            "capture-watch",
+            "all",
+            "--workspace-root",
+            str(workspace),
+            "--aoa-root",
+            str(aoa_root),
+            "--limit",
+            "7",
+            "--apply",
+        ]
+    )
+
+    assert args.func(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "applied"
+    assert payload["selected_count"] == 0
+    assert payload["archive_manifest_scan_performed"] is False
+    assert payload["raw_payload_read_for_unchanged_sources"] is False
+
+
+def test_capture_watch_time_budget_persists_retryable_progress(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    transcripts = []
+    for ordinal in range(2):
+        transcript = tmp_path / f"budget-{ordinal}.jsonl"
+        transcript.write_text(
+            json.dumps(
+                {
+                    "timestamp": f"2026-08-10T00:0{ordinal}:00Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": f"budget {ordinal}",
+                            }
+                        ],
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        transcripts.append(transcript)
+        module.register_capture_watch(
+            aoa_root=aoa_root,
+            session_id=f"budget-{ordinal}",
+            session_dir=aoa_root / "sessions" / f"budget-{ordinal}",
+            transcript_path=transcript,
+            observed_at=f"2026-08-10T00:0{ordinal}:01Z",
+        )
+
+    payload = module.reconcile_capture_watch(
+        aoa_root=aoa_root,
+        limit=2,
+        apply=True,
+        budget_seconds=0.0,
+        now="2026-08-10T00:02:00Z",
+    )
+
+    assert payload["ok"] is True
+    assert payload["status"] == "budget_exhausted"
+    assert payload["budget_exhausted"] is True
+    assert payload["completed_count"] == 0
+    assert payload["remaining_count"] == 2
+    assert payload["discovery_invoked"] is False
+    assert payload["projection_invoked"] is False
+    progress = module.read_json(
+        module.capture_watch_progress_path(aoa_root),
+        {},
+    )
+    assert progress["status"] == "budget_exhausted"
+    assert progress["completed_count"] == 0
+    assert progress["next_index"] == 0
+    assert progress["progress_sequence"] >= 3
+    state = module.read_json(
+        module.capture_watch_state_path(aoa_root),
+        {},
+    )
+    assert all(
+        "last_checked_at" not in item
+        for item in state["entries"].values()
+    )
+
+
+def test_capture_watch_preloads_registry_once_and_keeps_missing_manifest_local(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    for ordinal in range(3):
+        transcript = tmp_path / f"registry-{ordinal}.jsonl"
+        transcript.write_text("{\"row\": 1}\n", encoding="utf-8")
+        module.register_capture_watch(
+            aoa_root=aoa_root,
+            session_id=f"registry-{ordinal}",
+            session_dir=aoa_root / "sessions" / f"registry-{ordinal}",
+            transcript_path=transcript,
+            observed_at=f"2026-08-10T00:0{ordinal}:01Z",
+        )
+
+    original_read_json = module.read_json
+    registry_reads = 0
+    registry_path = aoa_root / module.REGISTRY_NAME
+
+    def counted_read_json(path: Path, default: Any) -> Any:
+        nonlocal registry_reads
+        if path == registry_path:
+            registry_reads += 1
+        return original_read_json(path, default)
+
+    monkeypatch.setattr(module, "read_json", counted_read_json)
+    payload = module.reconcile_capture_watch(
+        aoa_root=aoa_root,
+        limit=3,
+        apply=True,
+        budget_seconds=5.0,
+        now="2026-08-10T00:02:00Z",
+    )
+
+    assert payload["selected_count"] == 3
+    assert registry_reads == 1
+    assert payload["discovery_invoked"] is False
+    assert payload["projection_invoked"] is False
+    assert {
+        result["status"] for result in payload["results"]
+    } == {"capture_deferred_missing_manifest"}
+    assert all(
+        result.get("mutates") is False
+        for result in payload["results"]
+    )
+
+
+def test_capture_watch_resumes_from_matching_progress_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    for ordinal in range(2):
+        transcript = tmp_path / f"resume-{ordinal}.jsonl"
+        transcript.write_text("{\"row\": 1}\n", encoding="utf-8")
+        module.register_capture_watch(
+            aoa_root=aoa_root,
+            session_id=f"resume-{ordinal}",
+            session_dir=aoa_root / "sessions" / f"resume-{ordinal}",
+            transcript_path=transcript,
+            observed_at=f"2026-08-10T00:0{ordinal}:01Z",
+        )
+
+    original_deadline_check = module.capture_watch_deadline_check
+    item_start_checks = 0
+
+    def expire_on_second_item(
+        deadline_monotonic: float | None,
+        *,
+        stage: str,
+    ) -> None:
+        nonlocal item_start_checks
+        if stage == "item_start":
+            item_start_checks += 1
+            if item_start_checks == 2:
+                raise module.CaptureWatchBudgetExceeded(
+                    stage=stage,
+                    detail="test_budget_boundary",
+                )
+        original_deadline_check(None, stage=stage)
+
+    monkeypatch.setattr(
+        module,
+        "capture_watch_deadline_check",
+        expire_on_second_item,
+    )
+    first = module.reconcile_capture_watch(
+        aoa_root=aoa_root,
+        limit=2,
+        apply=True,
+        budget_seconds=5.0,
+        now="2026-08-10T00:02:00Z",
+    )
+
+    assert first["status"] == "budget_exhausted"
+    assert first["completed_count"] == 1
+    assert first["remaining_count"] == 1
+    assert first["progress_receipt"]["next_index"] == 1
+
+    monkeypatch.setattr(
+        module,
+        "capture_watch_deadline_check",
+        original_deadline_check,
+    )
+    resumed = module.reconcile_capture_watch(
+        aoa_root=aoa_root,
+        limit=2,
+        apply=True,
+        budget_seconds=5.0,
+        now="2026-08-10T00:03:00Z",
+    )
+
+    assert resumed["status"] == "applied"
+    assert resumed["resume_from_index"] == 1
+    assert resumed["completed_count"] == 2
+    assert resumed["remaining_count"] == 0
+    assert len(resumed["results"]) == 1
+    resumed_state = module.read_json(
+        module.capture_watch_state_path(aoa_root),
+        {},
+    )
+    assert (
+        resumed_state["entries"]["resume-0"]["last_checked_at"]
+        == "2026-08-10T00:02:00Z"
+    )
+    assert (
+        resumed_state["entries"]["resume-1"]["last_checked_at"]
+        == "2026-08-10T00:03:00Z"
+    )
+    assert module.read_json(
+        module.capture_watch_progress_path(aoa_root),
+        {},
+    )["status"] == "completed"
+
+
+def test_capture_watch_restarts_prefix_when_physical_lineage_grows_or_reorders(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    transcripts: dict[str, Path] = {}
+    stale_dirs: dict[str, Path] = {}
+    for ordinal, session_id in enumerate(("lineage-A", "lineage-B")):
+        transcript = tmp_path / f"{session_id}.jsonl"
+        transcript.write_text('{"row": 1}\n', encoding="utf-8")
+        transcripts[session_id] = transcript
+        stale_dir = tmp_path / f"stale-{session_id}"
+        stale_dirs[session_id] = stale_dir
+        module.register_capture_watch(
+            aoa_root=aoa_root,
+            session_id=session_id,
+            session_dir=stale_dir,
+            transcript_path=transcript,
+            observed_at=f"2026-08-10T00:0{ordinal}:01Z",
+        )
+
+    original_deadline_check = module.capture_watch_deadline_check
+    item_start_checks = 0
+
+    def expire_on_second_item(
+        deadline_monotonic: float | None,
+        *,
+        stage: str,
+    ) -> None:
+        nonlocal item_start_checks
+        if stage == "item_start":
+            item_start_checks += 1
+            if item_start_checks == 2:
+                raise module.CaptureWatchBudgetExceeded(
+                    stage=stage,
+                    detail="test_lineage_boundary",
+                )
+        original_deadline_check(None, stage=stage)
+
+    monkeypatch.setattr(
+        module,
+        "capture_watch_deadline_check",
+        expire_on_second_item,
+    )
+    first = module.reconcile_capture_watch(
+        aoa_root=aoa_root,
+        limit=2,
+        apply=True,
+        budget_seconds=5.0,
+        now="2026-08-10T00:02:00Z",
+    )
+    assert first["status"] == "budget_exhausted"
+    assert first["completed_count"] == 1
+    assert first["progress_receipt"]["next_index"] == 1
+
+    replacement_dir = tmp_path / "replacement-lineage-A"
+    alternate_dir = tmp_path / "alternate-lineage-A"
+    write_json(
+        replacement_dir / "session.manifest.json",
+        {"session_id": "lineage-A", "raw": {}},
+    )
+    write_json(
+        alternate_dir / "session.manifest.json",
+        {"session_id": "lineage-A", "raw": {}},
+    )
+    write_json(
+        aoa_root / module.REGISTRY_NAME,
+        {
+            "sessions": [
+                {
+                    "session_id": "lineage-A",
+                    "path": str(replacement_dir),
+                },
+                {
+                    "session_id": "lineage-A",
+                    "path": str(alternate_dir),
+                },
+                {
+                    "session_id": "lineage-B",
+                    "path": str(stale_dirs["lineage-B"]),
+                },
+            ]
+        },
+    )
+
+    monkeypatch.setattr(
+        module,
+        "capture_watch_deadline_check",
+        original_deadline_check,
+    )
+    resumed = module.reconcile_capture_watch(
+        aoa_root=aoa_root,
+        limit=2,
+        apply=True,
+        budget_seconds=5.0,
+        now="2026-08-10T00:03:00Z",
+    )
+
+    assert resumed["status"] == "applied"
+    assert resumed["resume_from_index"] == 0
+    assert "progress_binding_changed_restarted_from_zero" in resumed[
+        "resume_diagnostics"
+    ]
+    assert resumed["results"][0]["session_id"] == "lineage-A"
+    assert resumed["results"][0]["session_dir"] == str(alternate_dir)
+    assert resumed["results"][0]["status"] == (
+        "missed_hook_capture_recovered"
+    )
+    assert resumed["results"][1]["status"] == (
+        "capture_deferred_missing_manifest"
+    )
+    assert resumed["completed_count"] == 2
+    assert len(
+        resumed["selection_snapshot"][0]["lineage"]["registry"]["records"]
+    ) == 2
+    capture = module.raw_capture_state_for_session(alternate_dir)
+    assert module.raw_capture_state_receipt_valid(capture) is True
+    assert capture["state_receipt"]["status"] == "published"
+    assert capture["capture_execution"]["state_receipt"] == (
+        capture["state_receipt"]
+    )
+    assert Path(str(capture["capture_path"])).is_file()
+    assert not (replacement_dir / module.RAW_CAPTURE_STATE_JSON).exists()
+
+
+def test_capture_watch_progress_lock_rejects_concurrent_stale_writer(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    progress_path = module.capture_watch_progress_path(aoa_root)
+    lock_path = module.capture_watch_progress_lock_path(aoa_root)
+    binding_digest = "sha256:current-lineage"
+    write_json(
+        progress_path,
+        {
+            "schema_version": module.CAPTURE_WATCH_PROGRESS_SCHEMA_VERSION,
+            "status": "running",
+            "generation": 1,
+            "binding_digest": binding_digest,
+            "completed_count": 0,
+            "next_index": 0,
+            "progress_sequence": 7,
+        },
+    )
+
+    with pytest.raises(
+        module.CaptureWatchProgressConflict,
+        match="active_binding_collision",
+    ):
+        module.capture_watch_progress_write_guard(
+            {
+                "status": "started",
+                "generation": 1,
+                "binding_digest": "sha256:other-lineage",
+                "completed_count": 0,
+                "next_index": 0,
+            },
+            binding_digest=binding_digest,
+            expected_generation=1,
+            next_index=0,
+            completed_count=0,
+        )
+    with pytest.raises(
+        module.CaptureWatchProgressConflict,
+        match="generation_collision",
+    ):
+        module.capture_watch_progress_write_guard(
+            {
+                "status": "running",
+                "generation": 2,
+                "binding_digest": binding_digest,
+                "completed_count": 0,
+                "next_index": 0,
+            },
+            binding_digest=binding_digest,
+            expected_generation=1,
+            next_index=0,
+            completed_count=0,
+        )
+
+    release_first = threading.Event()
+    first_acquired = threading.Event()
+    outcomes: list[tuple[str, str]] = []
+
+    def writer(label: str, next_index: int) -> None:
+        handle = None
+        try:
+            handle, _waited_ms = module.acquire_capture_watch_lock(
+                lock_path,
+                deadline_monotonic=None,
+                stage="test_progress_lock_wait",
+            )
+            if label == "newer":
+                first_acquired.set()
+                release_first.wait(timeout=5)
+            existing = module.read_json(progress_path, {})
+            generation = module.capture_watch_progress_write_guard(
+                existing,
+                binding_digest=binding_digest,
+                expected_generation=1,
+                next_index=next_index,
+                completed_count=next_index,
+            )
+            sequence = module.capture_watch_progress_next_sequence(
+                existing,
+                0,
+            )
+            write_json(
+                progress_path,
+                {
+                    "schema_version": module.CAPTURE_WATCH_PROGRESS_SCHEMA_VERSION,
+                    "status": "running",
+                    "generation": generation,
+                    "binding_digest": binding_digest,
+                    "completed_count": next_index,
+                    "next_index": next_index,
+                    "progress_sequence": sequence,
+                },
+            )
+            outcomes.append((label, "written"))
+        except module.CaptureWatchProgressConflict as exc:
+            outcomes.append((label, exc.reason))
+        finally:
+            if handle is not None:
+                fcntl.flock(handle, fcntl.LOCK_UN)
+                handle.close()
+
+    newer = threading.Thread(target=writer, args=("newer", 1))
+    stale = threading.Thread(target=writer, args=("stale", 0))
+    newer.start()
+    assert first_acquired.wait(timeout=5) is True
+    stale.start()
+    time.sleep(0.02)
+    release_first.set()
+    newer.join(timeout=5)
+    stale.join(timeout=5)
+
+    assert not newer.is_alive()
+    assert not stale.is_alive()
+    assert ("newer", "written") in outcomes
+    assert (
+        "stale",
+        "capture_watch_progress_cursor_regression",
+    ) in outcomes
+    final_progress = module.read_json(progress_path, {})
+    assert final_progress["next_index"] == 1
+    assert final_progress["completed_count"] == 1
+    assert final_progress["progress_sequence"] == 8
+
+
+def test_capture_watch_cleanup_margin_and_deadline_boundaries_are_deterministic(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contract = module.capture_watch_budget_contract(999.0)
+    assert contract["effective_budget_seconds"] == 90.0
+    assert contract["service_timeout_seconds"] == 120.0
+    assert contract["cleanup_margin_seconds"] == 30.0
+    assert contract["effective_budget_seconds"] + contract[
+        "cleanup_margin_seconds"
+    ] == contract["service_timeout_seconds"]
+    assert contract["clamped"] is True
+    assert contract["cleanup_margin_proven"] is True
+    assert module.capture_watch_budget_contract(None)["status"] == (
+        "unbounded_library_route"
+    )
+
+    source = tmp_path / "boundary-source.jsonl"
+    source.write_bytes(b"abc")
+    block_path = tmp_path / "session" / "raw" / "blocks" / "001.json"
+    block_path.parent.mkdir(parents=True, exist_ok=True)
+    block_path.write_bytes(b"abc")
+    epoch = {
+        "captured_bytes": 3,
+        "blocks": [
+            {
+                "byte_start": 0,
+                "byte_count": 3,
+                "sha256": hashlib.sha256(b"abc").hexdigest(),
+                "path": str(block_path),
+            }
+        ],
+    }
+    original_deadline_check = module.capture_watch_deadline_check
+
+    def fail_at_block_hash(
+        deadline_monotonic: float | None,
+        *,
+        stage: str,
+    ) -> None:
+        if stage == "raw_boundary_block_hash":
+            raise module.CaptureWatchBudgetExceeded(stage=stage)
+        original_deadline_check(None, stage=stage)
+
+    monkeypatch.setattr(
+        module,
+        "capture_watch_deadline_check",
+        fail_at_block_hash,
+    )
+    with pytest.raises(
+        module.CaptureWatchBudgetExceeded,
+        match="raw_boundary_block_hash",
+    ):
+        module.raw_capture_epoch_boundary_current(
+            epoch=epoch,
+            source_path=source,
+            session_dir=tmp_path / "session",
+            cooperative_deadline_monotonic=None,
+        )
+
+    for ordinal, stage in enumerate(
+        (
+            "raw_postings_manifest",
+            "raw_overlay_publish",
+            "raw_capture_state_receipt",
+        )
+    ):
+        session_dir = tmp_path / f"deadline-{ordinal}"
+        transcript = tmp_path / f"deadline-{ordinal}.jsonl"
+        transcript.write_text('{"row": 1}\n', encoding="utf-8")
+
+        def fail_at_stage(
+            deadline_monotonic: float | None,
+            *,
+            stage_name: str,
+            target_stage: str = stage,
+        ) -> None:
+            if stage_name == target_stage:
+                raise module.CaptureWatchBudgetExceeded(stage=stage_name)
+            original_deadline_check(None, stage=stage_name)
+
+        monkeypatch.setattr(
+            module,
+            "capture_watch_deadline_check",
+            lambda deadline_monotonic, *, stage, target_stage=stage: (
+                fail_at_stage(
+                    deadline_monotonic,
+                    stage_name=stage,
+                    target_stage=target_stage,
+                )
+            ),
+        )
+        with pytest.raises(
+            module.CaptureWatchBudgetExceeded,
+            match=stage,
+        ):
+            module.preserve_unindexed_raw_capture(
+                session_dir=session_dir,
+                session_id=f"deadline-{ordinal}",
+                transcript_path=transcript,
+                manifest={"session_id": f"deadline-{ordinal}", "raw": {}},
+                hook_event_name="TimerWatchRecovery",
+                now="2026-08-10T00:04:00Z",
+                cooperative_deadline_monotonic=None,
+            )
+
+    lock_path = tmp_path / "held-progress.lock"
+    holder = lock_path.open("a+", encoding="utf-8")
+    fcntl.flock(holder, fcntl.LOCK_EX)
+    try:
+        with pytest.raises(
+            module.CaptureWatchBudgetExceeded,
+            match="test_lock_wait",
+        ):
+            module.acquire_capture_watch_lock(
+                lock_path,
+                deadline_monotonic=time.monotonic() + 0.02,
+                stage="test_lock_wait",
+            )
+    finally:
+        fcntl.flock(holder, fcntl.LOCK_UN)
+        holder.close()
+
+
+def test_hot_timer_recovers_missed_hook_without_archive_rediscovery(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "timer-missed-hook.jsonl"
+    initial_rows = [
+        {
+            "timestamp": "2026-08-10T00:00:00Z",
+            "type": "session_meta",
+            "payload": {
+                "id": "timer-missed-hook",
+                "cwd": str(workspace),
+            },
+        },
+        {
+            "timestamp": "2026-08-10T00:00:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "timer seed"}
+                ],
+            },
+        },
+    ]
+    write_jsonl(transcript, initial_rows)
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "timer-missed-hook",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    search = module.search_index_sessions(
+        aoa_root=aoa_root, target="all"
+    )
+    assert search["ok"] is True
+    assert search["outbox_completions"]
+    search_ready = module.projection_outbox_ready_sessions(aoa_root)
+    # Search progress is not an episode-authority artifact.  With no
+    # source-owned episode completion receipt, the strict outbox contract
+    # keeps the consumer pending for the separate successor handler route.
+    assert "episode_semantic" in search_ready["records"][0][
+        "pending_consumers"
+    ]
+    assert module.build_agent_atlas(
+        aoa_root=aoa_root, target="all", clean=True
+    )["ok"] is True
+    assert module.build_session_graph(
+        aoa_root=aoa_root,
+        target="all",
+        write=True,
+        include_rows=False,
+    )["ok"] is True
+    session_dir = module.session_dir_for_id(
+        aoa_root, "timer-missed-hook"
+    )
+    publish_id_before = module.projection_publish_id(
+        module.read_json(
+            session_dir / "session.manifest.json", {}
+        ).get("index_schema", {})
+    )
+    appended_row = {
+        "timestamp": "2026-08-10T00:01:00Z",
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "output_text",
+                    "text": "timer recovered exact anchor",
+                }
+            ],
+        },
+    }
+    with transcript.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(appended_row) + "\n")
+
+    timer = module.auto_maintenance(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        profile="hot",
+        target="all",
+        apply=True,
+        repair_indexes=False,
+        repair_graph=False,
+        sample_audit=False,
+    )
+
+    watch = timer["capture_watch_reconciliation"]
+    assert watch["recovered_count"] == 1
+    assert watch["archive_manifest_scan_performed"] is False
+    assert timer["selection_scope"]["mode"] in {
+        "event_driven_hot_ready_queues",
+        "event_driven_component_outbox",
+    }
+    assert timer["selection_scope"]["outbox"][
+        "archive_manifest_scan_performed"
+    ] is False
+    publish_id_after = module.projection_publish_id(
+        module.read_json(
+            session_dir / "session.manifest.json", {}
+        ).get("index_schema", {})
+    )
+    assert publish_id_after == publish_id_before
+    exact = module.live_tail_exact_search(
+        aoa_root=aoa_root,
+        session="timer-missed-hook",
+        query="timer recovered exact anchor",
+    )
+    assert exact["ok"] is True
+    assert exact["route"]["id"] == "persistent_live_tail_postings"
+    assert exact["result_count"] == 1
+
+
+def test_persistent_live_tail_postings_never_persist_sensitive_literals(
+    tmp_path: Path,
+) -> None:
+    session_dir = tmp_path / ".aoa" / "sessions" / "private-tail"
+    transcript = tmp_path / "private-tail.jsonl"
+    sensitive = "private-live-tail-value-123456789"
+    rows = [
+        {
+            "timestamp": "2026-08-10T00:00:00Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": f"unlabelled repeat {sensitive}",
+                    }
+                ],
+            },
+        },
+        {
+            "timestamp": "2026-08-10T00:00:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": f"access_token={sensitive}",
+                    }
+                ],
+            },
+        },
+    ]
+    write_jsonl(transcript, rows)
+    module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id="private-tail",
+        transcript_path=transcript,
+        manifest={},
+        hook_event_name="PostToolUse",
+        now="2026-08-10T00:00:02Z",
+    )
+    postings_path = module.persistent_live_tail_postings_path(
+        session_dir
+    )
+    persisted = postings_path.read_text(encoding="utf-8")
+
+    assert sensitive not in persisted
+    assert hashlib.sha256(sensitive.encode("utf-8")).hexdigest() not in (
+        persisted
+    )
+    postings = module.read_json(postings_path, {})
+    shard_paths = [
+        session_dir / str(descriptor["rel"])
+        for descriptor in postings["shards"]
+        if descriptor["format"] == "sharded_postings_v1"
+    ]
+    shard_texts = [
+        shard_path.read_text(encoding="utf-8")
+        for shard_path in shard_paths
+    ]
+    shards = [module.read_json(shard_path, {}) for shard_path in shard_paths]
+
+    assert postings["entry_count"] == 2
+    assert postings["shard_count"] == 1
+    assert postings["token_count"] == sum(
+        shard["token_count"] for shard in shards
+    )
+    assert all(sensitive not in shard_text for shard_text in shard_texts)
+    assert all(
+        hashlib.sha256(sensitive.encode("utf-8")).hexdigest()
+        not in shard_text
+        for shard_text in shard_texts
+    )
+    assert postings["privacy"]["raw_text_persisted"] is False
+    assert postings["privacy"][
+        "reversible_literal_digests_persisted"
+    ] is False
+    assert all(
+        shard["privacy"]["raw_text_persisted"] is False
+        and shard["privacy"][
+            "reversible_literal_digests_persisted"
+        ]
+        is False
+        for shard in shards
+    )
+
+
+def test_persistent_live_tail_postings_append_is_bounded_and_noop_is_zero_work(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        module,
+        "PERSISTENT_LIVE_TAIL_POSTINGS_SHARD_MAX_ENTRIES",
+        3,
+    )
+    session_dir = tmp_path / ".aoa" / "sessions" / "bounded-tail"
+    transcript = tmp_path / "bounded-tail.jsonl"
+
+    def row(ordinal: int, text: str) -> dict[str, Any]:
+        return {
+            "timestamp": f"2026-08-10T00:00:{ordinal:02d}Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": text}],
+            },
+        }
+
+    write_jsonl(
+        transcript,
+        [row(ordinal, f"bounded seed {ordinal}") for ordinal in range(7)],
+    )
+    first = module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id="bounded-tail",
+        transcript_path=transcript,
+        manifest={},
+        hook_event_name="PostToolUse",
+        now="2026-08-10T00:01:00Z",
+    )
+    postings_path = module.persistent_live_tail_postings_path(session_dir)
+    first_manifest = module.read_json(postings_path, {})
+    sealed = [
+        descriptor
+        for descriptor in first_manifest["shards"]
+        if descriptor["sealed"]
+    ]
+    sealed_receipts = {
+        descriptor["rel"]: (
+            descriptor["sha256"],
+            (session_dir / descriptor["rel"]).read_bytes(),
+        )
+        for descriptor in sealed
+    }
+    before_size = transcript.stat().st_size
+    appended = row(8, "newest bounded exact anchor")
+    with transcript.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(appended) + "\n")
+    appended_bytes = transcript.stat().st_size - before_size
+
+    second = module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id="bounded-tail",
+        transcript_path=transcript,
+        manifest={},
+        hook_event_name="PostToolUse",
+        now="2026-08-10T00:01:01Z",
+    )
+    metrics = second["persistent_live_tail"]["postings"]
+    second_manifest = module.read_json(postings_path, {})
+
+    assert metrics["source_bytes_read"] == appended_bytes
+    assert metrics["source_unique_bytes_read"] == appended_bytes
+    assert metrics["historical_raw_bytes_read"] == 0
+    assert metrics["shards_read_for_update"] == 1
+    assert metrics["shards_written"] == 1
+    assert metrics["rewritten_entry_count"] == 0
+    assert "entries" not in second_manifest
+    assert "token_postings" not in second_manifest
+    for relative, (expected_sha256, expected_bytes) in sealed_receipts.items():
+        shard_path = session_dir / relative
+        assert shard_path.is_file()
+        assert module.sha256_file_exact(shard_path) == expected_sha256
+        assert shard_path.read_bytes() == expected_bytes
+
+    snapshot = {
+        "session_id": "bounded-tail",
+        "session_label": "bounded-tail",
+        "session_title": "Bounded tail",
+        "session_date": "2026-08-10",
+        "ledger_epoch_id": second["ledger_epoch_id"],
+        "persistent_live_tail_postings": str(postings_path),
+        "persistent_live_tail_postings_sha256": second[
+            "persistent_live_tail_postings_sha256"
+        ],
+        "persistent_live_tail_postings_bytes": second[
+            "persistent_live_tail_postings_bytes"
+        ],
+        "live_source_path": second["capture_path"],
+        "archived_line_count": 0,
+        "scan_start_offset": 0,
+        "snapshot_end_offset": second["raw_bytes"],
+    }
+    exact = module.live_tail_exact_search_from_persistent_postings(
+        snapshot=snapshot,
+        needle="newest bounded exact anchor",
+        limit=5,
+        event_id_before=None,
+        event_type=None,
+        family=None,
+        outcome=None,
+        date_from=None,
+        date_to=None,
+        exclude_agent_event_stream_copies=False,
+    )
+    assert exact is not None
+    assert len(exact["results"]) == 1
+    assert exact["scan"]["posting_shards_examined"] == 1
+    assert exact["scan"]["global_recall_complete"] is False
+
+    before_noop_receipts = [
+        (descriptor["rel"], descriptor["sha256"])
+        for descriptor in second_manifest["shards"]
+    ]
+    third = module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id="bounded-tail",
+        transcript_path=transcript,
+        manifest={},
+        hook_event_name="PostToolUse",
+        now="2026-08-10T00:01:02Z",
+    )
+    noop = third["persistent_live_tail"]["postings"]
+    after_noop_manifest = module.read_json(postings_path, {})
+    assert noop["no_op"] is True
+    assert noop["source_bytes_read"] == 0
+    assert noop["shards_read_for_update"] == 0
+    assert noop["shards_written"] == 0
+    assert [
+        (descriptor["rel"], descriptor["sha256"])
+        for descriptor in after_noop_manifest["shards"]
+    ] == before_noop_receipts
+
+
+def test_persistent_live_tail_bootstrap_indexes_recent_bounded_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        module,
+        "PERSISTENT_LIVE_TAIL_POSTINGS_BOOTSTRAP_MAX_BYTES",
+        700,
+    )
+    monkeypatch.setattr(module, "RAW_CAPTURE_BLOCK_TARGET_BYTES", 256)
+    session_dir = tmp_path / ".aoa" / "sessions" / "recent-bootstrap"
+    transcript = tmp_path / "recent-bootstrap.jsonl"
+
+    def row(ordinal: int) -> dict[str, Any]:
+        return {
+            "timestamp": f"2026-08-10T00:00:{ordinal:02d}Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": f"bootstrap anchor {ordinal:02d} " + "x" * 80,
+                    }
+                ],
+            },
+        }
+
+    write_jsonl(transcript, [row(ordinal) for ordinal in range(20)])
+    first = module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id="recent-bootstrap",
+        transcript_path=transcript,
+        manifest={},
+        hook_event_name="PostToolUse",
+        now="2026-08-10T00:01:00Z",
+    )
+    metrics = first["persistent_live_tail"]["postings"]
+    manifest = module.read_json(
+        module.persistent_live_tail_postings_path(session_dir), {}
+    )
+    entries = [
+        entry
+        for descriptor in manifest["shards"]
+        for entry in module.read_json(
+            session_dir / descriptor["rel"], {}
+        )["entries"]
+    ]
+
+    assert metrics["bootstrap_window_applied"] is True
+    assert metrics["bootstrap_omitted_bytes"] > 0
+    assert metrics["bootstrap_omitted_line_count"] > 0
+    assert metrics["source_unique_bytes_read"] <= 900
+    assert metrics["historical_raw_bytes_read"] <= 256
+    assert manifest["coverage_start_byte"] > 0
+    assert manifest["coverage_start_line"] > 1
+    assert manifest["processed_line_count"] == 20
+    assert entries[-1]["line"] == 20
+    assert all(entry["line"] >= manifest["coverage_start_line"] for entry in entries)
+    assert not any("bootstrap anchor 00" in entry["preview"] for entry in entries)
+    assert any("bootstrap anchor 19" in entry["preview"] for entry in entries)
+
+    before_size = transcript.stat().st_size
+    with transcript.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row(20)) + "\n")
+    appended_bytes = transcript.stat().st_size - before_size
+    second = module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id="recent-bootstrap",
+        transcript_path=transcript,
+        manifest={},
+        hook_event_name="PostToolUse",
+        now="2026-08-10T00:01:01Z",
+    )["persistent_live_tail"]["postings"]
+
+    assert second["source_unique_bytes_read"] == appended_bytes
+    assert second["historical_raw_bytes_read"] == 0
+    assert second["bootstrap_omitted_bytes"] == metrics[
+        "bootstrap_omitted_bytes"
+    ]
+
+
+def test_persistent_live_tail_postings_resanitizes_prior_shards_from_new_literal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        module,
+        "PERSISTENT_LIVE_TAIL_POSTINGS_SHARD_MAX_ENTRIES",
+        1,
+    )
+    session_dir = tmp_path / ".aoa" / "sessions" / "resanitize-tail"
+    transcript = tmp_path / "resanitize-tail.jsonl"
+    sensitive = "late-private-live-value-123456789"
+    first_row = {
+        "timestamp": "2026-08-10T00:00:00Z",
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_text",
+                    "text": f"initially unlabelled {sensitive}",
+                }
+            ],
+        },
+    }
+    write_jsonl(transcript, [first_row])
+    module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id="resanitize-tail",
+        transcript_path=transcript,
+        manifest={},
+        hook_event_name="PostToolUse",
+        now="2026-08-10T00:01:00Z",
+    )
+    second_row = {
+        "timestamp": "2026-08-10T00:00:01Z",
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_text",
+                    "text": f"access_token={sensitive}",
+                }
+            ],
+        },
+    }
+    with transcript.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(second_row) + "\n")
+
+    second = module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id="resanitize-tail",
+        transcript_path=transcript,
+        manifest={},
+        hook_event_name="PostToolUse",
+        now="2026-08-10T00:01:01Z",
+    )
+    metrics = second["persistent_live_tail"]["postings"]
+    postings_path = module.persistent_live_tail_postings_path(session_dir)
+    manifest = module.read_json(postings_path, {})
+    persisted = postings_path.read_text(encoding="utf-8") + "".join(
+        (session_dir / descriptor["rel"]).read_text(encoding="utf-8")
+        for descriptor in manifest["shards"]
+    )
+
+    assert metrics["privacy_resanitization"] is True
+    assert metrics["rewritten_entry_count"] == 1
+    assert metrics["shards_read_for_update"] == 1
+    assert metrics["historical_raw_bytes_read"] == 0
+    assert sensitive not in persisted
+    assert hashlib.sha256(sensitive.encode("utf-8")).hexdigest() not in persisted
+    assert sensitive in Path(second["capture_path"]).read_text(encoding="utf-8")
+
+
+def test_persistent_live_tail_postings_migrates_exact_v2_predecessor_without_raw_rebuild(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        module,
+        "PERSISTENT_LIVE_TAIL_POSTINGS_SHARD_MAX_ENTRIES",
+        2,
+    )
+    session_dir = tmp_path / ".aoa" / "sessions" / "legacy-tail"
+    transcript = tmp_path / "legacy-tail.jsonl"
+    first_row = {
+        "timestamp": "2026-08-10T00:00:00Z",
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "legacy exact anchor"}
+            ],
+        },
+    }
+    write_jsonl(transcript, [first_row])
+    first = module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id="legacy-tail",
+        transcript_path=transcript,
+        manifest={},
+        hook_event_name="PostToolUse",
+        now="2026-08-10T00:01:00Z",
+    )
+    postings_path = module.persistent_live_tail_postings_path(session_dir)
+    current = module.read_json(postings_path, {})
+    entries = []
+    for descriptor in current["shards"]:
+        shard = module.read_json(session_dir / descriptor["rel"], {})
+        entries.extend(shard["entries"])
+    token_postings = module.persistent_live_tail_inverted_token_postings(entries)
+    predecessor_generation_id = next(
+        iter(module.PERSISTENT_LIVE_TAIL_POSTINGS_PREDECESSOR_GENERATION_IDS)
+    )
+    predecessor = {
+        "schema_version": 2,
+        "artifact_type": "persistent_live_tail_postings",
+        "session_id": "legacy-tail",
+        "epoch_id": current["epoch_id"],
+        "generation_identity": {"generation_id": predecessor_generation_id},
+        "updated_at": "2026-08-10T00:01:00Z",
+        "processed_bytes": current["processed_bytes"],
+        "processed_line_count": current["processed_line_count"],
+        "source_captured_bytes": current["source_captured_bytes"],
+        "projection_raw_bytes": 0,
+        "projection_raw_line_count": 0,
+        "pending_incomplete_bytes": 0,
+        "entry_count": len(entries),
+        "entries": entries,
+        "token_count": len(token_postings),
+        "token_postings": token_postings,
+        "privacy": current["privacy"],
+        "authority": current["authority"],
+    }
+    module.write_json_durable(postings_path, predecessor)
+    predecessor_bytes = postings_path.read_bytes()
+    before_size = transcript.stat().st_size
+    second_row = {
+        "timestamp": "2026-08-10T00:00:01Z",
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "native exact anchor"}
+            ],
+        },
+    }
+    with transcript.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(second_row) + "\n")
+    appended_bytes = transcript.stat().st_size - before_size
+
+    migrated = module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id="legacy-tail",
+        transcript_path=transcript,
+        manifest={},
+        hook_event_name="PostToolUse",
+        now="2026-08-10T00:01:01Z",
+    )
+    metrics = migrated["persistent_live_tail"]["postings"]
+    manifest = module.read_json(postings_path, {})
+
+    assert manifest["schema_version"] == 3
+    assert [descriptor["format"] for descriptor in manifest["shards"]] == [
+        "legacy_monolith_v2_link",
+        "sharded_postings_v1",
+    ]
+    assert metrics["source_bytes_read"] == appended_bytes
+    assert metrics["historical_raw_bytes_read"] == 0
+    assert metrics["shards_read_for_update"] == 0
+    assert metrics["migration"] == {
+        "status": "exact_predecessor_linked_without_raw_rebuild",
+        "from_generation_id": predecessor_generation_id,
+        "to_generation_id": module.persistent_live_tail_postings_generation_identity()[
+            "generation_id"
+        ],
+        "raw_authority_changed": False,
+        "unknown_generation_admission": False,
+    }
+    assert (
+        session_dir / manifest["shards"][0]["rel"]
+    ).read_bytes() == predecessor_bytes
+    assert first["ledger_epoch_id"] == migrated["ledger_epoch_id"]
+    snapshot = {
+        "session_id": "legacy-tail",
+        "session_label": "legacy-tail",
+        "session_title": "Legacy tail",
+        "session_date": "2026-08-10",
+        "ledger_epoch_id": migrated["ledger_epoch_id"],
+        "persistent_live_tail_postings": str(postings_path),
+        "persistent_live_tail_postings_sha256": migrated[
+            "persistent_live_tail_postings_sha256"
+        ],
+        "persistent_live_tail_postings_bytes": migrated[
+            "persistent_live_tail_postings_bytes"
+        ],
+        "live_source_path": migrated["capture_path"],
+        "archived_line_count": 0,
+        "scan_start_offset": 0,
+        "snapshot_end_offset": migrated["raw_bytes"],
+    }
+    for needle in ("legacy exact anchor", "native exact anchor"):
+        exact = module.live_tail_exact_search_from_persistent_postings(
+            snapshot=snapshot,
+            needle=needle,
+            limit=5,
+            event_id_before=None,
+            event_type=None,
+            family=None,
+            outcome=None,
+            date_from=None,
+            date_to=None,
+            exclude_agent_event_stream_copies=False,
+        )
+        assert exact is not None
+        assert len(exact["results"]) == 1
+
+
+def test_persistent_live_tail_postings_manifest_failure_retries_without_duplicate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        module,
+        "PERSISTENT_LIVE_TAIL_POSTINGS_SHARD_MAX_ENTRIES",
+        3,
+    )
+    session_dir = tmp_path / ".aoa" / "sessions" / "retry-tail"
+    transcript = tmp_path / "retry-tail.jsonl"
+    rows = [
+        {
+            "timestamp": "2026-08-10T00:00:00Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "retry seed"}
+                ],
+            },
+        }
+    ]
+    write_jsonl(transcript, rows)
+    module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id="retry-tail",
+        transcript_path=transcript,
+        manifest={},
+        hook_event_name="PostToolUse",
+        now="2026-08-10T00:01:00Z",
+    )
+    postings_path = module.persistent_live_tail_postings_path(session_dir)
+    old_manifest_bytes = postings_path.read_bytes()
+    old_manifest = module.read_json(postings_path, {})
+    old_shard_paths = [
+        session_dir / descriptor["rel"]
+        for descriptor in old_manifest["shards"]
+    ]
+    rows.append(
+        {
+            "timestamp": "2026-08-10T00:00:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "retry once exact anchor",
+                    }
+                ],
+            },
+        }
+    )
+    write_jsonl(transcript, rows)
+    real_write_json_durable = module.write_json_durable
+    failed = False
+
+    def fail_manifest_once(path: Path, payload: Any) -> None:
+        nonlocal failed
+        if Path(path) == postings_path and not failed:
+            failed = True
+            raise OSError("simulated_manifest_publish_failure")
+        real_write_json_durable(path, payload)
+
+    monkeypatch.setattr(module, "write_json_durable", fail_manifest_once)
+    with pytest.raises(OSError, match="simulated_manifest_publish_failure"):
+        module.preserve_unindexed_raw_capture(
+            session_dir=session_dir,
+            session_id="retry-tail",
+            transcript_path=transcript,
+            manifest={},
+            hook_event_name="PostToolUse",
+            now="2026-08-10T00:01:01Z",
+        )
+    assert postings_path.read_bytes() == old_manifest_bytes
+    assert all(path.is_file() for path in old_shard_paths)
+
+    monkeypatch.setattr(module, "write_json_durable", real_write_json_durable)
+    retried = module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id="retry-tail",
+        transcript_path=transcript,
+        manifest={},
+        hook_event_name="PostToolUse",
+        now="2026-08-10T00:01:02Z",
+    )
+    manifest = module.read_json(postings_path, {})
+    shard_entries = [
+        entry
+        for descriptor in manifest["shards"]
+        for entry in module.read_json(
+            session_dir / descriptor["rel"], {}
+        )["entries"]
+    ]
+    assert retried["persistent_live_tail"]["postings"]["new_entry_count"] == 1
+    assert manifest["entry_count"] == 2
+    assert len(shard_entries) == 2
+    assert sum(
+        "retry once exact anchor" in entry["preview"]
+        for entry in shard_entries
+    ) == 1
+
+
+def test_persistent_live_tail_postings_unknown_v2_predecessor_fails_closed(
+    tmp_path: Path,
+) -> None:
+    session_dir = tmp_path / ".aoa" / "sessions" / "unknown-v2-tail"
+    transcript = tmp_path / "unknown-v2-tail.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-08-10T00:00:00Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "unknown v2 seed"}
+                    ],
+                },
+            }
+        ],
+    )
+    module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id="unknown-v2-tail",
+        transcript_path=transcript,
+        manifest={},
+        hook_event_name="PostToolUse",
+        now="2026-08-10T00:01:00Z",
+    )
+    postings_path = module.persistent_live_tail_postings_path(session_dir)
+    unknown = module.read_json(postings_path, {})
+    unknown["schema_version"] = 2
+    unknown["generation_identity"] = {"generation_id": "f" * 64}
+    module.write_json_durable(postings_path, unknown)
+    last_good = postings_path.read_bytes()
+
+    with pytest.raises(
+        ValueError,
+        match="live_tail_postings_unknown_predecessor_fail_closed",
+    ):
+        module.preserve_unindexed_raw_capture(
+            session_dir=session_dir,
+            session_id="unknown-v2-tail",
+            transcript_path=transcript,
+            manifest={},
+            hook_event_name="PostToolUse",
+            now="2026-08-10T00:01:01Z",
+        )
+    assert postings_path.read_bytes() == last_good
+
+
+def test_live_tail_snapshot_uses_persistent_ledger_without_prefix_rescan(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    session_dir = aoa_root / "sessions" / "2026-08-10__001__overlay"
+    raw_dir = session_dir / "raw"
+    raw_dir.mkdir(parents=True)
+    session_id = "persistent-overlay-session"
+    prefix = b'{"row":"archived"}\n'
+    tail = b"".join(
+        json.dumps(
+            {
+                "timestamp": f"2026-08-10T00:03:0{ordinal}Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": text,
+                        }
+                    ],
+                },
+            }
+        ).encode("utf-8")
+        + b"\n"
+        for ordinal, text in enumerate(
+            (
+                "ordinary unrelated captured row",
+                "another unrelated overlay event",
+                "persistent live tail anchor",
+            ),
+            start=1,
+        )
+    )
+    archive_path = raw_dir / "session.raw.jsonl"
+    archive_path.write_bytes(prefix)
+    transcript = tmp_path / "persistent-overlay-session.jsonl"
+    transcript.write_bytes(prefix + tail)
+    manifest = {
+        "schema_version": 1,
+        "session_id": session_id,
+        "session_label": session_dir.name,
+        "session_title": "Persistent overlay",
+        "updated_at": "2026-08-10T00:03:00Z",
+        "archive_status": "indexed",
+        "source": {"transcript_path": str(transcript)},
+        "raw": {
+            "path": str(archive_path),
+            "source_path": str(transcript),
+            "bytes": len(prefix),
+            "line_count": 1,
+            "sha256": hashlib.sha256(prefix).hexdigest(),
+            "indexing_status": "indexed",
+            "source_snapshot": {
+                "path": str(transcript),
+                "size": len(prefix),
+                "mtime_ns": transcript.stat().st_mtime_ns,
+            },
+        },
+        "segments": [],
+    }
+    module.write_json(session_dir / "session.manifest.json", manifest)
+    module.update_registry(aoa_root, manifest, session_dir)
+    module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id=session_id,
+        transcript_path=transcript,
+        manifest=manifest,
+        hook_event_name="PostToolUse",
+        now="2026-08-10T00:03:00Z",
+    )
+
+    snapshot = module.session_live_tail_source_snapshot(
+        aoa_root=aoa_root,
+        session=session_id,
+    )
+
+    assert snapshot["ok"] is True
+    assert snapshot["status"] == "persistent_overlay"
+    assert snapshot["persistent_overlay"] is True
+    assert snapshot["scan_start_offset"] == len(prefix)
+    assert snapshot["scan_end_offset"] == len(prefix + tail)
+    assert snapshot["prefix_validation"]["status"] == (
+        "persistent_capture_archive_prefix_attested"
+    )
+    assert Path(snapshot["live_source_path"]).read_bytes() == prefix + tail
+    exact = module.live_tail_exact_search(
+        aoa_root=aoa_root,
+        session=session_id,
+        query="persistent live tail anchor",
+        limit=5,
+    )
+    assert exact["ok"] is True
+    assert exact["route"]["id"] == "persistent_live_tail_postings"
+    assert exact["result_count"] == 1
+    assert exact["results"][0]["freshness"][
+        "returned_evidence_current"
+    ] is True
+    assert exact["cost_profile"]["persistent_index_written"] is True
+    assert exact["scan"]["global_recall_complete"] is False
+    assert exact["scan"]["candidate_selection"] == (
+        "inverted_token_intersection"
+    )
+    assert exact["scan"]["posting_entries_examined"] == 1
+    assert exact["scan"]["posting_full_scan_performed"] is False
+
+
+def test_live_tail_snapshot_uses_publish_watermark_when_capture_metadata_lags(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    session_dir = aoa_root / "sessions" / "2026-08-10__002__resumed"
+    raw_dir = session_dir / "raw"
+    raw_dir.mkdir(parents=True)
+    session_id = "resumed-publish-overlay-session"
+    old_prefix = b'{"row":"old"}\n'
+    published_tail = b'{"row":"published"}\n'
+    live_tail = b'{"row":"live publish watermark anchor"}\n'
+    published = old_prefix + published_tail
+    transcript = tmp_path / "resumed-publish-overlay-session.jsonl"
+    transcript.write_bytes(published + live_tail)
+    archive_path = raw_dir / "session.raw.jsonl"
+    archive_path.write_bytes(published)
+    manifest = {
+        "schema_version": 1,
+        "session_id": session_id,
+        "session_label": session_dir.name,
+        "session_title": "Resumed publish overlay",
+        "updated_at": "2026-08-10T00:03:00Z",
+        "archive_status": "indexed",
+        "source": {"transcript_path": str(transcript)},
+        "raw": {
+            "path": str(archive_path),
+            "source_path": str(transcript),
+            "bytes": len(published),
+            "line_count": 2,
+            "sha256": hashlib.sha256(published).hexdigest(),
+            "indexing_status": "indexed",
+            "source_snapshot": {
+                "path": str(transcript),
+                "size": len(published),
+                "mtime_ns": transcript.stat().st_mtime_ns,
+            },
+        },
+        "index_schema": {
+            "projection_publish": {
+                "source": {
+                    "raw_bytes": len(published),
+                    "raw_line_count": 2,
+                    "raw_sha256": hashlib.sha256(published).hexdigest(),
+                }
+            }
+        },
+        "segments": [],
+    }
+    module.write_json(session_dir / "session.manifest.json", manifest)
+    module.update_registry(aoa_root, manifest, session_dir)
+    captured = module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id=session_id,
+        transcript_path=transcript,
+        manifest=manifest,
+        hook_event_name="PostToolUse",
+        now="2026-08-10T00:03:00Z",
+    )
+    overlay = captured["persistent_live_tail"]
+    with transcript.open("ab") as handle:
+        handle.write(b'{"row":"newer owner-only tail"}\n')
+
+    # Model a resumed projection whose original source snapshot lags its
+    # atomic publish watermark while raw.path now names the growing capture.
+    manifest["raw"]["source_snapshot"]["size"] = len(old_prefix)
+    manifest["raw"]["bytes"] = len(published + live_tail)
+    manifest["raw"]["sha256"] = hashlib.sha256(
+        published + live_tail
+    ).hexdigest()
+    manifest["raw"]["path"] = overlay["materialization_path"]
+    module.write_json(session_dir / "session.manifest.json", manifest)
+
+    snapshot = module.session_live_tail_source_snapshot(
+        aoa_root=aoa_root,
+        session=session_id,
+    )
+
+    assert snapshot["ok"] is True
+    assert snapshot["status"] == "truncated"
+    assert snapshot["archive_watermark_source"] == (
+        "projection_publish_identity"
+    )
+    assert snapshot["archived_bytes"] == len(published)
+    assert snapshot["scan_start_offset"] == len(published)
+    assert snapshot["owner_tail_bytes"] > 0
+    assert snapshot["unscanned_bytes"] == snapshot["owner_tail_bytes"]
+    assert (
+        "live_tail_owner_source_advanced_beyond_capture"
+        in snapshot["diagnostics"]
+    )
+    assert snapshot["prefix_validation"]["expected_sha256"] == (
+        hashlib.sha256(published).hexdigest()
+    )
+
+
+def test_generation_identity_uses_loaded_projection_producer_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     loaded_sha256 = (
@@ -64562,10 +78946,143 @@ def test_generation_identity_uses_process_loaded_producer_snapshot(
     assert before_common == after_common
     assert before_registry == after_registry
     assert after_common["producer_sha256"] == loaded_sha256
-    assert after_registry["producer_sha256"] == loaded_sha256
+    assert after_registry["producer_sha256"] == (
+        module.SESSION_MEMORY_LOADED_PROJECTION_PRODUCER_CONTRACTS[
+            "entity_registry"
+        ]["sha256"]
+    )
+    assert after_registry["producer_sha256"] != loaded_sha256
+    assert after_registry["producer_identity_mode"] == (
+        module.PROJECTION_PRODUCER_IDENTITY_MODE
+    )
+    assert after_registry["producer_contract_status"] == "current"
     assert after_common["producer_identity_mode"] == (
         "process_loaded_source_snapshot_v1"
     )
+
+
+def test_stage_work_identity_isolates_session_index_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publish_identity = {
+        "schema_version": 1,
+        "source": {
+            "raw_sha256": "a" * 64,
+            "raw_bytes": 1024,
+            "raw_line_count": 8,
+        },
+        "processed_watermark": {
+            "to_line": 8,
+            "to_timestamp": "2026-08-10T00:00:00Z",
+        },
+        "publish_id": "b" * 64,
+    }
+    before = module.session_projection_work_identity(
+        publish_identity
+    )
+    original = module.session_index_generation_identity
+
+    def changed_session_index() -> dict[str, Any]:
+        return {
+            **original(),
+            "generation_id": "c" * 64,
+        }
+
+    monkeypatch.setattr(
+        module,
+        "session_index_generation_identity",
+        changed_session_index,
+    )
+    after = module.session_projection_work_identity(
+        publish_identity
+    )
+
+    assert after["work_id"] == before["work_id"]
+    assert after["stage_work_identities"]["capture"] == (
+        before["stage_work_identities"]["capture"]
+    )
+    assert after["stage_work_identities"]["classification"] == (
+        before["stage_work_identities"]["classification"]
+    )
+    assert after["stage_work_identities"]["segment_index"] == (
+        before["stage_work_identities"]["segment_index"]
+    )
+    assert after["stage_work_identities"][
+        "session_component_manifest"
+    ] != before["stage_work_identities"][
+        "session_component_manifest"
+    ]
+
+
+def test_stage_work_identity_propagates_only_declared_downstream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publish_identity = {
+        "schema_version": 1,
+        "source": {
+            "raw_sha256": "a" * 64,
+            "raw_bytes": 1024,
+            "raw_line_count": 8,
+        },
+        "processed_watermark": {"to_line": 8},
+        "publish_id": "b" * 64,
+    }
+    before = module.session_projection_work_identity(
+        publish_identity
+    )["stage_work_identities"]
+    original_review = module.review_rendering_generation_identity
+
+    def changed_review(**kwargs: Any) -> dict[str, Any]:
+        return {
+            **original_review(**kwargs),
+            "generation_id": "d" * 64,
+        }
+
+    monkeypatch.setattr(
+        module,
+        "review_rendering_generation_identity",
+        changed_review,
+    )
+    after_review = module.session_projection_work_identity(
+        publish_identity
+    )["stage_work_identities"]
+    assert {
+        stage
+        for stage in before
+        if before[stage] != after_review[stage]
+    } == {"review_rendering"}
+
+    monkeypatch.undo()
+    original_episode = module.task_episode_source_generation_identity
+
+    def changed_episode(**kwargs: Any) -> dict[str, Any]:
+        return {
+            **original_episode(**kwargs),
+            "generation_id": "e" * 64,
+        }
+
+    monkeypatch.setattr(
+        module,
+        "task_episode_source_generation_identity",
+        changed_episode,
+    )
+    after_episode = module.session_projection_work_identity(
+        publish_identity
+    )["stage_work_identities"]
+    assert {
+        stage
+        for stage in before
+        if before[stage] != after_episode[stage]
+    } == {
+        "task_episodes",
+        "goal_lifecycles",
+        "session_component_manifest",
+    }
+    assert after_episode["classification"] == before["classification"]
+    assert after_episode["segment_index"] == before["segment_index"]
+    assert after_episode["review_rendering"] == before[
+        "review_rendering"
+    ]
 
 
 def test_evaluation_generation_pin_invalidates_projection_and_raw_drift(
@@ -64835,7 +79352,7 @@ def test_evaluation_generation_pin_invalidates_semantic_artifact_drift(
     assert before["semantic_fingerprint"] != after["semantic_fingerprint"]
 
 
-def test_evaluation_generation_pin_refuses_incompatible_producer_generation(
+def test_evaluation_generation_pin_refuses_incompatible_projection_producer_generation(
     tmp_path: Path,
     monkeypatch: Any,
 ) -> None:
@@ -64889,11 +79406,17 @@ def test_evaluation_generation_pin_refuses_incompatible_producer_generation(
         sessions=[session_id],
     )
     assert current["ok"] is True
-    common = module.session_memory_generation_common()
+    loaded_contracts = copy.deepcopy(
+        module.SESSION_MEMORY_LOADED_PROJECTION_PRODUCER_CONTRACTS
+    )
+    loaded_contracts["portable_lexical_search"] = {
+        **loaded_contracts["portable_lexical_search"],
+        "sha256": "f" * 64,
+    }
     monkeypatch.setattr(
         module,
-        "session_memory_generation_common",
-        lambda: {**common, "producer_sha256": "f" * 64},
+        "SESSION_MEMORY_LOADED_PROJECTION_PRODUCER_CONTRACTS",
+        loaded_contracts,
     )
 
     incompatible = module.evaluation_generation_snapshot(
@@ -66239,9 +80762,27 @@ def test_episode_semantic_projection_publishes_no_candidate_with_broken_ref(
     session_dir = Path(str(receipt["session_dir"]))
     session_index_path = session_dir / module.SESSION_INDEX_JSON
     session_index = module.read_json(session_index_path, {})
-    episode = session_index["task_episodes"][0]
+    episode = module.session_index_task_episode_components(
+        session_dir,
+        session_index,
+    )[0]
     episode["start_user_ref"]["line"] = 999
     episode["start_user_ref"]["raw_ref"] = "raw:line:999"
+    shards = module.materialize_session_index_task_episode_shards(
+        session_dir,
+        [episode],
+        publish_identity=session_index["projection_publish"],
+        literal_policy=module.DerivedSessionSensitiveLiteralPolicy(
+            values_by_kind={}
+        ),
+        workers=1,
+    )
+    module.write_session_index_shard_manifest(
+        session_dir,
+        publish_identity=session_index["projection_publish"],
+        source_identity=shards["source_identity"],
+        task_episode_records=shards["records"],
+    )
     session_index["task_episode_semantic_digest"] = (
         module.task_episode_semantic_digest_for_session_index(
             session_index,
@@ -67008,6 +81549,9 @@ def test_exact_literal_postings_recover_successful_command_output_without_semant
     mirrored_message_anchor = "MIRRORED_ASSISTANT_MESSAGE_ANCHOR_C31D9E"
     security_classified_echo_anchor = "ABSENT_SECURITY_CLASSIFIED_QUERY_ECHO_8E2C71"
     mcp_query_echo_anchor = "ABSENT_MCP_QUERY_ECHO_6A9D42"
+    wrapped_mcp_query_echo_anchor = (
+        "ABSENT_WRAPPED_MCP_QUERY_ECHO_3D947A"
+    )
     python_raw_read_echo_anchor = "ABSENT_PYTHON_RAW_READ_ECHO_2C7F91"
     with transcript.open("a", encoding="utf-8") as handle:
         for row in (
@@ -67189,6 +81733,42 @@ def test_exact_literal_postings_recover_successful_command_output_without_semant
                     "output": python_raw_read_echo_anchor,
                 },
             },
+            {
+                "timestamp": "2026-06-11T00:00:18Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "name": "exec",
+                    "call_id": "call-live-wrapped-mcp-query-echo",
+                    "input": (
+                        "const r = await "
+                        "tools.mcp__aoa_session_memory__aoa_session_search("
+                        f'{{query:"{wrapped_mcp_query_echo_anchor}",limit:5}});'
+                    ),
+                },
+            },
+            {
+                "timestamp": "2026-06-11T00:00:19Z",
+                "type": "compacted",
+                "payload": {
+                    "message": "context compacted",
+                    "replacement_history": [
+                        {
+                            "type": "message",
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "input_text",
+                                    "text": (
+                                        "copied historical context containing "
+                                        f"{live_only_anchor}"
+                                    ),
+                                }
+                            ],
+                        }
+                    ],
+                },
+            },
         ):
             handle.write(json.dumps(row) + "\n")
     stale_exact = module.search_sessions(
@@ -67219,6 +81799,19 @@ def test_exact_literal_postings_recover_successful_command_output_without_semant
         explain=True,
         literal_postings_only=True,
     )
+    global_live_exact = module.search_sessions(
+        aoa_root=aoa_root,
+        query=live_only_anchor,
+        limit=5,
+        explain=True,
+    )
+    global_live_exact_shards = module.search_sessions(
+        aoa_root=aoa_root,
+        query=live_only_anchor,
+        limit=5,
+        explain=True,
+        use_shards=True,
+    )
     absent_echo = module.live_tail_exact_search(
         aoa_root=aoa_root,
         session=session_id,
@@ -67244,6 +81837,13 @@ def test_exact_literal_postings_recover_successful_command_output_without_semant
         aoa_root=aoa_root,
         session=session_id,
         query=mcp_query_echo_anchor,
+        limit=5,
+        explain=True,
+    )
+    wrapped_mcp_query_echo = module.live_tail_exact_search(
+        aoa_root=aoa_root,
+        session=session_id,
+        query=wrapped_mcp_query_echo_anchor,
         limit=5,
         explain=True,
     )
@@ -67358,16 +81958,48 @@ def test_exact_literal_postings_recover_successful_command_output_without_semant
     assert stale_plan["ordered_routes"][1]["route_id"] == "freshness_diagnostic"
     assert stale_plan["ordered_routes"][2]["route_id"] == "exact_literal_postings_search"
     assert stale_plan["search_projection"]["exact_literal_postings"]["scope_status"] == "scope_deferred_live"
-    assert live_exact["raw_occurrence_count"] == 4
+    assert live_exact["raw_occurrence_count"] == 5
     assert live_exact["candidate_count"] == 1
     assert live_exact["result_count"] == 1
     assert live_exact["results"][0]["raw_ref"] == "raw:line:7"
     assert "live_tail_exact_retrieval_control_query_echo_suppressed:3" in live_exact["diagnostics"]
+    assert (
+        "live_tail_exact_generated_context_summary_suppressed:1"
+        in live_exact["diagnostics"]
+    )
     assert automatic_live_exact["result_count"] == 1
     assert automatic_live_exact["results"][0]["raw_ref"] == "raw:line:7"
     assert automatic_live_exact["results"][0]["retrieval_partition"] == "live_raw_fallback"
     assert automatic_live_exact["live_tail_fallback"]["status"] == "applied"
     assert automatic_live_exact["live_tail_fallback"]["mutates"] is False
+    for global_exact in (global_live_exact, global_live_exact_shards):
+        assert global_exact["result_count"] == 1
+        assert global_exact["results"][0]["raw_ref"] == "raw:line:7"
+        assert global_exact["results"][0]["retrieval_partition"] == (
+            "global_recent_raw_fallback"
+        )
+        assert global_exact["global_recent_fallback"]["status"] == "applied"
+        assert global_exact["global_recent_fallback"]["attempted"] is True
+        assert global_exact["global_recent_fallback"]["mutates"] is False
+        assert global_exact["route_selection"]["selected_route"] == (
+            "bounded_global_recent_raw_exact_fallback"
+        )
+        assert (
+            global_exact["global_recent_fallback"]["global_scope_complete"]
+            is False
+        )
+        assert (
+            global_exact["global_recent_fallback"][
+                "negative_result_exhaustive"
+            ]
+            is False
+        )
+        assert (
+            global_exact["cost_profile"][
+                "persistent_global_recent_index_written"
+            ]
+            is False
+        )
     assert absent_echo["raw_occurrence_count"] == 1
     assert absent_echo["candidate_count"] == 0
     assert absent_echo["result_count"] == 0
@@ -67385,6 +82017,13 @@ def test_exact_literal_postings_recover_successful_command_output_without_semant
     assert (
         "live_tail_exact_retrieval_control_query_echo_suppressed:3"
         in mcp_query_echo["diagnostics"]
+    )
+    assert wrapped_mcp_query_echo["raw_occurrence_count"] == 1
+    assert wrapped_mcp_query_echo["candidate_count"] == 0
+    assert wrapped_mcp_query_echo["result_count"] == 0
+    assert (
+        "live_tail_exact_retrieval_control_query_echo_suppressed:1"
+        in wrapped_mcp_query_echo["diagnostics"]
     )
     assert python_raw_read_echo["raw_occurrence_count"] == 2
     assert python_raw_read_echo["candidate_count"] == 0
@@ -72162,15 +86801,7 @@ def test_agent_event_route_skips_heavy_hydration_without_text_query(tmp_path: Pa
     def fail_body_hydration(*_args: Any, **_kwargs: Any) -> dict[int, str]:
         raise AssertionError("agent event structured route must not read document_bodies")
 
-    raw_preview_calls = 0
-
-    def counted_raw_preview(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
-        nonlocal raw_preview_calls
-        raw_preview_calls += 1
-        return {"status": "raw_semantic_text", "text": "Agent response route stays lightweight."}
-
     monkeypatch.setattr(module, "search_document_bodies_for_rows", fail_body_hydration)
-    monkeypatch.setattr(module, "route_raw_semantic_preview", counted_raw_preview)
     route = module.agent_event_route_search(
         aoa_root=aoa_root,
         agent_events=["assistant_answer"],
@@ -72185,7 +86816,8 @@ def test_agent_event_route_skips_heavy_hydration_without_text_query(tmp_path: Pa
     assert route["cost_profile"]["hydrates_body"] is False
     assert route["cost_profile"]["semantic_preview"] is False
     assert route["cost_profile"]["raw_ref_preview"] is True
-    assert raw_preview_calls == 1
+    assert route["quality"]["raw_preview_result_count"] == 1
+    assert route["results"][0]["preview_source"].startswith("raw")
     assert route["results"][0]["preview_source"] == "raw_semantic_text"
     assert route["results"][0]["bounded_preview"] == "Agent response route stays lightweight."
     assert route["results"][0]["explain"]["semantic_preview"] == "skipped_for_lightweight_route"
@@ -72925,7 +87557,213 @@ def test_search_provider_status_keeps_host_backends_optional(tmp_path: Path) -> 
     assert status["freshness_mode"] == "hot"
     assert status["providers"]["portable_sqlite"]["freshness"]["source_scan"] is False
     assert status["providers"]["abyss_machine_nervous"]["status"] == "disabled_by_default"
+    served = status["providers"]["abyss_machine_nervous"]["served_request_health"]
+    assert served["status"] == "unobserved"
+    assert served["observed"] is False
+    assert served["ok"] is None
     assert "Host providers are optional accelerators" in status["authority_law"]
+
+
+@pytest.mark.parametrize(
+    ("preflight", "expected_status", "expected_provider_ok"),
+    [
+        (
+            {
+                "ok": True,
+                "status": "available",
+                "provider_status": "embedded",
+                "model": module.EPISODE_DENSE_DEFAULT_MODEL,
+                "dimension": module.EPISODE_DENSE_DEFAULT_DIMENSION,
+                "elapsed_ms": 7,
+                "diagnostics": [],
+            },
+            "served",
+            True,
+        ),
+        (
+            {
+                "ok": False,
+                "status": "provider_unavailable",
+                "provider_status": "error",
+                "model": "",
+                "dimension": 0,
+                "elapsed_ms": 8,
+                "diagnostics": [
+                    "private response body "
+                    + "/"
+                    + "srv/private/provider payload"
+                ],
+            },
+            "failed",
+            False,
+        ),
+        (
+            {
+                "ok": False,
+                "status": "provider_contract_drift",
+                "provider_status": "embedded",
+                "model": "wrong-model",
+                "expected_model": module.EPISODE_DENSE_DEFAULT_MODEL,
+                "dimension": 3,
+                "expected_dimension": module.EPISODE_DENSE_DEFAULT_DIMENSION,
+                "elapsed_ms": 9,
+                "diagnostics": [
+                    "private response body "
+                    + "/"
+                    + "srv/private/provider payload"
+                ],
+            },
+            "contract_drift",
+            False,
+        ),
+    ],
+)
+def test_host_provider_status_separates_real_served_request_health_from_availability(
+    monkeypatch: Any,
+    preflight: dict[str, Any],
+    expected_status: str,
+    expected_provider_ok: bool,
+) -> None:
+    config = module.default_search_provider_config()
+
+    def fake_command(command: list[str], **_kwargs: Any) -> dict[str, Any]:
+        if "semantic-status" in command:
+            return {
+                "ok": True,
+                "status": "ok",
+                "command": command,
+                "payload": {
+                    "schema": "semantic-status-v1",
+                    "generated_at": "2026-08-01T03:00:00Z",
+                    "ok": True,
+                    "embedding": {
+                        "status": "ready",
+                        "model_exists": True,
+                        "dimension": module.EPISODE_DENSE_DEFAULT_DIMENSION,
+                    },
+                    "counts": {"vectors": 1},
+                    "freshness": {"stale": False},
+                },
+            }
+        return {
+            "ok": True,
+            "status": "ok",
+            "command": command,
+            "payload": {
+                "schema": "gate-v1",
+                "generated_at": "2026-08-01T03:00:00Z",
+                "summary": {"fails": 0, "warnings": 0, "checks": 1},
+            },
+        }
+
+    monkeypatch.setattr(module, "run_json_command", fake_command)
+    monkeypatch.setattr(
+        module,
+        "run_json_url",
+        lambda url, **_kwargs: {
+            "ok": True,
+            "status": "ok",
+            "url": url,
+            "payload": {"ok": True, "loaded": True},
+        },
+    )
+    calls: list[dict[str, Any]] = []
+
+    def fake_preflight(provider: dict[str, Any]) -> dict[str, Any]:
+        calls.append(provider)
+        return dict(preflight)
+
+    monkeypatch.setattr(module, "episode_dense_provider_preflight", fake_preflight)
+
+    provider = module.host_provider_status(
+        config=config,
+        provider_name="abyss_machine_nervous",
+        force_probe=True,
+        probe_served_request=True,
+    )
+
+    assert len(calls) == 1
+    assert provider["ok"] is expected_provider_ok
+    health = provider["served_request_health"]
+    assert health["status"] == expected_status
+    assert health["observed"] is True
+    assert health["ok"] is expected_provider_ok
+    assert health["freshness"] == {
+        "status": "current",
+        "scope": "single_status_invocation",
+        "reuse_allowed": False,
+    }
+    assert health["truth_status"] == (
+        "bounded_served_request_observation_not_semantic_quality_proof"
+    )
+    compact = module.compact_search_provider_status_for_route(
+        {
+            "schema_version": 1,
+            "artifact_type": "search_provider_status",
+            "provider_schema_version": module.SEARCH_PROVIDER_SCHEMA_VERSION,
+            "generated_at": "2026-08-01T03:00:00Z",
+            "served_request_probe": True,
+            "providers": {"abyss_machine_nervous": provider},
+        },
+        provider_name="abyss_machine_nervous",
+    )
+    compact_health = compact["providers"]["abyss_machine_nervous"][
+        "served_request_health"
+    ]
+    assert compact_health["status"] == expected_status
+    rendered = json.dumps(compact_health, ensure_ascii=False)
+    assert module.EPISODE_DENSE_PROVIDER_PROBE_TEXT not in rendered
+    assert "private response body" not in rendered
+    assert "/" + "srv/private" not in rendered
+
+
+def test_host_provider_status_does_not_conflate_unrequested_probe_with_health(
+    monkeypatch: Any,
+) -> None:
+    config = module.default_search_provider_config()
+    monkeypatch.setattr(
+        module,
+        "episode_dense_provider_preflight",
+        lambda _provider: (_ for _ in ()).throw(
+            AssertionError("unrequested served-request probe must not run")
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "run_json_command",
+        lambda command, **_kwargs: {
+            "ok": True,
+            "status": "ok",
+            "command": command,
+            "payload": {
+                "schema": "gate-v1",
+                "generated_at": "2026-08-01T03:00:00Z",
+                "summary": {"fails": 0, "warnings": 0, "checks": 1},
+            },
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "run_json_url",
+        lambda url, **_kwargs: {
+            "ok": True,
+            "status": "ok",
+            "url": url,
+            "payload": {"ok": True},
+        },
+    )
+
+    provider = module.host_provider_status(
+        config=config,
+        provider_name="abyss_machine_nervous",
+        force_probe=True,
+        probe_served_request=False,
+    )
+
+    assert provider["ok"] is True
+    assert provider["served_request_health"]["status"] == "unobserved"
+    assert provider["served_request_health"]["observed"] is False
+    assert provider["served_request_health"]["ok"] is None
 
 
 def test_search_provider_status_hot_route_uses_persisted_state_without_archive_scan(tmp_path: Path, monkeypatch: Any) -> None:
@@ -73516,6 +88354,460 @@ def test_token_accounting_backfill_respects_budget(tmp_path: Path, monkeypatch: 
     assert payload["remaining_count"] == 2
     assert payload["counts"] == {"planned": 1}
     assert "token_accounting_backfill_budget_exhausted" in payload["diagnostics"]
+
+
+def test_token_accounting_backfill_uses_token_only_atomic_projection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "token-only-backfill.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-07-20T00:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "token-only-backfill",
+                    "cwd": str(workspace),
+                },
+            },
+            {
+                "timestamp": "2026-07-20T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "refresh only token ledgers",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    receipt = module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "token-only-backfill",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    record = module.resolve_session_record(
+        aoa_root,
+        "token-only-backfill",
+    )
+    session_dir = Path(str(receipt["session_dir"]))
+    raw_path = Path(
+        module.read_json(
+            session_dir / "session.manifest.json", {}
+        )["raw"]["path"]
+    )
+    raw_sha_before = module.sha256_file(raw_path)
+    monkeypatch.setattr(
+        module,
+        "reindex_session_from_raw",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("full reindex must not run")
+        ),
+    )
+
+    result = module.token_accounting_backfill_candidate(
+        aoa_root,
+        record,
+        apply=True,
+        force=True,
+    )
+
+    assert result["status"] == "backfilled"
+    assert result["applied_mode"] == "token_projection_only"
+    assert result["reindex_result"]["status"] == (
+        "token_projection_backfilled"
+    )
+    assert result["raw_unchanged"] is True
+    assert module.sha256_file(raw_path) == raw_sha_before
+    assert result["after_diagnostics"] == []
+
+
+@pytest.mark.parametrize(
+    ("archive_status", "expected_backfill_mode"),
+    [
+        ("indexed", "token_projection_only"),
+        ("raw_mirrored_index_deferred", "full_initial_materialization"),
+    ],
+    ids=["indexed-token-only", "deferred-initial-materialization"],
+)
+def test_deep_fallback_maintenance_token_backfill_preserves_outer_execution_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    archive_status: str,
+    expected_backfill_mode: str,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    session_id = "deep-fallback-token-identity"
+    outer_execution_id = "deep-fallback-token-outer"
+    transcript = tmp_path / "deep-fallback-token-identity.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-08-22T00:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": session_id, "cwd": str(workspace)},
+            },
+            {
+                "timestamp": "2026-08-22T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "deep fallback token maintenance",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    monkeypatch.delenv("AOA_SESSION_MEMORY_FULL_STOP_SYNC", raising=False)
+    if archive_status == "raw_mirrored_index_deferred":
+        monkeypatch.setenv("AOA_SESSION_MEMORY_STOP_SYNC_MAX_BYTES", "0")
+    else:
+        monkeypatch.delenv("AOA_SESSION_MEMORY_STOP_SYNC_MAX_BYTES", raising=False)
+    receipt = module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": session_id,
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    session_dir = Path(str(receipt["session_dir"]))
+    record = module.resolve_session_record(aoa_root, session_id)
+    manifest_path = session_dir / "session.manifest.json"
+    manifest = module.read_json(manifest_path, {})
+    if archive_status == "indexed":
+        raw_blocks = manifest.get("raw_blocks") if isinstance(manifest.get("raw_blocks"), dict) else {}
+        raw_block_index_path = Path(str(raw_blocks.get("index") or ""))
+        raw_block_index = module.read_json(raw_block_index_path, {})
+        for key in ("token_accounting",):
+            manifest.pop(key, None)
+        for segment in manifest.get("segments", []) if isinstance(manifest.get("segments"), list) else []:
+            if not isinstance(segment, dict):
+                continue
+            segment.pop("token_accounting", None)
+            segment_index_path = Path(str(segment.get("index") or ""))
+            segment_index = module.read_json(segment_index_path, {})
+            if isinstance(segment_index, dict):
+                segment_index.pop("token_accounting", None)
+                write_json(segment_index_path, segment_index)
+        for block in raw_blocks.get("blocks", []) if isinstance(raw_blocks.get("blocks"), list) else []:
+            if isinstance(block, dict):
+                block.pop("token_accounting", None)
+        if isinstance(raw_block_index, dict):
+            for block in raw_block_index.get("blocks", []) if isinstance(raw_block_index.get("blocks"), list) else []:
+                if isinstance(block, dict):
+                    block.pop("token_accounting", None)
+            write_json(raw_block_index_path, raw_block_index)
+        session_index_path = session_dir / "session.index.json"
+        session_index = module.read_json(session_index_path, {})
+        if isinstance(session_index, dict):
+            session_index.pop("token_accounting", None)
+            write_json(session_index_path, session_index)
+        write_json(manifest_path, manifest)
+    else:
+        assert manifest["archive_status"] == "raw_mirrored_index_deferred"
+        assert manifest.get("segments") == []
+
+    current_state = {
+        "status": "current",
+        "needs_refresh": False,
+        "needs_maintenance": False,
+        "dirty_session_ids": [],
+        "dirty_sessions": [],
+        "reasons": [],
+        "diagnostics": [],
+    }
+
+    def state_copy(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return dict(current_state)
+
+    monkeypatch.setattr(module, "route_index_drift_records", lambda _records: [])
+    monkeypatch.setattr(module, "search_projection_fingerprints_for_records", lambda _records: [])
+    monkeypatch.setattr(module, "sqlite_search_index_hot_state", state_copy)
+    monkeypatch.setattr(module, "atlas_index_hot_state", state_copy)
+    monkeypatch.setattr(module, "sqlite_search_index_state", state_copy)
+    monkeypatch.setattr(module, "atlas_index_state", state_copy)
+    monkeypatch.setattr(module, "episode_semantic_projection_state", state_copy)
+    monkeypatch.setattr(module, "episode_direct_relation_postings_cardinality", state_copy)
+    monkeypatch.setattr(module, "episode_dense_projection_state", state_copy)
+    monkeypatch.setattr(module, "entity_registry_maintenance_status", state_copy)
+    monkeypatch.setattr(module, "session_memory_search_shard_projection_summary", state_copy)
+    monkeypatch.setattr(module, "session_memory_operational_route_rollup_status", state_copy)
+    monkeypatch.setattr(module, "session_memory_operational_direct_event_rollup_status", state_copy)
+    monkeypatch.setattr(
+        module,
+        "search_index_sessions",
+        lambda **_kwargs: {
+            "ok": True,
+            "selected_count": 0,
+            "processed_count": 0,
+            "completed_session_ids": [],
+            "remaining_count": 0,
+            "budget_exhausted": False,
+            "diagnostics": [],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "build_agent_atlas",
+        lambda **_kwargs: {
+            "ok": True,
+            "selected_count": 0,
+            "processed_count": 0,
+            "completed_session_ids": [],
+            "remaining_count": 0,
+            "budget_exhausted": False,
+            "diagnostics": [],
+        },
+    )
+
+    raw = manifest.get("raw") if isinstance(manifest.get("raw"), dict) else {}
+    capture_ledger = raw.get("capture_ledger") if isinstance(raw.get("capture_ledger"), dict) else {}
+    required_capture_bytes = int(raw.get("bytes") or 0) + 1
+    obligation_options = {
+        "persistent_obligation": True,
+        "obligation_kind": module.SESSION_PROJECTION_FRESHNESS_OBLIGATION_KIND,
+        "session_id": session_id,
+        "session_dir": str(session_dir),
+        "required_capture_epoch_id": str(capture_ledger.get("epoch_id") or "epoch-1"),
+        "required_capture_bytes": required_capture_bytes,
+        "required_capture_sha256": "b" * 64,
+        "required_stable_projection": False,
+        "required_search_consumer": False,
+    }
+
+    def schedule(queue_payload: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        return (
+            module.auto_maintenance_retry_upsert_item(
+                queue_payload,
+                profile="deep",
+                target=session_id,
+                reason="timer_deep_fallback_token_identity",
+                launch_status="freshness_obligation_enqueued",
+                options=obligation_options,
+                now_epoch=100.0,
+                initial_delay_seconds=0,
+            ),
+            True,
+        )
+
+    module.mutate_auto_maintenance_retry_queue(
+        aoa_root,
+        schedule,
+        now_epoch=100.0,
+    )
+
+    observed_candidates: list[dict[str, Any]] = []
+    original_candidate = module.token_accounting_backfill_candidate
+
+    def observe_candidate(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        result = original_candidate(*args, **kwargs)
+        observed_candidates.append(result)
+        return result
+
+    monkeypatch.setattr(
+        module,
+        "token_accounting_backfill_candidate",
+        observe_candidate,
+    )
+
+    progress_root = aoa_root / module.SESSION_PROJECTION_PROGRESS_RECEIPTS_ROOT
+    baseline_receipt_paths = set(progress_root.rglob("*.json"))
+
+    fallback_child = [
+        "python3",
+        str(Path(module.__file__).resolve()),
+        "index-maintenance",
+        session_id,
+        "--workspace-root",
+        str(workspace),
+        "--aoa-root",
+        str(aoa_root),
+        "--apply",
+        "--skip-graph-repair",
+        "--reason",
+        "auto_maintenance_resource:deep:index_drip_on_block",
+        "--write-report",
+        "--execution-id",
+        outer_execution_id,
+    ]
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        child = command[command.index("--") + 1 :]
+        assert child == fallback_child
+        child_args = module.build_parser().parse_args(child[2:])
+        with contextlib.redirect_stdout(io.StringIO()):
+            child_returncode = module.command_index_maintenance(child_args)
+        assert child_returncode == 0
+        return subprocess.CompletedProcess(
+            command,
+            1,
+            stdout=json.dumps(
+                {
+                    "schema": "abyss_machine_resource_launch_v1",
+                    "ok": False,
+                    "blocked_reasons": [],
+                    "denied_reasons": [],
+                    "execution": {
+                        "ok": False,
+                        "returncode": 124,
+                        "stdout_tail": "",
+                        "stderr_tail": "hard timeout after token publication",
+                        "timeout_cleanup": {
+                            "unit": "bounded-maintenance.service",
+                            "kill": {"returncode": 0},
+                        },
+                    },
+                }
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    payload = module.auto_maintenance_resource_launch(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        profile="deep",
+        target=session_id,
+        apply=True,
+        reason="timer_deep_fallback_token_identity",
+        child_command_override=fallback_child,
+        index_drip_on_block=False,
+        graph_drip_on_block=False,
+        execution_id=outer_execution_id,
+    )
+
+    assert len(calls) == 1
+    assert payload["execution_id"] == outer_execution_id
+    assert payload["status"] == "resource_hard_timeout_progress_recovered"
+    assert payload["execution"]["returncode"] == 124
+    assert payload["child_result_verified"] is False
+    assert payload["persisted_progress_recovered"] is True
+    completion = payload["completion_semantics"]
+    assert completion["semantic_progress"]["proven"] is True
+    assert completion["semantic_progress"]["remaining_work_unknown"] is True
+    assert completion["global_semantic_completion"]["proven"] is False
+    assert completion["global_freshness"]["proven"] is False
+    assert payload["automatic_retry"]["retryable"] is True
+    assert payload["automatic_retry"]["status"] in {
+        "scheduled",
+        "already_scheduled_updated",
+    }
+
+    assert len(observed_candidates) == 2
+    expected_planned_action = (
+        "token_projection_only"
+        if archive_status == "indexed"
+        else "initial_materialization_from_preserved_raw"
+    )
+    assert all(
+        candidate["planned_actions"] == [expected_planned_action]
+        for candidate in observed_candidates
+    )
+    candidate_result = observed_candidates[-1]
+    assert candidate_result["backfill_mode"] == expected_backfill_mode
+    assert candidate_result["applied_mode"] == (
+        "full_reindex"
+        if archive_status == "raw_mirrored_index_deferred"
+        else expected_backfill_mode
+    )
+    assert candidate_result["reindex_result"]["status"] in {
+        "token_projection_backfilled",
+        "reindexed",
+    }
+    assert (
+        candidate_result["reindex_result"]["publish_result"]
+        ["progress_receipt"]["execution_id"]
+        == outer_execution_id
+    )
+
+    receipt_paths = sorted(
+        set(progress_root.rglob("*.json")) - baseline_receipt_paths
+    )
+    assert len(receipt_paths) == 1
+    assert receipt_paths[0].parent == progress_root / module.safe_slug(outer_execution_id)
+    assert receipt_paths[0].parent.name == outer_execution_id
+    new_receipt_dirs = {path.parent for path in receipt_paths}
+    assert new_receipt_dirs == {
+        progress_root / module.safe_slug(outer_execution_id)
+    }
+    assert not any(
+        path.name == "unbound" or path.name.startswith("projection-")
+        for path in new_receipt_dirs
+    )
+    published_receipt = module.read_json(receipt_paths[0], {})
+    assert published_receipt["execution_id"] == outer_execution_id
+
+    recovered = module.recover_session_projection_progress_evidence(
+        aoa_root=aoa_root,
+        execution_id=outer_execution_id,
+        target=session_id,
+    )
+    assert recovered["verified"] is True
+    assert recovered["authoritative_publication_verified"] is True
+    assert recovered["receipt_observed_count"] == 1
+    assert recovered["receipt_count"] == 1
+    assert recovered["receipts"][0]["path"] == str(receipt_paths[0])
+    authority = recovered["receipts"][0]["authority_validation"]
+    assert authority["verified"] is True
+    assert authority["outbox_path"] == published_receipt["outbox"]["path"]
+    assert authority["manifest_path"] == str(manifest_path)
+    assert authority["current_publish_id"] == published_receipt["publish_id"]
+    assert authority["diagnostics"] == []
+
+    before_watermark = module.session_projection_freshness_obligation_status(
+        aoa_root,
+        obligation_options,
+    )
+    assert before_watermark["ok"] is False
+    assert before_watermark["status"] == "remaining"
+    assert "capture" in before_watermark["remaining_axes"]
+
+    manifest = module.read_json(manifest_path, {})
+    raw = manifest["raw"]
+    new_raw_bytes = int(raw["bytes"]) + 1
+    new_raw_sha256 = "b" * 64
+    raw["bytes"] = new_raw_bytes
+    raw["sha256"] = new_raw_sha256
+    raw["capture_ledger"] = {
+        **(raw.get("capture_ledger") if isinstance(raw.get("capture_ledger"), dict) else {}),
+        "epoch_id": obligation_options["required_capture_epoch_id"],
+        "processed_watermark_bytes": new_raw_bytes,
+    }
+    write_json(manifest_path, manifest)
+    after_watermark = module.session_projection_freshness_obligation_status(
+        aoa_root,
+        obligation_options,
+    )
+    assert after_watermark["ok"] is True
+    assert after_watermark["status"] == "satisfied"
 
 
 def test_index_maintenance_reports_token_planning_budget_exhausted(tmp_path: Path, monkeypatch: Any) -> None:
@@ -74109,6 +89401,41 @@ def test_entity_registry_route_terms_use_stable_projection_ref_and_documents_are
         len(json.dumps(module.search_doc_payload(doc), ensure_ascii=False))
         for doc in first_docs
     ) < 1000
+
+
+def test_entity_registry_search_documents_do_not_apply_cli_display_limit(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    captured: dict[str, Any] = {}
+    entries = [
+        {
+            "entity_id": f"tool:fixture_{index}",
+            "kind": "tool",
+            "canonical_key": f"fixture_{index}",
+            "aliases": [],
+            "status": "observed",
+            "source_refs": [],
+        }
+        for index in range(5001)
+    ]
+
+    def fake_build_entity_registry(**kwargs: Any) -> dict[str, Any]:
+        captured["limit"] = kwargs.get("limit", "missing")
+        return {
+            "generated_at": "2026-08-02T00:00:00Z",
+            "truth_status": "generated_entity_registry_navigation_not_source_truth",
+            "entries": entries,
+        }
+
+    monkeypatch.setattr(module, "build_entity_registry", fake_build_entity_registry)
+
+    documents = module.search_documents_for_entity_registry(aoa_root)
+
+    assert captured["limit"] is None
+    assert len(documents) == len(entries)
+    assert documents[-1]["id"] == "entity_registry:tool:fixture_5000"
 
 
 def test_entity_registry_identity_history_does_not_retain_generated_staging_refs_or_counters(
@@ -74763,7 +90090,7 @@ def test_auto_maintenance_clean_hot_and_catchup_noop_preserve_search_store(tmp_p
     assert after_catchup == before_catchup
 
 
-def test_hot_auto_maintenance_waits_for_recent_live_deferred_without_reindexing(tmp_path: Path) -> None:
+def test_hot_auto_maintenance_processes_recent_live_outbox_without_quiet_wait(tmp_path: Path) -> None:
     workspace = tmp_path / "AbyssOS"
     repo = workspace / "aoa-session-memory"
     repo.mkdir(parents=True)
@@ -74825,16 +90152,21 @@ def test_hot_auto_maintenance_waits_for_recent_live_deferred_without_reindexing(
     after = (db_path.stat().st_mtime_ns, wal_path.stat().st_size if wal_path.exists() else 0)
 
     assert hot["ok"] is True
-    assert hot["status"] == "wait_live_catchup"
-    assert hot["mutates"] is False
-    assert hot["deferred_live_after"] is True
-    assert hot["deferred_live_selection_count"] == 1
-    assert hot["selection_scope"]["quiescence"]["deferred_live_session_count"] == 1
-    action = hot["maintenance"]["actions"][0]
-    assert action["action_kind"] == "skipped_clean"
-    assert action["deferred_count"] == 1
-    assert action["skip_reason"] == "recent_live_sources_deferred_until_quiet_window"
-    assert after == before
+    assert hot["status"] == "applied_with_remaining_backlog"
+    assert hot["mutates"] is True
+    assert hot["deferred_live_after"] is False
+    assert hot["deferred_global_derivatives"] is True
+    assert hot["deferred_live_selection_count"] == 0
+    assert hot["selection_scope"]["mode"] == "event_driven_component_outbox"
+    assert hot["selection_scope"]["outbox"]["archive_manifest_scan_performed"] is False
+    assert hot["selection_scope"]["outbox"]["ready_session_count"] == 1
+    reasons = {
+        str(action.get("reason") or "")
+        for action in hot["maintenance"]["actions"]
+    }
+    assert "portable_sqlite_missing_or_stale" in reasons
+    assert "graph_store_missing_or_dirty_after_index_mutation" in reasons
+    assert after != before
 
 
 def test_auto_maintenance_hands_off_deferred_live_after_quiet_window(tmp_path: Path) -> None:
@@ -74906,9 +90238,10 @@ def test_auto_maintenance_hands_off_deferred_live_after_quiet_window(tmp_path: P
     catchup = module.auto_maintenance(
         workspace_root=workspace,
         aoa_root=aoa_root,
-        profile="hot",
+        profile="backlog",
         target="all",
         apply=True,
+        discovery_limit=0,
         budget_seconds=120,
     )
     assert catchup["ok"] is True
@@ -74918,8 +90251,15 @@ def test_auto_maintenance_hands_off_deferred_live_after_quiet_window(tmp_path: P
     assert current["ok"] is True
     assert current["providers"]["portable_sqlite"]["freshness"]["status"] == "current"
     after = module.session_memory_maintenance_status(workspace_root=workspace, aoa_root=aoa_root, include_timers=False)
-    assert after["recommendation"] == "use_graph_search"
-    assert after["agent_route"]["action"] == "use_graph_search"
+    # The search projection is current, but the outbox still needs a
+    # receipt-bearing consumer reconciliation before this source can be
+    # released as fully converged.  Search availability and lifecycle
+    # closure are intentionally separate claims.
+    assert after["recommendation"] == "run_maintenance"
+    assert after["agent_route"]["action"] == "run_maintenance_before_graph_search"
+    assert after["next_actions"][0]["id"] == "dispatch_session_freshness_obligation"
+    assert after["next_actions"][0]["route_kind"] == "session_projection_freshness_obligation"
+    assert after["automatic_retry"]["freshness_obligation_due_count"] == 1
     assert after["agent_route"]["live_catchup_pending"] is False
     assert after["live_tail"]["status"] == "none"
 
@@ -75251,6 +90591,107 @@ def test_raw_fts_search_timeout_returns_bounded_route_packet(tmp_path: Path, mon
     assert "bm25(" not in fake_conn.executed_sql[0]
     assert "sqlite_master" in fake_conn.executed_sql[0]
     assert fake_conn.closed is True
+
+
+def test_global_exact_search_timeout_uses_bounded_recent_fallback(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    db_path = module.search_db_path(aoa_root)
+    db_path.parent.mkdir(parents=True)
+    db_path.touch()
+    session_id = "11111111-2222-4333-8444-555555555555"
+
+    class TimeoutConnection:
+        def set_progress_handler(self, _handler: Any, _n: int) -> None:
+            return None
+
+        def execute(self, _sql: str, *_args: Any, **_kwargs: Any) -> Any:
+            raise sqlite3.OperationalError("interrupted")
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        module,
+        "connect_existing_search_db",
+        lambda *_args, **_kwargs: TimeoutConnection(),
+    )
+    monkeypatch.setattr(
+        module,
+        "global_recent_exact_fallback_candidates",
+        lambda _root: {
+            "ok": True,
+            "candidates": [
+                {
+                    "session_id": session_id,
+                    "session_label": "fresh-successor",
+                    "status": "deferred",
+                    "scan_mode": "live_tail",
+                    "document_count": 1,
+                    "selection_reason": "recent_registry_transcript_ahead_of_freshness_state",
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "live_tail_exact_search",
+        lambda **_kwargs: {
+            "ok": True,
+            "scan": {"status": "complete_verified"},
+            "result_count": 1,
+            "results": [
+                {
+                    "doc_id": "fresh-successor-event",
+                    "session_id": session_id,
+                    "session_label": "fresh-successor",
+                    "doc_type": "event",
+                    "event_type": "FILE_READ",
+                    "raw_ref": "raw:line:7",
+                    "raw_line": 7,
+                    "match_score": 100.0,
+                }
+            ],
+            "elapsed_ms": 1,
+        },
+    )
+
+    payload = module.search_sessions(
+        aoa_root=aoa_root,
+        query="timeout-anchor-7F9A2C",
+        limit=5,
+        query_timeout_ms=1,
+        explain=True,
+    )
+
+    assert payload["ok"] is True
+    assert payload["provider"]["status"] == module.SEARCH_FTS_QUERY_TIMEOUT_STATUS
+    assert payload["result_count"] == 1
+    assert payload["results"][0]["raw_ref"] == "raw:line:7"
+    assert payload["global_recent_fallback"]["status"] == "applied"
+    assert payload["bounded_timeout"]["recovered_by"] == (
+        "bounded_global_recent_raw_exact_fallback"
+    )
+    assert payload["bounded_timeout"]["recovery_status"] == "applied"
+    assert payload["route_selection"]["selected_route"] == (
+        "bounded_global_recent_raw_exact_fallback"
+    )
+
+    db_path.unlink()
+    missing_payload = module.search_sessions(
+        aoa_root=aoa_root,
+        query="timeout-anchor-7F9A2C",
+        limit=5,
+        explain=True,
+    )
+
+    assert missing_payload["ok"] is True
+    assert missing_payload["search_projection"]["status"] == "missing"
+    assert missing_payload["result_count"] == 1
+    assert missing_payload["results"][0]["raw_ref"] == "raw:line:7"
+    assert missing_payload["global_recent_fallback"]["status"] == "applied"
 
 
 def test_structured_route_filter_stays_within_posting_first_work_budget(
@@ -75849,6 +91290,246 @@ def test_structured_search_timeout_returns_bounded_route_packet(tmp_path: Path, 
     assert module.SEARCH_FTS_QUERY_PROGRESS_OPCODES in {step for _handler, step in fake_conn.progress_handlers}
     assert fake_conn.progress_handlers[-1] == (None, 0)
     assert fake_conn.closed is True
+
+
+def test_generated_search_reader_hard_deadline_reaps_noncooperative_reader(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """A reader that ignores Python deadlines cannot hold the serving query."""
+
+    aoa_root = tmp_path / ".aoa"
+
+    def noncooperative_reader(**_kwargs: Any) -> dict[str, Any]:
+        time.sleep(5)
+        return {}
+
+    monkeypatch.setattr(module, "_search_sessions_in_process", noncooperative_reader)
+    started = time.monotonic()
+    payload = module.search_sessions(
+        aoa_root=aoa_root,
+        query="noncooperative reader anchor",
+        query_timeout_ms=75,
+        include_archived_raw_fallback=False,
+    )
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+
+    attempt = payload["generated_storage_attempt"]
+    assert payload["ok"] is False
+    assert attempt["status"] == "timed_out"
+    assert attempt["enforcement"] == "isolated_generated_reader_process"
+    assert attempt["fallback_independent_of_reader"] is True
+    assert attempt["cleanup"]["status"] == "reaped"
+    assert attempt["cleanup"]["verified"] is True
+    assert attempt["reader_pid"] > 0
+    assert elapsed_ms < 1500
+
+
+def test_generated_search_reader_hard_deadline_bounds_storage_acquisition(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """Storage acquisition that never returns is contained by the reader boundary."""
+
+    aoa_root = tmp_path / ".aoa"
+    db_path = module.search_db_path(aoa_root)
+    db_path.parent.mkdir(parents=True)
+    db_path.touch()
+
+    def blocked_storage_acquisition(*_args: Any, **_kwargs: Any) -> Any:
+        time.sleep(5)
+        raise sqlite3.OperationalError("simulated storage wait")
+
+    monkeypatch.setattr(
+        module,
+        "connect_existing_search_db",
+        blocked_storage_acquisition,
+    )
+    payload = module._search_sessions_with_isolated_generated_reader(
+        {
+            "aoa_root": aoa_root,
+            "query": "blocked storage anchor",
+            "limit": 1,
+            "provider": "portable_sqlite",
+            "query_timeout_ms": 75,
+            "include_archived_raw_fallback": False,
+        }
+    )
+
+    attempt = payload["generated_storage_attempt"]
+    assert payload["ok"] is False
+    assert attempt["status"] == "timed_out"
+    assert attempt["deadline_scope"] == (
+        "generated_storage_connection_query_result_and_reader_cleanup"
+    )
+    assert attempt["cleanup"]["status"] == "reaped"
+    assert attempt["cleanup"]["verified"] is True
+    assert attempt["reader_pid"] > 0
+
+
+def test_generated_search_reader_timeout_reaches_session_raw_fallback(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """A timed generated reader cannot prevent the bounded source fallback."""
+
+    workspace = tmp_path / "workspace"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "natural-successor.jsonl"
+    session_id = "hard-deadline-fallback-session"
+    anchor = "HARD_FALLBACK_ANCHOR_9D2C"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-08-26T00:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": session_id, "cwd": str(workspace)},
+            },
+            {
+                "timestamp": "2026-08-26T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": anchor}],
+                },
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": session_id,
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    def noncooperative_reader(**_kwargs: Any) -> dict[str, Any]:
+        time.sleep(5)
+        return {}
+
+    monkeypatch.setattr(module, "_search_sessions_in_process", noncooperative_reader)
+    payload = module.search_sessions(
+        aoa_root=aoa_root,
+        query=anchor,
+        session=session_id,
+        limit=1,
+        query_timeout_ms=75,
+        explain=True,
+    )
+
+    assert payload["ok"] is True
+    assert payload["generated_storage_attempt"]["status"] == "timed_out"
+    assert payload["generated_storage_attempt"]["cleanup"]["verified"] is True
+    assert payload["archived_raw_fallback"]["status"] == (
+        "applied_verified_after_index_timeout"
+    )
+    assert payload["results"][0]["raw_ref"] == "raw:line:2"
+
+
+def test_generated_search_reader_timeout_reaches_global_source_only_fallback(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """Global fallback must not reopen the generated store after a reader timeout."""
+
+    workspace = tmp_path / "workspace"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "natural-global-successor.jsonl"
+    session_id = "global-hard-deadline-fallback-session"
+    anchor = "GLOBAL_HARD_FALLBACK_ANCHOR_3A71"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-08-26T00:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": session_id, "cwd": str(workspace)},
+            },
+            {
+                "timestamp": "2026-08-26T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": anchor}],
+                },
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": session_id,
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    def noncooperative_reader(**_kwargs: Any) -> dict[str, Any]:
+        time.sleep(5)
+        return {}
+
+    monkeypatch.setattr(module, "_search_sessions_in_process", noncooperative_reader)
+    payload = module._search_sessions_with_isolated_generated_reader(
+        {
+            "aoa_root": aoa_root,
+            "query": anchor,
+            "limit": 1,
+            "provider": "portable_sqlite",
+            "query_timeout_ms": 75,
+            "explain": True,
+        }
+    )
+
+    assert payload["ok"] is True
+    assert payload["generated_storage_attempt"]["status"] == "timed_out"
+    assert payload["generated_storage_attempt"]["cleanup"]["verified"] is True
+    fallback = payload["global_recent_fallback"]
+    assert fallback["status"] == "applied"
+    assert fallback["candidate_selection"]["generated_reader_accessed"] is False
+    assert "generated_search_reader_not_reopened_for_global_fallback" in payload[
+        "diagnostics"
+    ]
+    assert payload["results"][0]["raw_ref"] == "raw:line:2"
+
+
+def test_generated_search_reader_result_transport_handles_large_payload(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """Result transport must not reintroduce an unbounded pipe write/read."""
+
+    def large_success(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "result_count": 1,
+            "results": [{"body": "large-result-" * 100_000}],
+        }
+
+    monkeypatch.setattr(module, "_search_sessions_in_process", large_success)
+    payload = module.search_sessions(
+        aoa_root=tmp_path / ".aoa",
+        query="large result transport",
+        query_timeout_ms=1000,
+        include_archived_raw_fallback=False,
+    )
+
+    assert payload["ok"] is True
+    assert payload["result_count"] == 1
+    assert payload["generated_storage_attempt"]["status"] == "completed"
+    assert payload["generated_storage_attempt"]["transport"] == (
+        "atomic_child_result_file"
+    )
+    assert payload["generated_storage_attempt"]["cleanup"]["verified"] is True
 
 
 def test_agent_event_raw_fts_timeout_preserves_route_diagnostic(tmp_path: Path, monkeypatch: Any) -> None:
@@ -76554,7 +92235,10 @@ def test_search_no_match_is_observed_without_hiding_real_empty_failures(tmp_path
     refreshed_session_index = module.read_json(session_index_path, {})
     assert all(
         failure.get("line") != 4
-        for episode in refreshed_session_index["task_episodes"]
+        for episode in module.session_index_task_episode_components(
+            session_index_path.parent,
+            refreshed_session_index,
+        )
         for failure in episode.get("failures", [])
     )
 
@@ -77038,6 +92722,8 @@ def test_session_projection_rejects_changed_producer_and_preserves_last_good(
                     module.SESSION_INDEX_MARKDOWN,
                 }
                 or path.parent.name in {"raw", "segments"}
+                or module.SESSION_INDEX_SHARDS_DIR
+                in path.relative_to(session_dir).parts
             )
         }
 
@@ -77086,8 +92772,3144 @@ def test_session_projection_rejects_changed_producer_and_preserves_last_good(
     )
 
 
+def test_session_projection_checkpoint_resumes_completed_segments_without_raw_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "checkpoint-resume-session.jsonl"
+    rows: list[dict[str, Any]] = [
+        {
+            "timestamp": "2026-07-20T00:00:00Z",
+            "type": "session_meta",
+            "payload": {
+                "id": "checkpoint-resume-session",
+                "cwd": str(workspace),
+            },
+        }
+    ]
+    for ordinal in range(5):
+        rows.extend(
+            [
+                {
+                    "timestamp": (
+                        f"2026-07-20T00:00:{ordinal * 2 + 1:02d}Z"
+                    ),
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": f"checkpoint segment {ordinal}",
+                            }
+                        ],
+                    },
+                },
+                {
+                    "timestamp": (
+                        f"2026-07-20T00:00:{ordinal * 2 + 2:02d}Z"
+                    ),
+                    "type": "turn_context",
+                    "payload": {
+                        "summary": f"boundary {ordinal}",
+                    },
+                },
+            ]
+        )
+    write_jsonl(transcript, rows)
+    receipt = module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "checkpoint-resume-session",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    session_dir = Path(str(receipt["session_dir"]))
+    record = module.resolve_session_record(
+        aoa_root,
+        "checkpoint-resume-session",
+    )
+    raw_path = Path(
+        module.read_json(
+            session_dir / "session.manifest.json", {}
+        )["raw"]["path"]
+    )
+    raw_sha_before = module.sha256_file(raw_path)
+    original_write_segment = module.write_segment
+    calls: list[int] = []
+    fake_clock = [0.0]
+
+    def counted_write_segment(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        payload = original_write_segment(*args, **kwargs)
+        calls.append(int(args[2]))
+        fake_clock[0] = 2.0
+        return payload
+
+    monkeypatch.setattr(module.time, "monotonic", lambda: fake_clock[0])
+    monkeypatch.setattr(module, "write_segment", counted_write_segment)
+    monkeypatch.setattr(
+        module,
+        "reuse_published_session_segment",
+        lambda **_kwargs: None,
+    )
+    interrupted = module.reindex_session_from_raw(
+        aoa_root,
+        record,
+        cooperative_deadline_monotonic=1.0,
+        segment_workers=1,
+        execution_id="checkpoint-resume-run",
+    )
+
+    assert interrupted["status"] == "checkpointed"
+    assert interrupted["completed_segment_count"] == 1
+    assert calls == [0]
+    assert module.sha256_file(raw_path) == raw_sha_before
+    assert Path(interrupted["work_dir"]).is_dir()
+    work_checkpoint = module.read_json(
+        module.session_projection_work_checkpoint_path(
+            Path(interrupted["work_dir"])
+        ),
+        {},
+    )
+    assert work_checkpoint["raw_blocks"]["checkpoint_mode"] == (
+        "staged_index_component_receipts_v1"
+    )
+    assert "payload" not in work_checkpoint["raw_blocks"]
+    assert len(work_checkpoint["segments"]) == 1
+
+    fake_clock[0] = 0.0
+    calls.clear()
+    resumed = module.reindex_session_from_raw(
+        aoa_root,
+        record,
+        segment_workers=1,
+        execution_id="checkpoint-resume-run",
+    )
+
+    assert resumed["status"] == "reindexed"
+    assert 0 not in calls
+    assert len(calls) == resumed["segment_count"] - 1
+    assert module.sha256_file(raw_path) == raw_sha_before
+    progress_receipt = resumed["publish_result"]["progress_receipt"]
+    assert progress_receipt["status"] == "written"
+    assert module.read_json(Path(progress_receipt["path"]), {})[
+        "execution_id"
+    ] == "checkpoint-resume-run"
+    recovered_progress = module.recover_session_projection_progress_evidence(
+        aoa_root=aoa_root,
+        execution_id="checkpoint-resume-run",
+        target="checkpoint-resume-session",
+    )
+    assert recovered_progress["verified"] is True
+    assert recovered_progress["receipt_count"] == 1
+    assert not Path(interrupted["work_dir"]).exists()
+
+
+def test_session_projection_hard_timeout_after_checkpoint_resumes_without_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "hard-timeout-resume-session.jsonl"
+    session_id = "hard-timeout-resume-session"
+    rows: list[dict[str, Any]] = [
+        {
+            "timestamp": "2026-07-20T00:00:00Z",
+            "type": "session_meta",
+            "payload": {"id": session_id, "cwd": str(workspace)},
+        }
+    ]
+    for ordinal in range(4):
+        rows.extend(
+            [
+                {
+                    "timestamp": (
+                        f"2026-07-20T00:00:{ordinal * 2 + 1:02d}Z"
+                    ),
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": f"hard timeout segment {ordinal}",
+                            }
+                        ],
+                    },
+                },
+                {
+                    "timestamp": (
+                        f"2026-07-20T00:00:{ordinal * 2 + 2:02d}Z"
+                    ),
+                    "type": "turn_context",
+                    "payload": {"summary": f"hard boundary {ordinal}"},
+                },
+            ]
+        )
+    write_jsonl(transcript, rows)
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": session_id,
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    record = module.resolve_session_record(aoa_root, session_id)
+    original_write_segment = module.write_segment
+    calls: list[int] = []
+
+    def counted_write_segment(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        result = original_write_segment(*args, **kwargs)
+        calls.append(int(args[2]))
+        return result
+
+    class InjectedHardTimeout(BaseException):
+        pass
+
+    observed_work_dirs: list[Path] = []
+
+    def hard_timeout_after_first_checkpoint(
+        *, phase: str, work_dir: Path
+    ) -> None:
+        if phase != "segments_in_progress":
+            return
+        checkpoint = module.read_json(
+            module.session_projection_work_checkpoint_path(work_dir), {}
+        )
+        if len(checkpoint.get("segments", {})) >= 1:
+            observed_work_dirs.append(work_dir)
+            raise InjectedHardTimeout("simulated hard timeout")
+
+    monkeypatch.setattr(module, "write_segment", counted_write_segment)
+    monkeypatch.setattr(
+        module,
+        "reuse_published_session_segment",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        module,
+        "session_projection_checkpoint_observer",
+        hard_timeout_after_first_checkpoint,
+    )
+    with pytest.raises(InjectedHardTimeout, match="simulated hard timeout"):
+        module.reindex_session_from_raw(
+            aoa_root,
+            record,
+            segment_workers=1,
+            execution_id="hard-timeout-run",
+        )
+
+    assert calls == [0]
+    assert observed_work_dirs
+    work_dir = observed_work_dirs[-1]
+    checkpoint = module.read_json(
+        module.session_projection_work_checkpoint_path(work_dir), {}
+    )
+    assert checkpoint["phase"] == "segments_in_progress"
+    assert list(checkpoint["segments"]) == ["000"]
+
+    monkeypatch.setattr(
+        module,
+        "session_projection_checkpoint_observer",
+        lambda **_kwargs: None,
+    )
+    calls.clear()
+    resumed = module.reindex_session_from_raw(
+        aoa_root,
+        record,
+        segment_workers=1,
+        execution_id="hard-timeout-run",
+    )
+
+    assert resumed["status"] == "reindexed"
+    assert 0 not in calls
+    assert calls == list(range(1, resumed["segment_count"]))
+    assert not work_dir.exists()
+    assert resumed["publish_result"]["progress_receipt"]["status"] == (
+        "written"
+    )
+
+
+def test_continuous_session_freshness_and_retry_queue_slos_remain_bounded(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "continuous-session.jsonl"
+    session_id = "continuous-session"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-07-21T00:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": session_id, "cwd": str(workspace)},
+            },
+            {
+                "timestamp": "2026-07-21T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "continuous session seed",
+                        }
+                    ],
+                },
+            },
+            {
+                "timestamp": "2026-07-21T00:00:02Z",
+                "type": "turn_context",
+                "payload": {"summary": "continuous seed boundary"},
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": session_id,
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    record = module.resolve_session_record(aoa_root, session_id)
+    session_dir = module.session_dir_from_record(record)
+    raw_path = Path(
+        module.read_json(session_dir / "session.manifest.json", {})[
+            "raw"
+        ]["path"]
+    )
+    initial = module.reindex_session_from_raw(
+        aoa_root,
+        record,
+        segment_workers=1,
+        execution_id="continuous-run-0",
+    )
+    assert initial["status"] == "reindexed"
+
+    max_queue_count = 0
+    completed_slices = 0
+    max_publish_ms = 0
+    for iteration in range(1, 7):
+        with raw_path.open("a", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(
+                    {
+                        "timestamp": (
+                            f"2026-07-21T00:01:{iteration:02d}Z"
+                        ),
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "input_text",
+                                    "text": f"continuous tick {iteration}",
+                                }
+                            ],
+                        },
+                    }
+                )
+                + "\n"
+            )
+            handle.write(
+                json.dumps(
+                    {
+                        "timestamp": (
+                            f"2026-07-21T00:01:{iteration:02d}Z"
+                        ),
+                        "type": "turn_context",
+                        "payload": {
+                            "summary": f"continuous boundary {iteration}"
+                        },
+                    }
+                )
+                + "\n"
+            )
+        result = module.reindex_session_from_raw(
+            aoa_root,
+            record,
+            segment_workers=1,
+            execution_id=f"continuous-run-{iteration}",
+        )
+        assert result["status"] == "reindexed"
+        completed_slices += 1
+        max_publish_ms = max(
+            max_publish_ms,
+            int(
+                result.get("phase_timings_ms", {}).get(
+                    "validate_and_atomic_publish", 0
+                )
+            ),
+        )
+        current_manifest = module.read_json(
+            session_dir / "session.manifest.json", {}
+        )
+        current_index = module.read_json(
+            session_dir / module.SESSION_INDEX_JSON,
+            {},
+        )
+        assert current_manifest["raw"]["sha256"] == module.sha256_file(
+            raw_path
+        )
+        assert module.projection_publish_id(
+            current_manifest["index_schema"]
+        ) == module.projection_publish_id(current_index)
+
+        retry = module.auto_maintenance_retry_reconcile(
+            aoa_root=aoa_root,
+            profile="hot",
+            target=session_id,
+            reason="timer_continuous_session",
+            apply=True,
+            launch_ok=False,
+            launch_status="resource_hard_timeout_progress_recovered",
+            options={"continuous_iteration": iteration},
+            now_epoch=10_000.0 + iteration,
+        )
+        assert retry["retryable"] is True
+        queue = module.auto_maintenance_retry_queue_status(
+            aoa_root,
+            now_epoch=10_000.0 + iteration,
+        )
+        max_queue_count = max(max_queue_count, queue["queued_count"])
+        assert queue["queued_count"] <= 1
+        assert queue["items"][f"hot:{session_id}"]["occurrence_count"] == iteration
+
+    assert completed_slices == 6
+    assert max_queue_count == 1
+    assert max_publish_ms >= 0
+
+
+@pytest.mark.parametrize(
+    "crash_phase",
+    [
+        "sensitive_literal_policy_complete",
+        "classification_rehydrated",
+        "raw_copied",
+        "raw_blocks_complete",
+        "segments_complete",
+        "token_accounting_complete",
+        "projection_complete_unpublished",
+        "awaiting_atomic_publish",
+    ],
+)
+def test_session_projection_stage_checkpoint_crash_matrix_resumes_last_good(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    crash_phase: str,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / f"checkpoint-{crash_phase}.jsonl"
+    session_id = f"checkpoint-{crash_phase}"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-08-10T01:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": session_id, "cwd": str(workspace)},
+            },
+            {
+                "timestamp": "2026-08-10T01:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": f"checkpoint {crash_phase}",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    receipt = module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": session_id,
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    session_dir = Path(str(receipt["session_dir"]))
+    record = module.resolve_session_record(aoa_root, session_id)
+    protected_paths = [
+        session_dir / "session.manifest.json",
+        session_dir / module.SESSION_INDEX_JSON,
+        session_dir / module.SESSION_INDEX_MARKDOWN,
+    ]
+    last_good = {
+        path.name: path.read_bytes() for path in protected_paths
+    }
+    observed_work_dirs: list[Path] = []
+    original_observer = module.session_projection_checkpoint_observer
+
+    def crash_after_checkpoint(*, phase: str, work_dir: Path) -> None:
+        if phase == crash_phase:
+            observed_work_dirs.append(work_dir)
+            raise RuntimeError(f"injected checkpoint crash:{phase}")
+
+    monkeypatch.setattr(
+        module,
+        "session_projection_checkpoint_observer",
+        crash_after_checkpoint,
+    )
+    with pytest.raises(
+        RuntimeError, match=f"injected checkpoint crash:{crash_phase}"
+    ):
+        module.reindex_session_from_raw(
+            aoa_root,
+            record,
+            segment_workers=1,
+            defer_publish=crash_phase == "awaiting_atomic_publish",
+        )
+
+    assert observed_work_dirs
+    work_dir = observed_work_dirs[-1]
+    assert work_dir.is_dir()
+    assert module.read_json(
+        module.session_projection_work_checkpoint_path(work_dir), {}
+    )["phase"] == crash_phase
+    assert {
+        path.name: path.read_bytes() for path in protected_paths
+    } == last_good
+
+    monkeypatch.setattr(
+        module,
+        "session_projection_checkpoint_observer",
+        original_observer,
+    )
+    if crash_phase == "awaiting_atomic_publish":
+        resumed = module.publish_prebuilt_session_projection(
+            aoa_root=aoa_root,
+            record=record,
+            work_dir=work_dir,
+        )
+    else:
+        resumed = module.reindex_session_from_raw(
+            aoa_root,
+            record,
+            segment_workers=1,
+        )
+    assert resumed["status"] == "reindexed", resumed.get(
+        "diagnostics"
+    )
+    assert not work_dir.exists()
+    current_manifest = module.read_json(
+        session_dir / "session.manifest.json", {}
+    )
+    current_index = module.read_json(
+        session_dir / module.SESSION_INDEX_JSON, {}
+    )
+    assert module.projection_publish_id(
+        current_manifest["index_schema"]
+    ) == module.projection_publish_id(current_index)
+
+
+def test_maintenance_cleanup_preserves_current_checkpoint_and_removes_only_obsolete_work(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "stale-work-cleanup.jsonl"
+    rows: list[dict[str, Any]] = [
+        {
+            "timestamp": "2026-07-20T01:00:00Z",
+            "type": "session_meta",
+            "payload": {
+                "id": "stale-work-cleanup",
+                "cwd": str(workspace),
+            },
+        }
+    ]
+    for ordinal in range(3):
+        rows.extend(
+            [
+                {
+                    "timestamp": f"2026-07-20T01:00:{ordinal * 2 + 1:02d}Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": f"cleanup checkpoint {ordinal}",
+                            }
+                        ],
+                    },
+                },
+                {
+                    "timestamp": f"2026-07-20T01:00:{ordinal * 2 + 2:02d}Z",
+                    "type": "turn_context",
+                    "payload": {"summary": f"boundary {ordinal}"},
+                },
+            ]
+        )
+    write_jsonl(transcript, rows)
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "stale-work-cleanup",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    record = module.resolve_session_record(
+        aoa_root, "stale-work-cleanup"
+    )
+    original_write_segment = module.write_segment
+    fake_clock = [0.0]
+
+    def stop_after_one_segment(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        result = original_write_segment(*args, **kwargs)
+        fake_clock[0] = 2.0
+        return result
+
+    monkeypatch.setattr(module.time, "monotonic", lambda: fake_clock[0])
+    monkeypatch.setattr(module, "write_segment", stop_after_one_segment)
+    monkeypatch.setattr(
+        module,
+        "reuse_published_session_segment",
+        lambda **_kwargs: None,
+    )
+    interrupted = module.reindex_session_from_raw(
+        aoa_root,
+        record,
+        cooperative_deadline_monotonic=1.0,
+        segment_workers=1,
+    )
+    work_dir = Path(interrupted["work_dir"])
+
+    current = module.session_projection_work_status(aoa_root)
+    current_cleanup = module.maintenance_cleanup(
+        aoa_root=aoa_root, apply=False
+    )
+
+    assert interrupted["status"] == "checkpointed"
+    assert current["resumable_current_count"] == 1
+    assert current["obsolete_count"] == 0
+    assert current_cleanup["session_projection_work"][
+        "needs_cleanup"
+    ] is False
+    assert work_dir.is_dir()
+
+    session_dir = module.session_dir_from_record(record)
+    raw_path = Path(
+        module.read_json(
+            session_dir / "session.manifest.json", {}
+        )["raw"]["path"]
+    )
+    with raw_path.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "timestamp": "2026-07-20T01:00:20Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "raw changed after checkpoint",
+                            }
+                        ],
+                    },
+                }
+            )
+            + "\n"
+        )
+    old_epoch = time.time() - 600
+    for item in sorted(work_dir.rglob("*"), reverse=True):
+        os.utime(item, (old_epoch, old_epoch), follow_symlinks=False)
+    os.utime(work_dir, (old_epoch, old_epoch), follow_symlinks=False)
+    raw_sha_before_cleanup = module.sha256_file(raw_path)
+
+    obsolete = module.session_projection_work_status(aoa_root)
+    applied = module.maintenance_cleanup(
+        aoa_root=aoa_root, apply=True
+    )
+
+    assert obsolete["obsolete_count"] == 1
+    assert obsolete["entries"][0]["status"] == (
+        "obsolete_incompatible"
+    )
+    assert applied["action_counts"][
+        "obsolete_projection_work_removed"
+    ] == 1
+    assert not work_dir.exists()
+    assert module.sha256_file(raw_path) == raw_sha_before_cleanup
+
+
+@pytest.mark.parametrize(
+    "change_kind", ["generation", "policy", "rehydration"]
+)
+def test_checkpoint_resume_invalidates_changed_generation_or_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    change_kind: str,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    session_id = f"checkpoint-{change_kind}-drift"
+    transcript = tmp_path / f"{session_id}.jsonl"
+    rows: list[dict[str, Any]] = [
+        {
+            "timestamp": "2026-07-20T02:00:00Z",
+            "type": "session_meta",
+            "payload": {"id": session_id, "cwd": str(workspace)},
+        }
+    ]
+    for ordinal in range(3):
+        rows.extend(
+            [
+                {
+                    "timestamp": f"2026-07-20T02:00:{ordinal * 2 + 1:02d}Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": f"{change_kind} segment {ordinal}",
+                            }
+                        ],
+                    },
+                },
+                {
+                    "timestamp": f"2026-07-20T02:00:{ordinal * 2 + 2:02d}Z",
+                    "type": "turn_context",
+                    "payload": {"summary": f"boundary {ordinal}"},
+                },
+            ]
+        )
+    write_jsonl(transcript, rows)
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": session_id,
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    record = module.resolve_session_record(aoa_root, session_id)
+    original_write_segment = module.write_segment
+    fake_clock = [0.0]
+    calls: list[int] = []
+
+    def counted_write_segment(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        result = original_write_segment(*args, **kwargs)
+        calls.append(int(args[2]))
+        fake_clock[0] = 2.0
+        return result
+
+    monkeypatch.setattr(module.time, "monotonic", lambda: fake_clock[0])
+    monkeypatch.setattr(module, "write_segment", counted_write_segment)
+    monkeypatch.setattr(
+        module,
+        "reuse_published_session_segment",
+        lambda **_kwargs: None,
+    )
+    interrupted = module.reindex_session_from_raw(
+        aoa_root,
+        record,
+        cooperative_deadline_monotonic=1.0,
+        segment_workers=1,
+    )
+    old_work_dir = Path(interrupted["work_dir"])
+
+    if change_kind == "generation":
+        original_identity = module.segment_index_generation_identity
+
+        def changed_identity(
+            *args: Any, **kwargs: Any
+        ) -> dict[str, Any]:
+            identity = original_identity(*args, **kwargs)
+            return {
+                **identity,
+                "generation_id": (
+                    f"{identity['generation_id']}-changed"
+                ),
+            }
+
+        monkeypatch.setattr(
+            module,
+            "segment_index_generation_identity",
+            changed_identity,
+        )
+    elif change_kind == "policy":
+        monkeypatch.setattr(
+            module,
+            "DERIVED_TEXT_PRIVACY_POLICY_VERSION",
+            module.DERIVED_TEXT_PRIVACY_POLICY_VERSION + 1,
+        )
+    else:
+        monkeypatch.setattr(
+            module,
+            "SESSION_PROJECTION_REHYDRATION_PLAN_VERSION",
+            module.SESSION_PROJECTION_REHYDRATION_PLAN_VERSION + 1,
+        )
+    fake_clock[0] = 0.0
+    calls.clear()
+    resumed = module.reindex_session_from_raw(
+        aoa_root,
+        record,
+        segment_workers=1,
+    )
+
+    assert interrupted["status"] == "checkpointed"
+    assert resumed["status"] == "reindexed"
+    if change_kind == "rehydration":
+        assert resumed["work_id"] == interrupted["work_id"]
+    else:
+        assert resumed["work_id"] != interrupted["work_id"]
+    assert calls == list(range(resumed["segment_count"]))
+    assert old_work_dir.is_dir() is (
+        change_kind != "rehydration"
+    )
+
+
+def test_session_projection_process_parallel_matches_serial_semantics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "parallel-parity-session.jsonl"
+    rows: list[dict[str, Any]] = [
+        {
+            "timestamp": "2026-07-21T00:00:00Z",
+            "type": "session_meta",
+            "payload": {
+                "id": "parallel-parity-session",
+                "cwd": str(workspace),
+            },
+        }
+    ]
+    for ordinal in range(6):
+        rows.extend(
+            [
+                {
+                    "timestamp": f"2026-07-21T00:00:{ordinal * 2 + 1:02d}Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": f"parallel parity {ordinal}",
+                            }
+                        ],
+                    },
+                },
+                {
+                    "timestamp": f"2026-07-21T00:00:{ordinal * 2 + 2:02d}Z",
+                    "type": "turn_context",
+                    "payload": {"summary": f"boundary {ordinal}"},
+                },
+            ]
+        )
+    write_jsonl(transcript, rows)
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "parallel-parity-session",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    record = module.resolve_session_record(
+        aoa_root,
+        "parallel-parity-session",
+    )
+    monkeypatch.setattr(
+        module,
+        "reuse_published_session_segment",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        module,
+        "reusable_event_classification_cache_record",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        module, "EVENT_CLASSIFICATION_BLOCK_MAX_LINES", 2
+    )
+
+    serial = module.reindex_session_from_raw(
+        aoa_root,
+        record,
+        segment_workers=1,
+    )
+    session_dir = module.session_dir_from_record(record)
+
+    def clear_classification_caches() -> None:
+        shutil.rmtree(
+            module.event_classification_cache_root(session_dir),
+            ignore_errors=True,
+        )
+        for work_dir in session_dir.parent.glob(
+            f".{session_dir.name}.projection-work-*"
+        ):
+            shutil.rmtree(
+                module.event_classification_cache_root(work_dir),
+                ignore_errors=True,
+            )
+
+    clear_classification_caches()
+    original_cache_enabled = (
+        module.DERIVED_TEXT_REDACTION_CACHE_ENABLED
+    )
+    monkeypatch.setattr(
+        module,
+        "DERIVED_TEXT_REDACTION_CACHE_ENABLED",
+        False,
+    )
+    uncached = module.reindex_session_from_raw(
+        aoa_root,
+        record,
+        segment_workers=1,
+    )
+    monkeypatch.setattr(
+        module,
+        "DERIVED_TEXT_REDACTION_CACHE_ENABLED",
+        original_cache_enabled,
+    )
+    clear_classification_caches()
+    parallel = module.reindex_session_from_raw(
+        aoa_root,
+        record,
+        segment_workers=4,
+    )
+
+    assert serial["status"] == "reindexed"
+    assert uncached["status"] == "reindexed"
+    assert parallel["status"] == "reindexed"
+    assert serial["classification_execution"]["mode"] == "serial"
+    assert parallel["classification_execution"]["mode"] in {
+        "process_pool",
+        "serial",
+    }
+    if parallel["classification_execution"]["mode"] == "serial":
+        assert parallel["classification_execution"][
+            "parallel_fallback_reason"
+        ]
+        assert parallel["classification_execution"][
+            "actual_workers"
+        ] > 1
+    assert parallel["classification_execution"][
+        "actual_workers"
+    ] == 4
+    assert parallel["segment_execution"]["mode"] in {
+        "process_pool",
+        "serial",
+    }
+    assert parallel["segment_execution"]["actual_workers"] == 4
+    assert parallel["segment_execution"]["process_start_method"] == (
+        "spawn"
+    )
+    if parallel["segment_execution"]["mode"] == "process_pool":
+        assert parallel["segment_execution"]["worker_input_mode"] == (
+            "immutable_classification_block_refs_v1"
+        )
+    else:
+        assert parallel["segment_execution"][
+            "parallel_fallback_reason"
+        ]
+        assert parallel["segment_execution"]["worker_input_mode"] == (
+            "parent_event_slice_serial"
+        )
+    assert parallel["segment_execution"][
+        "serialized_raw_event_slice_count"
+    ] == 0
+    assert (
+        serial["publish_result"]["validation"]["semantic_digest"]
+        == uncached["publish_result"]["validation"]["semantic_digest"]
+    )
+    assert (
+        serial["publish_result"]["validation"]["semantic_digest"]
+        == parallel["publish_result"]["validation"]["semantic_digest"]
+    )
+
+
+def test_event_classification_checkpoint_resumes_without_persisting_literals(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "classification-checkpoint.jsonl"
+    synthetic_literal = (
+        "classification-checkpoint-sensitive-value-123456"
+    )
+    rows: list[dict[str, Any]] = [
+        {
+            "timestamp": "2026-07-21T00:10:00Z",
+            "type": "session_meta",
+            "payload": {
+                "id": "classification-checkpoint",
+                "cwd": str(workspace),
+            },
+        }
+    ]
+    for ordinal in range(8):
+        rows.append(
+            {
+                "timestamp": f"2026-07-21T00:10:{ordinal + 1:02d}Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": (
+                                f"classification row {ordinal} "
+                                + (
+                                    f"unlabelled repeat {synthetic_literal}"
+                                    if ordinal == 1
+                                    else (
+                                        f"token={synthetic_literal}"
+                                        if ordinal == 3
+                                        else ""
+                                    )
+                                )
+                            ),
+                        }
+                    ],
+                },
+            }
+        )
+    write_jsonl(transcript, rows)
+    receipt = module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "classification-checkpoint",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    record = module.resolve_session_record(
+        aoa_root, "classification-checkpoint"
+    )
+    session_dir = Path(str(receipt["session_dir"]))
+    raw_path = Path(
+        module.read_json(
+            session_dir / "session.manifest.json", {}
+        )["raw"]["path"]
+    )
+    raw_sha_before = module.sha256_file(raw_path)
+    monkeypatch.setattr(
+        module, "EVENT_CLASSIFICATION_BLOCK_MAX_LINES", 2
+    )
+    original_classify_block = module.classify_raw_event_block_task
+    fake_clock = [0.0]
+    calls: list[str] = []
+
+    def stop_after_one_block(task: Any) -> dict[str, Any]:
+        result = original_classify_block(task)
+        calls.append(str(result["cache_key"]))
+        fake_clock[0] = 2.0
+        return result
+
+    monkeypatch.setattr(module.time, "monotonic", lambda: fake_clock[0])
+    monkeypatch.setattr(
+        module,
+        "classify_raw_event_block_task",
+        stop_after_one_block,
+    )
+    interrupted = module.reindex_session_from_raw(
+        aoa_root,
+        record,
+        cooperative_deadline_monotonic=1.0,
+        segment_workers=1,
+    )
+
+    assert interrupted["status"] == "checkpointed"
+    assert interrupted["checkpoint_phase"] == (
+        "classification_blocks_in_progress"
+    )
+    assert interrupted["completed_classification_block_count"] == 1
+    assert module.sha256_file(raw_path) == raw_sha_before
+    checkpoint = module.read_json(
+        module.session_projection_work_checkpoint_path(
+            Path(str(interrupted["work_dir"]))
+        ),
+        {},
+    )
+    assert checkpoint["classification_blocks"] == {}
+    assert checkpoint["classification_checkpoint"][
+        "completed_block_count"
+    ] == 1
+    assert synthetic_literal not in json.dumps(
+        checkpoint, sort_keys=True
+    )
+
+    fake_clock[0] = 0.0
+    calls.clear()
+    monkeypatch.setattr(
+        module,
+        "classify_raw_event_block_task",
+        original_classify_block,
+    )
+    resumed = module.reindex_session_from_raw(
+        aoa_root, record, segment_workers=1
+    )
+
+    assert resumed["status"] == "reindexed"
+    assert resumed["classification_execution"][
+        "reused_block_count"
+    ] == 1
+    cache_root = module.event_classification_cache_root(session_dir)
+    cached_plaintext = "\n".join(
+        json.dumps(module.read_gzip_json(path), sort_keys=True)
+        for path in sorted((cache_root / "blocks").glob("*.json.gz"))
+    )
+    assert synthetic_literal not in cached_plaintext
+    assert module.sha256_file(raw_path) == raw_sha_before
+
+
+def test_event_classification_cache_reuses_stable_prefix_after_growth(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "classification-growth.jsonl"
+    late_discovered_literal = (
+        "opaque-late-discovered-secret-987654321"
+    )
+    rows: list[dict[str, Any]] = [
+        {
+            "timestamp": "2026-07-21T00:20:00Z",
+            "type": "session_meta",
+            "payload": {
+                "id": "classification-growth",
+                "cwd": str(workspace),
+            },
+        }
+    ]
+    rows.extend(
+        {
+            "timestamp": f"2026-07-21T00:20:{ordinal + 1:02d}Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": (
+                            f"stable prefix {ordinal} "
+                            + (
+                                late_discovered_literal
+                                if ordinal == 1
+                                else ""
+                            )
+                        ),
+                    }
+                ],
+            },
+        }
+        for ordinal in range(4)
+    )
+    write_jsonl(transcript, rows)
+    receipt = module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "classification-growth",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    record = module.resolve_session_record(
+        aoa_root, "classification-growth"
+    )
+    session_dir = Path(str(receipt["session_dir"]))
+    raw_path = Path(
+        module.read_json(
+            session_dir / "session.manifest.json", {}
+        )["raw"]["path"]
+    )
+    monkeypatch.setattr(
+        module, "EVENT_CLASSIFICATION_BLOCK_MAX_LINES", 2
+    )
+    first = module.reindex_session_from_raw(
+        aoa_root, record, segment_workers=1
+    )
+    first_raw_sha = module.sha256_file(raw_path)
+    assert first["status"] == "reindexed"
+    assert first["classification_execution"][
+        "rebuilt_block_count"
+    ] == 3
+
+    with raw_path.open("a", encoding="utf-8") as handle:
+        for ordinal in range(2):
+            handle.write(
+                json.dumps(
+                    {
+                        "timestamp": (
+                            f"2026-07-21T00:20:{10 + ordinal:02d}Z"
+                        ),
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "input_text",
+                                    "text": (
+                                        f"appended tail {ordinal} "
+                                        + (
+                                            "token="
+                                            + late_discovered_literal
+                                            if ordinal == 0
+                                            else ""
+                                        )
+                                    ),
+                                }
+                            ],
+                        },
+                    }
+                )
+                + "\n"
+            )
+    grown_raw_sha = module.sha256_file(raw_path)
+    grown = module.reindex_session_from_raw(
+        aoa_root, record, segment_workers=1
+    )
+
+    assert grown["status"] == "reindexed", "\n".join(
+        str(item) for item in grown.get("diagnostics", [])
+    )
+    assert grown_raw_sha != first_raw_sha
+    assert module.sha256_file(raw_path) == grown_raw_sha
+    assert grown["classification_execution"][
+        "reused_block_count"
+    ] == 2
+    assert grown["classification_execution"][
+        "attested_metadata_reused_block_count"
+    ] == 2
+    assert grown["classification_execution"][
+        "rebuilt_block_count"
+    ] == 2
+    cache_root = module.event_classification_cache_root(session_dir)
+    grown_cache_plaintext = "\n".join(
+        json.dumps(module.read_gzip_json(path), sort_keys=True)
+        for path in sorted((cache_root / "blocks").glob("*.json.gz"))
+    )
+    assert late_discovered_literal not in grown_cache_plaintext
+
+
+def test_deep_projection_artifact_audit_rehashes_metadata_admitted_cache(
+    tmp_path: Path,
+) -> None:
+    session_dir = tmp_path / "session"
+    cache_root = module.event_classification_cache_root(session_dir)
+    block = {
+        "cache_key": "audit-block",
+        "line_start": 1,
+        "line_end": 1,
+        "line_count": 1,
+        "byte_start": 0,
+        "byte_count": 1,
+        "raw_sha256": "a" * 64,
+    }
+    artifact_path = module.event_classification_cache_artifact_path(
+        cache_root, block
+    )
+    generation_identity = (
+        module.event_classification_generation_identity()
+    )
+    module.write_deterministic_gzip_json(
+        artifact_path,
+        {
+            "schema_version": (
+                module.EVENT_CLASSIFICATION_CACHE_SCHEMA_VERSION
+            ),
+            "artifact_type": "raw_event_classification_block",
+            "generation_identity": generation_identity,
+            "block": block,
+            "classifications": [{"line_no": 1}],
+            "summary": {
+                "schema_version": 1,
+                "event_count": 1,
+            },
+        },
+    )
+    record = module.event_classification_cache_record(
+        cache_root=cache_root,
+        block=block,
+        artifact_path=artifact_path,
+    )
+    record["metadata_mode"] = "size_mtime_v1"
+    record["validation_mode"] = (
+        "attested_published_artifact_metadata_reuse_v1"
+    )
+    module.write_event_classification_cache_index(
+        cache_root=cache_root,
+        generation_identity=generation_identity,
+        records={"audit-block": record},
+    )
+
+    initial = module.deep_audit_session_projection_artifacts(
+        session_dir=session_dir,
+        manifest={"segments": []},
+    )
+    assert initial["ok"] is True
+
+    stat = artifact_path.stat()
+    corrupted = bytearray(artifact_path.read_bytes())
+    corrupted[len(corrupted) // 2] ^= 1
+    artifact_path.write_bytes(corrupted)
+    os.utime(
+        artifact_path,
+        ns=(stat.st_atime_ns, stat.st_mtime_ns),
+    )
+
+    assert module.event_classification_cache_record_current(
+        cache_root=cache_root,
+        record=record,
+        block=block,
+        verify_content=False,
+    ) is True
+    audited = module.deep_audit_session_projection_artifacts(
+        session_dir=session_dir,
+        manifest={"segments": []},
+    )
+    assert audited["ok"] is False
+    assert audited["content_bytes_read"] == len(corrupted)
+    assert audited["diagnostics"] == [
+        "classification_cache_artifact_invalid:audit-block"
+    ]
+
+
+def test_classification_candidate_index_root_is_validated_once_per_build(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_dir = tmp_path / "session"
+    stage_dir = tmp_path / ".session.projection-work-current"
+    cache_root = module.event_classification_cache_root(session_dir)
+    generation_identity = (
+        module.event_classification_generation_identity()
+    )
+    blocks: list[dict[str, Any]] = []
+    records: dict[str, dict[str, Any]] = {}
+    for ordinal in range(12):
+        block = {
+            "cache_key": f"block-{ordinal}",
+            "line_start": ordinal + 1,
+            "line_end": ordinal + 1,
+            "line_count": 1,
+            "byte_start": ordinal,
+            "byte_count": 1,
+            "raw_sha256": f"{ordinal:064x}",
+        }
+        artifact_path = (
+            module.event_classification_cache_artifact_path(
+                cache_root, block
+            )
+        )
+        module.write_deterministic_gzip_json(
+            artifact_path,
+            {
+                "schema_version": (
+                    module.EVENT_CLASSIFICATION_CACHE_SCHEMA_VERSION
+                ),
+                "artifact_type": "raw_event_classification_block",
+                "generation_identity": generation_identity,
+                "block": block,
+                "classifications": [{"line_no": ordinal + 1}],
+                "summary": {
+                    "schema_version": 1,
+                    "event_count": 1,
+                },
+            },
+        )
+        blocks.append(block)
+        records[block["cache_key"]] = (
+            module.event_classification_cache_record(
+                cache_root=cache_root,
+                block=block,
+                artifact_path=artifact_path,
+            )
+        )
+        records[block["cache_key"]]["metadata_mode"] = (
+            "size_mtime_v1"
+        )
+    privacy_marker = {
+        "schema_version": module.SENSITIVE_STRUCTURAL_MARKER_VERSION,
+        "candidate_present": False,
+        "kind_counts": {},
+        "candidate_range_mode": (
+            "exact_candidate_lines_relative_to_raw_block_v1"
+        ),
+        "candidate_ranges": [],
+        "candidate_line_count": 0,
+        "literal_values_persisted": False,
+        "reversible_literal_digests_persisted": False,
+    }
+    records[blocks[0]["cache_key"]]["privacy_scan"] = {
+        "structural_marker": privacy_marker
+    }
+    module.write_event_classification_cache_index(
+        cache_root=cache_root,
+        generation_identity=generation_identity,
+        records=records,
+    )
+    compact_index = module.read_json(
+        module.event_classification_cache_index_path(cache_root), {}
+    )
+    assert compact_index["summary_storage_mode"] == (
+        "block_artifact_only_with_published_aggregate_v1"
+    )
+    assert all(
+        "summary" not in record
+        for record in compact_index["blocks"].values()
+    )
+    prior_work_dir = tmp_path / ".session.projection-work-prior"
+    prior_work_cache = module.event_classification_cache_root(
+        prior_work_dir
+    )
+    shutil.copytree(cache_root, prior_work_cache)
+
+    root_calls = 0
+    original_root = (
+        module.event_classification_cache_records_root_sha256
+    )
+
+    def counted_root(
+        candidate_records: dict[str, Any],
+        **kwargs: Any,
+    ) -> str:
+        nonlocal root_calls
+        root_calls += 1
+        return original_root(candidate_records, **kwargs)
+
+    monkeypatch.setattr(
+        module,
+        "event_classification_cache_records_root_sha256",
+        counted_root,
+    )
+    candidates = module.event_classification_cache_candidate_indexes(
+        session_dir=session_dir,
+        stage_dir=stage_dir,
+        generation_identity=generation_identity,
+    )
+    assert root_calls == 1
+    assert candidates[0]["cache_root"] == cache_root
+
+    for block in blocks:
+        reusable = module.reusable_event_classification_cache_record(
+            session_dir=session_dir,
+            stage_dir=stage_dir,
+            block=block,
+            generation_identity=generation_identity,
+            candidate_indexes=candidates,
+        )
+        assert reusable is not None
+    assert root_calls == 1
+
+    changed_generation = {
+        **generation_identity,
+        "generation_id": "f" * 64,
+    }
+    stale_candidates = (
+        module.event_classification_cache_candidate_indexes(
+            session_dir=session_dir,
+            stage_dir=stage_dir,
+            generation_identity=changed_generation,
+        )
+    )
+    assert stale_candidates
+    assert all(
+        candidate["generation_admission"]["compatible"] is False
+        for candidate in stale_candidates
+    )
+    assert module.reusable_event_classification_cache_record(
+        session_dir=session_dir,
+        stage_dir=stage_dir,
+        block=blocks[0],
+        generation_identity=changed_generation,
+        candidate_indexes=stale_candidates,
+    ) is None
+    assert module.reusable_sensitive_structural_marker(
+        block=blocks[0],
+        completed_records={},
+        candidate_indexes=stale_candidates,
+    ) == privacy_marker
+
+
+def test_captured_append_extends_classification_plan_from_attested_tail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        module,
+        "RAW_CAPTURE_PERSISTABLE_SHA256_MAX_BYTES",
+        1,
+    )
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "captured-plan-growth.jsonl"
+    rows = [
+        {
+            "timestamp": "2026-08-10T01:00:00Z",
+            "type": "session_meta",
+            "payload": {
+                "id": "captured-plan-growth",
+                "cwd": str(workspace),
+            },
+        },
+        *[
+            {
+                "timestamp": f"2026-08-10T01:00:{ordinal + 1:02d}Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": f"stable ordinary row {ordinal}",
+                        }
+                    ],
+                },
+            }
+            for ordinal in range(6)
+        ],
+    ]
+    rows.insert(
+        5,
+        {
+            "timestamp": "2026-08-10T01:00:05Z",
+            "type": "turn_context",
+            "payload": {"summary": "sealed append prefix"},
+        },
+    )
+    write_jsonl(transcript, rows)
+    synced = module.sync_session_from_transcript(
+        aoa_root=aoa_root,
+        event={
+            "session_id": "captured-plan-growth",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+        },
+        transcript_path=transcript,
+        hook_event_name="ManualSync",
+    )
+    session_dir = Path(str(synced["session_dir"]))
+    record = module.resolve_session_record(
+        aoa_root, "captured-plan-growth"
+    )
+    monkeypatch.setattr(
+        module, "EVENT_CLASSIFICATION_BLOCK_MAX_LINES", 2
+    )
+    first = module.reindex_session_from_raw(
+        aoa_root, record, segment_workers=1
+    )
+    assert first["status"] == "reindexed"
+    published_cache_root = (
+        module.event_classification_cache_root(session_dir)
+    )
+    prior_work_dir = (
+        session_dir.parent
+        / f".{session_dir.name}.projection-work-prior-current"
+    )
+    shutil.copytree(
+        published_cache_root,
+        module.event_classification_cache_root(prior_work_dir),
+    )
+    prior_work_cache_root = (
+        module.event_classification_cache_root(prior_work_dir)
+    )
+    published_cache_index = module.read_json(
+        module.event_classification_cache_index_path(
+            published_cache_root
+        ),
+        {},
+    )
+    published_records = published_cache_index["blocks"]
+    for published_record in published_records.values():
+        published_record.pop("privacy_scan", None)
+    module.write_event_classification_cache_index(
+        cache_root=published_cache_root,
+        generation_identity=(
+            module.event_classification_generation_identity()
+        ),
+        records=published_records,
+    )
+    monkeypatch.setattr(
+        module,
+        "event_classification_cache_candidate_roots",
+        lambda **_kwargs: [
+            prior_work_cache_root,
+            published_cache_root,
+        ],
+    )
+    current_manifest = module.read_json(
+        session_dir / "session.manifest.json", {}
+    )
+    module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id="captured-plan-growth",
+        transcript_path=transcript,
+        manifest=current_manifest,
+        hook_event_name="CaptureSeed",
+        now="2026-08-10T01:01:00Z",
+    )
+    appended_row = {
+        "timestamp": "2026-08-10T01:02:00Z",
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {"type": "output_text", "text": "one captured delta"}
+            ],
+        },
+    }
+    appended = (json.dumps(appended_row) + "\n").encode("utf-8")
+    with transcript.open("ab") as handle:
+        handle.write(appended)
+    capture = module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id="captured-plan-growth",
+        transcript_path=transcript,
+        manifest=current_manifest,
+        hook_event_name="PostToolUse",
+        now="2026-08-10T01:02:01Z",
+    )
+
+    checkpoint_phases: list[str] = []
+    checkpoint_segment_counts: list[int] = []
+    original_checkpoint_observer = (
+        module.session_projection_checkpoint_observer
+    )
+
+    def observe_checkpoint(*, phase: str, work_dir: Path) -> None:
+        checkpoint_phases.append(phase)
+        if phase == "segments_in_progress":
+            state = module.read_json(
+                module.session_projection_work_checkpoint_path(
+                    work_dir
+                ),
+                {},
+            )
+            checkpoint_segment_counts.append(
+                len(
+                    state.get("segments", {})
+                    if isinstance(state.get("segments"), dict)
+                    else {}
+                )
+            )
+
+    monkeypatch.setattr(
+        module,
+        "session_projection_checkpoint_observer",
+        observe_checkpoint,
+    )
+    grown = module.reindex_session_from_raw(
+        aoa_root, record, segment_workers=1
+    )
+    monkeypatch.setattr(
+        module,
+        "session_projection_checkpoint_observer",
+        original_checkpoint_observer,
+    )
+
+    assert capture["appended_bytes"] == len(appended)
+    assert capture["sha256_state_bootstrap_bytes_read"] < 64
+    assert capture["sha256_delta_bytes_hashed"] == len(appended)
+    assert capture["sha256_continuation_mode"] == (
+        "native_portable_aligned_sha256_v1"
+    )
+    assert capture["raw_sha256"] == hashlib.sha256(
+        transcript.read_bytes()
+    ).hexdigest()
+    capture_ledger = module.read_json(
+        module.raw_capture_ledger_path(session_dir), {}
+    )
+    capture_continuation = capture_ledger["epochs"][-1][
+        "full_raw_sha256_state"
+    ]
+    assert capture_continuation["pending_hex"] == ""
+    assert capture_continuation["total_bytes"] % 64 == 0
+    assert grown["status"] == "reindexed", grown.get("diagnostics")
+    assert grown["raw_scan_execution"]["scan_mode"] == (
+        "attested_prefix_plus_captured_tail_v1"
+    )
+    assert grown["raw_scan_execution"]["tail_bytes_read"] == len(
+        appended
+    )
+    assert grown["raw_scan_execution"]["prefix_bytes_reused"] == (
+        len(transcript.read_bytes()) - len(appended)
+    )
+    assert grown["sensitive_literal_execution"][
+        "selected_block_count"
+    ] == 1
+    assert grown["sensitive_literal_execution"][
+        "skipped_non_sensitive_block_count"
+    ] >= 1
+    assert grown["parent_rehydration_execution"]["raw_bytes_read"] < (
+        len(transcript.read_bytes()) - len(appended)
+    )
+    assert grown["parent_rehydration_execution"][
+        "metadata_only_block_count"
+    ] >= 1
+    assert grown["parent_rehydration_execution"]["mode"] == (
+        "bounded_raw_tail_plus_block_summaries_v1"
+    )
+    assert grown["parent_rehydration_execution"][
+        "full_event_object_list_materialized"
+    ] is False
+    assert grown["parent_rehydration_execution"][
+        "materialized_event_object_count"
+    ] < grown["parent_rehydration_execution"]["total_event_count"]
+    assert grown["session_index_execution"][
+        "event_aggregate_mode"
+    ] == "classification_block_summary_merge_v1"
+    assert grown["session_index_execution"][
+        "event_aggregate_source_mode"
+    ] == "published_prefix_plus_classification_tail_v1"
+    compact_cache_index = module.read_json(
+        module.event_classification_cache_index_path(
+            published_cache_root
+        ),
+        {},
+    )
+    assert compact_cache_index["summary_storage_mode"] == (
+        "block_artifact_only_with_published_aggregate_v1"
+    )
+    assert all(
+        "summary" not in record
+        for record in compact_cache_index["blocks"].values()
+    )
+    assert grown["raw_block_execution"][
+        "attested_sealed_reused_block_count"
+    ] >= 1
+    assert grown["segment_execution"][
+        "published_reused_segment_count"
+    ] >= 1
+    assert grown["segment_execution"][
+        "immutable_component_link_count"
+    ] >= 1
+    assert grown["segment_execution"][
+        "migrated_component_restamp_count"
+    ] == 0
+    assert checkpoint_phases.count("segments_in_progress") <= (
+        grown["segment_execution"]["rebuilt_segment_count"] + 1
+    )
+    assert max(checkpoint_segment_counts, default=0) <= (
+        grown["segment_execution"]["rebuilt_segment_count"]
+    )
+    snapshot_mode = grown["raw_snapshot_execution"]["mode"]
+    assert snapshot_mode == (
+        module.RAW_PROJECTION_STORAGE_CAPTURE_LEDGER
+    )
+    assert grown["raw_snapshot_execution"]["target_bytes_written"] == 0
+    assert grown["raw_snapshot_execution"]["source_bytes_read"] < len(
+        transcript.read_bytes()
+    )
+    validation_mode = grown["publish_result"]["validation"][
+        "raw_validation_mode"
+    ]
+    assert validation_mode == (
+        module.RAW_PROJECTION_STORAGE_CAPTURE_LEDGER
+    )
+    fast_session_index = module.read_json(
+        session_dir / module.SESSION_INDEX_JSON, {}
+    )
+    fast_semantic = module.session_projection_semantic_digest_value(
+        fast_session_index
+    )
+
+    full_replay = module.reindex_session_from_raw(
+        aoa_root, record, segment_workers=1
+    )
+    full_session_index = module.read_json(
+        session_dir / module.SESSION_INDEX_JSON, {}
+    )
+
+    assert full_replay["status"] == "reindexed"
+    assert full_replay["parent_rehydration_execution"]["mode"] == (
+        "full_raw_event_rehydration_v1"
+    )
+    assert module.session_projection_semantic_digest_value(
+        full_session_index
+    ) == fast_semantic
+
+    before_boundary_manifest = module.read_json(
+        session_dir / "session.manifest.json", {}
+    )
+    module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id="captured-plan-growth",
+        transcript_path=transcript,
+        manifest=before_boundary_manifest,
+        hook_event_name="CaptureBoundarySeed",
+        now="2026-08-10T01:03:00Z",
+    )
+    boundary_rows = [
+        {
+            "timestamp": "2026-08-10T01:04:00Z",
+            "type": "turn_context",
+            "payload": {"summary": "new captured boundary"},
+        },
+        {
+            "timestamp": "2026-08-10T01:04:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "new task after captured boundary",
+                    }
+                ],
+            },
+        },
+    ]
+    boundary_append = b"".join(
+        json.dumps(row).encode("utf-8") + b"\n"
+        for row in boundary_rows
+    )
+    with transcript.open("ab") as handle:
+        handle.write(boundary_append)
+    module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id="captured-plan-growth",
+        transcript_path=transcript,
+        manifest=before_boundary_manifest,
+        hook_event_name="PostToolUse",
+        now="2026-08-10T01:04:02Z",
+    )
+
+    boundary_growth = module.reindex_session_from_raw(
+        aoa_root, record, segment_workers=1
+    )
+    boundary_manifest = module.read_json(
+        session_dir / "session.manifest.json", {}
+    )
+
+    assert boundary_growth["status"] == "reindexed"
+    assert boundary_growth["raw_scan_execution"]["tail_bytes_read"] == (
+        len(boundary_append)
+    )
+    assert boundary_growth["parent_rehydration_execution"]["mode"] == (
+        "bounded_raw_tail_plus_block_summaries_v1"
+    )
+    assert boundary_growth["segment_count"] == (
+        full_replay["segment_count"] + 1
+    )
+    assert boundary_manifest["segments"][-2]["role"] == (
+        "compaction-to-compaction"
+    )
+    assert boundary_manifest["segments"][-1]["role"] == (
+        "compaction-to-latest"
+    )
+    assert boundary_growth["session_index_execution"][
+        "task_episode_incremental_build"
+    ]["mode"] == "append_stable_bounded_tail_replay_v1"
+
+
+def test_raw_snapshot_receipt_fails_closed_after_same_size_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.raw.jsonl"
+    stage_dir = tmp_path / "stage"
+    target = stage_dir / "raw" / "session.raw.jsonl"
+    payload = b'{"row":1}\n'
+    source.write_bytes(payload)
+    expected_sha256 = hashlib.sha256(payload).hexdigest()
+
+    def emulate_ficlone(
+        target_fd: int,
+        operation: int,
+        source_fd: int,
+    ) -> int:
+        assert operation == 0x40049409
+        copied = os.pread(source_fd, len(payload), 0)
+        assert os.write(target_fd, copied) == len(copied)
+        return 0
+
+    monkeypatch.setattr(module.fcntl, "ioctl", emulate_ficlone)
+    receipt = module.stage_raw_snapshot(
+        source=source,
+        target=target,
+        expected_sha256=expected_sha256,
+    )
+    module.write_json(
+        module.session_projection_work_checkpoint_path(stage_dir),
+        {"raw_snapshot_execution": receipt},
+    )
+
+    assert receipt["mode"] == "ficlone_snapshot_v1"
+    assert module.staged_raw_snapshot_receipt_current(
+        stage_dir=stage_dir,
+        staged_raw_path=target,
+        expected_raw_sha256=expected_sha256,
+        expected_raw_bytes=len(payload),
+    ) is True
+
+    previous_mtime_ns = target.stat().st_mtime_ns
+    target.write_bytes(b'{"row":2}\n')
+    os.utime(
+        target,
+        ns=(previous_mtime_ns + 1_000_000, previous_mtime_ns + 1_000_000),
+    )
+
+    assert target.stat().st_size == len(payload)
+    assert module.staged_raw_snapshot_receipt_current(
+        stage_dir=stage_dir,
+        staged_raw_path=target,
+        expected_raw_sha256=expected_sha256,
+        expected_raw_bytes=len(payload),
+    ) is False
+    assert module.sha256_file(target) != expected_sha256
+
+
+def test_capture_ledger_projection_receipt_fails_closed_on_tail_tamper(
+    tmp_path: Path,
+) -> None:
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    transcript = tmp_path / "source.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-08-11T00:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": "capture-ledger-receipt"},
+            },
+            {
+                "timestamp": "2026-08-11T00:00:01Z",
+                "type": "response_item",
+                "payload": {"type": "message", "role": "user"},
+            },
+        ],
+    )
+    module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id="capture-ledger-receipt",
+        transcript_path=transcript,
+        manifest={
+            "session_id": "capture-ledger-receipt",
+            "archive_status": "indexed",
+            "raw": {
+                "bytes": 0,
+                "line_count": 0,
+                "sha256": hashlib.sha256(b"").hexdigest(),
+                "indexing_status": "indexed",
+            },
+        },
+        hook_event_name="PostToolUse",
+        now="2026-08-11T00:00:02Z",
+    )
+    state = module.raw_capture_state_for_session(session_dir)
+    expected_sha256 = hashlib.sha256(transcript.read_bytes()).hexdigest()
+    current = module.raw_capture_ledger_projection_receipt(
+        session_dir=session_dir,
+        capture_state=state,
+        expected_raw_sha256=expected_sha256,
+        expected_raw_bytes=transcript.stat().st_size,
+    )
+    assert current["ok"] is True
+
+    ledger = module.read_json(
+        module.raw_capture_ledger_path(session_dir), {}
+    )
+    last_block = Path(ledger["epochs"][-1]["blocks"][-1]["path"])
+    payload = bytearray(last_block.read_bytes())
+    payload[len(payload) // 2] ^= 1
+    last_block.write_bytes(payload)
+
+    rejected = module.raw_capture_ledger_projection_receipt(
+        session_dir=session_dir,
+        capture_state=state,
+        expected_raw_sha256=expected_sha256,
+        expected_raw_bytes=transcript.stat().st_size,
+    )
+    assert rejected["ok"] is False
+    assert "capture_ledger_last_block_digest_mismatch" in rejected[
+        "diagnostics"
+    ]
+
+
+def test_goal_lifecycle_append_uses_bounded_tail_and_matches_full_replay(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "goal-tail-append.jsonl"
+    rows: list[dict[str, Any]] = [
+        {
+            "timestamp": "2026-08-10T02:00:00Z",
+            "type": "session_meta",
+            "payload": {
+                "id": "goal-tail-append",
+                "cwd": str(workspace),
+            },
+        }
+    ]
+    for ordinal in range(5):
+        rows.extend(
+            [
+                {
+                    "timestamp": f"2026-08-10T02:00:{ordinal * 3 + 1:02d}Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": f"stable task {ordinal}",
+                            }
+                        ],
+                    },
+                },
+                {
+                    "timestamp": f"2026-08-10T02:00:{ordinal * 3 + 2:02d}Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": f"stable answer {ordinal}",
+                            }
+                        ],
+                    },
+                },
+                {
+                    "timestamp": f"2026-08-10T02:00:{ordinal * 3 + 3:02d}Z",
+                    "type": "turn_context",
+                    "payload": {"summary": f"boundary {ordinal}"},
+                },
+            ]
+        )
+    rows.extend(
+        [
+            {
+                "timestamp": "2026-08-10T02:00:20Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "open a goal for bounded append",
+                        }
+                    ],
+                },
+            },
+            {
+                "timestamp": "2026-08-10T02:00:21Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "create_goal",
+                    "call_id": "goal-tail-create",
+                    "arguments": json.dumps(
+                        {"objective": "prove incremental goal tail"}
+                    ),
+                },
+            },
+            {
+                "timestamp": "2026-08-10T02:00:22Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "goal-tail-create",
+                    "output": json.dumps(
+                        {"goal": {"status": "active"}}
+                    ),
+                },
+            },
+        ]
+    )
+    write_jsonl(transcript, rows)
+    synced = module.sync_session_from_transcript(
+        aoa_root=aoa_root,
+        event={
+            "session_id": "goal-tail-append",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+        },
+        transcript_path=transcript,
+        hook_event_name="ManualSync",
+    )
+    session_dir = Path(str(synced["session_dir"]))
+    record = module.resolve_session_record(
+        aoa_root, "goal-tail-append"
+    )
+    initial = module.reindex_session_from_raw(
+        aoa_root, record, segment_workers=1
+    )
+    assert initial["status"] == "reindexed"
+    initial_manifest = module.read_json(
+        session_dir / "session.manifest.json", {}
+    )
+    module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id="goal-tail-append",
+        transcript_path=transcript,
+        manifest=initial_manifest,
+        hook_event_name="CaptureSeed",
+        now="2026-08-10T02:01:00Z",
+    )
+    appended_rows = [
+        {
+            "timestamp": "2026-08-10T02:01:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "update_goal",
+                "call_id": "goal-tail-complete",
+                "arguments": json.dumps({"status": "complete"}),
+            },
+        },
+        {
+            "timestamp": "2026-08-10T02:01:02Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "goal-tail-complete",
+                "output": json.dumps(
+                    {"goal": {"status": "complete"}}
+                ),
+            },
+        },
+    ]
+    with transcript.open("a", encoding="utf-8") as handle:
+        for row in appended_rows:
+            handle.write(json.dumps(row) + "\n")
+    module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id="goal-tail-append",
+        transcript_path=transcript,
+        manifest=initial_manifest,
+        hook_event_name="PostToolUse",
+        now="2026-08-10T02:01:03Z",
+    )
+
+    incremental = module.reindex_session_from_raw(
+        aoa_root, record, segment_workers=1
+    )
+    incremental_index = module.read_json(
+        session_dir / module.SESSION_INDEX_JSON, {}
+    )
+    incremental_digest = module.session_projection_semantic_digest_value(
+        incremental_index
+    )
+
+    assert incremental["status"] == "reindexed"
+    assert incremental["parent_rehydration_execution"]["mode"] == (
+        "bounded_raw_tail_plus_block_summaries_v1"
+    )
+    assert incremental["parent_rehydration_execution"][
+        "tail_has_goal_signal"
+    ] is True
+    assert incremental["session_index_execution"][
+        "goal_lifecycle_mode"
+    ] == "append_stable_goal_tail_merge_v1"
+    assert incremental_index["goal_lifecycles"][-1]["status"] == (
+        "complete"
+    )
+
+    full = module.reindex_session_from_raw(
+        aoa_root, record, segment_workers=1
+    )
+    full_index = module.read_json(
+        session_dir / module.SESSION_INDEX_JSON, {}
+    )
+    assert full["status"] == "reindexed"
+    assert module.session_projection_semantic_digest_value(
+        full_index
+    ) == incremental_digest
+
+
+def test_raw_snapshot_portable_fallback_requires_full_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.raw.jsonl"
+    stage_dir = tmp_path / "stage"
+    target = stage_dir / "raw" / "session.raw.jsonl"
+    payload = b'{"row":"portable"}\n'
+    source.write_bytes(payload)
+    expected_sha256 = hashlib.sha256(payload).hexdigest()
+
+    def unsupported_ficlone(*_args: Any, **_kwargs: Any) -> int:
+        raise OSError(95, "operation not supported")
+
+    monkeypatch.setattr(module.fcntl, "ioctl", unsupported_ficlone)
+    receipt = module.stage_raw_snapshot(
+        source=source,
+        target=target,
+        expected_sha256=expected_sha256,
+    )
+    module.write_json(
+        module.session_projection_work_checkpoint_path(stage_dir),
+        {"raw_snapshot_execution": receipt},
+    )
+
+    assert receipt["mode"] == "copy2_fallback"
+    assert receipt["source_bytes_read"] == len(payload)
+    assert receipt["target_bytes_written"] == len(payload)
+    assert module.staged_raw_snapshot_receipt_current(
+        stage_dir=stage_dir,
+        staged_raw_path=target,
+        expected_raw_sha256=expected_sha256,
+        expected_raw_bytes=len(payload),
+    ) is False
+    assert module.sha256_file(target) == expected_sha256
+
+
+def test_split_publish_lock_keeps_segment_build_outside_global_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "split-publish-lock.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-07-21T01:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "split-publish-lock",
+                    "cwd": str(workspace),
+                },
+            },
+            {
+                "timestamp": "2026-07-21T01:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "build without global lock",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "split-publish-lock",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    record = module.resolve_session_record(
+        aoa_root,
+        "split-publish-lock",
+    )
+    original_write_segment = module.write_segment
+    lock_observations: list[bool] = []
+
+    def observed_write_segment(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        lock_observations.append(
+            bool(module.maintenance_lock_snapshot(aoa_root)["active"])
+        )
+        return original_write_segment(*args, **kwargs)
+
+    monkeypatch.setenv("AOA_SESSION_MEMORY_SEGMENT_WORKERS", "1")
+    monkeypatch.setattr(module, "write_segment", observed_write_segment)
+    monkeypatch.setattr(
+        module,
+        "reuse_published_session_segment",
+        lambda **_kwargs: None,
+    )
+
+    payload = module.reindex_sessions(
+        aoa_root=aoa_root,
+        selected_records=[record],
+        split_publish_lock=True,
+    )
+
+    assert payload["ok"] is True
+    assert payload["results"][0]["status"] == "reindexed"
+    assert payload["results"][0]["split_publish_lock"] is True
+    assert lock_observations == [False]
+    assert payload["results"][0]["maintenance_coordinator"][
+        "mode"
+    ] == "publish"
+
+
+def test_fresh_session_publishes_while_heavy_session_build_is_active(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+
+    def create_session(session_id: str, minute: int) -> dict[str, Any]:
+        transcript = tmp_path / f"{session_id}.jsonl"
+        write_jsonl(
+            transcript,
+            [
+                {
+                    "timestamp": f"2026-07-21T02:{minute:02d}:00Z",
+                    "type": "session_meta",
+                    "payload": {
+                        "id": session_id,
+                        "cwd": str(workspace),
+                    },
+                },
+                {
+                    "timestamp": f"2026-07-21T02:{minute:02d}:01Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": f"build {session_id}",
+                            }
+                        ],
+                    },
+                },
+            ],
+        )
+        module.handle_hook_event(
+            "Stop",
+            {
+                "session_id": session_id,
+                "transcript_path": str(transcript),
+                "cwd": str(workspace),
+                "hook_event_name": "Stop",
+            },
+            workspace_root=workspace,
+            aoa_root=aoa_root,
+        )
+        return module.resolve_session_record(aoa_root, session_id)
+
+    heavy_record = create_session("concurrent-heavy", 0)
+    fresh_record = create_session("concurrent-fresh", 1)
+    heavy_label = str(heavy_record["session_label"])
+    original_write_segment = module.write_segment
+    heavy_entered = threading.Event()
+    release_heavy = threading.Event()
+
+    def coordinated_write_segment(
+        *args: Any, **kwargs: Any
+    ) -> dict[str, Any]:
+        if heavy_label in str(args[0]) and not heavy_entered.is_set():
+            heavy_entered.set()
+            assert release_heavy.wait(timeout=20)
+        return original_write_segment(*args, **kwargs)
+
+    monkeypatch.setenv("AOA_SESSION_MEMORY_SEGMENT_WORKERS", "1")
+    monkeypatch.setattr(
+        module, "write_segment", coordinated_write_segment
+    )
+    monkeypatch.setattr(
+        module,
+        "reuse_published_session_segment",
+        lambda **_kwargs: None,
+    )
+    heavy_result: dict[str, Any] = {}
+
+    def run_heavy() -> None:
+        heavy_result.update(
+            module.reindex_sessions(
+                aoa_root=aoa_root,
+                selected_records=[heavy_record],
+                split_publish_lock=True,
+            )
+        )
+
+    thread = threading.Thread(target=run_heavy, daemon=True)
+    thread.start()
+    assert heavy_entered.wait(timeout=20)
+
+    fresh_result = module.reindex_sessions(
+        aoa_root=aoa_root,
+        selected_records=[fresh_record],
+        split_publish_lock=True,
+    )
+
+    assert thread.is_alive()
+    assert fresh_result["ok"] is True
+    assert fresh_result["completed_session_ids"] == [
+        "concurrent-fresh"
+    ]
+    assert fresh_result["results"][0]["status"] == "reindexed"
+    release_heavy.set()
+    thread.join(timeout=20)
+    assert not thread.is_alive()
+    assert heavy_result["ok"] is True
+    assert heavy_result["completed_session_ids"] == [
+        "concurrent-heavy"
+    ]
+
+
+def test_auto_maintenance_catchup_defers_heavy_tail_without_starving_fresh_scope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+
+    def create_session(session_id: str, minute: int) -> dict[str, Any]:
+        transcript = tmp_path / f"{session_id}.jsonl"
+        write_jsonl(
+            transcript,
+            [
+                {
+                    "timestamp": f"2026-07-21T04:{minute:02d}:00Z",
+                    "type": "session_meta",
+                    "payload": {
+                        "id": session_id,
+                        "cwd": str(workspace),
+                    },
+                },
+                {
+                    "timestamp": f"2026-07-21T04:{minute:02d}:01Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": f"maintain {session_id}",
+                            }
+                        ],
+                    },
+                },
+            ],
+        )
+        module.handle_hook_event(
+            "Stop",
+            {
+                "session_id": session_id,
+                "transcript_path": str(transcript),
+                "cwd": str(workspace),
+                "hook_event_name": "Stop",
+            },
+            workspace_root=workspace,
+            aoa_root=aoa_root,
+        )
+        return module.resolve_session_record(aoa_root, session_id)
+
+    heavy_record = create_session("auto-heavy", 0)
+    second_heavy_record = create_session("auto-heavy-second", 1)
+    fresh_record = create_session("auto-fresh", 2)
+    heavy_session_dir = module.session_dir_from_record(heavy_record)
+    heavy_manifest_path = heavy_session_dir / "session.manifest.json"
+    heavy_manifest = module.read_json(heavy_manifest_path, {})
+    heavy_manifest["archive_status"] = "raw_mirrored_index_deferred"
+    module.write_json(heavy_manifest_path, heavy_manifest)
+    second_heavy_session_dir = module.session_dir_from_record(
+        second_heavy_record
+    )
+    # Published but generation-stale oversized sessions must also stay out of
+    # the locked repair lane.  A missing generated session index is a bounded
+    # stale-route witness; raw evidence and the manifest remain untouched.
+    (
+        second_heavy_session_dir / module.SESSION_INDEX_JSON
+    ).unlink()
+    monkeypatch.setattr(
+        module, "SESSION_PROJECTION_HEAVY_LANE_RAW_BYTES", 1
+    )
+    heavy_calls: list[list[str]] = []
+    heavy_budgets: list[float | None] = []
+    freshness_scopes: list[list[str]] = []
+
+    def checkpoint_heavy(**kwargs: Any) -> dict[str, Any]:
+        selected = kwargs["selected_records"]
+        heavy_calls.append(
+            [str(record.get("session_id") or "") for record in selected]
+        )
+        heavy_budgets.append(kwargs.get("budget_seconds"))
+        return {
+            "ok": False,
+            "status": "partial",
+            "budget_exhausted": True,
+            "remaining_count": 1,
+            "results": [
+                {
+                    "status": "checkpointed",
+                    "session_id": "auto-heavy",
+                    "work_dir": str(tmp_path / "heavy-work"),
+                }
+            ],
+        }
+
+    def clean_freshness(**kwargs: Any) -> dict[str, Any]:
+        selected = kwargs.get("selected_records") or []
+        freshness_scopes.append(
+            [str(record.get("session_id") or "") for record in selected]
+        )
+        return {
+            "ok": True,
+            "diagnostics": [],
+            "needs_index_maintenance": False,
+            "needs_graph_maintenance": False,
+            "needs_sidecar_export": False,
+            "needs_offline_graph_build": False,
+            "needs_optional_dense_maintenance": False,
+            "search_index": {
+                "dirty_session_count": 0,
+                "actionable_dirty_session_count": 0,
+                "deferred_live_session_count": 0,
+            },
+            "atlas_index": {"dirty_session_count": 0},
+            "entity_registry": {"needs_maintenance": False},
+            "episode_semantic_projection": {
+                "dirty_session_count": 0
+            },
+            "episode_posting_cardinality": {
+                "metadata_incomplete_session_count": 0
+            },
+            "episode_dense_projection": {"dirty_session_count": 0},
+            "graph_store": {
+                "actionable_source_count": 0,
+                "deferred_live_source_count": 0,
+            },
+        }
+
+    monkeypatch.setattr(module, "reindex_sessions", checkpoint_heavy)
+    monkeypatch.setattr(
+        module, "route_cache_freshness_gates", clean_freshness
+    )
+    payload = module.auto_maintenance(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        profile="catchup",
+        apply=True,
+        discovery_limit=0,
+        budget_seconds=900,
+    )
+
+    assert heavy_calls == []
+    assert heavy_budgets == []
+    assert freshness_scopes == [["auto-fresh"]]
+    assert payload["selection_scope"]["heavy_projection_lane"][
+        "status"
+    ] == "deferred_to_heavy_owner_profile"
+    assert payload["selection_scope"]["heavy_projection_lane"][
+        "owner_profiles"
+    ] == ["backlog", "deep"]
+    assert payload["selection_scope"]["heavy_projection_lane"][
+        "ordinary_bounded_maintenance_continues"
+    ] is True
+    assert payload["selection_scope"][
+        "heavy_projection_lane_excluded_from_locked_maintenance"
+    ] == ["auto-heavy", "auto-heavy-second"]
+    assert payload["selection_scope"]["selected_count"] == 1
+    assert payload["status"] == "nothing_to_do"
+
+    controlled_elapsed_before_heavy = 0.25
+    real_time = module.time
+
+    class ControlledClock:
+        def __init__(self) -> None:
+            self._reads = 0
+
+        def monotonic(self) -> float:
+            self._reads += 1
+            return (
+                1000.0
+                if self._reads == 1
+                else 1000.0 + controlled_elapsed_before_heavy
+            )
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(real_time, name)
+
+    monkeypatch.setattr(module, "time", ControlledClock())
+    backlog = module.auto_maintenance(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        profile="backlog",
+        apply=True,
+        discovery_limit=0,
+        budget_seconds=900,
+    )
+    assert heavy_calls == [["auto-heavy"]]
+    assert len(heavy_budgets) == 1
+    assert heavy_budgets[0] == pytest.approx(
+        900.0 - controlled_elapsed_before_heavy,
+        abs=1e-12,
+    )
+    assert backlog["selection_scope"]["heavy_projection_lane"][
+        "status"
+    ] == "checkpointed"
+    assert backlog["selection_scope"]["heavy_projection_lane"][
+        "lease_status"
+    ] == "acquired"
+
+    heavy_calls.clear()
+    heavy_lease_path = module.heavy_projection_lane_lock_path(aoa_root)
+    with heavy_lease_path.open("a+", encoding="utf-8") as lease_handle:
+        fcntl.flock(lease_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        module.write_maintenance_lock_owner(
+            lease_handle,
+            {
+                "status": "active",
+                "pid": 4242,
+                "profile": "backlog",
+                "session_id": "other-heavy-session",
+            },
+        )
+        deferred = module.auto_maintenance(
+            workspace_root=workspace,
+            aoa_root=aoa_root,
+            profile="backlog",
+            apply=True,
+            discovery_limit=0,
+            budget_seconds=900,
+        )
+        fcntl.flock(lease_handle, fcntl.LOCK_UN)
+
+    assert heavy_calls == []
+    deferred_lane = deferred["selection_scope"][
+        "heavy_projection_lane"
+    ]
+    assert deferred_lane["status"] == "deferred_heavy_lane_lease"
+    assert deferred_lane["lease_status"] == "deferred"
+    assert deferred_lane["blocking_owner"]["pid"] == 4242
+
+
+def test_per_session_build_lease_defers_duplicate_builder(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "duplicate-builder.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-07-21T02:30:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "duplicate-builder",
+                    "cwd": str(workspace),
+                },
+            },
+            {
+                "timestamp": "2026-07-21T02:30:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "only one builder owns this session",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "duplicate-builder",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    record = module.resolve_session_record(aoa_root, "duplicate-builder")
+    session_dir = module.session_dir_from_record(record)
+    lease_path = module.session_projection_build_lease_path(session_dir)
+    with lease_path.open("a+", encoding="utf-8") as lease_handle:
+        fcntl.flock(lease_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        deferred = module.reindex_session_from_raw(aoa_root, record)
+        fcntl.flock(lease_handle, fcntl.LOCK_UN)
+
+    assert deferred["status"] == "deferred_session_lease"
+    assert deferred["mutates"] is False
+    assert deferred["diagnostics"] == [
+        "session_projection_build_lease_held"
+    ]
+
+
+def test_prebuilt_projection_rejects_source_growth_and_preserves_last_good(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "source-growth-before-publish.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-07-21T03:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "source-growth-before-publish",
+                    "cwd": str(workspace),
+                },
+            },
+            {
+                "timestamp": "2026-07-21T03:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "build against a stable source",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "source-growth-before-publish",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    record = module.resolve_session_record(
+        aoa_root, "source-growth-before-publish"
+    )
+    session_dir = module.session_dir_from_record(record)
+
+    def published_projection() -> dict[str, bytes]:
+        return {
+            str(path.relative_to(session_dir)): path.read_bytes()
+            for path in sorted(session_dir.rglob("*"))
+            if path.is_file()
+            and path.name != "session.raw.jsonl"
+            and (
+                path.name
+                in {
+                    "session.manifest.json",
+                    module.SESSION_INDEX_JSON,
+                    module.SESSION_INDEX_MARKDOWN,
+                }
+                or path.parent.name in {"raw", "segments"}
+            )
+        }
+
+    last_good = published_projection()
+    built = module.reindex_session_from_raw(
+        aoa_root,
+        record,
+        defer_publish=True,
+        segment_workers=1,
+    )
+    work_dir = Path(built["work_dir"])
+    checkpoint = module.read_json(
+        module.session_projection_work_checkpoint_path(work_dir), {}
+    )
+    stage_identities = checkpoint["stage_work_identities"]
+    assert set(stage_identities) == {
+        "capture",
+        "classification",
+        "correlation_summaries",
+        "segment_index",
+        "review_rendering",
+        "task_episodes",
+        "goal_lifecycles",
+        "session_component_manifest",
+    }
+    for stage, identity in stage_identities.items():
+        stage_checkpoint = module.read_json(
+            module.session_projection_stage_checkpoint_path(
+                work_dir, stage
+            ),
+            {},
+        )
+        assert stage_checkpoint["status"] == "complete"
+        assert stage_checkpoint["stage_work_identity"] == identity
+    raw_path = Path(
+        module.read_json(
+            session_dir / "session.manifest.json", {}
+        )["raw"]["path"]
+    )
+    with raw_path.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "timestamp": "2026-07-21T03:00:02Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "source grew before publish",
+                            }
+                        ],
+                    },
+                }
+            )
+            + "\n"
+        )
+    rejected = (
+        module.publish_prebuilt_session_projection_under_maintenance_lock(
+            aoa_root=aoa_root,
+            record=record,
+            work_dir=work_dir,
+        )
+    )
+
+    assert built["status"] == "built_unpublished"
+    assert rejected["status"] == "diagnostic"
+    assert rejected["mutates"] is False
+    assert (
+        "projection_dependencies_drifted_before_publish"
+        in rejected["diagnostics"]
+    )
+    assert "last_good_projection_preserved" in rejected["diagnostics"]
+    assert published_projection() == last_good
+
+
+def test_growing_session_reuses_unchanged_published_segments(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "growing-session.jsonl"
+    rows: list[dict[str, Any]] = [
+        {
+            "timestamp": "2026-07-22T00:00:00Z",
+            "type": "session_meta",
+            "payload": {
+                "id": "growing-session",
+                "cwd": str(workspace),
+            },
+        }
+    ]
+    for ordinal in range(4):
+        rows.extend(
+            [
+                {
+                    "timestamp": f"2026-07-22T00:00:{ordinal * 2 + 1:02d}Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": f"stable segment {ordinal}",
+                            }
+                        ],
+                    },
+                },
+                {
+                    "timestamp": f"2026-07-22T00:00:{ordinal * 2 + 2:02d}Z",
+                    "type": "turn_context",
+                    "payload": {"summary": f"stable boundary {ordinal}"},
+                },
+            ]
+        )
+    write_jsonl(transcript, rows)
+    receipt = module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "growing-session",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    session_dir = Path(str(receipt["session_dir"]))
+    outbox_records_dir = (
+        aoa_root / module.PROJECTION_OUTBOX_RECORDS_DIR
+    )
+    initial_outbox_records = {
+        path.name for path in outbox_records_dir.glob("*.json")
+    }
+    record = module.resolve_session_record(aoa_root, "growing-session")
+    raw_path = Path(
+        module.read_json(
+            session_dir / "session.manifest.json", {}
+        )["raw"]["path"]
+    )
+    with raw_path.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "timestamp": "2026-07-22T00:00:20Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "new growing tail",
+                            }
+                        ],
+                    },
+                }
+            )
+            + "\n"
+        )
+
+    grown = module.reindex_session_from_raw(
+        aoa_root,
+        record,
+        segment_workers=4,
+    )
+
+    assert grown["status"] == "reindexed", "\n".join(
+        str(item) for item in grown.get("diagnostics", [])
+    )
+    execution = grown["segment_execution"]
+    assert execution["published_reused_segment_count"] >= 3
+    assert execution["rebuilt_segment_count"] < grown["segment_count"]
+    raw_block_execution = grown["raw_block_execution"]
+    assert raw_block_execution["reused_block_count"] >= 3
+    assert (
+        raw_block_execution["rebuilt_block_count"]
+        < grown["raw_block_count"]
+    )
+    episode_shards = grown["session_index_execution"][
+        "task_episode_shards"
+    ]
+    episode_builder = grown["session_index_execution"][
+        "task_episode_incremental_build"
+    ]
+    assert episode_builder["mode"] == (
+        "append_stable_bounded_tail_replay_v1"
+    )
+    assert episode_builder["reused_sealed_episode_count"] >= 1
+    assert episode_builder["replayed_event_count"] < 9
+    assert episode_shards["checkpoint_reused_shard_count"] >= 3
+    assert episode_shards["rebuilt_shard_count"] < (
+        episode_shards["planned_shard_count"]
+    )
+    changed_components = grown["publish_result"][
+        "changed_components"
+    ]
+    changed_segment_ids = {
+        item["component_id"]
+        for item in changed_components
+        if item["component_type"] == "segment_index"
+    }
+    assert changed_segment_ids
+    assert len(changed_segment_ids) < grown["segment_count"]
+    assert grown["publish_result"]["outbox"]["status"] == "written"
+    outbox_path = Path(grown["publish_result"]["outbox"]["path"])
+    assert outbox_path.is_file()
+    outbox = module.read_json(outbox_path, {})
+    assert outbox["status"] == "pending"
+    assert outbox["changes"] == changed_components
+    assert initial_outbox_records < {
+        path.name for path in outbox_records_dir.glob("*.json")
+    }
+
+
+def test_graph_registry_dependency_digest_invalidates_only_used_routes() -> None:
+    def entry(key: str, owner: str) -> dict[str, Any]:
+        return {
+            "entity_id": f"skill:{key}",
+            "kind": "skill",
+            "canonical_key": key,
+            "status": "registered",
+            "route_layer": "skill",
+            "route_signal": f"skill:{key}",
+            "source_surface": f"skills/{key}/SKILL.md",
+            "owner": owner,
+            "canonicalization": {
+                "schema_version": 1,
+                "status": "resolved",
+                "identity_claim_allowed": True,
+                "collision_preserved": False,
+                "candidate_count": 1,
+                "active_candidate_count": 1,
+                "selected_candidate_id": f"skill:{key}",
+                "candidate_ids": [f"skill:{key}"],
+            },
+        }
+
+    routes = [{"layer": "skill", "key": "used"}]
+    baseline_index = {
+        ("skill", "used"): entry("used", "owner-a"),
+        ("skill", "unrelated"): entry("unrelated", "owner-b"),
+    }
+    unrelated_changed = {
+        **baseline_index,
+        ("skill", "unrelated"): entry(
+            "unrelated", "different-owner"
+        ),
+    }
+    used_changed = {
+        **baseline_index,
+        ("skill", "used"): entry("used", "different-owner"),
+    }
+
+    baseline = module.graph_source_registry_dependency_for_route_tokens(
+        routes, baseline_index
+    )
+    unrelated = (
+        module.graph_source_registry_dependency_for_route_tokens(
+            routes, unrelated_changed
+        )
+    )
+    affected = module.graph_source_registry_dependency_for_route_tokens(
+        routes, used_changed
+    )
+
+    assert baseline["digest"] == unrelated["digest"]
+    assert baseline["digest"] != affected["digest"]
+    assert baseline["route_count"] == 1
+    assert baseline["resolved_entity_count"] == 1
+
+
+def test_graph_selective_registry_dependency_migration_is_one_time_and_bounded() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE graph_sources (source_key TEXT PRIMARY KEY)"
+    )
+    conn.execute(
+        "CREATE TABLE node_contribs ("
+        "source_key TEXT, node_type TEXT, payload_json TEXT)"
+    )
+    conn.executemany(
+        "INSERT INTO graph_sources(source_key) VALUES (?)",
+        [("source-used",), ("source-empty",)],
+    )
+    conn.execute(
+        "INSERT INTO node_contribs VALUES (?, ?, ?)",
+        (
+            "source-used",
+            "skill",
+            json.dumps(
+                {
+                    "route_layer": "skill",
+                    "route_key": "used",
+                }
+            ),
+        ),
+    )
+    registry_entry = {
+        "entity_id": "skill:used",
+        "kind": "skill",
+        "canonical_key": "used",
+        "status": "registered",
+        "route_layer": "skill",
+        "route_signal": "skill:used",
+        "source_surface": "skills/used/SKILL.md",
+        "owner": "aoa-skills",
+        "canonicalization": {
+            "schema_version": 1,
+            "status": "resolved",
+            "candidate_ids": ["skill:used"],
+        },
+    }
+
+    migrated = module.graph_migrate_selective_registry_dependencies(
+        conn=conn,
+        registry_index={("skill", "used"): registry_entry},
+    )
+    rows = {
+        row["source_key"]: row
+        for row in conn.execute(
+            "SELECT * FROM graph_sources ORDER BY source_key"
+        ).fetchall()
+    }
+    migrated_again = (
+        module.graph_migrate_selective_registry_dependencies(
+            conn=conn,
+            registry_index={("skill", "used"): registry_entry},
+        )
+    )
+
+    assert migrated["source_count"] == 2
+    assert migrated["route_bearing_source_count"] == 1
+    assert rows["source-used"]["entity_registry_selective_digest"]
+    assert json.loads(
+        rows["source-used"]["entity_registry_route_tokens_json"]
+    ) == [{"key": "used", "layer": "skill"}]
+    assert json.loads(
+        rows["source-empty"]["entity_registry_route_tokens_json"]
+    ) == []
+    assert migrated_again["source_count"] == 2
+    conn.close()
+
+
 def test_route_generation_refresh_uses_atomic_session_rebuild(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace = tmp_path / "AbyssOS"
     aoa_root = workspace / ".aoa"
@@ -77141,16 +95963,41 @@ def test_route_generation_refresh_uses_atomic_session_rebuild(
         module.ROUTE_SIGNAL_CLASSIFIER_VERSION - 1
     )
     module.write_json(segment_path, segment_index)
+    session_index_path = session_dir / module.SESSION_INDEX_JSON
+    session_index = module.read_json(session_index_path, {})
+    session_index["route_signal_classifier_version"] = (
+        module.ROUTE_SIGNAL_CLASSIFIER_VERSION - 1
+    )
+    module.write_json(session_index_path, session_index)
 
     planned = module.refresh_route_indexes_from_raw(
         aoa_root,
         record,
         dry_run=True,
     )
-    refreshed = module.refresh_route_indexes_from_raw(
-        aoa_root,
-        record,
+    original_write_segment = module.write_segment
+    lock_observations: list[bool] = []
+
+    def observed_write_segment(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        lock_observations.append(
+            bool(module.maintenance_lock_snapshot(aoa_root)["active"])
+        )
+        return original_write_segment(*args, **kwargs)
+
+    monkeypatch.setenv("AOA_SESSION_MEMORY_SEGMENT_WORKERS", "1")
+    monkeypatch.setattr(module, "write_segment", observed_write_segment)
+    monkeypatch.setattr(
+        module,
+        "reuse_published_session_segment",
+        lambda **_kwargs: None,
     )
+    batch = module.reindex_sessions(
+        aoa_root=aoa_root,
+        selected_records=[record],
+        stale_route_indexes=True,
+        split_publish_lock=True,
+    )
+    refreshed = batch["results"][0]
 
     assert planned["planned_action"] == (
         "atomic_session_projection_rebuild_for_route_generation"
@@ -77162,6 +96009,9 @@ def test_route_generation_refresh_uses_atomic_session_rebuild(
     assert refreshed["route_refresh_scope"] == (
         "full_session_projection_generation"
     )
+    assert refreshed["split_publish_lock"] is True
+    assert lock_observations == [False]
+    assert refreshed["maintenance_coordinator"]["mode"] == "publish"
     restored_index = module.read_json(segment_path, {})
     assert (
         restored_index["route_signal_classifier_version"]
@@ -77205,6 +96055,62 @@ def test_raw_unavailable_writes_diagnostic(tmp_path: Path) -> None:
     assert manifest["session_id"] == "missing-session"
     assert manifest["display"]["label"].endswith("__codex-in-abyssos")
     assert manifest["display"]["path"] == str(session_dir)
+    assert list((session_dir / "incidents").glob("*__INCIDENT.md"))
+    assert list((session_dir / "incidents").glob("*__DIAGNOSTIC.json"))
+
+
+def test_raw_unavailable_lifecycle_hook_defers_registry_derivatives_by_default(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    missing = tmp_path / "missing.jsonl"
+
+    def unexpected_name_index(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("lifecycle hook rebuilt the name index inline")
+
+    def unexpected_directory_index(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError(
+            "lifecycle hook rebuilt the directory index inline"
+        )
+
+    monkeypatch.setattr(module, "write_session_name_index", unexpected_name_index)
+    monkeypatch.setattr(
+        module,
+        "write_sessions_directory_index",
+        unexpected_directory_index,
+    )
+    receipt = module.handle_hook_event(
+        "SessionStart",
+        {
+            "session_id": "missing-fast-hook",
+            "transcript_path": str(missing),
+            "cwd": str(workspace),
+            "hook_event_name": "SessionStart",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    assert receipt["ok"] is True
+    assert "raw_unavailable_incident_written" in receipt["actions"]
+    assert "registry_derivatives_deferred" in receipt["actions"]
+    assert "registry_update_deferred" not in receipt["actions"]
+    assert "registry_update_retry_queued" in receipt["actions"]
+    assert Path(str(receipt["registry_update_job"])).is_file()
+    registry = json.loads(
+        (aoa_root / "session-registry.json").read_text(encoding="utf-8")
+    )
+    assert [
+        item["session_id"] for item in registry["sessions"]
+    ] == ["missing-fast-hook"]
+    assert receipt["incident"]["registry_updated"] is True
+    assert receipt["incident"]["registry_derivatives_updated"] is False
+    assert not (aoa_root / module.SESSION_NAME_INDEX_JSON).exists()
+    assert not (aoa_root / "SESSION_NAMES.md").exists()
+    session_dir = Path(str(receipt["session_dir"]))
+    assert (session_dir / "session.manifest.json").is_file()
     assert list((session_dir / "incidents").glob("*__INCIDENT.md"))
     assert list((session_dir / "incidents").glob("*__DIAGNOSTIC.json"))
 
@@ -77552,6 +96458,164 @@ def test_hook_worker_processes_deferred_sync_job(tmp_path: Path, monkeypatch) ->
     assert (session_dir / "segments" / "000__initial-to-latest.index.json").exists()
     assert not list((aoa_root / module.HOOK_JOBS_ROOT / "pending").glob("*.json"))
     assert list((aoa_root / module.HOOK_JOBS_ROOT / "done").glob("*.json"))
+
+
+def test_hook_sync_queue_coalesces_pending_events_per_session(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    transcript = tmp_path / "rollout-coalesced-pending.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-08-12T00:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": "coalesced-pending"},
+            }
+        ],
+    )
+
+    first = module.enqueue_hook_sync_job(
+        aoa_root,
+        event_name="SessionStart",
+        event={"session_id": "coalesced-pending", "sequence": 1},
+        session_id="coalesced-pending",
+        transcript_path=transcript,
+        reason="first_signal",
+    )
+    second = module.enqueue_hook_sync_job(
+        aoa_root,
+        event_name="Stop",
+        event={"session_id": "coalesced-pending", "sequence": 2},
+        session_id="coalesced-pending",
+        transcript_path=transcript,
+        reason="latest_signal",
+    )
+
+    assert first == second
+    pending = list(
+        (aoa_root / module.HOOK_JOBS_ROOT / "pending").glob("*.json")
+    )
+    assert pending == [first]
+    payload = json.loads(first.read_text(encoding="utf-8"))
+    assert payload["event_name"] == "Stop"
+    assert payload["event"]["sequence"] == 2
+    assert payload["coalesced_event_count"] == 2
+    assert payload["coalesced_event_names"] == ["SessionStart", "Stop"]
+    assert payload["coalesced_reasons"] == ["first_signal", "latest_signal"]
+
+
+def test_hook_sync_queue_updates_one_deferred_job_in_place(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    transcript = tmp_path / "rollout-coalesced-deferred.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-08-12T00:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": "coalesced-deferred"},
+            }
+        ],
+    )
+    pending = module.enqueue_hook_sync_job(
+        aoa_root,
+        event_name="PreCompact",
+        event={"session_id": "coalesced-deferred", "sequence": 1},
+        session_id="coalesced-deferred",
+        transcript_path=transcript,
+        reason="initial_defer",
+    )
+    assert pending is not None
+    deferred = aoa_root / module.HOOK_JOBS_ROOT / "deferred" / pending.name
+    pending.replace(deferred)
+
+    updated = module.enqueue_hook_sync_job(
+        aoa_root,
+        event_name="PostCompact",
+        event={"session_id": "coalesced-deferred", "sequence": 2},
+        session_id="coalesced-deferred",
+        transcript_path=transcript,
+        reason="newer_snapshot",
+    )
+
+    assert updated == deferred
+    assert not list(
+        (aoa_root / module.HOOK_JOBS_ROOT / "pending").glob("*.json")
+    )
+    payload = json.loads(deferred.read_text(encoding="utf-8"))
+    assert payload["event_name"] == "PostCompact"
+    assert payload["coalesced_event_count"] == 2
+
+
+def test_hook_worker_coalesces_legacy_duplicates_into_superseded_receipts(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-legacy-hook-duplicates.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-08-12T00:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": "legacy-hook-duplicates"},
+            }
+        ],
+    )
+    deferred = aoa_root / module.HOOK_JOBS_ROOT / "deferred"
+    deferred.mkdir(parents=True)
+    for ordinal, event_name in enumerate(
+        ("SessionStart", "PreCompact", "Stop"),
+        start=1,
+    ):
+        (deferred / f"legacy-{ordinal}.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": module.SCHEMA_VERSION,
+                    "job_type": "hook_sync_transcript",
+                    "queued_at": f"2026-08-12T00:00:0{ordinal}Z",
+                    "event_name": event_name,
+                    "session_id": "legacy-hook-duplicates",
+                    "transcript_path": str(transcript),
+                    "reason": f"legacy_{ordinal}",
+                    "event": {
+                        "session_id": "legacy-hook-duplicates",
+                        "sequence": ordinal,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+    monkeypatch.setenv("AOA_SESSION_MEMORY_HOOK_WORKER_MAX_RAW_BYTES", "1")
+
+    result = module.run_hook_worker(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        limit=5,
+    )
+
+    assert result["processed"] == 0
+    assert len(result["coalesced_hook_jobs"]) == 1
+    coalesced = result["coalesced_hook_jobs"][0]
+    assert coalesced["source_job_count"] == 3
+    assert coalesced["coalesced_event_count"] == 3
+    assert len(coalesced["superseded_jobs"]) == 3
+    active = list(deferred.glob("*.json"))
+    assert len(active) == 1
+    active_payload = json.loads(active[0].read_text(encoding="utf-8"))
+    assert active_payload["event_name"] == "Stop"
+    assert active_payload["coalesced_event_count"] == 3
+    assert len(
+        list(
+            (aoa_root / module.HOOK_JOBS_ROOT / "superseded").glob("*.json")
+        )
+    ) == 3
 
 
 def test_hook_worker_reports_post_sync_staleness_when_transcript_grows_during_sync(
@@ -78159,11 +97223,330 @@ def test_hooks_config_builder_uses_supplied_roots(tmp_path: Path) -> None:
     assert config["hooks"]["SessionStart"][0]["matcher"] == "startup|resume"
     rendered = json.dumps(config, ensure_ascii=False)
     assert str(module.default_source_aoa_root()) not in rendered
+    assert "sweep-codex-sessions" not in rendered
     for event_name in config["hooks"]:
         command = config["hooks"][event_name][0]["hooks"][0]["command"]
         assert str(workspace) in command
-        assert str(aoa_root / "scripts" / "aoa_session_memory.py") in command
+        assert str(aoa_root / "scripts" / "aoa_session_hook.py") in command
+        assert " enqueue " in command
         assert f"--event-name {event_name}" in command
+
+
+def test_thin_hook_ingress_preserves_exact_bytes_and_coalesces_duplicate_signals(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    raw_event = json.dumps(
+        {
+            "session_id": "thin-hook-session",
+            "transcript_path": str(tmp_path / "missing.jsonl"),
+            "cwd": str(workspace),
+            "hook_event_name": "SessionStart",
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    environment = {
+        **os.environ,
+        "AOA_SESSION_MEMORY_HOOK_BACKGROUND_SYNC": "0",
+    }
+    command = [
+        sys.executable,
+        str(HOOK_SCRIPT),
+        "enqueue",
+        "--event-name",
+        "SessionStart",
+        "--workspace-root",
+        str(workspace),
+        "--aoa-root",
+        str(aoa_root),
+    ]
+
+    first = subprocess.run(
+        command,
+        input=raw_event,
+        capture_output=True,
+        check=False,
+        env=environment,
+    )
+    second = subprocess.run(
+        command,
+        input=raw_event,
+        capture_output=True,
+        check=False,
+        env=environment,
+    )
+
+    assert first.returncode == 0
+    assert second.returncode == 0
+    output = json.loads(first.stdout)
+    assert set(output) == {"continue", "hookSpecificOutput"}
+    assert output["continue"] is True
+    pending = list(
+        (aoa_root / module.HOOK_INGRESS_ROOT / "pending").glob("*.json")
+    )
+    assert len(pending) == 1
+    assert pending[0].stat().st_mode & 0o777 == 0o600
+    assert pending[0].parent.stat().st_mode & 0o777 == 0o700
+    envelope = json.loads(pending[0].read_text(encoding="utf-8"))
+    assert envelope["schema_version"] == module.HOOK_INGRESS_SCHEMA_VERSION
+    assert envelope["signal_count"] == 2
+    assert base64.b64decode(envelope["event_b64"]) == raw_event
+    assert envelope["event_sha256"] == (
+        f"sha256:{hashlib.sha256(raw_event).hexdigest()}"
+    )
+
+    pipeline = module.run_hook_pipeline(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        ingress_limit=5,
+        job_limit=5,
+    )
+
+    assert pipeline["ok"] is True
+    assert pipeline["ingress"]["processed"] == 1
+    assert pipeline["ingress"]["results"][0]["signal_count"] == 2
+    assert pipeline["jobs"]["processed"] == 1
+    assert not list(
+        (aoa_root / module.HOOK_INGRESS_ROOT / "pending").glob("*.json")
+    )
+    done = list(
+        (aoa_root / module.HOOK_INGRESS_ROOT / "done").glob("*.json")
+    )
+    assert len(done) == 1
+    assert done[0].stat().st_mode & 0o777 == 0o600
+    assert base64.b64decode(
+        json.loads(done[0].read_text(encoding="utf-8"))["event_b64"]
+    ) == raw_event
+    session_dir = Path(
+        str(pipeline["ingress"]["results"][0]["session_dir"])
+    )
+    hook_events = [
+        json.loads(line)
+        for line in (
+            session_dir / "hooks" / "events.jsonl"
+        )
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert len(hook_events) == 1
+    assert hook_events[0]["event"]["_aoa_hook_ingress"][
+        "signal_count"
+    ] == 2
+
+
+def test_thin_hook_ingress_rejects_corrupt_existing_identity(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    raw_event = b'{"session_id":"corrupt-existing"}'
+    pending_path, envelope = hook_module.enqueue_event(
+        event_name="SessionStart",
+        raw_event=raw_event,
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    decoded, decoded_raw = module.decode_hook_ingress_event(
+        envelope,
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    assert decoded == {"session_id": "corrupt-existing"}
+    assert decoded_raw == raw_event
+    with pytest.raises(ValueError, match="identity mismatch"):
+        module.decode_hook_ingress_event(
+            {**envelope, "ingress_id": "hook-ingress:wrong"},
+            workspace_root=workspace,
+            aoa_root=aoa_root,
+        )
+
+    corrupt = {**envelope, "event_b64": "corrupt-but-valid-json"}
+    pending_path.write_text(
+        json.dumps(corrupt, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    before = pending_path.read_bytes()
+    with pytest.raises(ValueError, match="failed exact identity"):
+        hook_module.enqueue_event(
+            event_name="SessionStart",
+            raw_event=raw_event,
+            workspace_root=workspace,
+            aoa_root=aoa_root,
+        )
+    assert pending_path.read_bytes() == before
+
+    worker = module.run_hook_ingress_worker(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        limit=1,
+    )
+    assert worker["ok"] is False
+    assert worker["processed"] == 1
+    assert not list(
+        (aoa_root / module.HOOK_INGRESS_ROOT / "pending").glob("*.json")
+    )
+    failed_root = aoa_root / module.HOOK_INGRESS_ROOT / "failed"
+    quarantined = list(failed_root.glob("*.raw"))
+    diagnostics = list(failed_root.glob("*.json"))
+    assert len(quarantined) == 1
+    assert len(diagnostics) == 1
+    assert quarantined[0].read_bytes() == before
+    failure = json.loads(diagnostics[0].read_text(encoding="utf-8"))
+    assert failure["quarantined_envelope"] == str(quarantined[0])
+
+
+def test_thin_hook_ingress_coalesces_duplicate_arriving_during_owner_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    raw_event = json.dumps(
+        {
+            "session_id": "thin-hook-running-duplicate",
+            "transcript_path": str(tmp_path / "missing.jsonl"),
+            "cwd": str(workspace),
+            "hook_event_name": "SessionStart",
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    command = [
+        sys.executable,
+        str(HOOK_SCRIPT),
+        "enqueue",
+        "--event-name",
+        "SessionStart",
+        "--workspace-root",
+        str(workspace),
+        "--aoa-root",
+        str(aoa_root),
+    ]
+    environment = {
+        **os.environ,
+        "AOA_SESSION_MEMORY_HOOK_BACKGROUND_SYNC": "0",
+    }
+    first = subprocess.run(
+        command,
+        input=raw_event,
+        capture_output=True,
+        check=False,
+        env=environment,
+    )
+    assert first.returncode == 0
+
+    original_handle = module.handle_hook_event
+    duplicate_results: list[subprocess.CompletedProcess[bytes]] = []
+
+    def handle_with_late_duplicate(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        duplicate_results.append(
+            subprocess.run(
+                command,
+                input=raw_event,
+                capture_output=True,
+                check=False,
+                env=environment,
+            )
+        )
+        return original_handle(*args, **kwargs)
+
+    monkeypatch.setattr(module, "handle_hook_event", handle_with_late_duplicate)
+    pipeline = module.run_hook_pipeline(
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        ingress_limit=5,
+        job_limit=5,
+    )
+
+    assert [item.returncode for item in duplicate_results] == [0]
+    assert pipeline["ok"] is True
+    assert pipeline["ingress"]["processed"] == 1
+    result = pipeline["ingress"]["results"][0]
+    assert result["signal_count"] == 2
+    assert result["coalesced_after_replay"] == 1
+    assert "hook_ingress_late_duplicates_coalesced" in result["actions"]
+    assert not list(
+        (aoa_root / module.HOOK_INGRESS_ROOT / "pending").glob("*.json")
+    )
+    done = json.loads(
+        next(
+            (aoa_root / module.HOOK_INGRESS_ROOT / "done").glob("*.json")
+        ).read_text(encoding="utf-8")
+    )
+    assert done["signal_count"] == 2
+    session_dir = Path(str(result["session_dir"]))
+    hook_events = (
+        session_dir / "hooks" / "events.jsonl"
+    ).read_text(encoding="utf-8").splitlines()
+    receipts = [
+        json.loads(line)
+        for line in (
+            session_dir / "hooks" / "receipts.jsonl"
+        ).read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(hook_events) == 1
+    assert receipts[-1]["hook_ingress"]["signal_count"] == 2
+    assert receipts[-1]["hook_ingress"]["coalesced_after_replay"] == 1
+
+
+def test_scheduled_retry_dispatch_recovers_pending_thin_prompt_ingress(
+    tmp_path: Path,
+    capsys: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    event = {
+        "session_id": "scheduled-thin-prompt",
+        "cwd": str(workspace),
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "preserve this prompt until the owner worker runs",
+    }
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(HOOK_SCRIPT),
+            "enqueue",
+            "--event-name",
+            "UserPromptSubmit",
+            "--workspace-root",
+            str(workspace),
+            "--aoa-root",
+            str(aoa_root),
+        ],
+        input=json.dumps(event, ensure_ascii=False).encode("utf-8"),
+        capture_output=True,
+        check=False,
+        env={
+            **os.environ,
+            "AOA_SESSION_MEMORY_HOOK_BACKGROUND_SYNC": "0",
+        },
+    )
+    assert completed.returncode == 0
+    assert list(
+        (aoa_root / module.HOOK_INGRESS_ROOT / "pending").glob("*.json")
+    )
+
+    returncode = module.command_auto_maintenance_retry(
+        SimpleNamespace(
+            workspace_root=str(workspace),
+            aoa_root=str(aoa_root),
+            apply=True,
+            limit=0,
+            write_report=False,
+            full=False,
+        )
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert returncode == 0
+    assert payload["hook_pipeline"]["ok"] is True
+    assert payload["hook_pipeline"]["ingress"]["processed"] == 1
+    assert not list(
+        (aoa_root / module.HOOK_INGRESS_ROOT / "pending").glob("*.json")
+    )
 
 
 def test_codex_hook_lookup_tracks_trust_and_expected_commands(tmp_path: Path) -> None:
@@ -78356,7 +97739,8 @@ def test_lifecycle_hooks_queue_compaction_archive_and_worker_indexes(tmp_path: P
 
     worker = module.run_hook_worker(workspace_root=workspace, aoa_root=aoa_root, limit=5)
     assert worker["ok"] is True
-    assert worker["processed"] == 2
+    assert worker["processed"] == 1
+    assert worker["results"][0]["status"] == "synced"
     session_dir = aoa_root / "sessions" / "2026-05-14__001__archive-compaction-intervals"
     manifest = json.loads((session_dir / "session.manifest.json").read_text(encoding="utf-8"))
     assert manifest["archive_status"] == "indexed"
@@ -78374,7 +97758,6 @@ def test_lifecycle_hooks_queue_compaction_archive_and_worker_indexes(tmp_path: P
         manifest,
     ) == [
         "HookWorker:PostCompact",
-        "HookWorker:PreCompact",
         "PostCompact",
         "PreCompact",
     ]
@@ -78410,7 +97793,7 @@ def test_lifecycle_hooks_queue_compaction_archive_and_worker_indexes(tmp_path: P
         aoa_root=aoa_root,
     )
 
-    assert stop["ok"] is True
+    assert stop["ok"] is True, stop
     assert "indexing_deferred" in stop["actions"]
     assert "background_sync_queued" in stop["actions"]
     stop_manifest = json.loads((session_dir / "session.manifest.json").read_text(encoding="utf-8"))
@@ -78598,6 +97981,8 @@ def test_validate_pipeline_runs_end_to_end(tmp_path: Path) -> None:
     assert payload["ok"] is True
     checks = {check["name"]: check["ok"] for check in payload["checks"]}
     assert checks["generated_hook_config_events"] is True
+    assert checks["generated_hook_commands_use_thin_ingress"] is True
+    assert checks["thin_hook_ingress_source_exists"] is True
     assert checks["precompact_receipt_ok"] is True
     assert checks["postcompact_receipt_ok"] is True
     assert checks["stop_receipt_ok"] is True
@@ -78630,6 +98015,16 @@ def test_generated_session_projection_validates_against_json_schemas(
         hook_event_name="ManualSync",
     )
     session_dir = Path(str(synced["session_dir"]))
+    module.preserve_unindexed_raw_capture(
+        session_dir=session_dir,
+        session_id="aoa-validate-session",
+        transcript_path=transcript,
+        manifest=module.read_json(
+            session_dir / "session.manifest.json", {}
+        ),
+        hook_event_name="SchemaValidationCapture",
+        now="2026-08-10T00:00:00Z",
+    )
     source_root = SCRIPT.parents[1]
     contracts = [
         (
@@ -78641,12 +98036,43 @@ def test_generated_session_projection_validates_against_json_schemas(
         (
             source_root
             / "schemas"
+            / "projection-outbox.schema.json",
+            Path(str(synced["publish_result"]["outbox"]["path"])),
+        ),
+        (
+            source_root
+            / "schemas"
             / "raw-capture-state.schema.json",
             session_dir
             / "raw"
             / module.RAW_CAPTURE_STATE_JSON,
         ),
+        (
+            source_root
+            / "schemas"
+            / "live-tail.postings.schema.json",
+            session_dir
+            / "raw"
+            / module.PERSISTENT_LIVE_TAIL_POSTINGS_JSON,
+        ),
     ]
+    postings_manifest = module.read_json(
+        session_dir
+        / "raw"
+        / module.PERSISTENT_LIVE_TAIL_POSTINGS_JSON,
+        {},
+    )
+    contracts.extend(
+        (
+            source_root
+            / "schemas"
+            / "live-tail.postings-shard.schema.json",
+            session_dir / str(shard["rel"]),
+        )
+        for shard in postings_manifest.get("shards", [])
+        if isinstance(shard, dict)
+        and shard.get("format") == "sharded_postings_v1"
+    )
     manifest = module.read_json(
         session_dir / "session.manifest.json",
         {},
@@ -78698,6 +98124,11 @@ def test_install_portable_bundle_creates_clean_target(tmp_path: Path) -> None:
     assert (aoa_root / "schemas" / "AGENTS.md").exists()
     assert (aoa_root / "schemas" / "atlas-route-entry.schema.json").exists()
     assert (aoa_root / "schemas" / "raw-capture-state.schema.json").exists()
+    assert (aoa_root / "schemas" / "live-tail.postings.schema.json").exists()
+    assert (
+        aoa_root / "schemas" / "live-tail.postings-shard.schema.json"
+    ).exists()
+    assert (aoa_root / "schemas" / "projection-outbox.schema.json").exists()
     assert (aoa_root / "scripts" / "AGENTS.md").exists()
     assert (aoa_root / "scripts" / "build_capability_projection.py").exists()
     assert (aoa_root / "scripts" / "capability_route.py").exists()
@@ -78747,9 +98178,78 @@ def test_install_portable_bundle_creates_clean_target(tmp_path: Path) -> None:
     assert str(module.default_source_aoa_root()) not in rendered_hooks
     assert str(workspace) in rendered_hooks
     assert str(aoa_root) in rendered_hooks
+    install_profile = payload["install_profile"]
+    assert install_profile["schema_version"] == module.INSTALL_PROFILE_SCHEMA_VERSION
+    assert install_profile["source_ref"] == install_profile["source_commit"]
+    assert install_profile["source_commit_ref"] == install_profile["source_commit"]
+    assert install_profile["source_root"] == str(source_aoa.resolve())
+    assert install_profile["source_tree"] == subprocess.check_output(
+        ["git", "-C", str(source_aoa), "rev-parse", "--verify", "HEAD^{tree}"],
+        text=True,
+    ).strip()
+    assert install_profile["source_script"] == "scripts/aoa_session_memory.py"
+    assert install_profile["source_script_sha256"] == (
+        "sha256:" + module.sha256_file_exact(source_aoa / "scripts" / "aoa_session_memory.py")
+    )
+    source_provenance = module.runtime_install_source_provenance(source_aoa)
+    assert install_profile["source_worktree_clean"] == (
+        source_provenance["source_worktree_clean"]
+    )
+    assert install_profile["source_identity_status"] == (
+        source_provenance["identity_status"]
+    )
+    assert install_profile["source_identity"]["status"] == (
+        source_provenance["identity_status"]
+    )
+    assert install_profile["installed_at"] == install_profile["generated_at"]
+    assert install_profile["install_id"].startswith("sha256:")
 
     validation = module.validate_pipeline(workspace_root=workspace, aoa_root=aoa_root)
     assert validation["ok"] is True
+
+
+def test_install_upgrade_can_render_named_systemd_units_without_activation(
+    tmp_path: Path,
+) -> None:
+    source_aoa = SCRIPT.parents[1]
+    workspace = tmp_path / "TargetWorkspace"
+    aoa_root = workspace / ".aoa"
+    unit_dir = tmp_path / "systemd-user"
+
+    payload = module.install_portable_bundle(
+        source_aoa_root=source_aoa,
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        overwrite=True,
+        systemd_unit_dir=unit_dir,
+    )
+
+    assert payload["ok"] is True
+    assert payload["systemd_units"]["status"] == "rendered_and_written"
+    assert payload["install_profile"]["systemd_unit_dir"] == str(unit_dir.resolve())
+    assert sorted(path.name for path in unit_dir.iterdir()) == sorted(
+        {
+            module.SESSION_MEMORY_CAPTURE_SERVICE,
+            module.SESSION_MEMORY_CAPTURE_TIMER,
+            module.SESSION_MEMORY_RESOURCE_GATED_SWEEP_SERVICE,
+            module.SESSION_MEMORY_RESOURCE_GATED_SWEEP_TIMER,
+            module.SESSION_MEMORY_RETRY_DISPATCH_SERVICE,
+            module.SESSION_MEMORY_RETRY_DISPATCH_TIMER,
+        }
+    )
+    capture_text = (unit_dir / module.SESSION_MEMORY_CAPTURE_SERVICE).read_text(encoding="utf-8")
+    assert "capture-watch" in capture_text
+    assert (
+        f"--budget-seconds {int(module.CAPTURE_WATCH_DEFAULT_BUDGET_SECONDS)}"
+        in capture_text
+    )
+    assert "sweep-codex-sessions" not in capture_text
+    retry_text = (unit_dir / module.SESSION_MEMORY_RETRY_DISPATCH_SERVICE).read_text(encoding="utf-8")
+    assert "auto-maintenance-retry" in retry_text
+    assert "--apply" in retry_text
+    assert f"--limit {module.AUTO_MAINTENANCE_RETRY_DISPATCH_LIMIT}" in retry_text
+    assert "sweep-codex-sessions" not in retry_text
+    assert "systemctl" not in json.dumps(payload, ensure_ascii=False)
 
 
 def test_portable_copy_ignores_atomic_publish_scratch_files(
@@ -78853,12 +98353,9 @@ def test_doctor_accepts_runtime_install_without_local_tests(
         unmarked_payload["problems"]
     )
 
-    module.install_portable_bundle(
-        source_aoa_root=source_aoa,
-        workspace_root=workspace,
-        aoa_root=aoa_root,
-        include_tests=False,
-        overwrite=True,
+    module.write_json(
+        install_profile_path,
+        install_payload["install_profile"],
     )
     (aoa_root / "tests").mkdir()
     (aoa_root / "tests" / "AGENTS.md").write_text(
@@ -78896,6 +98393,30 @@ def test_doctor_accepts_runtime_install_without_local_tests(
         overwrite=True,
     )
     assert full_install["install_profile"]["include_tests"] is True
+    full_result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "doctor",
+            "--workspace-root",
+            str(workspace),
+            "--aoa-root",
+            str(aoa_root),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    full_payload = json.loads(full_result.stdout)
+    assert full_result.returncode == 0, full_result.stdout + full_result.stderr
+    assert full_payload["ok"] is True
+    assert full_payload["status"] == "current"
+    assert full_payload["truth_status"] == "doctor_full_filesystem_contract"
+    assert full_payload["runtime_optional_absent_root_files"] == []
+    assert full_payload["runtime_install_profile"]["valid"] is True
+    assert full_payload["runtime_install_profile"]["include_tests"] is True
+    assert full_payload["problems"] == []
+
     shutil.rmtree(aoa_root / "tests")
     lost_tests_result = subprocess.run(
         [
@@ -78918,6 +98439,46 @@ def test_doctor_accepts_runtime_install_without_local_tests(
     assert lost_tests_payload["runtime_optional_absent_root_files"] == []
     assert "missing required root file: tests/AGENTS.md" in (
         lost_tests_payload["problems"]
+    )
+
+
+def test_doctor_rejects_runtime_install_without_source_provenance(
+    tmp_path: Path,
+) -> None:
+    source_aoa = SCRIPT.parents[1]
+    workspace = tmp_path / "RuntimeWorkspace"
+    aoa_root = workspace / ".aoa"
+    install_payload = module.install_portable_bundle(
+        source_aoa_root=source_aoa,
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        overwrite=True,
+    )
+    profile = dict(install_payload["install_profile"])
+    profile.pop("source_commit")
+    module.write_json(aoa_root / module.INSTALL_PROFILE_PATH, profile)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "doctor",
+            "--workspace-root",
+            str(workspace),
+            "--aoa-root",
+            str(aoa_root),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+
+    assert result.returncode == 1
+    assert payload["ok"] is False
+    assert payload["runtime_install_profile"]["valid"] is False
+    assert "runtime_install_profile_source_commit_missing" in (
+        payload["runtime_install_profile"]["diagnostics"]
     )
 
 
@@ -78946,7 +98507,8 @@ def test_copy_portable_bundle_keeps_hook_example_and_local_stats_portable(tmp_pa
     rendered_hooks = json.dumps(hook_example, ensure_ascii=False)
     assert str(module.default_source_aoa_root()) not in rendered_hooks
     assert str(target.resolve()) not in rendered_hooks
-    assert "/path/to/workspace/.aoa/scripts/aoa_session_memory.py" in rendered_hooks
+    assert "/path/to/workspace/.aoa/scripts/aoa_session_hook.py" in rendered_hooks
+    assert " enqueue " in rendered_hooks
     assert "stats" in payload["copied"]
     assert "docs" in payload["copied"]
     assert (target / "stats" / "port.manifest.json").is_file()
@@ -79091,7 +98653,12 @@ def test_completion_audit_portable_bundle_accepts_clean_source_without_runtime_s
     source_aoa = SCRIPT.parents[1]
     workspace = tmp_path / "TargetWorkspace"
     bundle_root = tmp_path / "aoa-session-memory"
-    module.copy_portable_bundle(source_aoa_root=source_aoa, target_aoa_root=bundle_root, overwrite=True)
+    module.copy_portable_bundle(
+        source_aoa_root=source_aoa,
+        target_aoa_root=bundle_root,
+        overwrite=True,
+        audit_public_safety=False,
+    )
     (bundle_root / ".git").mkdir()
 
     def fake_remote(repo_root: Path, remote: str = "origin") -> str | None:
@@ -79135,6 +98702,53 @@ def test_completion_audit_portable_bundle_accepts_clean_source_without_runtime_s
     assert maintenance["agent_route"]["bootstrap_required"] is True
     assert maintenance["portable_clean_runtime"]["ok"] is True
     assert maintenance["diagnostics"] == []
+
+
+def test_completion_audit_requires_skill_usage_receipt_schema(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source_aoa = SCRIPT.parents[1]
+    workspace = tmp_path / "TargetWorkspace"
+    bundle_root = tmp_path / "aoa-session-memory"
+    module.copy_portable_bundle(
+        source_aoa_root=source_aoa,
+        target_aoa_root=bundle_root,
+        overwrite=True,
+        audit_public_safety=False,
+    )
+    (bundle_root / ".git").mkdir()
+    receipt_schema = bundle_root / "schemas" / "skill-usage-receipt.schema.json"
+    assert receipt_schema.is_file()
+    receipt_schema.unlink()
+
+    monkeypatch.setattr(
+        module,
+        "git_remote_url",
+        lambda repo_root, remote="origin": (
+            "git@github.com:8Dionysus/aoa-session-memory.git"
+            if repo_root == bundle_root
+            else None
+        ),
+    )
+
+    payload = module.completion_audit(
+        workspace_root=workspace,
+        aoa_root=bundle_root,
+        check_codex=False,
+        portable_bundle=True,
+    )
+
+    assert payload["ok"] is False
+    root_contract = next(
+        item
+        for item in payload["checklist"]
+        if item["requirement"]
+        == "Root kernel surfaces exist and are agent-readable"
+    )
+    assert root_contract["status"] == "missing"
+    assert root_contract["evidence"]["missing"] == [
+        "schemas/skill-usage-receipt.schema.json"
+    ]
 
 
 def test_force_export_clear_preserves_git_metadata(tmp_path: Path) -> None:
@@ -79191,6 +98805,47 @@ def test_export_bundle_rejects_session_flag_before_force_clear(
     assert sentinel.read_text(encoding="utf-8") == "preserve\n"
 
 
+def test_export_bundle_force_rejects_runtime_install_before_clear(
+    tmp_path: Path,
+    capsys: Any,
+) -> None:
+    target = tmp_path / "runtime-workspace" / ".aoa"
+    session_dir = target / "sessions" / "existing-session"
+    session_dir.mkdir(parents=True)
+    sentinel = session_dir / "raw.jsonl"
+    sentinel.write_text('{"type":"session_meta"}\n', encoding="utf-8")
+    install_profile = target / module.INSTALL_PROFILE_PATH
+    install_profile.parent.mkdir(parents=True, exist_ok=True)
+    install_profile.write_text(
+        '{"artifact_type":"runtime_install_profile"}\n',
+        encoding="utf-8",
+    )
+
+    code = module.command_export_bundle(
+        SimpleNamespace(
+            source_aoa_root=str(SCRIPT.parents[1]),
+            target_dir=str(target),
+            with_sessions=False,
+            no_tests=False,
+            force=True,
+        )
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == 1
+    assert payload["status"] == (
+        "rejected_runtime_target_before_mutation"
+    )
+    assert "runtime_install_profile" in payload["runtime_markers"]
+    assert "session_archive_directories" in payload["runtime_markers"]
+    assert payload["next_route"] == (
+        "use install --force for a runtime kernel upgrade"
+    )
+    assert sentinel.read_text(encoding="utf-8") == (
+        '{"type":"session_meta"}\n'
+    )
+
+
 def test_install_portable_bundle_preserves_existing_sessions(tmp_path: Path) -> None:
     source_aoa = SCRIPT.parents[1]
     workspace = tmp_path / "ExistingWorkspace"
@@ -79226,6 +98881,98 @@ def test_install_portable_bundle_preserves_existing_sessions(tmp_path: Path) -> 
     assert session_dir.exists()
     registry = json.loads(registry_path.read_text(encoding="utf-8"))
     assert registry["sessions"][0]["session_id"] == "existing-session"
+
+
+def test_install_portable_bundle_preserves_generated_maps_on_upgrade(
+    tmp_path: Path,
+) -> None:
+    source_aoa = SCRIPT.parents[1]
+    workspace = tmp_path / "ExistingWorkspace"
+    aoa_root = workspace / ".aoa"
+    module.install_portable_bundle(
+        source_aoa_root=source_aoa,
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        overwrite=True,
+    )
+    generated_payloads = {
+        Path("maps/INDEX.md"): "# Generated atlas\n",
+        Path("maps/index.json"): '{"generated": true}\n',
+        Path("maps") / module.ATLAS_PROJECTION_STATE_JSON: (
+            '{"projection": "kept"}\n'
+        ),
+        module.ENTITY_REGISTRY_PATH: '{"entities": ["kept"]}\n',
+        module.ENTITY_REGISTRY_MARKDOWN: "# Generated registry\n",
+        Path("maps/by-tool/INDEX.md"): "# Generated tool map\n",
+        Path("maps/by-tool/index.json"): '{"tool": true}\n',
+        Path("maps/by-tool/entries/runtime.json"): '{"runtime": true}\n',
+    }
+    for relative, text in generated_payloads.items():
+        path = aoa_root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    obsolete_authored = aoa_root / "maps" / "obsolete-authored.md"
+    obsolete_authored.write_text("remove on upgrade\n", encoding="utf-8")
+
+    payload = module.install_portable_bundle(
+        source_aoa_root=source_aoa,
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        overwrite=True,
+    )
+
+    assert payload["copy"]["preserve_runtime_generated"] is True
+    assert "entity-registry.json" in payload["copy"][
+        "restored_runtime_generated"
+    ]
+    assert "by-tool/entries" in payload["copy"][
+        "restored_runtime_generated"
+    ]
+    for relative, text in generated_payloads.items():
+        assert (aoa_root / relative).read_text(encoding="utf-8") == text
+    assert not obsolete_authored.exists()
+    assert (aoa_root / "maps" / "START.md").exists()
+
+
+def test_install_portable_bundle_restores_map_tree_when_overlay_fails(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    source_aoa = SCRIPT.parents[1]
+    workspace = tmp_path / "ExistingWorkspace"
+    aoa_root = workspace / ".aoa"
+    module.install_portable_bundle(
+        source_aoa_root=source_aoa,
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+        overwrite=True,
+    )
+    generated = aoa_root / module.ENTITY_REGISTRY_PATH
+    generated.write_text('{"entities": ["last-good"]}\n', encoding="utf-8")
+    previous_start = (aoa_root / "maps" / "START.md").read_text(
+        encoding="utf-8"
+    )
+
+    def fail_overlay(**_kwargs: Any) -> list[str]:
+        raise RuntimeError("synthetic overlay failure")
+
+    monkeypatch.setattr(module, "restore_runtime_generated_maps", fail_overlay)
+
+    with pytest.raises(RuntimeError, match="synthetic overlay failure"):
+        module.install_portable_bundle(
+            source_aoa_root=source_aoa,
+            workspace_root=workspace,
+            aoa_root=aoa_root,
+            overwrite=True,
+        )
+
+    assert generated.read_text(encoding="utf-8") == (
+        '{"entities": ["last-good"]}\n'
+    )
+    assert (aoa_root / "maps" / "START.md").read_text(
+        encoding="utf-8"
+    ) == previous_start
+    assert not list(aoa_root.glob(".maps.runtime-preserve.*.tmp"))
 
 
 def test_install_user_skill_symlinks_router_and_is_idempotent(tmp_path: Path) -> None:
@@ -79758,6 +99505,228 @@ def test_sweep_codex_sessions_reports_post_sync_staleness_when_source_grows(
     assert result["freshness"]["reason"] == "source_size_changed"
     assert result["freshness_reason"] == "source_size_changed"
     assert result["retry_required"] is True
+
+
+def test_sweep_codex_sessions_preserves_oversized_raw_before_deferred_indexing(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    source_root = tmp_path / "codex-sessions"
+    session_id = "sweep-oversized-capture"
+    transcript = (
+        source_root
+        / "2026"
+        / "05"
+        / "03"
+        / f"rollout-2026-05-03T12-00-00-{session_id}.jsonl"
+    )
+    initial_rows = [
+        {
+            "timestamp": "2026-05-03T12:00:00Z",
+            "type": "session_meta",
+            "payload": {"id": session_id, "cwd": str(workspace)},
+        },
+        {
+            "timestamp": "2026-05-03T12:00:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "Preserve oversized raw independently",
+                    }
+                ],
+            },
+        },
+    ]
+    write_jsonl(transcript, initial_rows)
+    initial = module.sweep_codex_sessions(
+        aoa_root=aoa_root,
+        source_root=source_root,
+        since="2026-05-01",
+        apply=True,
+        min_age_seconds=0,
+        index_max_raw_bytes=None,
+    )
+    session_dir = Path(initial["results"][0]["session_dir"])
+    initial_manifest = json.loads(
+        (session_dir / "session.manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    initial_raw_sha256 = initial_manifest["raw"]["sha256"]
+
+    write_jsonl(
+        transcript,
+        initial_rows
+        + [
+            {
+                "timestamp": "2026-05-03T12:00:02Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "New tail remains raw-accessible",
+                        }
+                    ],
+                },
+            }
+        ],
+    )
+
+    probed_paths: list[Path] = []
+    original_transcript_probe = module.transcript_probe
+
+    def recording_transcript_probe(path: Path) -> dict[str, Any]:
+        probed_paths.append(path)
+        return original_transcript_probe(path)
+
+    monkeypatch.setattr(module, "transcript_probe", recording_transcript_probe)
+    planned = module.sweep_codex_sessions(
+        aoa_root=aoa_root,
+        source_root=source_root,
+        since="2026-05-01",
+        min_age_seconds=0,
+        index_max_raw_bytes=1,
+    )
+    assert planned["counts"] == {"planned_raw_mirror": 1}
+    assert planned["mirror_only_candidate_count"] == 1
+    assert planned["metadata_probe_max_raw_bytes"] == 1
+    assert probed_paths == []
+
+    monkeypatch.setattr(
+        module, "SESSION_PROJECTION_HEAVY_LANE_RAW_BYTES", 1
+    )
+    mirrored = module.sweep_codex_sessions(
+        aoa_root=aoa_root,
+        source_root=source_root,
+        since="2026-05-01",
+        apply=True,
+        min_age_seconds=0,
+        index_max_raw_bytes=1,
+    )
+    result = mirrored["results"][0]
+    assert mirrored["counts"] == {"mirrored_index_deferred": 1}
+    assert mirrored["mirror_only_candidate_count"] == 1
+    assert result["raw_capture_current"] is True
+    assert result["indexing_deferred"] is True
+    assert result["heavy_lane_lease"]["status"] == "acquired"
+    assert result["last_good_projection_preserved"] is True
+    assert result["freshness_reason"] == (
+        "preserved_capture_ahead_of_projection"
+    )
+
+    final_manifest = json.loads(
+        (session_dir / "session.manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert final_manifest["archive_status"] == "indexed"
+    assert final_manifest["raw"]["sha256"] == initial_raw_sha256
+    capture = json.loads(
+        (session_dir / "raw" / module.RAW_CAPTURE_STATE_JSON).read_text(
+            encoding="utf-8"
+        )
+    )
+    capture_path = Path(capture["capture_path"])
+    assert capture["status"] == "preserved_unindexed"
+    assert capture_path.is_file()
+    assert capture_path.read_bytes() == transcript.read_bytes()
+    retry_queue = module.auto_maintenance_retry_queue_status(
+        aoa_root
+    )
+    queue_key = f"deep:{session_id}"
+    assert retry_queue["freshness_obligation_count"] == 1
+    assert retry_queue["freshness_obligation_due_count"] == 1
+    assert queue_key in retry_queue["items"]
+    obligation = retry_queue["items"][queue_key]["options"]
+    assert obligation["persistent_obligation"] is True
+    assert obligation["obligation_kind"] == (
+        module.SESSION_PROJECTION_FRESHNESS_OBLIGATION_KIND
+    )
+    assert obligation["required_capture_bytes"] == transcript.stat().st_size
+    assert obligation["required_capture_epoch_id"] == capture[
+        "ledger_epoch_id"
+    ]
+
+
+def test_sweep_codex_sessions_defers_large_capture_for_heavy_lane_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    source_root = tmp_path / "codex-sessions"
+    session_id = "sweep-heavy-lease"
+    transcript = (
+        source_root
+        / "2026"
+        / "05"
+        / "04"
+        / f"rollout-2026-05-04T12-00-00-{session_id}.jsonl"
+    )
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-05-04T12:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": session_id, "cwd": str(workspace)},
+            },
+            {
+                "timestamp": "2026-05-04T12:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "large capture must serialize",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        module, "SESSION_PROJECTION_HEAVY_LANE_RAW_BYTES", 1
+    )
+    lease_path = module.heavy_projection_lane_lock_path(aoa_root)
+    lease_path.parent.mkdir(parents=True, exist_ok=True)
+    with lease_path.open("a+", encoding="utf-8") as lease_handle:
+        fcntl.flock(lease_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        module.write_maintenance_lock_owner(
+            lease_handle,
+            {
+                "status": "active",
+                "pid": 7331,
+                "lane": "auto_maintenance_projection",
+            },
+        )
+        payload = module.sweep_codex_sessions(
+            aoa_root=aoa_root,
+            source_root=source_root,
+            since="2026-05-01",
+            apply=True,
+            min_age_seconds=0,
+            index_max_raw_bytes=1,
+        )
+        fcntl.flock(lease_handle, fcntl.LOCK_UN)
+
+    result = payload["results"][0]
+    assert payload["counts"] == {"deferred_heavy_lane_lease": 1}
+    assert result["retry_required"] is True
+    assert result["heavy_lane_lease"]["status"] == "deferred"
+    assert result["heavy_lane_lease"]["blocking_owner"]["pid"] == 7331
+    assert not (aoa_root / module.SESSION_ROOT).exists()
 
 
 def test_sweep_codex_sessions_supplements_date_window_with_recent_transcript_activity(tmp_path: Path) -> None:
@@ -80519,6 +100488,7 @@ def test_first_pass_distillation_is_atomic_deterministic_and_stales_after_source
                 "raw",
                 "segments",
                 "distillation",
+                module.SESSION_INDEX_SHARDS_DIR,
             } and relative.name not in {
                 "session.manifest.json",
                 module.SESSION_INDEX_JSON,
@@ -80906,6 +100876,587 @@ def test_owner_resolution_uses_indexed_paths_when_grounding_falls_back(tmp_path:
     assert owner["status"] == "resolved_from_evidence"
     assert owner["owner_root"] == "/srv/example/aoa-sdk"
     assert owner["confidence"] == "medium"
+
+
+def test_session_index_task_episode_shards_checkpoint_and_resume(
+    tmp_path: Path,
+) -> None:
+    stage_dir = tmp_path / "session-stage"
+    episodes = [
+        {
+            "episode_id": f"task-{index:04d}",
+            "stable_id": f"session:task-{index:04d}:event-{index}",
+            "identity": {
+                "canonical_id": f"episode:canonical-{index}"
+            },
+            "status": "closed",
+            "semantic_text": (
+                "bounded semantic text "
+                "shard-redaction-marker-13579"
+            ),
+            "event_range": {
+                "from_line": index + 1,
+                "to_line": index + 1,
+            },
+        }
+        for index in range(3)
+    ]
+    publish_identity = {
+        "source": {
+            "raw_sha256": "a" * 64,
+            "raw_bytes": 300,
+            "raw_line_count": 3,
+        },
+        "publish_id": "b" * 64,
+    }
+    literal_policy = module.DerivedSessionSensitiveLiteralPolicy(
+        values_by_kind={
+            "fixture": {"shard-redaction-marker-13579"}
+        }
+    )
+
+    first = module.materialize_session_index_task_episode_shards(
+        stage_dir,
+        episodes,
+        publish_identity=publish_identity,
+        literal_policy=literal_policy,
+        workers=1,
+        cooperative_deadline_monotonic=time.monotonic() - 1,
+    )
+
+    assert first["complete"] is False
+    assert first["execution"]["completed_shard_count"] == 1
+    assert first["execution"]["rebuilt_shard_count"] == 1
+
+    resumed = module.materialize_session_index_task_episode_shards(
+        stage_dir,
+        episodes,
+        publish_identity=publish_identity,
+        literal_policy=literal_policy,
+        workers=2,
+    )
+    second = module.materialize_session_index_task_episode_shards(
+        stage_dir,
+        episodes,
+        publish_identity=publish_identity,
+        literal_policy=literal_policy,
+        workers=2,
+    )
+
+    assert resumed["complete"] is True
+    assert resumed["execution"]["checkpoint_reused_shard_count"] == 1
+    assert resumed["execution"]["rebuilt_shard_count"] == 2
+    assert second["complete"] is True
+    assert second["execution"]["checkpoint_reused_shard_count"] == 3
+    assert second["execution"]["rebuilt_shard_count"] == 0
+    assert resumed["payloads"] == second["payloads"]
+    shard_bytes = b"".join(
+        path.read_bytes()
+        for path in (
+            stage_dir
+            / module.SESSION_INDEX_SHARDS_DIR
+            / module.SESSION_INDEX_TASK_EPISODE_SHARDS_DIR
+        ).glob("*.json")
+    )
+    assert b"shard-redaction-marker-13579" not in shard_bytes
+    assert module.DERIVED_TEXT_REDACTION_MARKER.encode() in shard_bytes
+
+
+def test_cold_task_episode_shard_redacts_each_payload_once(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    stage_dir = tmp_path / "session-stage"
+    episode = {
+        "episode_id": "task-0001",
+        "stable_id": "session:task-0001:event-1",
+        "identity": {"canonical_id": "episode:canonical-1"},
+        "status": "closed",
+        "semantic_text": "single-pass-redaction-marker-24680",
+        "event_range": {"from_line": 1, "to_line": 1},
+    }
+    policy = module.DerivedSessionSensitiveLiteralPolicy(
+        values_by_kind={
+            "fixture": {"single-pass-redaction-marker-24680"}
+        }
+    )
+    original = module.redact_derived_value
+    calls = 0
+
+    def counted(*args: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        if not str(kwargs.get("field_name") or ""):
+            calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(module, "redact_derived_value", counted)
+    result = module.materialize_session_index_task_episode_shards(
+        stage_dir,
+        [episode],
+        publish_identity={
+            "source": {
+                "raw_sha256": "a" * 64,
+                "raw_bytes": 100,
+                "raw_line_count": 1,
+            },
+            "publish_id": "b" * 64,
+        },
+        literal_policy=policy,
+        workers=1,
+    )
+
+    assert result["complete"] is True
+    assert calls == 1
+    assert result["payloads"][0]["semantic_text"] == (
+        module.DERIVED_TEXT_REDACTION_MARKER
+    )
+
+
+def test_task_episode_shard_reuse_admits_published_manifest_without_content_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    published_dir = tmp_path / "published"
+    stage_dir = tmp_path / "stage"
+    episodes = [
+        {
+            "episode_id": f"task-{ordinal:04d}",
+            "stable_id": f"session:task-{ordinal:04d}:event-{ordinal}",
+            "identity": {
+                "canonical_id": f"episode:canonical-{ordinal}"
+            },
+            "status": "closed",
+            "semantic_text": f"manifest admitted {ordinal}",
+            "event_range": {
+                "from_line": ordinal + 1,
+                "to_line": ordinal + 1,
+            },
+        }
+        for ordinal in range(8)
+    ]
+    publish_identity = {
+        "source": {
+            "raw_sha256": "a" * 64,
+            "raw_bytes": 800,
+            "raw_line_count": 8,
+        },
+        "publish_id": "b" * 64,
+    }
+    policy = module.DerivedSessionSensitiveLiteralPolicy(
+        values_by_kind={}
+    )
+    first = module.materialize_session_index_task_episode_shards(
+        published_dir,
+        episodes,
+        publish_identity=publish_identity,
+        literal_policy=policy,
+        workers=1,
+    )
+    module.write_session_index_shard_manifest(
+        published_dir,
+        publish_identity=publish_identity,
+        source_identity=first["source_identity"],
+        task_episode_records=first["records"],
+    )
+    published_shard_dir = (
+        published_dir
+        / module.SESSION_INDEX_SHARDS_DIR
+        / module.SESSION_INDEX_TASK_EPISODE_SHARDS_DIR
+    )
+    original_read_json = module.read_json
+    original_sha256_file = module.sha256_file
+
+    def guarded_read_json(path: Path, default: Any = None) -> Any:
+        if Path(path).parent == published_shard_dir:
+            raise AssertionError("published shard content reread")
+        return original_read_json(path, default)
+
+    def guarded_sha256_file(path: Path) -> str:
+        if Path(path).parent == published_shard_dir:
+            raise AssertionError("published shard content rehashed")
+        return original_sha256_file(path)
+
+    monkeypatch.setattr(module, "read_json", guarded_read_json)
+    monkeypatch.setattr(module, "sha256_file", guarded_sha256_file)
+    monkeypatch.setattr(
+        module,
+        "redact_derived_value",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("pre-redacted stable prefix re-redacted")
+        ),
+    )
+    original_component_identity = (
+        module.task_episode_component_source_identity
+    )
+
+    def changed_hydrated_component_identity(
+        episode: dict[str, Any],
+        *,
+        generation_identity: dict[str, Any],
+    ) -> dict[str, Any]:
+        identity = original_component_identity(
+            episode,
+            generation_identity=generation_identity,
+        )
+        return {**identity, "episode_source_sha256": "f" * 64}
+
+    monkeypatch.setattr(
+        module,
+        "task_episode_component_source_identity",
+        changed_hydrated_component_identity,
+    )
+    reused = module.materialize_session_index_task_episode_shards(
+        stage_dir,
+        first["payloads"],
+        published_session_dir=published_dir,
+        publish_identity=publish_identity,
+        literal_policy=policy,
+        workers=1,
+        pre_redacted_episode_count=len(episodes),
+    )
+
+    assert reused["complete"] is True
+    assert reused["payloads"] == first["payloads"]
+    assert reused["execution"][
+        "manifest_admitted_reused_shard_count"
+    ] == len(episodes)
+    assert reused["execution"]["rebuilt_shard_count"] == 0
+    assert reused["execution"]["pre_redacted_episode_count"] == len(
+        episodes
+    )
+    assert reused["execution"][
+        "pre_redacted_identity_preserved_reused_shard_count"
+    ] == len(episodes)
+
+
+def test_session_index_shard_manifest_validates_manifest_first_components(
+    tmp_path: Path,
+) -> None:
+    stage_dir = tmp_path / "session-stage"
+    episode = {
+        "episode_id": "task-0001",
+        "stable_id": "session:task-0001:event-1",
+        "identity": {"canonical_id": "episode:canonical-1"},
+        "status": "closed",
+        "semantic_text": "verified bounded episode",
+    }
+    publish_identity = {
+        "source": {
+            "raw_sha256": "c" * 64,
+            "raw_bytes": 100,
+            "raw_line_count": 1,
+        }
+    }
+    publish_identity["publish_id"] = "e" * 64
+    shards = module.materialize_session_index_task_episode_shards(
+        stage_dir,
+        [episode],
+        publish_identity=publish_identity,
+        literal_policy=module.DerivedSessionSensitiveLiteralPolicy(
+            values_by_kind={}
+        ),
+        workers=1,
+    )
+    module.write_session_index_shard_manifest(
+        stage_dir,
+        publish_identity=publish_identity,
+        source_identity=shards["source_identity"],
+        task_episode_records=shards["records"],
+    )
+    session_index = {
+        "task_episodes": [],
+        "projection_publish": publish_identity,
+        "component_storage": {
+            "manifest_ref": str(
+                Path(module.SESSION_INDEX_SHARDS_DIR)
+                / module.SESSION_INDEX_SHARD_MANIFEST_JSON
+            ),
+            "task_episode_shard_count": 1,
+            "embedded_compatibility_view": False,
+            "reader_mode": "manifest_first",
+        },
+    }
+
+    validation_metrics: dict[str, Any] = {}
+    assert module.staged_session_index_shard_diagnostics(
+        stage_dir=stage_dir,
+        session_index=session_index,
+        expected_publish_id=publish_identity["publish_id"],
+        validation_metrics_out=validation_metrics,
+    ) == []
+    assert validation_metrics == {
+        "metadata_receipt_admitted_count": 1,
+        "full_content_validation_count": 0,
+        "policy": "metadata_receipt_else_full_content_validation_v1",
+    }
+    assert shards["records"][0]["artifact_receipt"]["sha256"] == (
+        shards["records"][0]["artifact_sha256"]
+    )
+    assert module.session_index_task_episode_components(
+        stage_dir,
+        session_index,
+    ) == shards["payloads"]
+
+    shard_path = stage_dir / shards["records"][0]["ref"]
+    shard_path.write_text("{}\n", encoding="utf-8")
+    assert any(
+        reason.startswith(
+            "session_index_task_episode_shard_artifact_mismatch"
+        )
+        for reason in module.staged_session_index_shard_diagnostics(
+            stage_dir=stage_dir,
+            session_index=session_index,
+            expected_publish_id=publish_identity["publish_id"],
+        )
+    )
+
+
+def test_deep_projection_audit_rehashes_task_episode_shards(
+    tmp_path: Path,
+) -> None:
+    session_dir = tmp_path / "session"
+    publish_identity = {
+        "source": {
+            "raw_sha256": "a" * 64,
+            "raw_bytes": 100,
+            "raw_line_count": 1,
+        },
+        "publish_id": "b" * 64,
+    }
+    shards = module.materialize_session_index_task_episode_shards(
+        session_dir,
+        [
+            {
+                "episode_id": "task-audit",
+                "stable_id": "session:task-audit:event-1",
+                "identity": {"canonical_id": "episode:audit"},
+                "status": "closed",
+                "semantic_text": "deep audit episode",
+            }
+        ],
+        publish_identity=publish_identity,
+        literal_policy=module.DerivedSessionSensitiveLiteralPolicy(
+            values_by_kind={}
+        ),
+        workers=1,
+    )
+    module.write_session_index_shard_manifest(
+        session_dir,
+        publish_identity=publish_identity,
+        source_identity=shards["source_identity"],
+        task_episode_records=shards["records"],
+    )
+
+    initial = module.deep_audit_session_projection_artifacts(
+        session_dir=session_dir,
+        manifest={"segments": []},
+    )
+    assert initial["ok"] is True
+    assert initial["task_episode_component_count"] == 1
+
+    artifact = session_dir / shards["records"][0]["ref"]
+    stat = artifact.stat()
+    corrupted = bytearray(artifact.read_bytes())
+    corrupted[len(corrupted) // 2] ^= 1
+    artifact.write_bytes(corrupted)
+    os.utime(artifact, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+
+    audited = module.deep_audit_session_projection_artifacts(
+        session_dir=session_dir,
+        manifest={"segments": []},
+    )
+    assert audited["ok"] is False
+    assert audited["task_episode_component_count"] == 1
+    assert any(
+        reason == "task_episode_shard:0:artifact_sha256_mismatch"
+        for reason in audited["diagnostics"]
+    )
+
+
+def test_manifest_first_task_episode_reader_hydrates_only_verified_scope(
+    tmp_path: Path,
+) -> None:
+    stage_dir = tmp_path / "session-stage"
+    episodes = [
+        {
+            "episode_id": f"task-{index:04d}",
+            "stable_id": f"session:task-{index:04d}:event-{index}",
+            "identity": {"canonical_id": f"episode:canonical-{index}"},
+            "status": "closed",
+            "semantic_text": f"bounded episode {index}",
+            "event_range": {
+                "from_line": index + 1,
+                "to_line": index + 1,
+            },
+        }
+        for index in range(5)
+    ]
+    publish_identity = {
+        "source": {
+            "raw_sha256": "d" * 64,
+            "raw_bytes": 500,
+            "raw_line_count": 5,
+        }
+    }
+    publish_identity["publish_id"] = "f" * 64
+    shards = module.materialize_session_index_task_episode_shards(
+        stage_dir,
+        episodes,
+        publish_identity=publish_identity,
+        literal_policy=module.DerivedSessionSensitiveLiteralPolicy(
+            values_by_kind={}
+        ),
+        workers=1,
+    )
+    module.write_session_index_shard_manifest(
+        stage_dir,
+        publish_identity=publish_identity,
+        source_identity=shards["source_identity"],
+        task_episode_records=shards["records"],
+    )
+    session_index = {
+        "task_episodes": [],
+        "projection_publish": publish_identity,
+        "component_storage": {
+            "manifest_ref": str(
+                Path(module.SESSION_INDEX_SHARDS_DIR)
+                / module.SESSION_INDEX_SHARD_MANIFEST_JSON
+            ),
+            "task_episode_shard_count": len(episodes),
+            "embedded_compatibility_view": False,
+            "reader_mode": "manifest_first",
+        },
+    }
+
+    oldest_path = stage_dir / shards["records"][0]["ref"]
+    oldest_path.write_text("{}\n", encoding="utf-8")
+    bounded = module.session_index_task_episode_component_read(
+        stage_dir,
+        session_index,
+        order="recent",
+        limit=1,
+    )
+
+    assert bounded["status"] == "current"
+    assert bounded["payloads"][0]["episode_id"] == "task-0004"
+    assert bounded["hydrated_component_count"] == 1
+    assert bounded["component_count"] == 5
+    assert bounded["scan_complete"] is False
+    assert bounded["global_component_integrity"] == "unresolved"
+    assert module.session_index_task_episode_components(
+        stage_dir,
+        session_index,
+    ) == []
+
+
+def test_task_episode_cli_route_uses_manifest_first_selective_hydration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    session_dir = aoa_root / "sessions" / "selective-session"
+    episodes = [
+        {
+            "episode_id": f"task-{index:04d}",
+            "stable_id": f"session:task-{index:04d}:event-{index}",
+            "identity": {"canonical_id": f"episode:canonical-{index}"},
+            "status": "closed",
+            "semantic_text": f"bounded episode {index}",
+            "event_range": {
+                "from_line": index + 1,
+                "to_line": index + 1,
+            },
+        }
+        for index in range(6)
+    ]
+    publish_identity = {
+        "source": {
+            "raw_sha256": "1" * 64,
+            "raw_bytes": 600,
+            "raw_line_count": 6,
+        },
+        "publish_id": "2" * 64,
+    }
+    shards = module.materialize_session_index_task_episode_shards(
+        session_dir,
+        episodes,
+        publish_identity=publish_identity,
+        literal_policy=module.DerivedSessionSensitiveLiteralPolicy(
+            values_by_kind={}
+        ),
+        workers=1,
+    )
+    module.write_session_index_shard_manifest(
+        session_dir,
+        publish_identity=publish_identity,
+        source_identity=shards["source_identity"],
+        task_episode_records=shards["records"],
+    )
+    session_index = {
+        "session_id": "selective-session-id",
+        "display": {"label": "selective-session"},
+        "task_episodes": [],
+        "projection_publish": publish_identity,
+        "component_storage": {
+            "manifest_ref": str(
+                Path(module.SESSION_INDEX_SHARDS_DIR)
+                / module.SESSION_INDEX_SHARD_MANIFEST_JSON
+            ),
+            "task_episode_shard_count": len(episodes),
+            "embedded_compatibility_view": False,
+            "reader_mode": "manifest_first",
+        },
+    }
+    module.write_json(
+        session_dir / module.SESSION_INDEX_JSON,
+        session_index,
+    )
+    module.write_json(
+        session_dir / "session.manifest.json",
+        {
+            "session_id": "selective-session-id",
+            "session_label": "selective-session",
+            "display": {"label": "selective-session"},
+        },
+    )
+    module.write_json(
+        aoa_root / module.REGISTRY_NAME,
+        {
+            "schema_version": 1,
+            "sessions": [
+                {
+                    "session_id": "selective-session-id",
+                    "session_label": "selective-session",
+                    "path": str(session_dir),
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "generated_session_index_stale_reasons_for_session",
+        lambda *_args, **_kwargs: [],
+    )
+
+    payload = module.task_episode_route_search(
+        aoa_root=aoa_root,
+        session="selective-session-id",
+        order="recent",
+        limit=1,
+    )
+
+    assert payload["ok"] is True
+    assert payload["results"][0]["episode_id"] == "task-0005"
+    assert payload["cost_profile"]["component_count"] == 6
+    assert payload["cost_profile"]["hydrated_component_count"] == 1
+    assert payload["cost_profile"]["opens_raw"] is False
+    assert payload["global_recall"] == {
+        "complete": False,
+        "negative_claims_admitted": False,
+    }
+    assert payload["component_reads"][0]["reader_mode"] == (
+        "manifest_first"
+    )
 
 
 def test_repair_session_titles_skips_ide_context_prompt(tmp_path: Path) -> None:
@@ -82034,25 +102585,30 @@ def test_deferred_capture_is_idempotent_and_partial_copy_keeps_prior_state(
     raw_before_failure = (
         session_dir / "raw" / "session.raw.jsonl"
     ).read_bytes()
-    original_copy2 = module.shutil.copy2
+    with transcript.open("ab") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "timestamp": "2026-05-18T03:01:02Z",
+                    "type": "event_msg",
+                    "payload": {"type": "agent_message", "message": "tail"},
+                }
+            ).encode("utf-8")
+            + b"\n"
+        )
+    original_chain = module.raw_capture_chain_sha256
 
-    def fail_partial_capture_copy(
-        source: Path,
-        target: Path,
-        *args: Any,
-        **kwargs: Any,
-    ) -> None:
-        Path(target).write_bytes(b"partial capture")
-        raise OSError("injected capture copy failure")
+    def fail_block_commit(**_kwargs: Any) -> str:
+        raise OSError("injected capture block commit failure")
 
     monkeypatch.setattr(
-        module.shutil,
-        "copy2",
-        fail_partial_capture_copy,
+        module,
+        "raw_capture_chain_sha256",
+        fail_block_commit,
     )
     with pytest.raises(
         OSError,
-        match="injected capture copy failure",
+        match="injected capture block commit failure",
     ):
         module.mirror_transcript_without_indexing(
             aoa_root=aoa_root,
@@ -82062,9 +102618,9 @@ def test_deferred_capture_is_idempotent_and_partial_copy_keeps_prior_state(
             now="2026-05-18T03:01:02Z",
         )
     monkeypatch.setattr(
-        module.shutil,
-        "copy2",
-        original_copy2,
+        module,
+        "raw_capture_chain_sha256",
+        original_chain,
     )
 
     assert state_path.read_bytes() == state_before_failure
@@ -83467,6 +104023,782 @@ def test_derived_text_redaction_is_idempotent_and_preserves_benign_identity() ->
     )
 
 
+def test_event_index_deferred_redaction_is_equivalent_to_direct_redaction() -> None:
+    secret = "".join(
+        ["sk-", "proj-", "abcdefghijklmnop", "qrstuvwxyz0123456789"]
+    )
+    raw = json.dumps(
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "text": f"Authorization: Bearer {secret}",
+            },
+        }
+    )
+    event = module.RawEvent(
+        event_id="privacy-deferred:1",
+        line_no=1,
+        raw=raw,
+        parsed=json.loads(raw),
+        event_type="MESSAGE",
+        source_type="response_item",
+        title=f"detached {secret}",
+        timestamp="2026-08-11T00:00:00Z",
+        tags=[f"secret:{secret}"],
+        importance="normal",
+        compaction_boundary=False,
+        facets={
+            "route_signals": [
+                {
+                    "layer": "entity",
+                    "key": f"credential:{secret}",
+                }
+            ]
+        },
+    )
+    policy = module.derived_session_sensitive_literal_policy([event])
+    observations = module.token_accounting_for_event(event)
+
+    direct = module.event_index_record(
+        event,
+        "001.md",
+        literal_policy=policy,
+        token_observations=observations,
+    )
+    deferred = module.event_index_record(
+        event,
+        "001.md",
+        literal_policy=policy,
+        token_observations=observations,
+        redact_output=False,
+    )
+
+    assert secret in json.dumps(deferred, ensure_ascii=False)
+    assert module.redact_derived_value(
+        deferred,
+        literal_policy=policy,
+    ) == direct
+    assert secret not in json.dumps(direct, ensure_ascii=False)
+
+
+def test_graph_record_redaction_cache_preserves_standard_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sensitive_label = "".join(("pass", "word"))
+    sensitive_value = "".join(("must", "-not-", "survive"))
+    source = {
+        "route": ["tool:exec_command"] * 40,
+        "label": "tool:exec_command",
+        "nested": json.dumps(
+            {"route": ["tool:exec_command"] * 20},
+            sort_keys=True,
+        ),
+        sensitive_label: sensitive_value,
+    }
+    expected = module.redact_derived_value(source)
+    module._derived_text_sensitive_value_key_cached.cache_clear()
+    original = module.redact_derived_text
+    calls = 0
+
+    def counted(value: Any, **kwargs: Any) -> str:
+        nonlocal calls
+        calls += 1
+        return original(value, **kwargs)
+
+    monkeypatch.setattr(module, "redact_derived_text", counted)
+    cache: dict[tuple[str, str], str] = {}
+    actual = module.graph_redact_derived_value(
+        source,
+        text_cache=cache,
+    )
+
+    assert actual == expected
+    assert sensitive_value not in json.dumps(actual)
+    assert calls < 10
+    assert cache
+    cache_info = module._derived_text_sensitive_value_key_cached.cache_info()
+    assert cache_info.hits >= 50
+    assert cache_info.misses < 10
+
+
+def test_standard_redaction_cache_preserves_literal_policy_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "".join(
+        ["sk-", "proj-", "abcdefghijklmnop", "qrstuvwxyz0123456789"]
+    )
+    bearer_prefix = "".join(["Bear", "er "])
+    policy = module.derived_session_sensitive_literal_policy_from_texts(
+        [f"Authorization: {bearer_prefix}{secret}"]
+    )
+    source = {
+        "route": ["tool:exec_command"] * 40,
+        "label": "tool:exec_command",
+        "nested": json.dumps(
+            {
+                "route": ["tool:exec_command"] * 20,
+                "value": secret,
+            },
+            sort_keys=True,
+        ),
+        "detached": [secret] * 12,
+    }
+    expected = module.redact_derived_value(
+        source,
+        literal_policy=policy,
+    )
+    original = module.redact_derived_text
+    calls = 0
+
+    def counted(value: Any, **kwargs: Any) -> str:
+        nonlocal calls
+        calls += 1
+        return original(value, **kwargs)
+
+    monkeypatch.setattr(module, "redact_derived_text", counted)
+    cache: dict[tuple[str, str], str] = {}
+    actual = module.redact_derived_value(
+        source,
+        literal_policy=policy,
+        text_cache=cache,
+    )
+
+    assert actual == expected
+    assert secret not in json.dumps(actual)
+    assert calls < 20
+    assert cache
+
+
+def test_graph_record_builder_restores_gc_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[bool] = []
+
+    def inner(*_args: Any, **_kwargs: Any) -> tuple[list[Any], list[str]]:
+        observed.append(module.gc.isenabled())
+        return [], []
+
+    monkeypatch.setattr(
+        module,
+        "_graph_contributions_for_record",
+        inner,
+    )
+    module.gc.enable()
+    assert module.graph_contributions_for_record({}) == ([], [])
+    assert observed == [False]
+    assert module.gc.isenabled() is True
+
+    module.gc.disable()
+    try:
+        assert module.graph_contributions_for_record({}) == ([], [])
+        assert observed == [False, False]
+        assert module.gc.isenabled() is False
+    finally:
+        module.gc.enable()
+
+
+def test_graph_blocked_segment_reuses_loaded_record_sources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    session_dir = aoa_root / "sessions" / "fixture-session"
+    segment_path = session_dir / "segments" / "001.index.json"
+    write_json(
+        session_dir / "session.manifest.json",
+        {
+            "session_id": "fixture-session",
+            "session_label": "fixture-session",
+            "segments": [
+                {
+                    "segment_id": "001",
+                    "index": str(segment_path),
+                }
+            ],
+        },
+    )
+    write_json(
+        session_dir / module.SESSION_INDEX_JSON,
+        {"generation_id": "fixture-session-generation"},
+    )
+    write_json(
+        segment_path,
+        {"generation_id": "stale-segment-generation", "events": []},
+    )
+    monkeypatch.setattr(
+        module,
+        "generated_session_index_stale_reasons_for_session",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        module,
+        "generated_segment_index_stale_reasons",
+        lambda *_args, **_kwargs: ["fixture_segment_stale"],
+    )
+
+    def forbid_candidate_rescan(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("blocked segment rescanned complete session")
+
+    monkeypatch.setattr(
+        module,
+        "graph_source_candidates_for_record",
+        forbid_candidate_rescan,
+    )
+    contributions, diagnostics = module.graph_contributions_for_record(
+        {"session_id": "fixture-session", "path": str(session_dir)},
+        entity_registry_index={},
+    )
+
+    assert diagnostics == []
+    assert len(contributions) == 2
+    blocked = contributions[1]
+    assert blocked["source"]["source_key"] == (
+        "segment:fixture-session:001"
+    )
+    assert blocked["source"]["status"] == "blocked"
+    assert blocked["nodes"] == []
+    assert blocked["edges"] == []
+
+
+def test_graph_blocked_session_reuses_source_fingerprints(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    session_dir = aoa_root / "sessions" / "fixture-session"
+    manifest_path = session_dir / "session.manifest.json"
+    session_index_path = session_dir / module.SESSION_INDEX_JSON
+    segment_paths = [
+        session_dir / "segments" / f"00{ordinal}.index.json"
+        for ordinal in range(2)
+    ]
+    write_json(
+        manifest_path,
+        {
+            "session_id": "fixture-session",
+            "session_label": "fixture-session",
+            "segments": [
+                {
+                    "segment_id": f"00{ordinal}",
+                    "index": str(segment_path),
+                }
+                for ordinal, segment_path in enumerate(segment_paths)
+            ],
+        },
+    )
+    write_json(
+        session_index_path,
+        {"generation_id": "stale-session-generation"},
+    )
+    for ordinal, segment_path in enumerate(segment_paths):
+        write_json(
+            segment_path,
+            {"generation_id": f"segment-generation-{ordinal}"},
+        )
+    monkeypatch.setattr(
+        module,
+        "generated_session_index_stale_reasons_for_session",
+        lambda *_args, **_kwargs: ["fixture_session_stale"],
+    )
+    computed_paths: list[Path] = []
+    original_fingerprint = module.projection_semantic_file_fingerprint
+
+    def count_fingerprint(path: Path, **kwargs: Any) -> dict[str, Any]:
+        computed_paths.append(path)
+        return original_fingerprint(path, **kwargs)
+
+    monkeypatch.setattr(
+        module,
+        "projection_semantic_file_fingerprint",
+        count_fingerprint,
+    )
+
+    contributions, diagnostics = module.graph_contributions_for_record(
+        {"session_id": "fixture-session", "path": str(session_dir)},
+        source_keys={
+            "segment:fixture-session:000",
+            "segment:fixture-session:001",
+        },
+        entity_registry_index={},
+    )
+
+    assert diagnostics == []
+    assert len(contributions) == 2
+    assert all(item["source"]["status"] == "blocked" for item in contributions)
+    assert computed_paths.count(manifest_path) == 1
+    assert computed_paths.count(session_index_path) == 1
+    assert computed_paths.count(segment_paths[0]) == 1
+    assert computed_paths.count(segment_paths[1]) == 1
+
+
+def test_graph_store_resolves_registry_index_only_once_per_store(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def dependency_snapshot(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        return {
+            "status": "current",
+            "current": True,
+            "dependency_id": "fixture-dependency",
+            "index": {},
+        }
+
+    monkeypatch.setattr(
+        module,
+        "graph_entity_registry_dependency_snapshot",
+        dependency_snapshot,
+    )
+    store = module.GraphSqliteStore(
+        tmp_path / ".aoa",
+        reset=True,
+        entity_registry_dependency={
+            "status": "current",
+            "dependency_id": "fixture-dependency",
+        },
+    )
+    try:
+        assert store._current_entity_registry_index() == {}
+        assert store._current_entity_registry_index() == {}
+    finally:
+        store.close()
+
+    assert calls == 1
+
+
+def test_segment_pre_redacted_classification_fast_path_preserves_output_and_privacy(
+    tmp_path: Path,
+) -> None:
+    secret = "".join(
+        ["sk-", "proj-", "abcdefghijklmnop", "qrstuvwxyz0123456789"]
+    )
+    raw = json.dumps(
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "token_count",
+                "model": secret,
+                "input_tokens": 7,
+                "output_tokens": 3,
+                "total_tokens": 10,
+            },
+        }
+    )
+    unsafe_event = module.RawEvent(
+        event_id="privacy-fast-path:1",
+        line_no=1,
+        raw=raw,
+        parsed=json.loads(raw),
+        event_type="TOKEN_COUNT",
+        source_type="response_item",
+        title=f"detached {secret}",
+        timestamp="2026-08-11T00:00:00Z",
+        tags=[f"secret:{secret}"],
+        importance="normal",
+        compaction_boundary=False,
+        facets={
+            "route_signals": [
+                {
+                    "layer": "entity",
+                    "key": f"credential:{secret}",
+                }
+            ]
+        },
+    )
+    policy = module.derived_session_sensitive_literal_policy([unsafe_event])
+    safe_event = module.raw_event_from_classification_payload(
+        raw=raw,
+        parsed=json.loads(raw),
+        payload=module.raw_event_classification_payload(
+            unsafe_event,
+            literal_policy=policy,
+        ),
+    )
+    reference = tmp_path / "reference"
+    standard = tmp_path / "standard"
+    fast = tmp_path / "fast"
+
+    module.write_segment(
+        standard,
+        "raw/session.raw.jsonl",
+        0,
+        "initial-to-compaction",
+        [safe_event],
+        reference_session_dir=reference,
+        literal_policy=policy,
+    )
+    module.write_segment(
+        fast,
+        "raw/session.raw.jsonl",
+        0,
+        "initial-to-compaction",
+        [safe_event],
+        reference_session_dir=reference,
+        literal_policy=policy,
+        classification_metadata_pre_redacted=True,
+    )
+
+    standard_bytes = (
+        standard / "segments/000__initial-to-compaction.index.json"
+    ).read_bytes()
+    fast_bytes = (
+        fast / "segments/000__initial-to-compaction.index.json"
+    ).read_bytes()
+    standard_index = json.loads(standard_bytes)
+    fast_index = json.loads(fast_bytes)
+    assert fast_bytes == standard_bytes
+    assert fast_index == standard_index
+    assert secret not in json.dumps(fast_index, ensure_ascii=False)
+    assert (
+        fast_index["token_accounting"]["observations"][0]["model_id"]
+        == module.DERIVED_TEXT_REDACTION_MARKER
+    )
+
+
+def test_session_sensitive_literal_policy_redacts_detached_values_without_persisting_them() -> None:
+    bearer_secret = "".join(
+        ["bearer", "abcdefghijklmnop", "qrstuvwxyz0123456789"]
+    )
+    assignment_secret = "".join(
+        ["assignment", "abcdefghijklmnop", "qrstuvwxyz0123456789"]
+    )
+    encrypted_content = "".join(
+        ["ciphertext", "abcdefghijklmnop", "qrstuvwxyz0123456789"]
+    )
+    weak_word = "navigation"
+    raw = json.dumps(
+        {
+            "command": f"Authorization: Bearer {bearer_secret}",
+            "".join(["api_", "key"]): assignment_secret,
+            "password": "placeholder",
+            "_".join(("weak", "password")): weak_word,
+            "encrypted_content": encrypted_content,
+            "examples": (
+                "Authorization: Bearer "
+                + "credential; "
+                + "".join(["pass", "word=passwords; "])
+                + "".join(["api_", "key=contract; "])
+                + "".join(["pass", "word=contracts"])
+            ),
+        }
+    )
+    event = module.RawEvent(
+        event_id="privacy:1",
+        line_no=1,
+        raw=raw,
+        parsed=json.loads(raw),
+        event_type="message",
+        source_type="response_item",
+        title="Synthetic privacy context",
+        timestamp="2026-07-18T00:00:00Z",
+        tags=[],
+        importance="normal",
+        compaction_boundary=False,
+    )
+
+    policy = module.derived_session_sensitive_literal_policy([event])
+    detached = dict(
+        [
+            (bearer_secret, [f"detached {bearer_secret}"]),
+            (assignment_secret, [f"detached {assignment_secret}"]),
+            (
+                "safe",
+                [
+                    "placeholder",
+                    encrypted_content,
+                    weak_word,
+                    "credential",
+                    "credentials",
+                    "contract",
+                    "contracts",
+                    "password",
+                    "passwords",
+                ],
+            ),
+        ]
+    )
+    rendered = json.dumps(
+        module.redact_derived_value(
+            detached,
+            literal_policy=policy,
+        ),
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    report_text = json.dumps(
+        policy.report(),
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    repr_text = repr(policy)
+
+    assert bearer_secret not in rendered
+    assert assignment_secret not in rendered
+    assert encrypted_content in rendered
+    assert "placeholder" in rendered
+    assert weak_word in rendered
+    contextual_weak = module.redact_derived_text(
+        "_".join(("weak", "password")) + f"={weak_word}"
+    )
+    assert weak_word not in contextual_weak
+    assert "<redacted:password>" in contextual_weak
+    for safe_literal in (
+        "credential",
+        "credentials",
+        "contract",
+        "contracts",
+        "password",
+        "passwords",
+    ):
+        assert safe_literal in rendered
+    assert policy.report()["literal_count"] == 2
+    assert policy.report()["values_persisted"] is False
+    assert policy.report()["reversible_digests_persisted"] is False
+    for sensitive_value in (
+        bearer_secret,
+        assignment_secret,
+        encrypted_content,
+    ):
+        assert sensitive_value not in report_text
+        assert sensitive_value not in repr_text
+
+
+def test_session_sensitive_literal_policy_skips_expensive_assignment_matcher_for_benign_text(
+    monkeypatch,
+) -> None:
+    class ForbiddenAssignmentMatcher:
+        def finditer(self, _source: str):
+            raise AssertionError(
+                "full assignment matcher must not scan benign text"
+            )
+
+    monkeypatch.setattr(
+        module,
+        "DERIVED_SENSITIVE_ASSIGNMENT_RE",
+        ForbiddenAssignmentMatcher(),
+    )
+    benign = "ordinary transcript payload " + ("x" * 450_000)
+
+    policy = module.derived_session_sensitive_literal_policy_from_texts(
+        [benign]
+    )
+
+    assert policy.report()["literal_count"] == 0
+
+
+def test_session_sensitive_literal_policy_prefilter_preserves_assignment_detection() -> None:
+    assignment_value = "".join(
+        ["assignment", "abcdefghijklmnop", "0123456789"]
+    )
+    source = f"service.api-key={assignment_value}"
+
+    policy = module.derived_session_sensitive_literal_policy_from_texts(
+        [source]
+    )
+
+    assert policy.report()["literal_count"] == 1
+    assert assignment_value not in module.redact_derived_text(
+        f"detached {assignment_value}",
+        literal_policy=policy,
+    )
+
+
+def test_sensitive_literal_candidate_ranges_avoid_historical_block_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_path = tmp_path / "candidate-ranges.raw.jsonl"
+    secret = "".join(["opaque", "-range-secret-", "987654321"])
+    payload = (
+        ("ordinary benign payload " + "x" * 4096 + "\n") * 64
+        + f"password={secret}\n"
+        + ("ordinary trailing payload " + "y" * 4096 + "\n") * 64
+    ).encode("utf-8")
+    raw_path.write_bytes(payload)
+    block = {
+        "cache_key": "candidate-range-block",
+        "byte_start": 0,
+        "byte_count": len(payload),
+        "raw_sha256": hashlib.sha256(payload).hexdigest(),
+    }
+
+    discovered = module.sensitive_literal_candidate_ranges_task(
+        (str(raw_path), block, {})
+    )
+    marker = discovered["structural_marker"]
+
+    assert discovered["scan_mode"] == (
+        "full_block_scan_with_range_discovery_v1"
+    )
+    assert discovered["source_bytes_read"] == len(payload)
+    assert marker["candidate_present"] is True
+    assert marker["candidate_line_count"] == 1
+    assert marker["literal_values_persisted"] is False
+    assert secret not in json.dumps(marker, sort_keys=True)
+
+    invalid_marker = {
+        **marker,
+        "candidate_ranges": [
+            {"byte_start": len(payload), "byte_count": 1}
+        ],
+    }
+    fail_closed = module.sensitive_literal_candidate_ranges_task(
+        (str(raw_path), block, invalid_marker)
+    )
+    assert fail_closed["scan_mode"] == (
+        "full_block_scan_with_range_discovery_v1"
+    )
+    assert fail_closed["source_bytes_read"] == len(payload)
+    assert fail_closed["values_by_kind"] == discovered["values_by_kind"]
+
+    def forbid_full_block(*_args: Any, **_kwargs: Any) -> bytes:
+        raise AssertionError("historical block fallback was used")
+
+    monkeypatch.setattr(
+        module,
+        "raw_classification_block_bytes",
+        forbid_full_block,
+    )
+    admitted = module.sensitive_literal_candidate_ranges_task(
+        (str(raw_path), block, marker)
+    )
+
+    assert admitted["scan_mode"] == (
+        "admitted_candidate_line_ranges_v1"
+    )
+    assert admitted["values_by_kind"] == discovered["values_by_kind"]
+    assert admitted["source_bytes_read"] < len(payload) // 100
+
+
+def test_derived_privacy_prefilters_skip_expensive_matchers_for_benign_text(
+    monkeypatch,
+) -> None:
+    class ForbiddenSubMatcher:
+        def sub(self, _replacement, _source: str):
+            raise AssertionError("candidate matcher scanned benign text")
+
+    for name in (
+        "DERIVED_TEXT_NAMED_QUOTED_ASSIGNMENT_RE",
+        "DERIVED_TEXT_NAMED_BARE_ASSIGNMENT_RE",
+        "DERIVED_TEXT_SENSITIVE_FLAG_RE",
+    ):
+        monkeypatch.setattr(module, name, ForbiddenSubMatcher())
+
+    benign = "ordinary transcript payload " + ("x" * 450_000)
+    projection = module.derived_text_privacy_projection(benign)
+
+    assert projection["status"] == "unchanged"
+    assert projection["text"] == benign
+
+
+def test_derived_privacy_skips_opaque_rewrite_when_all_matches_are_benign(
+    monkeypatch,
+) -> None:
+    original = module.DERIVED_TEXT_OPAQUE_CREDENTIAL_RE
+
+    class FindOnlyOpaqueMatcher:
+        def finditer(self, source: str):
+            return original.finditer(source)
+
+        def sub(self, _replacement, _source: str):
+            raise AssertionError("benign opaque candidates triggered rewrite")
+
+    monkeypatch.setattr(
+        module,
+        "DERIVED_TEXT_OPAQUE_CREDENTIAL_RE",
+        FindOnlyOpaqueMatcher(),
+    )
+    benign = (
+        "source_sha256="
+        "0123456789abcdef0123456789abcdef"
+        "0123456789abcdef0123456789abcdef"
+    )
+
+    projection = module.derived_text_privacy_projection(benign)
+
+    assert projection["status"] == "unchanged"
+    assert projection["text"] == benign
+    assert projection["redaction_count"] == 0
+
+
+def test_derived_privacy_skips_named_rewrite_for_safe_metadata(
+    monkeypatch,
+) -> None:
+    class FindOnlyNamedMatcher:
+        def __init__(self, original):
+            self.original = original
+
+        def match(self, source: str, start: int = 0):
+            return self.original.match(source, start)
+
+        def sub(self, _replacement, _source: str):
+            raise AssertionError("safe named metadata triggered rewrite")
+
+    for name in (
+        "DERIVED_TEXT_NAMED_QUOTED_ASSIGNMENT_RE",
+        "DERIVED_TEXT_NAMED_BARE_ASSIGNMENT_RE",
+        "DERIVED_TEXT_SENSITIVE_FLAG_RE",
+    ):
+        monkeypatch.setattr(
+            module,
+            name,
+            FindOnlyNamedMatcher(getattr(module, name)),
+        )
+    benign = (
+        'API_KEY_STATUS="configured" '\
+        "token_status_path=/srv/example/token-status.json "
+        "--access-token '${ACCESS_TOKEN}'"
+    )
+
+    projection = module.derived_text_privacy_projection(benign)
+
+    assert projection["status"] == "unchanged"
+    assert projection["text"] == benign
+    assert projection["redaction_count"] == 0
+
+
+@pytest.mark.parametrize(
+    "label,separator,secret",
+    [
+        ("".join(("api", "_key")), "=", "abcdefghijklmnop123456"),
+        ("".join(("client", "-secret")), "=", "abcdefghijklmnop123456"),
+        ("".join(("--access", "-token")), " ", "abcdefghijklmnop123456"),
+        ("".join(("service.", "password")), "=", "abcdefghijklmnop123456"),
+        ("".join(("credential", "s")), ":", "abcdefghijklmnop123456"),
+    ],
+)
+def test_derived_privacy_prefilters_admit_every_sensitive_shape(
+    label: str,
+    separator: str,
+    secret: str,
+) -> None:
+    source = f"{label}{separator}{secret}"
+    assert module.DERIVED_TEXT_SENSITIVE_LABEL_PREFILTER_RE.search(source)
+    assert module.DERIVED_SENSITIVE_ASSIGNMENT_PREFILTER_RE.search(source)
+    assert secret not in module.redact_derived_text(source)
+
+
+def test_redaction_prefilter_skips_full_assignment_matcher_for_benign_text(
+    monkeypatch,
+) -> None:
+    class ForbiddenSubMatcher:
+        def sub(self, _replacement, _source: str):
+            raise AssertionError("full assignment matcher scanned benign text")
+
+    monkeypatch.setattr(
+        module,
+        "DERIVED_SENSITIVE_ASSIGNMENT_RE",
+        ForbiddenSubMatcher(),
+    )
+    benign = "ordinary transcript payload " + ("x" * 450_000)
+
+    assert module.redact_derived_text(benign) == benign
+
+
 def test_generated_session_search_and_graph_views_do_not_duplicate_credentials(
     tmp_path: Path,
     monkeypatch,
@@ -83569,6 +104901,23 @@ def test_generated_session_search_and_graph_views_do_not_duplicate_credentials(
                     "type": "function_call_output",
                     "call_id": "call-oversized",
                     "output": oversized_secret + ("x" * 40_000),
+                },
+            },
+            {
+                "timestamp": "2026-07-18T00:00:04.500000Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": (
+                                "Detached values must remain private: "
+                                f"{bearer_secret} {json_secret}"
+                            ),
+                        }
+                    ],
                 },
             },
             {
@@ -83688,7 +105037,12 @@ def test_generated_session_search_and_graph_views_do_not_duplicate_credentials(
         write=True,
         include_rows=False,
     )
-    assert graph["ok"] is True
+    assert graph["ok"] is True, json.dumps(
+        graph,
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+    )
 
     def decoded_sqlite_text(path: Path) -> str:
         conn = sqlite3.connect(str(path))
@@ -83868,3 +105222,2646 @@ def test_portable_public_safety_audit_reports_classes_not_values(
     rendered = json.dumps(payload, ensure_ascii=False)
     assert secret_value not in rendered
     assert "private-operator" not in rendered
+
+
+def test_portable_public_safety_host_path_prefilters_preserve_all_routes() -> None:
+    counts = module.portable_public_safety_host_path_counts(
+        "\n".join(
+            [
+                "unix="
+                + "/".join(
+                    ["", "Users", "private-unix", "workspace", "owner.json"]
+                ),
+                "windows="
+                + "\\".join(
+                    [
+                        "C:",
+                        "uSeRs",
+                        "private-windows",
+                        "workspace",
+                        "owner.json",
+                    ]
+                ),
+                "service="
+                + "/".join(
+                    ["", "srv", "private-service", "workspace", "owner.json"]
+                ),
+            ]
+        )
+    )
+
+    assert counts == {
+        "host_srv_path": 1,
+        "private_home_path": 1,
+        "private_windows_home_path": 1,
+    }
+
+
+def test_projection_producer_contract_is_bounded_and_change_sensitive() -> None:
+    source = SCRIPT.read_bytes()
+    graph_before = (
+        module.projection_producer_contract_from_source_bytes(
+            source,
+            "session_graph",
+        )
+    )
+    unrelated = source + b"\n# query-only test sentinel\n"
+    graph_after_unrelated = (
+        module.projection_producer_contract_from_source_bytes(
+            unrelated,
+            "session_graph",
+        )
+    )
+    start = source.index(b"\ndef graph_route_node_type(") + 1
+    end = source.index(
+        b"\nGRAPH_PROJECTION_SEMANTIC_DIGEST_VERSION =",
+        start,
+    )
+    graph_chunk = source[start:end]
+    needle = b'return "skill"'
+    assert needle in graph_chunk
+    changed_chunk = graph_chunk.replace(
+        needle,
+        b'return "skill_changed_for_test"',
+        1,
+    )
+    changed = source[:start] + changed_chunk + source[end:]
+    graph_after_materializer_change = (
+        module.projection_producer_contract_from_source_bytes(
+            changed,
+            "session_graph",
+        )
+    )
+
+    assert graph_before["status"] == "current"
+    assert graph_after_unrelated["status"] == "current"
+    assert graph_after_materializer_change["status"] == "current"
+    assert graph_before["sha256"] == graph_after_unrelated["sha256"]
+    assert (
+        graph_before["sha256"]
+        != graph_after_materializer_change["sha256"]
+    )
+
+
+def test_task_episode_materializer_change_is_not_episode_semantic_abi() -> None:
+    source = SCRIPT.read_bytes()
+    task_before = module.projection_producer_contract_from_source_bytes(
+        source,
+        "task_episode_source",
+    )
+    session_before = (
+        module.projection_producer_contract_from_source_bytes(
+            source,
+            "session_index",
+        )
+    )
+    needle = b'"pre_redacted_episode_count": min('
+    assert source.count(needle) == 1
+    changed = source.replace(
+        needle,
+        b'"pre_redacted_episode_count_v2": min(',
+        1,
+    )
+
+    task_after = module.projection_producer_contract_from_source_bytes(
+        changed,
+        "task_episode_source",
+    )
+    session_after = (
+        module.projection_producer_contract_from_source_bytes(
+            changed,
+            "session_index",
+        )
+    )
+
+    assert task_before["sha256"] == task_after["sha256"]
+    assert session_before["sha256"] != session_after["sha256"]
+
+
+def test_sweep_orchestration_change_does_not_invalidate_task_episode_source() -> None:
+    source = SCRIPT.read_bytes()
+    task_before = module.projection_producer_contract_from_source_bytes(
+        source,
+        "task_episode_source",
+    )
+    sweep_before = source.index(b"\ndef sweep_codex_sessions(")
+    sweep_after = source.index(
+        b"\ndef codex_session_import_markdown(", sweep_before
+    )
+    sentinel = b"\n# sweep-only freshness orchestration sentinel\n"
+    changed = source[:sweep_after] + sentinel + source[sweep_after:]
+
+    task_after = module.projection_producer_contract_from_source_bytes(
+        changed,
+        "task_episode_source",
+    )
+
+    assert task_before["status"] == "current"
+    assert task_after["status"] == "current"
+    assert task_before["sha256"] == task_after["sha256"]
+
+
+def test_task_episode_streaming_replay_fails_closed_on_generation() -> None:
+    current = module.task_episode_source_generation_identity()
+    assert module.task_episode_incremental_replay_admitted(
+        {
+            "dependency_generation_identities": {
+                "task_episode_source": current,
+            }
+        }
+    ) is True
+    assert module.task_episode_incremental_replay_admitted(
+        {
+            "dependency_generation_identities": {
+                "task_episode_source": {"generation_id": "f" * 64},
+            }
+        }
+    ) is False
+    assert module.task_episode_incremental_replay_admitted({}) is False
+
+
+def test_capture_handoff_change_does_not_invalidate_classification() -> None:
+    source = SCRIPT.read_bytes()
+    capture_before = module.projection_producer_contract_from_source_bytes(
+        source,
+        "raw_capture",
+    )
+    classification_before = (
+        module.projection_producer_contract_from_source_bytes(
+            source,
+            "raw_event_classification_cache",
+        )
+    )
+    needle = b"openssl_public_ctx_to_portable_aligned_state_v1"
+    assert source.count(needle) == 1
+    changed = source.replace(
+        needle,
+        b"openssl_public_ctx_to_portable_aligned_state_v2",
+        1,
+    )
+    capture_after = module.projection_producer_contract_from_source_bytes(
+        changed,
+        "raw_capture",
+    )
+    classification_after = (
+        module.projection_producer_contract_from_source_bytes(
+            changed,
+            "raw_event_classification_cache",
+        )
+    )
+
+    assert capture_before["sha256"] != capture_after["sha256"]
+    assert (
+        classification_before["sha256"]
+        == classification_after["sha256"]
+    )
+
+
+def test_graph_legacy_generation_transition_requires_exact_source(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    identities = (
+        module.session_memory_expected_generation_identities(
+            aoa_root
+        )
+    )
+    previous_source = tmp_path / "aoa_session_memory.py"
+    source_bytes = SCRIPT.read_bytes()
+    previous_source.write_bytes(source_bytes)
+    previous_sha256 = hashlib.sha256(source_bytes).hexdigest()
+    legacy_task_episode = (
+        module.legacy_whole_source_generation_identity(
+            identities["task_episode_source"],
+            producer_sha256=previous_sha256,
+        )
+    )
+    legacy_entity_registry = (
+        module.legacy_whole_source_generation_identity(
+            identities["entity_registry"],
+            producer_sha256=previous_sha256,
+        )
+    )
+    stored_graph = module.legacy_whole_source_generation_identity(
+        identities["graph"],
+        producer_sha256=previous_sha256,
+        dependency_generations={
+            "task_episode_source": legacy_task_episode[
+                "generation_id"
+            ],
+            "entity_registry": legacy_entity_registry[
+                "generation_id"
+            ],
+        },
+    )
+
+    ready = module.graph_declared_generation_transition(
+        aoa_root=aoa_root,
+        stored_identity=stored_graph,
+        previous_producer_source=previous_source,
+    )
+    missing = module.graph_declared_generation_transition(
+        aoa_root=aoa_root,
+        stored_identity=stored_graph,
+        previous_producer_source=None,
+    )
+    previous_source.write_bytes(source_bytes + b"\n# drift\n")
+    wrong = module.graph_declared_generation_transition(
+        aoa_root=aoa_root,
+        stored_identity=stored_graph,
+        previous_producer_source=previous_source,
+    )
+
+    assert ready["status"] == "ready"
+    assert ready["compatible"] is True
+    assert ready["contracts"]["session_graph"]["equal"] is True
+    assert ready["contracts"]["task_episode_source"]["equal"] is True
+    assert missing["compatible"] is False
+    assert missing["requires_previous_producer_source"] is True
+    assert wrong["compatible"] is False
+    assert wrong["diagnostics"] == [
+        "graph_generation_transition_previous_source_sha_mismatch"
+    ]
+
+
+def test_graph_projection_generation_transition_requires_declared_pair_and_exact_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    expected = module.session_memory_expected_generation_identities(
+        aoa_root
+    )["graph"]
+    source_bytes = SCRIPT.read_bytes().replace(
+        b"Durable source-contribution graph store for incremental maintenance.",
+        b"Prior source-contribution graph store for incremental maintenance.",
+        1,
+    )
+    previous_source = tmp_path / "previous_aoa_session_memory.py"
+    previous_source.write_bytes(source_bytes)
+    previous_contract = (
+        module.projection_producer_contract_from_source_bytes(
+            source_bytes,
+            "session_graph",
+        )
+    )
+    stored = {
+        key: value
+        for key, value in expected.items()
+        if key
+        not in (
+            {"generation_id", "generated_at"}
+            | module.PROJECTION_PRODUCER_GENERATION_FIELD_NAMES
+        )
+    }
+    stored["dependency_generations"] = {
+        **stored["dependency_generations"],
+        "entity_registry": "prior-entity-registry-generation",
+    }
+    stored.update(
+        {
+            "producer": "aoa_session_memory.py",
+            "producer_identity_mode": (
+                module.PROJECTION_PRODUCER_IDENTITY_MODE
+            ),
+            "producer_sha256": previous_contract["sha256"],
+            "producer_contract_version": (
+                module.PROJECTION_PRODUCER_CONTRACT_VERSION
+            ),
+            "producer_contract_status": "current",
+            "producer_contract_chunks": [
+                {
+                    key: item.get(key)
+                    for key in (
+                        "ordinal",
+                        "start_anchor",
+                        "end_anchor",
+                        "byte_count",
+                        "sha256",
+                    )
+                }
+                for item in previous_contract["chunks"]
+            ],
+        }
+    )
+    stored = module.generation_identity_with_id(stored)
+    monkeypatch.setattr(
+        module,
+        "DECLARED_GRAPH_PROJECTION_GENERATION_TRANSITIONS",
+        {
+            expected["generation_id"]: {
+                stored["generation_id"]: hashlib.sha256(
+                    source_bytes
+                ).hexdigest()
+            }
+        },
+    )
+
+    ready = module.graph_declared_generation_transition(
+        aoa_root=aoa_root,
+        stored_identity=stored,
+        previous_producer_source=previous_source,
+    )
+    missing = module.graph_declared_generation_transition(
+        aoa_root=aoa_root,
+        stored_identity=stored,
+        previous_producer_source=None,
+    )
+    previous_source.write_bytes(source_bytes + b"\n# drift\n")
+    wrong = module.graph_declared_generation_transition(
+        aoa_root=aoa_root,
+        stored_identity=stored,
+        previous_producer_source=previous_source,
+    )
+
+    assert ready["status"] == "ready"
+    assert ready["compatible"] is True
+    assert ready["reconstructed_previous_identity"][
+        "dependency_generations"
+    ]["entity_registry"] == "prior-entity-registry-generation"
+    assert ready["declared_transition"]["decision_id"] == "AOA-SM-D-0067"
+    assert missing["diagnostics"] == [
+        "graph_generation_transition_previous_source_required"
+    ]
+    assert wrong["compatible"] is False
+    assert wrong["diagnostics"] == [
+        "graph_generation_transition_previous_source_sha_mismatch"
+    ]
+
+
+def test_graph_declared_transition_target_is_current_generation(
+    tmp_path: Path,
+) -> None:
+    expected_generation_id = (
+        module.session_memory_expected_generation_identities(
+            tmp_path / ".aoa"
+        )["graph"]["generation_id"]
+    )
+
+    assert set(
+        module.DECLARED_GRAPH_PROJECTION_GENERATION_TRANSITIONS
+    ) == {expected_generation_id}
+    assert all(
+        len(source_sha256) == 64
+        for source_sha256 in module.DECLARED_GRAPH_PROJECTION_GENERATION_TRANSITIONS[
+            expected_generation_id
+        ].values()
+    )
+
+
+def test_graph_registry_rebind_compatibility_admits_mixed_exact_generations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    expected = module.session_memory_expected_generation_identities(
+        aoa_root
+    )["graph"]
+    source_bytes = SCRIPT.read_bytes().replace(
+        b"Durable source-contribution graph store for incremental maintenance.",
+        b"Prior source-contribution graph store for incremental maintenance.",
+        1,
+    )
+    previous_source = tmp_path / "previous_aoa_session_memory.py"
+    previous_source.write_bytes(source_bytes)
+    previous_contract = (
+        module.projection_producer_contract_from_source_bytes(
+            source_bytes,
+            "session_graph",
+        )
+    )
+    predecessor = {
+        key: value
+        for key, value in expected.items()
+        if key
+        not in (
+            {"generation_id", "generated_at"}
+            | module.PROJECTION_PRODUCER_GENERATION_FIELD_NAMES
+        )
+    }
+    predecessor.update(
+        {
+            "producer": "aoa_session_memory.py",
+            "producer_identity_mode": (
+                module.PROJECTION_PRODUCER_IDENTITY_MODE
+            ),
+            "producer_sha256": previous_contract["sha256"],
+            "producer_contract_version": (
+                module.PROJECTION_PRODUCER_CONTRACT_VERSION
+            ),
+            "producer_contract_status": "current",
+            "producer_contract_chunks": previous_contract["chunks"],
+        }
+    )
+    predecessor = module.generation_identity_with_id(predecessor)
+    monkeypatch.setattr(
+        module,
+        "DECLARED_GRAPH_PROJECTION_GENERATION_TRANSITIONS",
+        {
+            expected["generation_id"]: {
+                predecessor["generation_id"]: hashlib.sha256(
+                    source_bytes
+                ).hexdigest()
+            }
+        },
+    )
+    dependency = {
+        "schema_version": 1,
+        "artifact_type": "entity_registry_dependency",
+        "status": "current",
+        "dependency_id": "current-dependency",
+        "entries": [],
+        "index": {},
+        "truth_status": "fixture",
+    }
+    store = module.GraphSqliteStore(
+        aoa_root,
+        reset=True,
+        entity_registry_dependency=dependency,
+    )
+    source_template = {
+        "source_type": "session",
+        "session_id": "fixture",
+        "session_label": "fixture",
+        "segment_id": "",
+        "source_path": "fixture",
+        "source_paths_json": "[]",
+        "source_sha": "fixture",
+        "source_mtime": 1.0,
+        "graph_schema_version": module.GRAPH_SCHEMA_VERSION,
+        "graph_store_schema_version": module.GRAPH_STORE_SCHEMA_VERSION,
+        "graph_event_route_signal_edge_policy": (
+            module.GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY
+        ),
+        "route_signal_classifier_version": (
+            module.ROUTE_SIGNAL_CLASSIFIER_VERSION
+        ),
+        "entity_registry_route_tokens_json": "[]",
+        "entity_registry_selective_digest": (
+            module.graph_source_registry_dependency_for_route_tokens(
+                [],
+                {},
+            )["digest"]
+        ),
+        "indexed_at": module.utc_now(),
+        "status": "current",
+        "diagnostic": "",
+        "node_count": 0,
+        "edge_count": 0,
+    }
+    columns = [
+        "source_key",
+        *source_template.keys(),
+        "generation_id",
+        "generation_identity_json",
+        "entity_registry_dependency_id",
+        "entity_registry_dependency_json",
+    ]
+    for source_key, identity, dependency_id in (
+        ("session:old", predecessor, "previous-dependency"),
+        ("session:current", expected, "current-dependency"),
+    ):
+        values = {
+            "source_key": source_key,
+            **source_template,
+            "generation_id": identity["generation_id"],
+            "generation_identity_json": module.graph_json(identity),
+            "entity_registry_dependency_id": dependency_id,
+            "entity_registry_dependency_json": module.graph_json(
+                {"dependency_id": dependency_id}
+            ),
+        }
+        store.conn.execute(
+            f"INSERT INTO graph_sources ({', '.join(columns)}) "
+            f"VALUES ({', '.join('?' for _ in columns)})",
+            tuple(values[column] for column in columns),
+        )
+    store.conn.commit()
+
+    plan = module.graph_entity_registry_materialization_compatibility(
+        aoa_root=aoa_root,
+        conn=store.conn,
+        dependency=dependency,
+        previous_producer_source=previous_source,
+    )
+    store.conn.execute(
+        "UPDATE graph_sources SET generation_id = ? "
+        "WHERE source_key = ?",
+        ("mismatched-column-generation", "session:old"),
+    )
+    store.conn.commit()
+    mismatched = (
+        module.graph_entity_registry_materialization_compatibility(
+            aoa_root=aoa_root,
+            conn=store.conn,
+            dependency=dependency,
+            previous_producer_source=previous_source,
+            include_content_digest=False,
+        )
+    )
+    store.close()
+
+    assert plan["compatible"] is True
+    assert plan["status"] == "ready"
+    assert plan["generation_changed"] is True
+    assert plan["dependency_changed"] is True
+    assert len(plan["source_generation_transitions"]) == 2
+    assert {
+        item["transition"]["status"]
+        for item in plan["source_generation_transitions"]
+    } == {"current", "ready"}
+    assert "graph_registry_rebind_mixed_stored_generations" not in plan[
+        "diagnostics"
+    ]
+    assert "graph_registry_rebind_mixed_stored_dependencies" not in plan[
+        "diagnostics"
+    ]
+    assert mismatched["compatible"] is False
+    assert any(
+        reason.startswith(
+            "graph_registry_rebind_source_generation_id_payload_mismatch:"
+        )
+        for reason in mismatched["diagnostics"]
+    )
+
+
+def test_graph_content_digest_excludes_only_generation_bindings(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "graph.sqlite3"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT)"
+    )
+    conn.execute(
+        """
+        CREATE TABLE graph_sources(
+          source_key TEXT PRIMARY KEY,
+          generation_id TEXT,
+          generation_identity_json TEXT,
+          entity_registry_dependency_id TEXT,
+          entity_registry_dependency_json TEXT,
+          semantic_value TEXT
+        )
+        """
+    )
+    conn.execute(
+        "CREATE TABLE node_contribs("
+        "source_key TEXT, node_id TEXT, payload_json TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE edge_contribs("
+        "source_key TEXT, edge_id TEXT, payload_json TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE nodes("
+        "id TEXT PRIMARY KEY, payload_json TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE edges("
+        "id TEXT PRIMARY KEY, payload_json TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE graph_type_counts("
+        "kind TEXT, type TEXT, count INTEGER)"
+    )
+    conn.executemany(
+        "INSERT INTO metadata(key, value) VALUES (?, ?)",
+        [
+            ("graph_generation_id", "old-generation"),
+            ("entity_registry_dependency_id", "old-dependency"),
+            ("semantic_policy", "typed-v1"),
+        ],
+    )
+    conn.execute(
+        """
+        INSERT INTO graph_sources VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "session:one",
+            "old-generation",
+            '{"generation_id":"old-generation"}',
+            "old-dependency",
+            '{"dependency_id":"old-dependency"}',
+            "preserved-content",
+        ),
+    )
+    conn.execute(
+        "INSERT INTO nodes VALUES (?, ?)",
+        ("node:one", '{"id":"node:one"}'),
+    )
+    conn.commit()
+    before = module.graph_projection_content_digest(conn)
+
+    conn.execute(
+        "UPDATE graph_sources SET generation_id = ?, "
+        "generation_identity_json = ?, "
+        "entity_registry_dependency_id = ?, "
+        "entity_registry_dependency_json = ?",
+        (
+            "new-generation",
+            '{"generation_id":"new-generation"}',
+            "new-dependency",
+            '{"dependency_id":"new-dependency"}',
+        ),
+    )
+    conn.execute(
+        "UPDATE metadata SET value = ? "
+        "WHERE key = 'graph_generation_id'",
+        ("new-generation",),
+    )
+    conn.execute(
+        "UPDATE metadata SET value = ? "
+        "WHERE key = 'entity_registry_dependency_id'",
+        ("new-dependency",),
+    )
+    after_binding = module.graph_projection_content_digest(conn)
+    conn.execute(
+        "UPDATE graph_sources SET semantic_value = ?",
+        ("changed-content",),
+    )
+    after_content = module.graph_projection_content_digest(conn)
+    conn.close()
+
+    assert before["sha256"] == after_binding["sha256"]
+    assert before["sha256"] != after_content["sha256"]
+
+
+def test_graph_registry_rebind_uses_entry_set_identity_without_content_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    generation = module.session_memory_expected_generation_identities(
+        aoa_root
+    )["graph"]
+    identity_base = {
+        "version": 1,
+        "schema_version": module.ENTITY_REGISTRY_SCHEMA_VERSION,
+        "canonicalization_version": (
+            module.ENTITY_REGISTRY_CANONICALIZATION_VERSION
+        ),
+        "generation_id": "registry-generation",
+        "source_fingerprint": "f" * 64,
+        "entity_count": 1,
+        "semantic_epoch_id": "e" * 64,
+    }
+    old_dependency = {
+        "schema_version": 1,
+        "artifact_type": (
+            "session_memory_graph_entity_registry_dependency"
+        ),
+        "status": "current",
+        "dependency_id": "old-dependency",
+        "identity": {
+            **identity_base,
+            "semantic_digest_sha256": "a" * 64,
+        },
+        "entries": [],
+        "index": {},
+    }
+    current_dependency = {
+        **old_dependency,
+        "dependency_id": "current-dependency",
+        "identity": {
+            **identity_base,
+            "semantic_digest_sha256": "b" * 64,
+        },
+    }
+    store = module.GraphSqliteStore(
+        aoa_root,
+        reset=True,
+        entity_registry_dependency=old_dependency,
+    )
+    store.conn.execute(
+        """
+        INSERT INTO graph_sources(
+          source_key, source_type, session_id, session_label,
+          segment_id, source_path, source_paths_json, source_sha,
+          source_mtime, graph_schema_version,
+          graph_store_schema_version,
+          graph_event_route_signal_edge_policy,
+          route_signal_classifier_version,
+          entity_registry_route_tokens_json,
+          entity_registry_selective_digest, indexed_at, status,
+          diagnostic, node_count, edge_count, generation_id,
+          generation_identity_json, entity_registry_dependency_id,
+          entity_registry_dependency_json
+        ) VALUES (
+          'session:fixture', 'session', 'fixture', 'fixture', '',
+          'fixture', '[]', 'fixture', 1.0, ?, ?, ?, ?, '[]', '',
+          ?, 'current', '', 0, 0, ?, ?, ?, ?
+        )
+        """,
+        (
+            module.GRAPH_SCHEMA_VERSION,
+            module.GRAPH_STORE_SCHEMA_VERSION,
+            module.GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY,
+            module.ROUTE_SIGNAL_CLASSIFIER_VERSION,
+            module.utc_now(),
+            generation["generation_id"],
+            module.graph_json(generation),
+            old_dependency["dependency_id"],
+            module.graph_json(old_dependency),
+        ),
+    )
+    store.conn.commit()
+
+    def fail_scan(_conn: sqlite3.Connection) -> dict[str, Any]:
+        raise AssertionError("identity-only rebind must not scan graph content")
+
+    monkeypatch.setattr(
+        module,
+        "graph_projection_content_digest",
+        fail_scan,
+    )
+    monkeypatch.setattr(
+        module,
+        "graph_projection_semantic_digest",
+        fail_scan,
+    )
+    plan = module.graph_entity_registry_materialization_compatibility(
+        aoa_root=aoa_root,
+        conn=store.conn,
+        dependency=current_dependency,
+    )
+    store.close()
+
+    assert plan["compatible"] is True
+    assert plan["status"] == "ready"
+    assert plan["identity_only_rebind"] is True
+    assert plan["registry_entry_set_unchanged"] is True
+    assert plan["dependency_changed"] is True
+    assert plan["materialization_counts"] == {}
+
+
+def test_graph_registry_rebind_admits_generation_after_complete_materialization(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    expected = module.session_memory_expected_generation_identities(
+        aoa_root
+    )["graph"]
+    stored = json.loads(json.dumps(expected))
+    stored.pop("generation_id", None)
+    stored["dependency_generations"]["entity_registry"] = (
+        "prior-registry-generation"
+    )
+    stored = module.generation_identity_with_id(stored)
+    old_dependency = {
+        "schema_version": 1,
+        "artifact_type": (
+            "session_memory_graph_entity_registry_dependency"
+        ),
+        "status": "current",
+        "dependency_id": "old-dependency",
+        "identity": {
+            "source_fingerprint": "a" * 64,
+            "entity_count": 0,
+            "semantic_epoch_id": "e" * 64,
+        },
+        "entries": [],
+        "index": {},
+    }
+    current_dependency = {
+        **old_dependency,
+        "dependency_id": "current-dependency",
+        "identity": {
+            **old_dependency["identity"],
+            "source_fingerprint": "b" * 64,
+        },
+    }
+    store = module.GraphSqliteStore(
+        aoa_root,
+        reset=True,
+        entity_registry_dependency=old_dependency,
+    )
+    store.conn.execute(
+        "UPDATE metadata SET value = ? "
+        "WHERE key = 'graph_generation_id'",
+        (stored["generation_id"],),
+    )
+    store.conn.execute(
+        "UPDATE metadata SET value = ? "
+        "WHERE key = 'graph_generation_identity_json'",
+        (module.graph_json(stored),),
+    )
+    source = {
+        "source_key": "session:fixture",
+        "source_type": "session",
+        "session_id": "fixture",
+        "session_label": "fixture",
+        "segment_id": "",
+        "source_path": "fixture",
+        "source_paths_json": "[]",
+        "source_sha": "fixture",
+        "source_mtime": 1.0,
+        "graph_schema_version": module.GRAPH_SCHEMA_VERSION,
+        "graph_store_schema_version": module.GRAPH_STORE_SCHEMA_VERSION,
+        "graph_event_route_signal_edge_policy": (
+            module.GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY
+        ),
+        "route_signal_classifier_version": (
+            module.ROUTE_SIGNAL_CLASSIFIER_VERSION
+        ),
+        "entity_registry_route_tokens_json": "[]",
+        "entity_registry_selective_digest": (
+            module.graph_source_registry_dependency_for_route_tokens(
+                [],
+                {},
+            )["digest"]
+        ),
+        "indexed_at": module.utc_now(),
+        "status": "current",
+        "diagnostic": "",
+        "node_count": 0,
+        "edge_count": 0,
+        "generation_id": stored["generation_id"],
+        "generation_identity_json": module.graph_json(stored),
+        "entity_registry_dependency_id": old_dependency["dependency_id"],
+        "entity_registry_dependency_json": module.graph_json(
+            old_dependency
+        ),
+    }
+    columns = list(source)
+    store.conn.execute(
+        f"INSERT INTO graph_sources ({', '.join(columns)}) "
+        f"VALUES ({', '.join('?' for _ in columns)})",
+        tuple(source[column] for column in columns),
+    )
+    store.conn.commit()
+
+    plan = module.graph_entity_registry_materialization_compatibility(
+        aoa_root=aoa_root,
+        conn=store.conn,
+        dependency=current_dependency,
+        include_content_digest=False,
+    )
+    store.close()
+
+    assert plan["compatible"] is True
+    assert plan["status"] == "ready"
+    assert plan[
+        "materialization_equivalent_generation_transition"
+    ] is True
+    assert plan["materialization_proof_mode"] == (
+        "compact_source_route_tokens_and_exact_registry_pairs_v1"
+    )
+    assert plan["generation_transition"]["compatible"] is True
+    assert plan["generation_transition"]["declared_transition"][
+        "decision_id"
+    ] == "AOA-SM-D-0079"
+
+
+def test_graph_registry_materialization_refresh_is_bounded_and_exact(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    old_entry = module.entity_registry_make_entry(
+        kind="tool",
+        key="alpha",
+        aliases=["alpha"],
+        source_refs=[
+            {
+                "source_type": "fixture",
+                "path": "old",
+                "status": "active",
+            }
+        ],
+        source_surface="old_fixture",
+        owner="fixture",
+        status="active",
+    )
+    current_entry = module.entity_registry_make_entry(
+        kind="tool",
+        key="alpha",
+        aliases=["alpha"],
+        source_refs=[
+            {
+                "source_type": "fixture",
+                "path": "current",
+                "status": "active",
+            }
+        ],
+        source_surface="current_fixture",
+        owner="fixture",
+        status="active",
+    )
+    old_dependency = {
+        "status": "current",
+        "dependency_id": "old-dependency",
+        "entries": [old_entry],
+        "index": {("tool", "alpha"): old_entry},
+    }
+    current_dependency = {
+        "status": "current",
+        "dependency_id": "current-dependency",
+        "entries": [current_entry],
+        "index": {
+            ("tool", "alpha"): current_entry,
+        },
+    }
+    evidence_refs = [
+        {
+            "session_id": "fixture-session",
+            "refs": {"raw": "raw:line:3"},
+        }
+    ]
+    route_node = {
+        "id": module.graph_route_node_id("tool", "alpha"),
+        "type": "tool",
+        "label": "alpha",
+        "route_layer": "tool",
+        "route_key": "alpha",
+        "route_signal": "tool:alpha",
+        "session_id": "fixture-session",
+        "evidence_refs": evidence_refs,
+    }
+    old_registry_node = module.graph_entity_registry_node(
+        old_entry,
+        aoa_root=aoa_root,
+        evidence_refs=evidence_refs,
+    )
+    owner_edge = {
+        "source": "event:fixture",
+        "target": old_registry_node["id"],
+        "type": "event_has_registered_entity_signal",
+        "session_id": "fixture-session",
+        "route_signal": "tool:alpha",
+        "evidence_refs": evidence_refs,
+    }
+    registry_edge = {
+        "source": old_registry_node["id"],
+        "target": route_node["id"],
+        "type": "registry_entity_has_route_signal",
+        "session_id": "fixture-session",
+        "route_signal": "tool:alpha",
+        "evidence_refs": evidence_refs,
+    }
+    contribution = {
+        "source": {
+            "source_key": "session:fixture-session",
+            "source_type": "session",
+            "session_id": "fixture-session",
+            "session_label": "fixture-session",
+            "segment_id": "",
+            "source_path": "fixture",
+            "source_paths": ["fixture"],
+            "source_sha": "fixture-source-sha",
+            "source_mtime": 1.0,
+            "graph_schema_version": module.GRAPH_SCHEMA_VERSION,
+            "graph_store_schema_version": (
+                module.GRAPH_STORE_SCHEMA_VERSION
+            ),
+            "graph_event_route_signal_edge_policy": (
+                module.GRAPH_EVENT_ROUTE_SIGNAL_EDGE_POLICY
+            ),
+            "route_signal_classifier_version": (
+                module.ROUTE_SIGNAL_CLASSIFIER_VERSION
+            ),
+            "status": "current",
+            "diagnostics": [],
+        },
+        "nodes": [
+            {
+                "id": "event:fixture",
+                "type": "event",
+                "session_id": "fixture-session",
+                "evidence_refs": evidence_refs,
+            },
+            route_node,
+            old_registry_node,
+        ],
+        "edges": [owner_edge, registry_edge],
+    }
+    store = module.GraphSqliteStore(
+        aoa_root,
+        reset=True,
+        entity_registry_dependency=old_dependency,
+    )
+    for ordinal in range(
+        module.GRAPH_MAINTENANCE_FRESH_REPRESENTATIVE_ROW_LIMIT
+        + 1
+    ):
+        repeated = json.loads(json.dumps(contribution))
+        repeated["source"]["source_key"] = (
+            f"session:fixture-session-{ordinal}"
+        )
+        store._insert_source_row(repeated)
+        store._insert_contrib_rows(repeated)
+    for node in contribution["nodes"]:
+        store._add_aggregate_node(node)
+    for edge in contribution["edges"]:
+        store._add_aggregate_edge(edge)
+    store.refresh_type_counts(commit=False)
+    store.conn.commit()
+
+    missing_source_key = "session:fixture-session-0"
+    missing_edge_id = module.graph_edge_id(
+        old_registry_node["id"],
+        route_node["id"],
+        "registry_entity_has_route_signal",
+    )
+    store.conn.execute(
+        "DELETE FROM edge_contribs WHERE source_key = ? AND edge_id = ?",
+        (missing_source_key, missing_edge_id),
+    )
+    store.conn.execute(
+        "UPDATE graph_sources SET edge_count = edge_count - 1 "
+        "WHERE source_key = ?",
+        (missing_source_key,),
+    )
+    additive_plan = {
+        "registry_materialization_refreshable": True,
+        "diagnostics": [
+            "graph_registry_rebind_contribution_route_mapping_mismatch"
+        ],
+        "materialization_counts": {
+            "missing_contribution_registry_edge_count": 1,
+            "extra_contribution_registry_edge_count": 0,
+            "missing_aggregate_registry_edge_count": 0,
+            "extra_aggregate_registry_edge_count": 0,
+            "aggregate_registry_node_mismatch_count": 0,
+            "contribution_registry_node_mismatch_count": 0,
+            "dangling_aggregate_registry_edge_count": 0,
+            "dangling_contribution_registry_edge_count": 0,
+            "malformed_payload_count": 0,
+            "selective_dependency_mismatch_count": 0,
+        },
+    }
+    additive = module.graph_registry_materialization_refresh(
+        aoa_root=aoa_root,
+        conn=store.conn,
+        dependency=old_dependency,
+        plan=additive_plan,
+    )
+    assert additive["ok"] is True, additive
+    assert additive["status"] == "additive_exact_refreshed"
+    assert additive["counts"]["missing_pair_count"] == 1
+    assert additive["counts"][
+        "added_registry_edge_contribution_count"
+    ] == 1
+    assert store.conn.execute(
+        "SELECT COUNT(*) FROM edge_contribs "
+        "WHERE source_key = ? AND edge_id = ?",
+        (missing_source_key, missing_edge_id),
+    ).fetchone()[0] == 1
+    before = module.graph_non_registry_content_digest(store.conn)
+
+    refreshed = module.graph_registry_materialization_refresh(
+        aoa_root=aoa_root,
+        conn=store.conn,
+        dependency=current_dependency,
+    )
+    after = module.graph_non_registry_content_digest(store.conn)
+    registry_nodes = store.conn.execute(
+        "SELECT node_id, payload_json FROM node_contribs "
+        "WHERE node_type = 'entity_registry'"
+    ).fetchall()
+    incident_edges = store.conn.execute(
+        "SELECT edge_type, source_node, target_node "
+        "FROM edge_contribs "
+        "WHERE source_node LIKE 'entity_registry:%' "
+        "OR target_node LIKE 'entity_registry:%' "
+        "ORDER BY edge_type"
+    ).fetchall()
+    aggregate_registry_row = store.conn.execute(
+        "SELECT payload_json FROM nodes "
+        "WHERE id = ?",
+        (f"entity_registry:{current_entry['entity_id']}",),
+    ).fetchone()
+    store.close()
+
+    current_registry_node_id = (
+        f"entity_registry:{current_entry['entity_id']}"
+    )
+    assert refreshed["ok"] is True
+    assert before["sha256"] == after["sha256"]
+    assert {
+        row["node_id"] for row in registry_nodes
+    } == {current_registry_node_id}
+    assert len(registry_nodes) > (
+        module.GRAPH_MAINTENANCE_FRESH_REPRESENTATIVE_ROW_LIMIT
+    )
+    registry_payload = json.loads(registry_nodes[0]["payload_json"])
+    assert registry_payload["canonical_key"] == "alpha"
+    assert registry_payload["source_surface"] == "current_fixture"
+    assert aggregate_registry_row is not None
+    aggregate_registry_payload = json.loads(
+        aggregate_registry_row["payload_json"]
+    )
+    assert (
+        aggregate_registry_payload["source_surface"]
+        == "current_fixture"
+    )
+    assert refreshed["counts"][
+        "registry_aggregate_rewrite_count"
+    ] == 1
+    assert {
+        (
+            row["edge_type"],
+            row["source_node"],
+            row["target_node"],
+        )
+        for row in incident_edges
+    } == {
+        (
+            "event_has_registered_entity_signal",
+            "event:fixture",
+            current_registry_node_id,
+        ),
+        (
+            "registry_entity_has_route_signal",
+            current_registry_node_id,
+            route_node["id"],
+        ),
+    }
+
+
+def test_entity_registry_semantic_digest_ignores_writer_source_state(
+    tmp_path: Path,
+) -> None:
+    base = {
+        "schema_version": module.ENTITY_REGISTRY_SCHEMA_VERSION,
+        "artifact_type": "entity_registry_snapshot",
+        "generation_identity": (
+            module.entity_registry_generation_identity()
+        ),
+        "entries": [
+            module.entity_registry_make_entry(
+                kind="tool",
+                key="stable",
+                aliases=["stable"],
+                source_refs=[
+                    {
+                        "source_type": "fixture",
+                        "path": "stable",
+                        "status": "active",
+                    }
+                ],
+                source_surface="fixture",
+                owner="fixture",
+                status="active",
+            )
+        ],
+    }
+    first = module.entity_registry_semantic_digest(
+        {
+            **base,
+            "producer_source_state": {
+                "loaded_sha256": "first",
+                "current_sha256": "first",
+                "stable": True,
+            },
+        },
+        aoa_root=tmp_path,
+    )
+    second = module.entity_registry_semantic_digest(
+        {
+            **base,
+            "producer_source_state": {
+                "loaded_sha256": "second",
+                "current_sha256": "second",
+                "stable": True,
+            },
+        },
+        aoa_root=tmp_path,
+    )
+
+    assert first["sha256"] == second["sha256"]
+    assert "producer_source_state" in first["excluded_keys"]
+
+    cli_ref_first = {
+        **base,
+        "entries": [
+            {
+                **base["entries"][0],
+                "source_refs": [
+                    {
+                        "source_type": (
+                            "aoa_session_memory_cli_subcommands"
+                        ),
+                        "path": "aoa_session_memory.py",
+                        "status": "active",
+                        "identity_sha256": "stable-parser-contract",
+                        "sha256": "whole-file-first",
+                        "sha256_mode": "full_file_v1",
+                    }
+                ],
+            }
+        ],
+    }
+    cli_ref_second = {
+        **cli_ref_first,
+        "entries": [
+            {
+                **cli_ref_first["entries"][0],
+                "source_refs": [
+                    {
+                        **cli_ref_first["entries"][0][
+                            "source_refs"
+                        ][0],
+                        "sha256": "whole-file-second",
+                    }
+                ],
+            }
+        ],
+    }
+    assert module.entity_registry_semantic_digest(
+        cli_ref_first,
+        aoa_root=tmp_path,
+    )["sha256"] == module.entity_registry_semantic_digest(
+        cli_ref_second,
+        aoa_root=tmp_path,
+    )["sha256"]
+
+
+def test_entity_registry_semantic_digest_canonicalizes_logical_root(
+    tmp_path: Path,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir()
+    relative_root = Path(os.path.relpath(aoa_root, Path.cwd()))
+    payload = {
+        "schema_version": module.ENTITY_REGISTRY_SCHEMA_VERSION,
+        "artifact_type": "entity_registry_snapshot",
+        "aoa_root": str(aoa_root),
+        "registry_path": str(
+            aoa_root / module.ENTITY_REGISTRY_PATH
+        ),
+        "entries": [],
+    }
+
+    absolute = module.entity_registry_semantic_digest(
+        payload,
+        aoa_root=aoa_root,
+    )
+    relative = module.entity_registry_semantic_digest(
+        payload,
+        aoa_root=relative_root,
+    )
+
+    assert absolute["sha256"] == relative["sha256"]
+
+
+def _epistemic_prediction_kwargs(
+    label: str,
+    *,
+    expected_facets: list[str] | None = None,
+    window_start: str = "9999-12-31T23:59:59Z",
+    window_end: str = "9999-12-31T23:59:59.999999Z",
+) -> dict[str, object]:
+    return {
+        "request_id": f"request-{label}",
+        "attempt_id": f"attempt-{label}",
+        "pre_action_marker": module.epistemic_digest(f"pre-action-{label}"),
+        "observation_window_digest": module.epistemic_digest(
+            f"window-{label}"
+        ),
+        "observation_window_start_at": window_start,
+        "observation_window_end_at": window_end,
+        "expected_observation_facet_ids": list(expected_facets or []),
+        "hypothesis_digest": module.epistemic_digest(f"hypothesis-{label}"),
+        "expected_change_digest": module.epistemic_digest(
+            f"expected-change-{label}"
+        ),
+        "falsifier_digest": module.epistemic_digest(f"falsifier-{label}"),
+        "confidence": 0.75,
+        "action_plan_digest": module.epistemic_digest(f"plan-{label}"),
+        "tool_use_id": f"tool-{label}",
+    }
+
+
+def _epistemic_action_kwargs(label: str) -> dict[str, object]:
+    return {
+        "attempt_id": f"attempt-{label}",
+        "tool_use_id": f"tool-{label}",
+        "action_kind": "bounded_action",
+        "effect_class": "repo_mutation",
+        "action_started_at": "9999-12-31T23:59:59Z",
+    }
+
+
+def _epistemic_observation_kwargs(
+    label: str,
+    *,
+    observed_at: str | None = "9999-12-31T23:59:59.500000Z",
+    observed_facets: list[str] | None = None,
+) -> dict[str, object]:
+    return {
+        "attempt_id": f"attempt-{label}",
+        "tool_use_id": f"tool-{label}",
+        "evidence_ref_ids": [f"evidence-{label}"],
+        "observed_at": observed_at,
+        "observed_observation_facet_ids": list(observed_facets or []),
+    }
+
+
+def _canonical_epistemic_json(value: object) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _epistemic_event_id(event_type: str, identity: object) -> str:
+    return "event:" + hashlib.sha256(
+        _canonical_epistemic_json(
+            {"event_type": event_type, "identity": identity}
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _epistemic_prediction_commitment_digest(event: dict[str, object]) -> str:
+    material = {
+        "request_id": event["request_id"],
+        "attempt_id": event["attempt_id"],
+        "prediction_id": event["prediction_id"],
+        "action_id": event["action_id"],
+        "tool_use_id": event.get("tool_use_id"),
+        "expected_observation_digest": event[
+            "expected_observation_digest"
+        ],
+        "pre_action_marker": event["pre_action_marker"],
+        "observation_window_digest": event["observation_window_digest"],
+        "observation_window_start_at": event[
+            "observation_window_start_at"
+        ],
+        "observation_window_end_at": event["observation_window_end_at"],
+        "expected_observation_facet_ids": event[
+            "expected_observation_facet_ids"
+        ],
+        "hypothesis_digest": event["hypothesis_digest"],
+        "expected_change_digest": event["expected_change_digest"],
+        "falsifier_digest": event["falsifier_digest"],
+        "confidence": event["confidence"],
+        "action_plan_digest": event["action_plan_digest"],
+    }
+    return module.epistemic_digest(_canonical_epistemic_json(material))
+
+
+def _rehash_epistemic_store(
+    store: Path,
+    events: list[dict[str, object]] | None = None,
+) -> list[dict[str, object]]:
+    if events is None:
+        events = [
+            json.loads(line)
+            for line in store.read_text(encoding="utf-8").splitlines()
+        ]
+    previous_digest = "genesis"
+    for sequence, event in enumerate(events, start=1):
+        event["sequence"] = sequence
+        event["prev_event_digest"] = previous_digest
+        material = {
+            key: value for key, value in event.items() if key != "event_digest"
+        }
+        event["event_digest"] = module.epistemic_digest(
+            _canonical_epistemic_json(material)
+        )
+        previous_digest = str(event["event_digest"])
+    store.write_text(
+        "".join(
+            _canonical_epistemic_json(event) + "\n" for event in events
+        ),
+        encoding="utf-8",
+    )
+    return events
+
+
+def _create_epistemic_candidate_store(store: Path, label: str) -> None:
+    chain = module.EpistemicActionChain.create(
+        store,
+        session_id=f"session-{label}",
+        turn_id=f"turn-{label}",
+    )
+    chain.commit_prediction(
+        f"action-{label}",
+        module.epistemic_digest(f"expected-{label}"),
+        **_epistemic_prediction_kwargs(label),
+        prediction_id=f"prediction-{label}",
+        created_at="2026-08-26T00:00:00Z",
+    )
+    chain.bind_action(
+        f"action-{label}",
+        module.epistemic_digest(f"action-{label}"),
+        **_epistemic_action_kwargs(label),
+        created_at="2026-08-26T00:00:01Z",
+    )
+    chain.record_observation(
+        f"action-{label}",
+        module.epistemic_digest(f"actual-{label}"),
+        **_epistemic_observation_kwargs(label),
+        observation_id=f"observation-{label}",
+        created_at="2026-08-26T00:00:02Z",
+    )
+    chain.derive_discrepancy(
+        f"action-{label}",
+        created_at="2026-08-26T00:00:03Z",
+    )
+
+
+def test_epistemic_action_chain_replays_prediction_action_observation_and_candidate(
+    tmp_path: Path,
+) -> None:
+    store = tmp_path / "epistemic-action.jsonl"
+    chain = module.EpistemicActionChain.create(
+        store,
+        session_id="session-epistemic-1",
+        turn_id="turn-epistemic-1",
+    )
+    expected = module.epistemic_digest("expected-observation-1")
+    action_digest = module.epistemic_digest("action-1")
+    observed = module.epistemic_digest("actual-observation-1")
+
+    prediction = chain.commit_prediction(
+        "action-epistemic-1",
+        expected,
+        **_epistemic_prediction_kwargs("epistemic-1"),
+        prediction_id="prediction-epistemic-1",
+        created_at="2026-08-26T00:00:00Z",
+    )
+    action = chain.bind_action(
+        "action-epistemic-1",
+        action_digest,
+        **_epistemic_action_kwargs("epistemic-1"),
+        created_at="2026-08-26T00:00:01Z",
+    )
+    observation = chain.record_observation(
+        "action-epistemic-1",
+        observed,
+        **_epistemic_observation_kwargs("epistemic-1"),
+        observation_id="observation-epistemic-1",
+        created_at="2026-08-26T00:00:02Z",
+    )
+    derived = chain.derive_discrepancy(
+        "action-epistemic-1",
+        alternative_explanation_digest=module.epistemic_digest(
+            "alternative-epistemic-1"
+        ),
+        model_update_digest=module.epistemic_digest("model-update-epistemic-1"),
+        next_distinguishing_action_digest=module.epistemic_digest(
+            "next-action-epistemic-1"
+        ),
+        created_at="2026-08-26T00:00:03Z",
+    )
+
+    assert [
+        prediction["sequence"],
+        action["sequence"],
+        observation["sequence"],
+    ] == [1, 2, 3]
+    assert derived["discrepancy"]["kind"] == "mismatch"
+    assert derived["model_update_candidate"]["status"] == "shadow_only"
+    assert derived["model_update_candidate"]["update_kind"] == "review_prediction"
+
+    replayed = module.EpistemicActionChain.load(store)
+    assert replayed.commit_prediction(
+        "action-epistemic-1",
+        expected,
+        **_epistemic_prediction_kwargs("epistemic-1"),
+        prediction_id="prediction-epistemic-1",
+    )["event_id"] == prediction["event_id"]
+    assert replayed.bind_action(
+        "action-epistemic-1",
+        action_digest,
+        **_epistemic_action_kwargs("epistemic-1"),
+    )["event_id"] == action["event_id"]
+    assert replayed.record_observation(
+        "action-epistemic-1",
+        observed,
+        **_epistemic_observation_kwargs("epistemic-1"),
+        observation_id="observation-epistemic-1",
+    )["event_id"] == observation["event_id"]
+    replayed_derived = replayed.derive_discrepancy("action-epistemic-1")
+    artifact = replayed.inspect()
+
+    assert replayed_derived["event"]["event_id"] == derived["event"]["event_id"]
+    assert artifact["event_count"] == 5
+    assert [event["sequence"] for event in artifact["events"]] == [1, 2, 3, 4, 5]
+    assert module.validate_epistemic_action_chain_artifact(artifact)["ok"] is True
+    from jsonschema import Draft202012Validator
+
+    schema = json.loads(
+        (
+            SCRIPT.parents[1]
+            / "schemas"
+            / "epistemic-action-event-chain.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    Draft202012Validator.check_schema(schema)
+    Draft202012Validator(schema).validate(artifact)
+    forbidden_fields = {"prompt", "payload", "tool_input", "tool_output", "transcript"}
+    for event in artifact["events"]:
+        assert not forbidden_fields.intersection(event)
+        assert "PRIVATE_EPISTEMIC_RAW_SENTINEL" not in json.dumps(event)
+
+
+def test_epistemic_action_chain_rejects_ordering_post_hoc_and_immutable_prediction_conflicts(
+    tmp_path: Path,
+) -> None:
+    before_store = tmp_path / "before-prediction.jsonl"
+    before = module.EpistemicActionChain.create(
+        before_store,
+        session_id="session-ordering",
+        turn_id="turn-ordering",
+    )
+    with pytest.raises(module.EpistemicActionOrderingError) as ordering:
+        before.bind_action(
+            "action-ordering",
+            module.epistemic_digest("action"),
+            **_epistemic_action_kwargs("ordering"),
+        )
+    assert ordering.value.reason_code == "action_before_prediction"
+    assert ordering.value.state == "refused"
+    assert json.loads(json.dumps(before.inspect()))["chain_status"] == "refused"
+
+    store = tmp_path / "immutable-prediction.jsonl"
+    chain = module.EpistemicActionChain.create(
+        store,
+        session_id="session-immutable",
+        turn_id="turn-immutable",
+    )
+    first = chain.commit_prediction(
+        "action-immutable",
+        module.epistemic_digest("expected-a"),
+        **_epistemic_prediction_kwargs("immutable"),
+        prediction_id="prediction-immutable",
+    )
+    chain.bind_action(
+        "action-immutable",
+        module.epistemic_digest("action"),
+        **_epistemic_action_kwargs("immutable"),
+    )
+    with pytest.raises(module.EpistemicActionOrderingError) as post_hoc:
+        chain.commit_prediction(
+            "action-immutable",
+            module.epistemic_digest("expected-b"),
+            **_epistemic_prediction_kwargs("immutable"),
+            prediction_id="prediction-late",
+        )
+    assert post_hoc.value.reason_code == "post_hoc_prediction"
+    with pytest.raises(module.EpistemicActionConflictError) as immutable:
+        chain.commit_prediction(
+            "action-immutable",
+            module.epistemic_digest("expected-b"),
+            **_epistemic_prediction_kwargs("immutable"),
+            prediction_id="prediction-immutable",
+        )
+    assert immutable.value.reason_code == "prediction_immutable_conflict"
+    assert immutable.value.state == "ambiguous"
+    assert first["sequence"] == 1
+    events = chain.inspect()["events"]
+    assert len(events) == 4
+    assert [event["event_type"] for event in events] == [
+        "prediction_commitment",
+        "action_binding",
+        "refusal",
+        "refusal",
+    ]
+    assert [event["state"] for event in events] == [
+        "committed",
+        "bound",
+        "refused",
+        "ambiguous",
+    ]
+    assert [event["reason_code"] for event in events[2:]] == [
+        "post_hoc_prediction",
+        "prediction_immutable_conflict",
+    ]
+    assert sum(
+        event["event_type"] == "prediction_commitment" for event in events
+    ) == 1
+    assert sum(event["event_type"] == "action_binding" for event in events) == 1
+
+
+def test_epistemic_action_chain_preserves_interruption_missing_and_shadow_only_candidate(
+    tmp_path: Path,
+) -> None:
+    store = tmp_path / "epistemic-interruption.jsonl"
+    chain = module.EpistemicActionChain.create(
+        store,
+        session_id="session-interruption",
+        turn_id="turn-interruption",
+    )
+    chain.commit_prediction(
+        "action-interruption",
+        module.epistemic_digest("expected"),
+        **_epistemic_prediction_kwargs("interruption"),
+        prediction_id="prediction-interruption",
+    )
+    chain.bind_action(
+        "action-interruption",
+        module.epistemic_digest("action"),
+        **_epistemic_action_kwargs("interruption"),
+    )
+    missing = chain.record_observation(
+        "action-interruption",
+        **_epistemic_observation_kwargs("interruption", observed_at=None),
+        observation_id="observation-interruption",
+        observation_status="unknown",
+        reason_code="interrupted",
+    )
+    derived = chain.derive_discrepancy("action-interruption")
+    candidate = chain.inspect_model_update_candidate("action-interruption")
+
+    assert missing["state"] == "unknown"
+    assert missing["observation_status"] == "unknown"
+    assert derived["state"] == "unknown"
+    assert derived["discrepancy"]["kind"] == "unknown"
+    assert derived["model_update_candidate"]["status"] == "shadow_only"
+    assert derived["model_update_candidate"]["update_kind"] == "withhold_update"
+    assert candidate["state"] == "shadow_only"
+    assert chain.inspect()["chain_status"] == "unknown"
+    assert module.validate_epistemic_action_chain(store)["ok"] is True
+
+    compaction_store = tmp_path / "epistemic-compaction.jsonl"
+    compaction = module.EpistemicActionChain.create(
+        compaction_store,
+        session_id="session-compaction",
+        turn_id="turn-compaction",
+    )
+    compaction.commit_prediction(
+        "action-compaction",
+        module.epistemic_digest("expected-compaction"),
+        **_epistemic_prediction_kwargs("compaction"),
+        prediction_id="prediction-compaction",
+    )
+    compaction.bind_action(
+        "action-compaction",
+        module.epistemic_digest("action-compaction"),
+        **_epistemic_action_kwargs("compaction"),
+    )
+    compaction.record_observation(
+        "action-compaction",
+        **_epistemic_observation_kwargs("compaction", observed_at=None),
+        observation_id="observation-compaction",
+        observation_status="missing",
+        reason_code="compaction_boundary",
+    )
+    compaction_result = compaction.derive_discrepancy("action-compaction")
+    assert compaction_result["state"] == "unknown"
+    assert compaction_result["discrepancy"]["kind"] == "unknown"
+    assert module.validate_epistemic_action_chain(compaction_store)["ok"] is True
+
+
+def test_epistemic_action_chain_rejects_conflicting_observations_as_ambiguous(
+    tmp_path: Path,
+) -> None:
+    store = tmp_path / "epistemic-conflict.jsonl"
+    chain = module.EpistemicActionChain.create(
+        store,
+        session_id="session-conflict",
+        turn_id="turn-conflict",
+    )
+    chain.commit_prediction(
+        "action-conflict",
+        module.epistemic_digest("expected"),
+        **_epistemic_prediction_kwargs("conflict"),
+        prediction_id="prediction-conflict",
+    )
+    chain.bind_action(
+        "action-conflict",
+        module.epistemic_digest("action"),
+        **_epistemic_action_kwargs("conflict"),
+    )
+    first = chain.record_observation(
+        "action-conflict",
+        module.epistemic_digest("actual-a"),
+        **_epistemic_observation_kwargs("conflict"),
+        observation_id="observation-a",
+    )
+    assert chain.record_observation(
+        "action-conflict",
+        module.epistemic_digest("actual-a"),
+        **_epistemic_observation_kwargs("conflict"),
+        observation_id="observation-a",
+    )["event_id"] == first["event_id"]
+    with pytest.raises(module.EpistemicActionConflictError) as conflict:
+        chain.record_observation(
+            "action-conflict",
+            module.epistemic_digest("actual-b"),
+            **_epistemic_observation_kwargs("conflict"),
+            observation_id="observation-b",
+        )
+    assert conflict.value.reason_code == "conflicting_observation"
+    assert conflict.value.state == "ambiguous"
+    derived = chain.derive_discrepancy("action-conflict")
+    assert derived["discrepancy"]["kind"] == "ambiguous"
+    assert chain.inspect()["chain_status"] == "ambiguous"
+    assert any(
+        event["event_type"] == "observation_conflict"
+        for event in chain.inspect()["events"]
+    )
+
+
+def test_epistemic_action_chain_enforces_public_safe_identifiers_and_digests(
+    tmp_path: Path,
+) -> None:
+    store = tmp_path / "epistemic-privacy.jsonl"
+    public_session = module.epistemic_public_id(
+        "session",
+        "private session coordinate",
+    )
+    public_turn = module.epistemic_public_id("turn", "private turn coordinate")
+    chain = module.EpistemicActionChain.create(
+        store,
+        session_id=public_session,
+        turn_id=public_turn,
+    )
+    with pytest.raises(module.EpistemicActionPrivacyError) as unsafe_id:
+        chain.commit_prediction(
+            "raw action coordinate with spaces",
+            module.epistemic_digest("expected"),
+            **_epistemic_prediction_kwargs("privacy"),
+        )
+    assert unsafe_id.value.reason_code == "safe_identifier_invalid"
+    with pytest.raises(module.EpistemicActionPrivacyError) as unsafe_digest:
+        chain.record_observation(
+            "action-safe",
+            "raw tool output is not a digest",
+            **_epistemic_observation_kwargs("privacy"),
+        )
+    assert unsafe_digest.value.reason_code == "digest_invalid"
+    assert not store.exists()
+    assert public_session.startswith("id:")
+    assert public_turn.startswith("id:")
+    assert "private session coordinate" not in json.dumps(chain.inspect())
+    assert "raw tool output is not a digest" not in json.dumps(chain.inspect())
+
+
+def test_epistemic_action_chain_detects_stale_writers_and_tampered_replay(
+    tmp_path: Path,
+) -> None:
+    store = tmp_path / "epistemic-concurrency.jsonl"
+    writer = module.EpistemicActionChain.create(
+        store,
+        session_id="session-concurrency",
+        turn_id="turn-concurrency",
+    )
+    stale = module.EpistemicActionChain.load(
+        store,
+        session_id="session-concurrency",
+        turn_id="turn-concurrency",
+    )
+    writer.commit_prediction(
+        "action-concurrency-a",
+        module.epistemic_digest("expected-a"),
+        **_epistemic_prediction_kwargs("concurrency-a"),
+    )
+    with pytest.raises(module.EpistemicActionConcurrencyError) as concurrency:
+        stale.commit_prediction(
+            "action-concurrency-b",
+            module.epistemic_digest("expected-b"),
+            **_epistemic_prediction_kwargs("concurrency-b"),
+        )
+    assert concurrency.value.reason_code == "concurrency_conflict"
+    stale_artifact = module.EpistemicActionChain.load(store).inspect()
+    assert stale_artifact["event_count"] == 1
+    assert [event["event_type"] for event in stale_artifact["events"]] == [
+        "prediction_commitment"
+    ]
+    assert not any(
+        event.get("action_id") == "action-concurrency-b"
+        for event in stale_artifact["events"]
+    )
+    current = module.EpistemicActionChain.load(store)
+    with pytest.raises(module.EpistemicActionConcurrencyError) as sequence:
+        current.commit_prediction(
+            "action-concurrency-c",
+            module.epistemic_digest("expected-c"),
+            **_epistemic_prediction_kwargs("concurrency-c"),
+            expected_sequence=0,
+        )
+    assert sequence.value.reason_code == "concurrency_conflict"
+
+    lines = store.read_text(encoding="utf-8").splitlines()
+    tampered = json.loads(lines[0])
+    tampered["state"] = "ready"
+    store.write_text(
+        json.dumps(tampered, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(module.EpistemicActionIntegrityError) as integrity:
+        module.EpistemicActionChain.load(store)
+    assert integrity.value.reason_code in {
+        "event_digest_mismatch",
+        "event_shape_invalid",
+    }
+
+
+def test_epistemic_action_chain_binds_attempt_and_tool_use_identity(
+    tmp_path: Path,
+) -> None:
+    store = tmp_path / "epistemic-tool-use.jsonl"
+    chain = module.EpistemicActionChain.create(
+        store,
+        session_id="session-tool-use",
+        turn_id="turn-tool-use",
+    )
+    chain.commit_prediction(
+        "action-tool-use",
+        module.epistemic_digest("expected"),
+        **_epistemic_prediction_kwargs("tool-use"),
+    )
+    mismatched_action = _epistemic_action_kwargs("tool-use")
+    mismatched_action["tool_use_id"] = "tool-other"
+    with pytest.raises(module.EpistemicActionConflictError) as mismatch:
+        chain.bind_action(
+            "action-tool-use",
+            module.epistemic_digest("action"),
+            **mismatched_action,
+        )
+    assert mismatch.value.reason_code == "tool_use_identity_conflict"
+    assert not any(
+        event["event_type"] == "action_binding"
+        for event in chain.inspect()["events"]
+    )
+
+
+def test_epistemic_action_chain_rejects_timestamp_post_hoc_commitment(
+    tmp_path: Path,
+) -> None:
+    store = tmp_path / "epistemic-timestamp.jsonl"
+    chain = module.EpistemicActionChain.create(
+        store,
+        session_id="session-timestamp",
+        turn_id="turn-timestamp",
+    )
+    chain.commit_prediction(
+        "action-timestamp",
+        module.epistemic_digest("expected"),
+        **_epistemic_prediction_kwargs("timestamp"),
+        created_at="2026-08-26T00:00:02Z",
+    )
+    action_kwargs = _epistemic_action_kwargs("timestamp")
+    action_kwargs["action_started_at"] = "2026-08-26T00:00:01Z"
+    with pytest.raises(module.EpistemicActionOrderingError) as post_hoc:
+        chain.bind_action(
+            "action-timestamp",
+            module.epistemic_digest("action"),
+            **action_kwargs,
+        )
+    assert post_hoc.value.reason_code == "post_hoc_prediction"
+    assert not any(
+        event["event_type"] == "action_binding"
+        for event in chain.inspect()["events"]
+    )
+
+
+def test_epistemic_action_chain_enforces_strict_time_and_observation_window(
+    tmp_path: Path,
+) -> None:
+    equal_store = tmp_path / "epistemic-equal-time.jsonl"
+    equal = module.EpistemicActionChain.create(
+        equal_store,
+        session_id="session-equal-time",
+        turn_id="turn-equal-time",
+    )
+    equal.commit_prediction(
+        "action-equal-time",
+        module.epistemic_digest("expected-equal-time"),
+        **_epistemic_prediction_kwargs("equal-time"),
+        created_at="2026-08-26T00:00:00.000000Z",
+    )
+    equal_action = _epistemic_action_kwargs("equal-time")
+    equal_action["action_started_at"] = "2026-08-26T00:00:00.000000Z"
+    with pytest.raises(module.EpistemicActionOrderingError) as equal_error:
+        equal.bind_action(
+            "action-equal-time",
+            module.epistemic_digest("action-equal-time"),
+            **equal_action,
+        )
+    assert equal_error.value.reason_code == "post_hoc_prediction"
+
+    def build_windowed(label: str) -> module.EpistemicActionChain:
+        chain = module.EpistemicActionChain.create(
+            tmp_path / f"epistemic-window-{label}.jsonl",
+            session_id=f"session-window-{label}",
+            turn_id=f"turn-window-{label}",
+        )
+        chain.commit_prediction(
+            f"action-window-{label}",
+            module.epistemic_digest(f"expected-window-{label}"),
+            **_epistemic_prediction_kwargs(
+                label,
+                window_start="2026-08-26T00:00:01.000000Z",
+                window_end="2026-08-26T00:00:04.000000Z",
+            ),
+            created_at="2026-08-26T00:00:00.000000Z",
+        )
+        action = _epistemic_action_kwargs(label)
+        action["action_started_at"] = "2026-08-26T00:00:01.000000Z"
+        chain.bind_action(
+            f"action-window-{label}",
+            module.epistemic_digest(f"action-window-{label}"),
+            **action,
+        )
+        return chain
+
+    early = build_windowed("early")
+    early_observation = _epistemic_observation_kwargs(
+        "early",
+        observed_at="2026-08-26T00:00:00.500000Z",
+    )
+    with pytest.raises(module.EpistemicActionOrderingError) as early_error:
+        early.record_observation(
+            "action-window-early",
+            module.epistemic_digest("actual-early"),
+            **early_observation,
+        )
+    assert early_error.value.reason_code == "observation_outside_window"
+
+    late = build_windowed("late")
+    late_observation = _epistemic_observation_kwargs(
+        "late",
+        observed_at="2026-08-26T00:00:05.000000Z",
+    )
+    with pytest.raises(module.EpistemicActionOrderingError) as late_error:
+        late.record_observation(
+            "action-window-late",
+            module.epistemic_digest("actual-late"),
+            **late_observation,
+        )
+    assert late_error.value.reason_code == "observation_outside_window"
+
+
+def test_epistemic_action_chain_requires_observed_evidence_and_timestamp(
+    tmp_path: Path,
+) -> None:
+    store = tmp_path / "epistemic-observation-admission.jsonl"
+    chain = module.EpistemicActionChain.create(
+        store,
+        session_id="session-observation-admission",
+        turn_id="turn-observation-admission",
+    )
+    chain.commit_prediction(
+        "action-observation-admission",
+        module.epistemic_digest("expected-observation-admission"),
+        **_epistemic_prediction_kwargs("observation-admission"),
+    )
+    chain.bind_action(
+        "action-observation-admission",
+        module.epistemic_digest("action-observation-admission"),
+        **_epistemic_action_kwargs("observation-admission"),
+    )
+    with pytest.raises(module.EpistemicActionPrivacyError) as evidence_error:
+        chain.record_observation(
+            "action-observation-admission",
+            module.epistemic_digest("actual-observation-admission"),
+            attempt_id="attempt-observation-admission",
+            tool_use_id="tool-observation-admission",
+            evidence_ref_ids=[],
+            observed_at="9999-12-31T23:59:59.500000Z",
+        )
+    assert evidence_error.value.reason_code == "observation_evidence_required"
+    with pytest.raises(module.EpistemicActionPrivacyError) as timestamp_error:
+        chain.record_observation(
+            "action-observation-admission",
+            module.epistemic_digest("actual-observation-admission"),
+            attempt_id="attempt-observation-admission",
+            tool_use_id="tool-observation-admission",
+            evidence_ref_ids=["evidence-observation-admission"],
+        )
+    assert timestamp_error.value.reason_code == "observation_timestamp_required"
+    assert not any(
+        event["event_type"] == "observation" for event in chain.inspect()["events"]
+    )
+
+
+def test_epistemic_action_chain_rejects_null_required_timestamps(
+    tmp_path: Path,
+) -> None:
+    prediction_store = tmp_path / "epistemic-null-created-at.jsonl"
+    prediction_chain = module.EpistemicActionChain.create(
+        prediction_store,
+        session_id="session-null-created-at",
+        turn_id="turn-null-created-at",
+    )
+    with pytest.raises(module.EpistemicActionPrivacyError) as created_error:
+        prediction_chain.commit_prediction(
+            "action-null-created-at",
+            module.epistemic_digest("expected-null-created-at"),
+            **_epistemic_prediction_kwargs("null-created-at"),
+            created_at=None,
+        )
+    assert created_error.value.reason_code == "timestamp_invalid"
+    assert prediction_chain.inspect()["event_count"] == 0
+    assert not prediction_store.exists()
+
+    action_store = tmp_path / "epistemic-null-action-started-at.jsonl"
+    action_chain = module.EpistemicActionChain.create(
+        action_store,
+        session_id="session-null-action-started-at",
+        turn_id="turn-null-action-started-at",
+    )
+    action_chain.commit_prediction(
+        "action-null-action-started-at",
+        module.epistemic_digest("expected-null-action-started-at"),
+        **_epistemic_prediction_kwargs("null-action-started-at"),
+        created_at="2026-08-26T00:00:00Z",
+    )
+    null_action = _epistemic_action_kwargs("null-action-started-at")
+    null_action["action_started_at"] = None
+    with pytest.raises(module.EpistemicActionPrivacyError) as action_error:
+        action_chain.bind_action(
+            "action-null-action-started-at",
+            module.epistemic_digest("action-null-action-started-at"),
+            **null_action,
+        )
+    assert action_error.value.reason_code == "timestamp_invalid"
+    assert [event["event_type"] for event in action_chain.inspect()["events"]] == [
+        "prediction_commitment"
+    ]
+
+    valid_action = _epistemic_action_kwargs("null-action-started-at")
+    action_chain.bind_action(
+        "action-null-action-started-at",
+        module.epistemic_digest("action-null-action-started-at"),
+        **valid_action,
+        created_at="2026-08-26T00:00:01Z",
+    )
+    null_observation = _epistemic_observation_kwargs(
+        "null-action-started-at",
+        observed_at=None,
+    )
+    with pytest.raises(module.EpistemicActionPrivacyError) as observation_error:
+        action_chain.record_observation(
+            "action-null-action-started-at",
+            module.epistemic_digest("actual-null-observed-at"),
+            **null_observation,
+            observation_id="observation-null-observed-at",
+        )
+    assert observation_error.value.reason_code == "timestamp_invalid"
+    assert [event["event_type"] for event in action_chain.inspect()["events"]] == [
+        "prediction_commitment",
+        "action_binding",
+    ]
+
+
+def test_epistemic_action_chain_rejects_invalid_required_timestamps_before_replay(
+    tmp_path: Path,
+) -> None:
+    missing = object()
+    cases = [
+        ("created-at-missing", 0, "created_at", missing),
+        ("created-at-null", 0, "created_at", None),
+        ("created-at-non-string", 0, "created_at", 17),
+        ("created-at-malformed", 0, "created_at", "2026-13-26T00:00:00Z"),
+        (
+            "window-start-null",
+            0,
+            "observation_window_start_at",
+            None,
+        ),
+        ("action-started-missing", 1, "action_started_at", missing),
+        (
+            "action-started-malformed",
+            1,
+            "action_started_at",
+            "2026-08-26T00:00:00+00:00",
+        ),
+        ("observed-at-missing", 2, "observed_at", missing),
+        ("observed-at-null", 2, "observed_at", None),
+        ("observed-at-non-string", 2, "observed_at", 23),
+    ]
+    for label, event_index, field, value in cases:
+        store = tmp_path / f"epistemic-invalid-timestamp-{label}.jsonl"
+        _create_epistemic_candidate_store(store, label)
+        events = _rehash_epistemic_store(store)
+        if value is missing:
+            del events[event_index][field]
+        else:
+            events[event_index][field] = value
+        _rehash_epistemic_store(store, events)
+
+        result = module.validate_epistemic_action_chain(store)
+
+        assert result["ok"] is False, label
+        assert result["diagnostics"] == ["timestamp_invalid"], label
+        with pytest.raises(module.EpistemicActionError) as replay_error:
+            module.EpistemicActionChain.load(store)
+        assert replay_error.value.reason_code == "timestamp_invalid", label
+
+
+def test_epistemic_action_event_schema_requires_type_specific_timestamps(
+    tmp_path: Path,
+) -> None:
+    from jsonschema import Draft202012Validator
+
+    store = tmp_path / "epistemic-schema-timestamps.jsonl"
+    chain = module.EpistemicActionChain.create(
+        store,
+        session_id="session-schema-timestamps",
+        turn_id="turn-schema-timestamps",
+    )
+    chain.commit_prediction(
+        "action-schema-timestamps",
+        module.epistemic_digest("expected-schema-timestamps"),
+        **_epistemic_prediction_kwargs("schema-timestamps"),
+        prediction_id="prediction-schema-timestamps",
+    )
+    chain.bind_action(
+        "action-schema-timestamps",
+        module.epistemic_digest("action-schema-timestamps"),
+        **_epistemic_action_kwargs("schema-timestamps"),
+    )
+    chain.record_observation(
+        "action-schema-timestamps",
+        module.epistemic_digest("actual-schema-timestamps"),
+        **_epistemic_observation_kwargs("schema-timestamps"),
+        observation_id="observation-schema-timestamps",
+    )
+    chain.derive_discrepancy(
+        "action-schema-timestamps",
+        alternative_explanation_digest=module.epistemic_digest(
+            "alternative-schema-timestamps"
+        ),
+        model_update_digest=module.epistemic_digest("update-schema-timestamps"),
+        next_distinguishing_action_digest=module.epistemic_digest(
+            "next-schema-timestamps"
+        ),
+    )
+    artifact = chain.inspect()
+    schema = json.loads(
+        (
+            SCRIPT.parents[1]
+            / "schemas"
+            / "epistemic-action-event-chain.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    Draft202012Validator.check_schema(schema)
+    validator = Draft202012Validator(schema)
+    validator.validate(artifact)
+
+    for event_index, field in (
+        (0, "observation_window_start_at"),
+        (1, "action_started_at"),
+        (2, "observed_at"),
+    ):
+        invalid = copy.deepcopy(artifact)
+        del invalid["events"][event_index][field]
+        assert list(validator.iter_errors(invalid)), field
+
+
+def test_epistemic_action_chain_derives_partial_and_rejects_conflicting_classification(
+    tmp_path: Path,
+) -> None:
+    store = tmp_path / "epistemic-partial.jsonl"
+    chain = module.EpistemicActionChain.create(
+        store,
+        session_id="session-partial",
+        turn_id="turn-partial",
+    )
+    chain.commit_prediction(
+        "action-partial",
+        module.epistemic_digest("expected"),
+        **_epistemic_prediction_kwargs(
+            "partial",
+            expected_facets=["facet-partial-a", "facet-partial-b"],
+        ),
+    )
+    chain.bind_action(
+        "action-partial",
+        module.epistemic_digest("action"),
+        **_epistemic_action_kwargs("partial"),
+    )
+    chain.record_observation(
+        "action-partial",
+        module.epistemic_digest("actual"),
+        **_epistemic_observation_kwargs(
+            "partial",
+            observed_facets=["facet-partial-a"],
+        ),
+    )
+    derived = chain.derive_discrepancy(
+        "action-partial",
+        discrepancy_kind="partial_match",
+        model_update_digest=module.epistemic_digest("update"),
+    )
+    assert derived["discrepancy"]["kind"] == "partial_match"
+    assert derived["model_update_candidate"]["update_kind"] == "review_prediction"
+    candidate = derived["model_update_candidate"]
+    assert candidate["discrepancy_kind"] == "partial_match"
+    assert candidate["update_kind"] == "review_prediction"
+    assert candidate["model_update_digest"] == module.epistemic_digest("update")
+    with pytest.raises(module.EpistemicActionConflictError) as candidate_conflict:
+        chain.derive_discrepancy(
+            "action-partial",
+            model_update_digest=module.epistemic_digest("different-update"),
+        )
+    assert candidate_conflict.value.reason_code == "model_update_conflict"
+    with pytest.raises(module.EpistemicActionConflictError) as classification:
+        chain.derive_discrepancy(
+            "action-partial",
+            discrepancy_kind="mismatch",
+        )
+    assert classification.value.reason_code == "discrepancy_classification_conflict"
+
+
+def test_epistemic_action_chain_rejects_conflicting_rederivation(
+    tmp_path: Path,
+) -> None:
+    store = tmp_path / "epistemic-rederivation.jsonl"
+    _create_epistemic_candidate_store(store, "rederivation")
+    chain = module.EpistemicActionChain.load(store)
+
+    with pytest.raises(module.EpistemicActionConflictError) as conflict:
+        chain.derive_discrepancy(
+            "action-rederivation",
+            discrepancy_kind="match",
+        )
+
+    assert conflict.value.reason_code == (
+        "discrepancy_classification_conflict"
+    )
+    assert conflict.value.state == "ambiguous"
+    assert chain.inspect()["chain_status"] == "ambiguous"
+    assert not any(
+        event["event_type"] == "discrepancy"
+        and event["discrepancy_kind"] == "match"
+        for event in chain.inspect()["events"]
+    )
+
+
+def test_epistemic_action_chain_serializes_concurrent_writers_and_duplicate_json(
+    tmp_path: Path,
+) -> None:
+    store = tmp_path / "epistemic-race.jsonl"
+    first = module.EpistemicActionChain.create(
+        store,
+        session_id="session-race",
+        turn_id="turn-race",
+    )
+    second = module.EpistemicActionChain.load(
+        store,
+        session_id="session-race",
+        turn_id="turn-race",
+    )
+    barrier = threading.Barrier(2)
+    results: list[str] = []
+
+    def commit(chain: object, label: str) -> None:
+        barrier.wait()
+        try:
+            chain.commit_prediction(
+                f"action-{label}",
+                module.epistemic_digest(f"expected-{label}"),
+                **_epistemic_prediction_kwargs(label),
+            )
+            results.append("committed")
+        except module.EpistemicActionConcurrencyError:
+            results.append("concurrency_conflict")
+
+    workers = [
+        threading.Thread(target=commit, args=(first, "race-a")),
+        threading.Thread(target=commit, args=(second, "race-b")),
+    ]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join()
+    assert sorted(results) == ["committed", "concurrency_conflict"]
+
+    line = store.read_text(encoding="utf-8").splitlines()[0]
+    store.write_text(
+        line.replace(
+            '"state":"committed"',
+            '"state":"committed","state":"unknown"',
+            1,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(module.EpistemicActionIntegrityError) as duplicate:
+        module.EpistemicActionChain.load(store)
+    assert duplicate.value.reason_code == "event_shape_invalid"
+
+
+def test_epistemic_action_chain_rejects_rehashed_semantic_tampering(
+    tmp_path: Path,
+) -> None:
+    cases = [
+        (
+            "prediction",
+            0,
+            "hypothesis_digest",
+            module.epistemic_digest("tampered-hypothesis"),
+            "prediction_commitment_mismatch",
+        ),
+        (
+            "discrepancy",
+            3,
+            "discrepancy_kind",
+            "match",
+            "discrepancy_derivation_mismatch",
+        ),
+        (
+            "candidate",
+            4,
+            "update_kind",
+            "inspect_only",
+            "candidate_derivation_mismatch",
+        ),
+    ]
+    for name, event_index, field, value, reason_code in cases:
+        store = tmp_path / f"rehashed-{name}.jsonl"
+        _create_epistemic_candidate_store(store, f"tamper-{name}")
+        events = _rehash_epistemic_store(store)
+        events[event_index][field] = value
+        _rehash_epistemic_store(store, events)
+
+        result = module.validate_epistemic_action_chain(store)
+
+        assert result["ok"] is False
+        assert result["diagnostics"] == [reason_code]
+        with pytest.raises(module.EpistemicActionIntegrityError) as integrity:
+            module.EpistemicActionChain.load(store)
+        assert integrity.value.reason_code == reason_code
+
+
+def test_epistemic_action_chain_rejects_rehashed_duplicate_logical_identity(
+    tmp_path: Path,
+) -> None:
+    store = tmp_path / "rehashed-duplicate.jsonl"
+    _create_epistemic_candidate_store(store, "duplicate")
+    events = _rehash_epistemic_store(store)
+    duplicate = copy.deepcopy(events[0])
+    duplicate["prediction_id"] = "prediction-duplicate-other"
+    duplicate["prediction_commitment_digest"] = (
+        _epistemic_prediction_commitment_digest(duplicate)
+    )
+    duplicate["event_id"] = _epistemic_event_id(
+        "prediction_commitment",
+        {"prediction_id": duplicate["prediction_id"]},
+    )
+    events.append(duplicate)
+    _rehash_epistemic_store(store, events)
+
+    result = module.validate_epistemic_action_chain(store)
+
+    assert result["ok"] is False
+    assert result["diagnostics"] == ["duplicate_logical_identity"]
+
+
+def test_epistemic_action_chain_malformed_enum_values_return_diagnostics(
+    tmp_path: Path,
+) -> None:
+    cases = [
+        ("event_type", 0, []),
+        ("state", 0, {}),
+        ("observation_status", 2, []),
+        ("reason_code", 2, {}),
+        ("discrepancy_kind", 3, []),
+        ("candidate_status", 4, {}),
+        ("update_kind", 4, []),
+    ]
+    for name, event_index, value in cases:
+        store = tmp_path / f"malformed-{name}.jsonl"
+        _create_epistemic_candidate_store(store, f"malformed-{name}")
+        events = _rehash_epistemic_store(store)
+        events[event_index][name] = value
+        _rehash_epistemic_store(store, events)
+
+        result = module.validate_epistemic_action_chain(store)
+
+        assert result["ok"] is False
+        assert isinstance(result["diagnostics"], list)
+        assert result["diagnostics"]
+        assert all(isinstance(item, str) for item in result["diagnostics"])
+
+    cli_store = tmp_path / "malformed-cli.jsonl"
+    _create_epistemic_candidate_store(cli_store, "malformed-cli")
+    cli_events = _rehash_epistemic_store(cli_store)
+    cli_events[0]["event_type"] = []
+    _rehash_epistemic_store(cli_store, cli_events)
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT.with_name("aoa_epistemic_action_event_chain.py")),
+            "--store",
+            str(cli_store),
+            "validate",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 1
+    payload = json.loads(completed.stdout)
+    assert payload["ok"] is False
+    assert payload["diagnostics"] == ["event_type_invalid"]
+
+
+def test_epistemic_action_chain_rejects_rehashed_refusal_state_tampering(
+    tmp_path: Path,
+) -> None:
+    store = tmp_path / "rehashed-refusal-state.jsonl"
+    chain = module.EpistemicActionChain.create(
+        store,
+        session_id="session-refusal-state",
+        turn_id="turn-refusal-state",
+    )
+    with pytest.raises(module.EpistemicActionOrderingError):
+        chain.bind_action(
+            "action-refusal-state",
+            module.epistemic_digest("action-refusal-state"),
+            **_epistemic_action_kwargs("refusal-state"),
+        )
+    events = _rehash_epistemic_store(store)
+    assert events[0]["event_type"] == "refusal"
+    events[0]["state"] = "ready"
+    _rehash_epistemic_store(store, events)
+
+    result = module.validate_epistemic_action_chain(store)
+
+    assert result["ok"] is False
+    assert result["diagnostics"] == ["event_shape_invalid"]
+
+
+def test_epistemic_action_chain_serializes_same_instance_concurrency(
+    tmp_path: Path,
+) -> None:
+    store = tmp_path / "epistemic-same-instance-race.jsonl"
+    chain = module.EpistemicActionChain.create(
+        store,
+        session_id="session-same-instance-race",
+        turn_id="turn-same-instance-race",
+    )
+    barrier = threading.Barrier(2)
+    results: list[str] = []
+
+    def commit(label: str) -> None:
+        barrier.wait()
+        try:
+            chain.commit_prediction(
+                f"action-same-instance-{label}",
+                module.epistemic_digest(f"expected-same-instance-{label}"),
+                **_epistemic_prediction_kwargs(f"same-instance-{label}"),
+            )
+            results.append("committed")
+        except module.EpistemicActionError as exc:
+            results.append(exc.reason_code)
+
+    workers = [
+        threading.Thread(target=commit, args=("a",)),
+        threading.Thread(target=commit, args=("b",)),
+    ]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join()
+
+    assert sorted(results) == ["committed", "committed"]
+    artifact = chain.inspect()
+    assert artifact["event_count"] == 2
+    assert [event["sequence"] for event in artifact["events"]] == [1, 2]
+    assert module.validate_epistemic_action_chain(store)["ok"] is True
+
+
+def test_epistemic_action_chain_rejects_cross_instance_same_action_prediction_race(
+    tmp_path: Path,
+) -> None:
+    store = tmp_path / "epistemic-cross-instance-prediction-race.jsonl"
+    first = module.EpistemicActionChain.create(
+        store,
+        session_id="session-cross-instance-prediction",
+        turn_id="turn-cross-instance-prediction",
+    )
+    second = module.EpistemicActionChain.load(
+        store,
+        session_id="session-cross-instance-prediction",
+        turn_id="turn-cross-instance-prediction",
+    )
+    barrier = threading.Barrier(2)
+    results: list[tuple[str, str | None, str | None]] = []
+
+    def commit(chain: object, label: str) -> None:
+        barrier.wait()
+        try:
+            chain.commit_prediction(
+                "action-cross-instance-prediction",
+                module.epistemic_digest(f"expected-{label}"),
+                **_epistemic_prediction_kwargs(label),
+                prediction_id=f"prediction-{label}",
+            )
+            results.append(("committed", None, None))
+        except module.EpistemicActionError as exc:
+            results.append(("rejected", exc.reason_code, exc.state))
+
+    workers = [
+        threading.Thread(target=commit, args=(first, "prediction-a")),
+        threading.Thread(target=commit, args=(second, "prediction-b")),
+    ]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join()
+
+    assert sorted(result[0] for result in results) == ["committed", "rejected"]
+    rejected = next(result for result in results if result[0] == "rejected")
+    assert rejected[1] == "duplicate_logical_identity"
+    assert rejected[2] == "ambiguous"
+    loaded = module.EpistemicActionChain.load(
+        store,
+        session_id="session-cross-instance-prediction",
+        turn_id="turn-cross-instance-prediction",
+    )
+    assert loaded.inspect()["event_count"] == 1
+    assert loaded.inspect()["chain_status"] == "ready"
+    assert [event["event_type"] for event in loaded.inspect()["events"]] == [
+        "prediction_commitment"
+    ]
+    assert module.validate_epistemic_action_chain(store)["ok"] is True
+
+
+def test_epistemic_action_chain_rejects_cross_instance_same_action_observation_race(
+    tmp_path: Path,
+) -> None:
+    store = tmp_path / "epistemic-cross-instance-observation-race.jsonl"
+    seed = module.EpistemicActionChain.create(
+        store,
+        session_id="session-cross-instance-observation",
+        turn_id="turn-cross-instance-observation",
+    )
+    seed.commit_prediction(
+        "action-cross-instance-observation",
+        module.epistemic_digest("expected-observation"),
+        **_epistemic_prediction_kwargs("observation-race"),
+        prediction_id="prediction-observation-race",
+    )
+    seed.bind_action(
+        "action-cross-instance-observation",
+        module.epistemic_digest("action-observation"),
+        **_epistemic_action_kwargs("observation-race"),
+    )
+    first = module.EpistemicActionChain.load(
+        store,
+        session_id="session-cross-instance-observation",
+        turn_id="turn-cross-instance-observation",
+    )
+    second = module.EpistemicActionChain.load(
+        store,
+        session_id="session-cross-instance-observation",
+        turn_id="turn-cross-instance-observation",
+    )
+    barrier = threading.Barrier(2)
+    results: list[tuple[str, str | None, str | None]] = []
+
+    def observe(chain: object, observation_id: str, digest: str) -> None:
+        barrier.wait()
+        try:
+            chain.record_observation(
+                "action-cross-instance-observation",
+                module.epistemic_digest(digest),
+                **_epistemic_observation_kwargs("observation-race"),
+                observation_id=observation_id,
+            )
+            results.append(("committed", None, None))
+        except module.EpistemicActionError as exc:
+            results.append(("rejected", exc.reason_code, exc.state))
+
+    workers = [
+        threading.Thread(target=observe, args=(first, "observation-a", "actual-a")),
+        threading.Thread(target=observe, args=(second, "observation-b", "actual-b")),
+    ]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join()
+
+    assert sorted(result[0] for result in results) == ["committed", "rejected"]
+    rejected = next(result for result in results if result[0] == "rejected")
+    assert rejected[1] == "duplicate_logical_identity"
+    assert rejected[2] == "ambiguous"
+    loaded = module.EpistemicActionChain.load(
+        store,
+        session_id="session-cross-instance-observation",
+        turn_id="turn-cross-instance-observation",
+    )
+    assert loaded.inspect()["event_count"] == 3
+    assert loaded.inspect()["chain_status"] == "ready"
+    assert [event["event_type"] for event in loaded.inspect()["events"]] == [
+        "prediction_commitment",
+        "action_binding",
+        "observation",
+    ]
+    assert module.validate_epistemic_action_chain(store)["ok"] is True
+
+
+def test_epistemic_action_chain_rejects_store_symlink_alias(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "real-store.jsonl"
+    alias = tmp_path / "alias-store.jsonl"
+    alias.symlink_to(target)
+
+    with pytest.raises(module.EpistemicActionIntegrityError) as error:
+        module.EpistemicActionChain.create(
+            alias,
+            session_id="session-symlink",
+            turn_id="turn-symlink",
+        )
+    assert error.value.reason_code == "store_not_regular"

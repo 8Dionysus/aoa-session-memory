@@ -1,0 +1,17 @@
+{
+  "allowed_bytes": 22465684,
+  "allowed_tracked_bytes": 23802531,
+  "approved_by": "repository-owner",
+  "base_ref": "4304e6faa90a9e5faf7e671030668361a6098d19",
+  "changed_generated_bytes": 22465684,
+  "changed_generated_files": 318,
+  "decision_ref": "aoa-kag:docs/decisions/AOA-KAG-D-0017-portable-content-addressed-repository-family.md",
+  "default_limit_bytes": 1048576,
+  "head_family_digest": "8b78c945d5dd52824191542c1c823f253d460814f9d85e35ff540dc77dc2348a",
+  "reason": "Refresh stale portable KAG family after primary-preserving role-diverse dense evidence hydration, dense-reranker consensus, and corrected owner-local eval source pins",
+  "repo": "aoa-session-memory",
+  "schema_version": "aoa-repo-local-kag-budget-receipt-v1",
+  "scope": "generated_delta_and_tracked_size",
+  "tracked_bytes": 23802531,
+  "tracked_bytes_max": 13631488
+}

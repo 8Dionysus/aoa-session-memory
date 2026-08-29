@@ -110,6 +110,46 @@ def build_server(
         return current_state().session_literal_query_plan(query=query, kind=kind, filters=filters)
 
     @read_only_tool
+    def aoa_session_memory_query_plan(query: str = "", kind: str = "auto", filters: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Classify a memory claim shape and return the producer-owned bounded route, admission, freshness, and owner-handoff packet."""
+        return current_state().session_memory_query_plan(query=query, kind=kind, filters=filters)
+
+    @read_only_tool
+    def aoa_session_episode_search(
+        query: str,
+        session: str = "",
+        status: str = "",
+        date_from: str = "",
+        date_to: str = "",
+        time_from: str = "",
+        time_to: str = "",
+        mode: str = "auto",
+        limit: int = 10,
+        dense_candidate_limit: int | None = None,
+        rerank_local: bool = False,
+        rerank_candidate_limit: int | None = None,
+        explain: bool = True,
+        full: bool = False,
+    ) -> dict[str, Any]:
+        """Execute producer-owned semantic episode retrieval with temporal, causal, quantitative, freshness, and answer-admission evidence preserved."""
+        return current_state().session_episode_search(
+            query=query,
+            session=session,
+            status=status,
+            date_from=date_from,
+            date_to=date_to,
+            time_from=time_from,
+            time_to=time_to,
+            mode=mode,
+            limit=limit,
+            dense_candidate_limit=dense_candidate_limit,
+            rerank_local=rerank_local,
+            rerank_candidate_limit=rerank_candidate_limit,
+            explain=explain,
+            full=full,
+        )
+
+    @read_only_tool
     def aoa_session_agent_responses(
         query: str = "",
         session: str = "",
@@ -300,6 +340,7 @@ def build_server(
         consequence_window: int = 6,
         document_limit: int = 24,
         session: str = "",
+        correlation_id: str = "",
         full: bool = False,
     ) -> dict[str, Any]:
         """Return compact usage-to-consequence chains for an operational entity without graph or raw-preview expansion."""
@@ -311,6 +352,7 @@ def build_server(
             consequence_window=consequence_window,
             document_limit=document_limit,
             session=session,
+            correlation_id=correlation_id,
             full=full,
         )
 

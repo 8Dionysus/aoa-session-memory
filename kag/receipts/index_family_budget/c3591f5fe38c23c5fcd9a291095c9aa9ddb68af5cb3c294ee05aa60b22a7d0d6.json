@@ -1,0 +1,17 @@
+{
+  "allowed_bytes": 33206062,
+  "allowed_tracked_bytes": 32062813,
+  "approved_by": "repository-owner",
+  "base_ref": "1d79b84e7ae09738936ba7e88adeeefd4f0f28b2",
+  "changed_generated_bytes": 33206062,
+  "changed_generated_files": 463,
+  "decision_ref": "aoa-kag:docs/decisions/AOA-KAG-D-0017-portable-content-addressed-repository-family.md",
+  "default_limit_bytes": 1048576,
+  "head_family_digest": "c3591f5fe38c23c5fcd9a291095c9aa9ddb68af5cb3c294ee05aa60b22a7d0d6",
+  "reason": "Long-horizon integration refresh for the source-linked portable KAG family after accepted session-memory feature slices; preserve historical records and owner provenance.",
+  "repo": "aoa-session-memory",
+  "schema_version": "aoa-repo-local-kag-budget-receipt-v1",
+  "scope": "generated_delta_and_tracked_size",
+  "tracked_bytes": 32062813,
+  "tracked_bytes_max": 13631488
+}

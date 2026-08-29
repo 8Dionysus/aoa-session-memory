@@ -30,18 +30,23 @@ segments with indexes.
 
 ## Procedure
 
-1. Preserve the raw transcript under
+1. Resolve the source identity and verify that the transcript exists and is
+   readable before creating or updating archive output.
+2. If source validation or reading fails, stop archive processing and hand a
+   typed `raw-read-failure` to `aoa-session-raw-diagnostic`. Do not emit or
+   claim an `archived-session-set` for that attempt.
+3. Preserve the raw transcript under
    `sessions/YYYY-MM-DD__NNN__short-title/raw/`.
-2. Parse JSONL line by line without discarding raw lines.
-3. Split by detected compaction boundaries. If no boundary exists, write
+4. Parse JSONL line by line without discarding raw lines.
+5. Split by detected compaction boundaries. If no boundary exists, write
    segment `000__initial-to-latest`.
-4. Write bounded raw interval blocks under `raw/blocks/` plus
+6. Write bounded raw interval blocks under `raw/blocks/` plus
    `raw/blocks.index.json` and `raw/compaction-events.jsonl`.
-5. Write one Markdown segment per interval with raw event bodies intact.
-6. Write a sibling `.index.json` for each segment.
-7. Update `session.manifest.json`, `SESSION.md`, `session.index.json`, and
+7. Write one Markdown segment per interval with raw event bodies intact.
+8. Write a sibling `.index.json` for each segment.
+9. Update `session.manifest.json`, `SESSION.md`, `session.index.json`, and
    `session-registry.json`.
-8. Ensure the session archive directory itself uses the readable label.
+10. Ensure the session archive directory itself uses the readable label.
 
 ## Verification
 
@@ -54,6 +59,8 @@ segments with indexes.
 - The Codex UUID remains in `session_id`; do not use it as the normal folder
   name once a readable label is available.
 - Re-running the archive command is idempotent for the same raw transcript.
+- On source failure, no archive output is claimed and the diagnostic handoff
+  preserves the source path, error, event, and session identity.
 
 ## Stop Line
 

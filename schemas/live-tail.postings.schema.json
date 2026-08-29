@@ -1,0 +1,167 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AoA persistent live-tail postings manifest",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "artifact_type",
+    "session_id",
+    "epoch_id",
+    "generation_identity",
+    "updated_at",
+    "processed_bytes",
+    "processed_line_count",
+    "source_captured_bytes",
+    "projection_raw_bytes",
+    "projection_raw_line_count",
+    "coverage_start_byte",
+    "coverage_start_line",
+    "bootstrap_omitted_bytes",
+    "bootstrap_omitted_line_count",
+    "pending_incomplete_bytes",
+    "storage_mode",
+    "shard_max_entries",
+    "shard_count",
+    "entry_count",
+    "token_count",
+    "shards",
+    "privacy",
+    "authority"
+  ],
+  "properties": {
+    "schema_version": {"const": 3},
+    "artifact_type": {"const": "persistent_live_tail_postings"},
+    "session_id": {"type": "string", "minLength": 1},
+    "epoch_id": {"type": "string", "pattern": "^[a-f0-9]{24}$"},
+    "generation_identity": {"$ref": "#/$defs/generationIdentity"},
+    "updated_at": {"type": "string", "minLength": 1},
+    "processed_bytes": {"type": "integer", "minimum": 0},
+    "processed_line_count": {"type": "integer", "minimum": 0},
+    "source_captured_bytes": {"type": "integer", "minimum": 0},
+    "projection_raw_bytes": {"type": "integer", "minimum": 0},
+    "projection_raw_line_count": {"type": "integer", "minimum": 0},
+    "coverage_start_byte": {"type": "integer", "minimum": 0},
+    "coverage_start_line": {"type": "integer", "minimum": 1},
+    "bootstrap_omitted_bytes": {"type": "integer", "minimum": 0},
+    "bootstrap_omitted_line_count": {"type": "integer", "minimum": 0},
+    "pending_incomplete_bytes": {"type": "integer", "minimum": 0},
+    "storage_mode": {"const": "bounded_json_shards_v1"},
+    "shard_max_entries": {"type": "integer", "minimum": 1},
+    "shard_count": {"type": "integer", "minimum": 0},
+    "entry_count": {"type": "integer", "minimum": 0},
+    "token_count": {"type": "integer", "minimum": 0},
+    "shards": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/shardDescriptor"}
+    },
+    "privacy": {"$ref": "#/$defs/privacy"},
+    "migration_receipt": {
+      "type": "object",
+      "required": [
+        "status",
+        "from_generation_id",
+        "to_generation_id",
+        "raw_authority_changed",
+        "unknown_generation_admission"
+      ],
+      "properties": {
+        "status": {"const": "exact_predecessor_linked_without_raw_rebuild"},
+        "from_generation_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "to_generation_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "raw_authority_changed": {"const": false},
+        "unknown_generation_admission": {"const": false}
+      },
+      "additionalProperties": false
+    },
+    "authority": {
+      "const": "derived_navigation_with_typed_refs_raw_capture_is_authority"
+    }
+  },
+  "$defs": {
+    "generationIdentity": {
+      "type": "object",
+      "required": ["generation_id"],
+      "properties": {
+        "generation_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+      },
+      "additionalProperties": true
+    },
+    "privacy": {
+      "type": "object",
+      "required": [
+        "raw_text_persisted",
+        "reversible_literal_digests_persisted"
+      ],
+      "properties": {
+        "raw_text_persisted": {"const": false},
+        "reversible_literal_digests_persisted": {"const": false}
+      },
+      "additionalProperties": true
+    },
+    "shardDescriptor": {
+      "type": "object",
+      "required": [
+        "format",
+        "ordinal",
+        "rel",
+        "from_line",
+        "to_line",
+        "from_byte",
+        "to_byte",
+        "entry_count",
+        "token_count",
+        "bytes",
+        "sha256",
+        "mtime_ns",
+        "ctime_ns",
+        "sealed"
+      ],
+      "properties": {
+        "format": {"enum": ["sharded_postings_v1", "legacy_monolith_v2_link"]},
+        "ordinal": {"type": "integer", "minimum": 0},
+        "rel": {"type": "string", "minLength": 1},
+        "from_line": {"type": "integer", "minimum": 1},
+        "to_line": {"type": "integer", "minimum": 1},
+        "from_byte": {"type": "integer", "minimum": 0},
+        "to_byte": {"type": "integer", "minimum": 1},
+        "entry_count": {"type": "integer", "minimum": 1},
+        "token_count": {"type": "integer", "minimum": 0},
+        "token_filter": {
+          "type": "object",
+          "required": [
+            "algorithm",
+            "bit_count",
+            "hash_count",
+            "encoded_bits",
+            "false_negative_contract"
+          ],
+          "properties": {
+            "algorithm": {"const": "sha256_double_hash_bloom_v1"},
+            "bit_count": {"type": "integer", "minimum": 1024, "maximum": 1048576},
+            "hash_count": {"type": "integer", "minimum": 1, "maximum": 16},
+            "encoded_bits": {"type": "string", "minLength": 1},
+            "false_negative_contract": {"const": "none_for_writer_emitted_tokens"}
+          },
+          "additionalProperties": false
+        },
+        "bytes": {"type": "integer", "minimum": 1},
+        "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "mtime_ns": {"type": "integer", "minimum": 0},
+        "ctime_ns": {"type": "integer", "minimum": 0},
+        "sealed": {"type": "boolean"},
+        "predecessor_generation_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"format": {"const": "sharded_postings_v1"}},
+            "required": ["format"]
+          },
+          "then": {"required": ["token_filter"]}
+        }
+      ],
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

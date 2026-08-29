@@ -14,12 +14,15 @@
 | explicit skill selection is laundered into payload load or invocation | `selected` remains distinct; `loaded` requires a separate producer runtime receipt and neither state proves `invoked` |
 | a parallel tool result is attached to the wrong skill event | source, observed, and rejected correlation ids remain visible and foreign results stay in a separate bounded rejection bucket |
 | compact MCP output drops the admission or freshness reason and makes a candidate look answerable | usage-chain compaction preserves lifecycle, answer admission, compact generations, global/scoped freshness, boundedness, refs, rejections, insufficiency, and next route |
+| MCP applies literal search to a current-state, negative, temporal, causal, or quantitative question and makes historical navigation look answerable | the common memory-query-plan tool transports the producer-owned claim shape, first route, answer admission, insufficiency, and handoff without MCP-local reconstruction |
+| a query-plan maintenance or current-owner handoff becomes an implicit MCP side effect | the tool remains read-only; handoffs are returned as packets and are never executed by the access plane |
 | a legacy, foreign, or internally corrupted entity-registry snapshot is treated as a resolved identity | MCP requires schema v2, matching generation-policy and producer digests, and a source fingerprint that recomputes from the snapshot entries; incompatible snapshots remain `stale-readable`, preserve candidates for navigation, and reject identity admission |
 | a self-consistent but old entity-registry snapshot is treated as current owner/runtime state | snapshot identity admission is explicitly scoped to the persisted generation; current repository, installation, registration, and runtime claims remain rejected until the returned owner/runtime route is checked |
 | registry compaction destructively merges two implementations or drops correction provenance | compact entries preserve bounded candidate IDs, roles, fingerprints, source refs, collision state, and historical/current status; MCP never resolves the collision |
 | loopback HTTP widens the caller surface beyond stdio | stdio remains the portable default; optional HTTP rejects non-loopback binds and requires the source-owned bearer credential under `ABYSS-STACK-D-0077` |
 | bearer value leaks into source, config, or diagnostics | systemd uses `LoadCredential`, Codex config stores only `bearer_token_env_var`, and preflight reports availability without the value |
 | arbitrary file read through route resources | resources resolve fixed URI shapes and `.aoa` map/session roots only |
+| a session selector, registry path, or symlink escapes the archive | session directories are canonicalized under `.aoa/sessions`; session files and raw-line refs fail closed before reading, and rehydrate receives only a validated session-directory name |
 | Codex treats an unannotated evidence read as a side-effecting MCP call | every tool advertises exact closed-world read-only, non-destructive, idempotent annotations and package validation rejects missing or contradictory metadata |
 
 ## Trust Boundary
