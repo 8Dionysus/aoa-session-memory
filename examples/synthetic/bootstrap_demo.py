@@ -12,8 +12,8 @@ from pathlib import Path
 from typing import Any
 
 
-SESSION_ID = "builder-week-synthetic-demo"
-FIXTURE_NAME = "rollout-builder-week-demo.jsonl"
+SESSION_ID = "synthetic-session-demo"
+FIXTURE_NAME = "rollout-synthetic-demo.jsonl"
 
 
 def sha256(path: Path) -> str:

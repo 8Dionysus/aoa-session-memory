@@ -308,33 +308,11 @@ assessment.
 The same approach can be applied to tools, MCP servers, errors, decisions,
 workflows, and recurring development patterns.
 
-## Built during OpenAI Build Week
-
-`aoa-session-memory` began before OpenAI Build Week. During the submission
-period, it was substantially extended and prepared as a portable developer tool.
-
-The Build Week work included:
-
-- stronger exact, semantic, temporal, and graph retrieval
-- evidence-backed skill-use and consequence tracking
-- generation-aware freshness and maintenance
-- a semantic skill system with typed capability relationships
-- progressive skill disclosure and task-local routing
-- a public-safe behavioral sandbox
-- a deterministic read-only MCP package and synthetic protocol demo
-- portable installation, validation, export, and Codex grounding
-- stronger privacy and public-safety boundaries
-- a reproducible procedure for reviewing skill-use evidence
-
-The main submission-period development is preserved in pull requests
-[#59](https://github.com/8Dionysus/aoa-session-memory/pull/59) through
-[#62](https://github.com/8Dionysus/aoa-session-memory/pull/62).
-
 ## How Codex and GPT-5.6 were used
 
 I built `aoa-session-memory` in close collaboration with Codex. Earlier parts
 of the project were developed with GPT-5.5, while most of the current
-architecture and the Build Week work were completed with GPT-5.6 Sol.
+architecture was completed with GPT-5.6 Sol.
 
 Our work took place through long, iterative Codex sessions. We would move from
 an architectural idea to implementation, test it, inspect what failed, and
