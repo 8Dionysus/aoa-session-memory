@@ -90251,8 +90251,15 @@ def test_auto_maintenance_hands_off_deferred_live_after_quiet_window(tmp_path: P
     assert current["ok"] is True
     assert current["providers"]["portable_sqlite"]["freshness"]["status"] == "current"
     after = module.session_memory_maintenance_status(workspace_root=workspace, aoa_root=aoa_root, include_timers=False)
-    assert after["recommendation"] == "use_graph_search"
-    assert after["agent_route"]["action"] == "use_graph_search"
+    # The search projection is current, but the outbox still needs a
+    # receipt-bearing consumer reconciliation before this source can be
+    # released as fully converged.  Search availability and lifecycle
+    # closure are intentionally separate claims.
+    assert after["recommendation"] == "run_maintenance"
+    assert after["agent_route"]["action"] == "run_maintenance_before_graph_search"
+    assert after["next_actions"][0]["id"] == "dispatch_session_freshness_obligation"
+    assert after["next_actions"][0]["route_kind"] == "session_projection_freshness_obligation"
+    assert after["automatic_retry"]["freshness_obligation_due_count"] == 1
     assert after["agent_route"]["live_catchup_pending"] is False
     assert after["live_tail"]["status"] == "none"
 
