@@ -1,9 +1,5 @@
 # Stats AGENTS.md
 
-## Applies to
-
-This card applies to `stats/` and all descendants.
-
 ## Role
 
 `stats/` is the owner-local measurement port for the portable session-memory
@@ -14,13 +10,14 @@ It does not own raw sessions, reviewed memory, retrieval truth, eval verdicts,
 runtime maintenance, MCP behavior, user assessment, or cross-repository
 aggregation.
 
-## Read before editing
+## Task routes
 
-1. Root `AGENTS.md`, `DESIGN.md`, `PIPELINE.md`, and `READINESS.md`.
-2. This district's `README.md` and `port.manifest.json`.
-3. The source corpus, fixture contract, and executable consumer named by the
-   measurement.
-4. The central `aoa-stats` measurement and local-port contracts.
+The root card is inherited. Open only:
+
+- question semantics: `README.md` and `port.manifest.json`;
+- packet refresh: the manifest, named source/fixture/consumer, and central
+  `aoa-stats` contract;
+- design, lifecycle, or readiness: the relevant root-document section.
 
 ## Boundaries
 

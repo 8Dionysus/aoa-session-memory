@@ -4,23 +4,18 @@
 
 This directory is the archive district for preserved Codex sessions.
 
-It contains generated archive-local navigation plus one directory per
-session. Do not treat a raw filesystem listing as the route. Start from
-this card, then use the generated indexes and session-local cards.
+It contains generated navigation plus one directory per session. Do not use a
+raw filesystem listing as the route.
 
-## Read Order
+## Task Routes
 
-1. `AGENTS.md`
-2. `INDEX.md`
-3. `../SESSION_NAMES.md`
-4. `../session-registry.json`
-5. `<session>/AGENTS.md`
-6. `<session>/SESSION.md`
-7. `<session>/session.manifest.json`
-8. `<session>/session.index.json`
-9. `<session>/segments/*.index.json` before opening segment Markdown
-10. `<session>/raw/session.raw.jsonl` only for exact verification,
-    recovery, or durable evidence anchors
+- Orientation: `INDEX.md` or `../SESSION_NAMES.md`.
+- Known session: its `AGENTS.md`, then `session.index.json`.
+- Identity/status: `session.manifest.json`; reviewed brief: `SESSION.md`.
+- Exact expansion: the relevant segment index before Markdown; raw JSONL only
+  for exact verification, recovery, or durable evidence anchors.
+
+Do not bulk-open archive maps or raw evidence.
 
 ## Authority
 

@@ -1,10 +1,5 @@
 # AGENTS.md
 
-## Applies to
-
-This card applies to `docs/decisions/` and the durable decision records inside
-it.
-
 ## Role
 
 Decision records preserve why durable archive, projection, query-route,
@@ -14,15 +9,13 @@ were made in `aoa-session-memory`.
 They do not make current behavior by themselves. Current behavior remains in
 the owning source, schema, configuration, route, and pipeline surfaces.
 
-## Read before editing
+## Task routes
 
-Read:
+The root card is inherited; do not reread it.
 
-1. repository root `AGENTS.md`;
-2. `docs/decisions/README.md`;
-3. `docs/decisions/TEMPLATE.md`;
-4. the nearest existing decision for the same projection or guard;
-5. the source surface whose rationale the decision records.
+- Author or supersede: `TEMPLATE.md`, nearest accepted decision, owning source.
+- Repair indexes: source record and `scripts/generate_decision_indexes.py`.
+- Human orientation: `README.md`, then source; indexes are navigation.
 
 ## Boundaries
 

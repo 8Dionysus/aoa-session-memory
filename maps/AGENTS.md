@@ -1,11 +1,9 @@
 # Maps AGENTS.md
 
-## Purpose
+## Role
 
-This directory is the source-owned skeleton for the agent atlas.
-
-The atlas gives low-context agents a small, convex route surface before they
-open heavy session archives, generated indexes, or raw JSONL evidence.
+Source-owned skeleton for the agent atlas: a small route surface before heavy
+session archives, generated indexes, or raw JSONL evidence.
 
 ## Authority
 
@@ -29,11 +27,9 @@ open heavy session archives, generated indexes, or raw JSONL evidence.
 - Keep local AoA/Tree of Sophia overlays out of the portable atlas unless the
   signal is generated from the installed workspace.
 
-## Read Order
+## Task Routes
 
-1. `START.md`
-2. `README.md`
-3. `../DESIGN.AGENTS.md`
-4. `../PIPELINE.md`
-5. `../NAMING.md` when session names or phase/topic maps are involved
-6. The relevant `by-*/` axis before opening a session archive
+Open only: `START.md` plus the relevant axis README for orientation; `README.md`,
+`../config/atlas-policy.json`, and the template for shape; or the relevant part
+of `../DESIGN.AGENTS.md`, `../PIPELINE.md`, or `../NAMING.md` for semantics. Do
+not open all root documents or axes.
