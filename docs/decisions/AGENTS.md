@@ -43,11 +43,7 @@ decision with explicit supersession metadata and prose.
 
 After adding or editing decision metadata, run:
 
-```bash
-python3 scripts/generate_decision_indexes.py
-python3 scripts/generate_decision_indexes.py --check
-git diff --check
-```
+Run `../../VALIDATION.md#decisions` on demand.
 
 Also run the owner checks for every source, export, query, projection, or
 orchestration surface changed by the decision.

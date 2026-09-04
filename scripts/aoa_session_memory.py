@@ -36671,17 +36671,22 @@ def write_session_agents(session_dir: Path) -> None:
     path.write_text(
         """# AGENTS.md
 
-## Session-local instructions
+## Session-local route
 
-This folder contains one Codex session archive.
+This folder contains one generated session archive. Start with
+`session.index.json`; it is the compact route to available evidence and
+projections, not reviewed truth.
 
-Always read:
+- Read `session.manifest.json` only when identity, archive status, provenance,
+  or source boundaries matter.
+- Read `SESSION.md` only when a human brief or session overview is needed.
+- For exact evidence, open the relevant `segments/*.index.json` before its
+  Markdown and follow raw refs only as far as the claim requires.
+- Consult root `.aoa/DESIGN.md` only for organ-wide architecture or authority,
+  not as a per-session preload.
 
-1. root `.aoa/DESIGN.md` if available
-2. `SESSION.md`
-3. `session.manifest.json`
-4. the relevant `segments/*.index.json`
-5. only then the relevant `segments/*.md`
+Do not bulk-open the archive or treat this card as a replacement for generated
+indexes and preserved evidence.
 
 ## Rules
 

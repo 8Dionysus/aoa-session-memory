@@ -98235,6 +98235,19 @@ def test_agent_route_cards_preserve_progressive_disclosure(tmp_path: Path) -> No
     assert "## Read Order" not in generated
     assert "Do not bulk-open archive maps or raw evidence" in generated
 
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    module.write_session_agents(session_dir)
+    session_card = (session_dir / "AGENTS.md").read_text(encoding="utf-8")
+    assert "Always read" not in session_card
+    assert "Start with\n`session.index.json`" in session_card
+    assert "only when identity" in session_card
+    assert "only when a human brief" in session_card
+    assert "only for organ-wide architecture" in session_card
+    assert session_card.index("session.index.json") < session_card.index(
+        "session.manifest.json"
+    )
+
 
 def test_install_upgrade_can_render_named_systemd_units_without_activation(
     tmp_path: Path,

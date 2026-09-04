@@ -35,12 +35,5 @@ blast radius.
 
 ## Checks
 
-Run:
-
-```bash
-python3 -m py_compile scripts/aoa_session_memory.py
-python3 scripts/generate_decision_indexes.py --check
-PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider tests/test_session_memory.py
-python3 scripts/aoa_session_memory.py validate --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa
-python3 scripts/aoa_session_memory.py doctor --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa
-```
+Use the applicable root, decisions, and session-memory route from the
+corresponding `VALIDATION.md` file on demand.
