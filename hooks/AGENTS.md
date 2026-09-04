@@ -43,8 +43,4 @@ understanding layer.
 
 Use the narrowest applicable check:
 
-```bash
-python3 scripts/aoa_session_memory.py validate --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa
-python3 scripts/aoa_session_memory.py codex-hooks-status --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa
-python3 scripts/aoa_session_memory.py doctor --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa
-```
+Run `VALIDATION.md` in this directory on demand.

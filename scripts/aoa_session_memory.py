@@ -36671,17 +36671,22 @@ def write_session_agents(session_dir: Path) -> None:
     path.write_text(
         """# AGENTS.md
 
-## Session-local instructions
+## Session-local route
 
-This folder contains one Codex session archive.
+This folder contains one generated session archive. Start with
+`session.index.json`; it is the compact route to available evidence and
+projections, not reviewed truth.
 
-Always read:
+- Read `session.manifest.json` only when identity, archive status, provenance,
+  or source boundaries matter.
+- Read `SESSION.md` only when a human brief or session overview is needed.
+- For exact evidence, open the relevant `segments/*.index.json` before its
+  Markdown and follow raw refs only as far as the claim requires.
+- Consult root `.aoa/DESIGN.md` only for organ-wide architecture or authority,
+  not as a per-session preload.
 
-1. root `.aoa/DESIGN.md` if available
-2. `SESSION.md`
-3. `session.manifest.json`
-4. the relevant `segments/*.index.json`
-5. only then the relevant `segments/*.md`
+Do not bulk-open the archive or treat this card as a replacement for generated
+indexes and preserved evidence.
 
 ## Rules
 
@@ -46413,23 +46418,18 @@ def write_sessions_directory_agents(session_root: Path) -> None:
         "",
         "This directory is the archive district for preserved Codex sessions.",
         "",
-        "It contains generated archive-local navigation plus one directory per",
-        "session. Do not treat a raw filesystem listing as the route. Start from",
-        "this card, then use the generated indexes and session-local cards.",
+        "It contains generated navigation plus one directory per session. Do not use a",
+        "raw filesystem listing as the route.",
         "",
-        "## Read Order",
+        "## Task Routes",
         "",
-        "1. `AGENTS.md`",
-        f"2. `{SESSIONS_INDEX_MARKDOWN}`",
-        "3. `../SESSION_NAMES.md`",
-        "4. `../session-registry.json`",
-        "5. `<session>/AGENTS.md`",
-        f"6. `<session>/{SESSION_INDEX_MARKDOWN}`",
-        "7. `<session>/session.manifest.json`",
-        f"8. `<session>/{SESSION_INDEX_JSON}`",
-        "9. `<session>/segments/*.index.json` before opening segment Markdown",
-        "10. `<session>/raw/session.raw.jsonl` only for exact verification,",
-        "    recovery, or durable evidence anchors",
+        f"- Orientation: `{SESSIONS_INDEX_MARKDOWN}` or `../SESSION_NAMES.md`.",
+        f"- Known session: its `AGENTS.md`, then `{SESSION_INDEX_JSON}`.",
+        f"- Identity/status: `session.manifest.json`; reviewed brief: `{SESSION_INDEX_MARKDOWN}`.",
+        "- Exact expansion: the relevant segment index before Markdown; raw JSONL only",
+        "  for exact verification, recovery, or durable evidence anchors.",
+        "",
+        "Do not bulk-open archive maps or raw evidence.",
         "",
         "## Authority",
         "",

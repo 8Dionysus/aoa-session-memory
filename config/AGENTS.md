@@ -50,7 +50,4 @@ review lanes. They are machine-readable route law, not generated reports.
 
 Run at least:
 
-```bash
-PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider tests/test_session_memory.py
-python3 scripts/aoa_session_memory.py doctor --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa
-```
+Run the applicable root route in `../VALIDATION.md` on demand.

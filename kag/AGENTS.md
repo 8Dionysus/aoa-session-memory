@@ -1,10 +1,5 @@
 # AGENTS.md
 
-## Applies To
-
-This card applies to `aoa-session-memory/kag/` and every nested path until a
-nearer card narrows the lane.
-
 ## Role
 
 `kag/` is the local KAG provider home for the portable session-memory kernel.
@@ -12,11 +7,12 @@ It exposes compact, source-linked records over archive routes, session
 manifests, atlas maps, and validation receipts for `aoa-kag` registry,
 composition, and MCP consumers.
 
-## Read Before Editing
+## Task Routes
 
-Read the root `AGENTS.md`, this card, `kag/README.md`, `kag/manifest.json`,
-`README.md`, `PIPELINE.md`, `READINESS.md`, and
-`schemas/session.manifest.schema.json` before changing provider records.
+The root card is inherited. Open the manifest, changed record, and exact source;
+the named schema or shared `aoa-kag` contract for shape; or only the relevant
+part of `PIPELINE.md`, `READINESS.md`, or `kag/README.md` for wording. The root
+README is not a prerequisite.
 
 ## Owner Split
 
@@ -32,5 +28,5 @@ through the `aoa-kag` local subtree validator.
 
 ## Closeout
 
-Report provider records changed, source-return route changed, owner validation,
-`aoa-kag` validation, and the next MCP consumer route.
+Report changed records/routes, owner and `aoa-kag` validation, and the next MCP
+consumer route.

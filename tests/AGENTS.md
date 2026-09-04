@@ -19,8 +19,4 @@ Tests protect the route mesh from silent drift.
 
 ## Checks
 
-Run:
-
-```bash
-PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider tests/test_session_memory.py
-```
+Use the common on-demand route in `../VALIDATION.md`.

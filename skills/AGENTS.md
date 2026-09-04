@@ -33,10 +33,4 @@ repeatable without turning hooks into heavy interpretation.
 
 Run:
 
-```bash
-PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider tests/test_session_memory.py
-python3 scripts/aoa_session_memory.py doctor \
-  --workspace-root /path/to/workspace \
-  --aoa-root /path/to/workspace/.aoa \
-  --check-user-skill
-```
+Run `VALIDATION.md` in this directory on demand.

@@ -54,7 +54,4 @@ or naming semantics by themselves.
 
 Run:
 
-```bash
-python3 -m py_compile scripts/aoa_session_memory.py
-PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider tests/test_session_memory.py
-```
+Run the common route in `../VALIDATION.md` on demand.

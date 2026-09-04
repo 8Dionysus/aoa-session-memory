@@ -98208,6 +98208,47 @@ def test_install_portable_bundle_creates_clean_target(tmp_path: Path) -> None:
     assert validation["ok"] is True
 
 
+def test_agent_route_cards_preserve_progressive_disclosure(tmp_path: Path) -> None:
+    source_aoa = SCRIPT.parents[1]
+    routed_cards = [
+        "docs/decisions/AGENTS.md",
+        "kag/AGENTS.md",
+        "maps/AGENTS.md",
+        "stats/AGENTS.md",
+    ]
+
+    for relative in routed_cards:
+        text = (source_aoa / relative).read_text(encoding="utf-8")
+        assert "## Task routes" in text or "## Task Routes" in text
+        assert "repository root `AGENTS.md`" not in text
+        assert "Read the root `AGENTS.md`" not in text
+        assert "Root `AGENTS.md`" not in text
+
+    generated_root = tmp_path / "sessions"
+    module.write_sessions_directory_agents(generated_root)
+    generated = (generated_root / module.SESSIONS_AGENTS_MARKDOWN).read_text(
+        encoding="utf-8"
+    )
+    source = (source_aoa / "sessions" / "AGENTS.md").read_text(encoding="utf-8")
+    assert generated == source
+    assert "## Task Routes" in generated
+    assert "## Read Order" not in generated
+    assert "Do not bulk-open archive maps or raw evidence" in generated
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    module.write_session_agents(session_dir)
+    session_card = (session_dir / "AGENTS.md").read_text(encoding="utf-8")
+    assert "Always read" not in session_card
+    assert "Start with\n`session.index.json`" in session_card
+    assert "only when identity" in session_card
+    assert "only when a human brief" in session_card
+    assert "only for organ-wide architecture" in session_card
+    assert session_card.index("session.index.json") < session_card.index(
+        "session.manifest.json"
+    )
+
+
 def test_install_upgrade_can_render_named_systemd_units_without_activation(
     tmp_path: Path,
 ) -> None:
