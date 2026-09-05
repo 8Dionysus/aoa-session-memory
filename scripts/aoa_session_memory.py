@@ -413,8 +413,13 @@ DECLARED_GRAPH_PROJECTION_GENERATION_TRANSITIONS: dict[
     # graph producer range, so the target must be the current generation;
     # retain the immediately preceding integration generation with its exact
     # source snapshot as a declared, source-verified predecessor.
-    "9fc7d5d9fb6a97d4380092d5a56fc3da765f0abe2f7864baecba82ebb04de3c4": (
+    "2fa11c19ef0d5fdab8d63acf43c3f469230fc10e92a13bedd7932145101bec02": (
         {
+            # Index reuse changes execution cost, not registry admission or
+            # graph materialization. Require the exact pre-optimization source.
+            "9fc7d5d9fb6a97d4380092d5a56fc3da765f0abe2f7864baecba82ebb04de3c4": (
+                "0416c082802ae84b4ae13c2d73246646f598480943b7e22fdbc617d6aa3320d7"
+            ),
             # The source immediately before the outbox consumer contract was
             # integrated is the current integration parent.  Its whole-file
             # digest is the admission proof for the prior 73d generation.
