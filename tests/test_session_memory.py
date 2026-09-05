@@ -24110,6 +24110,43 @@ def test_raw_block_storage_maintenance_selects_sealed_prefix_and_resumes(
     assert open_plain_path.exists()
     assert hashlib.sha256(open_plain_path.read_bytes()).hexdigest() == open_plain_sha
 
+    state_after_first = module.read_json(
+        module.raw_block_storage_maintenance_state_path(aoa_root),
+        {},
+    )
+    first_block_cursor = state_after_first["block_cursors"][
+        "storage-prefix"
+    ]
+    monkeypatch.setattr(
+        module,
+        "atomic_publish_session_projection",
+        fail_publish,
+    )
+    failed_after_cursor = module.raw_block_storage_maintenance(
+        aoa_root=aoa_root,
+        target="all",
+        limit=1,
+        scan_limit=1,
+        max_plain_bytes=cap,
+        closed_only=False,
+        apply=True,
+        confirm_remove_plain=True,
+    )
+    assert failed_after_cursor["ok"] is False
+    assert failed_after_cursor["block_cursor_committed"] is False
+    assert failed_after_cursor["block_cursor_before"][
+        "storage-prefix"
+    ] == first_block_cursor
+    assert module.read_json(
+        module.raw_block_storage_maintenance_state_path(aoa_root),
+        {},
+    )["block_cursors"]["storage-prefix"] == first_block_cursor
+    monkeypatch.setattr(
+        module,
+        "atomic_publish_session_projection",
+        original_atomic_publish,
+    )
+
     second = module.raw_block_storage_maintenance(
         aoa_root=aoa_root,
         target="all",
