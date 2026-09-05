@@ -140,7 +140,9 @@ python3 -m venv /tmp/aoa-session-memory-venv
 ### Run the standalone behavioral sandbox
 
 ```bash
-/tmp/aoa-session-memory-venv/bin/python -m pytest -q -p no:cacheprovider \
+env -u PYTHONDONTWRITEBYTECODE \
+  PYTHONPYCACHEPREFIX="${PYTHONPYCACHEPREFIX:-${TMPDIR:-/tmp}/aoa-session-memory-pycache}" \
+  /tmp/aoa-session-memory-venv/bin/python -m pytest -q -p no:cacheprovider \
   tests/test_skill_behavioral_sandbox.py \
   -k "not route-global-owner-cli"
 ```
@@ -158,7 +160,9 @@ A successful run exits with status `0`.
 ### Run the portable source suite
 
 ```bash
-/tmp/aoa-session-memory-venv/bin/python -m pytest -q -p no:cacheprovider \
+env -u PYTHONDONTWRITEBYTECODE \
+  PYTHONPYCACHEPREFIX="${PYTHONPYCACHEPREFIX:-${TMPDIR:-/tmp}/aoa-session-memory-pycache}" \
+  /tmp/aoa-session-memory-venv/bin/python -m pytest -q -p no:cacheprovider \
   tests/test_session_memory.py \
   tests/test_public_tree_audit.py \
   tests/test_git_history_audit.py
@@ -169,6 +173,18 @@ not claim that a model independently selected the best skill or that a skill
 improved performance. Those questions require live evidence and a separate eval.
 The complete skill-router integration suite uses a pinned `aoa-skills` checkout
 and runs in the optional ecosystem workflow; it is not a standalone dependency.
+
+These commands place Python and pytest assertion-rewrite bytecode under the
+external cache prefix rather than in the checkout. Pytest assertion rewriting
+stays enabled. With Python's default timestamp/size invalidation, a changed
+source or test byte length or recorded timestamp normally causes recompilation.
+The standard `.pyc` timestamp is stored with one-second precision, so a
+rapid same-size edit within the same timestamp second can reuse stale bytecode
+even when the filesystem `st_mtime_ns` changed; preserving both stored fields
+has the same limit. Rotate or clear the external prefix when metadata-
+preserving or rapid same-second edits are possible. CI uses a fresh
+`runner.temp` prefix per job. Set `PYTHONPYCACHEPREFIX` explicitly when a
+different external cache location is preferred.
 
 ## Public Goal catalog
 

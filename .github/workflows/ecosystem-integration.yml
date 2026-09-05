@@ -50,6 +50,9 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Configure external Python bytecode cache
+        run: echo "PYTHONPYCACHEPREFIX=$RUNNER_TEMP/aoa-session-memory-pycache" >> "$GITHUB_ENV"
+
       - name: Install ecosystem test dependencies
         run: >-
           python -m pip install --disable-pip-version-check
@@ -66,17 +69,15 @@ jobs:
 
       - name: Check owner-local capability contract and generated parity
         run: >-
-          PYTHONDONTWRITEBYTECODE=1
           python scripts/validate_local_capability_port.py --check-generated
 
       - name: Check owner-local eval port and execution sidecars
         run: >-
-          PYTHONDONTWRITEBYTECODE=1
           python "$AOA_EVALS_ROOT/scripts/validate_local_eval_port.py"
           --target-root "$GITHUB_WORKSPACE"
 
       - name: Run owner-coupled skill tests
         run: >-
-          PYTHONDONTWRITEBYTECODE=1 python -m pytest -q -p no:cacheprovider
+          python -m pytest -q -p no:cacheprovider
           tests/test_skill_system.py
           tests/test_skill_behavioral_sandbox.py
