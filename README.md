@@ -177,10 +177,12 @@ and runs in the optional ecosystem workflow; it is not a standalone dependency.
 These commands place Python and pytest assertion-rewrite bytecode under the
 external cache prefix rather than in the checkout. Pytest assertion rewriting
 stays enabled. With Python's default timestamp/size invalidation, a changed
-source or test `mtime` or byte length causes recompilation; this is not a
-content hash, so a same-size edit that preserves both metadata fields can
-reuse stale bytecode. Rotate or clear the external prefix (or use hash-based
-invalidation) when metadata-preserving edits are possible. CI uses a fresh
+source or test byte length or recorded timestamp normally causes recompilation.
+The standard `.pyc` timestamp is stored with one-second precision, so a
+rapid same-size edit within the same timestamp second can reuse stale bytecode
+even when the filesystem `st_mtime_ns` changed; preserving both stored fields
+has the same limit. Rotate or clear the external prefix when metadata-
+preserving or rapid same-second edits are possible. CI uses a fresh
 `runner.temp` prefix per job. Set `PYTHONPYCACHEPREFIX` explicitly when a
 different external cache location is preferred.
 
