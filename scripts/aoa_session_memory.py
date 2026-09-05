@@ -943,6 +943,8 @@ RAW_BLOCK_STORAGE_MAINTENANCE_DEFAULT_SCAN_LIMIT = 8
 RAW_BLOCK_STORAGE_MAINTENANCE_MAX_SCAN_LIMIT = 32
 RAW_BLOCK_STORAGE_MAINTENANCE_DEFAULT_SESSION_LIMIT = 1
 RAW_BLOCK_STORAGE_MAINTENANCE_MAX_SESSION_LIMIT = 4
+RAW_BLOCK_STORAGE_MAINTENANCE_DEFAULT_PLAIN_BYTES = 1 * 1024 * 1024 * 1024
+RAW_BLOCK_STORAGE_MAINTENANCE_MAX_PLAIN_BYTES = 1 * 1024 * 1024 * 1024
 CONVERSATION_ACT_SCHEMA_VERSION = 4
 SESSION_ACT_SCHEMA_VERSION = 3
 AGENT_EVENT_SCHEMA_VERSION = 3
@@ -13243,12 +13245,7 @@ def raw_block_storage_projection_stale_reasons(
 
 def raw_block_storage_validation_drift_allowed(reason: Any) -> bool:
     value = str(reason or "")
-    return bool(
-        value in RAW_BLOCK_STORAGE_ALLOWED_VALIDATION_DRIFT_REASONS
-        or value.startswith(
-            "generation_migration_transition_target_mismatch:"
-        )
-    )
+    return value in RAW_BLOCK_STORAGE_ALLOWED_VALIDATION_DRIFT_REASONS
 
 
 def compact_signal_detail(value: Any, *, max_chars: int = 240) -> str:
@@ -35945,31 +35942,59 @@ def validate_staged_session_projection(
                             "staged_compressed_raw_block_payload_mismatch:"
                             f"{block_id}"
                         )
-    classification_cache_root = (
-        event_classification_cache_root(stage_dir)
+    classification_cache_root = event_classification_cache_root(stage_dir)
+    classification_cache_index_path = (
+        event_classification_cache_index_path(classification_cache_root)
+    )
+    classification_cache_index_present = (
+        classification_cache_index_path.is_file()
     )
     classification_cache_index = read_json(
-        event_classification_cache_index_path(
-            classification_cache_root
-        ),
+        classification_cache_index_path,
         {},
     )
     expected_classification_generation = (
         event_classification_generation_identity()
     )
+    classification_cache_index_structurally_valid = bool(
+        classification_cache_root.is_dir()
+        and classification_cache_index_present
+        and isinstance(classification_cache_index, dict)
+        and isinstance(
+            classification_cache_index.get("generation_identity"),
+            dict,
+        )
+        and classification_cache_index.get("generation_identity")
+        and isinstance(
+            classification_cache_index.get("blocks"),
+            dict,
+        )
+        and bool(
+            str(
+                classification_cache_index.get("records_root_sha256")
+                or ""
+            )
+        )
+    )
+    if classification_cache_root.exists() and not (
+        classification_cache_index_structurally_valid
+    ):
+        diagnostics.append("classification_cache_index_invalid")
     classification_cache_generation_current = bool(
-        isinstance(classification_cache_index, dict)
+        classification_cache_index_structurally_valid
         and classification_cache_index.get(
             "generation_identity"
         )
         == expected_classification_generation
     )
-    if classification_cache_root.exists() and not classification_cache_generation_current:
+    if (
+        classification_cache_root.exists()
+        and classification_cache_index_structurally_valid
+        and not classification_cache_generation_current
+    ):
         if not storage_only:
             diagnostics.append("classification_cache_generation_mismatch")
-    if classification_cache_root.exists() and isinstance(
-        classification_cache_index, dict
-    ):
+    if classification_cache_index_structurally_valid:
         classification_records = (
             classification_cache_index.get("blocks")
             if isinstance(
@@ -216868,6 +216893,10 @@ def command_raw_block_storage_compact(args: argparse.Namespace) -> int:
                 target=args.session,
                 limit=args.limit,
                 scan_limit=getattr(args, "scan_limit", None),
+                max_plain_bytes=getattr(args, "max_plain_bytes", None),
+                closed_only=not bool(
+                    getattr(args, "include_open_tail", False)
+                ),
                 apply=args.apply,
                 confirm_remove_plain=args.confirm_remove_plain,
                 estimate_compression=args.estimate_compression,
@@ -221552,6 +221581,7 @@ def raw_block_storage_eligibility(
     sealed_only: bool = True,
     closed_only: bool = False,
     probe_locks: bool = True,
+    ignored_locks: Iterable[str] | None = None,
 ) -> dict[str, Any]:
     """Admit one bounded raw-block storage candidate fail-closed.
 
@@ -221765,6 +221795,11 @@ def raw_block_storage_eligibility(
     else:
         result["guards"]["capture_mode"] = capture_mode or "legacy_snapshot"
 
+    ignored_lock_names = {
+        str(item)
+        for item in (ignored_locks or [])
+        if str(item)
+    }
     if probe_locks:
         for lock_name, lock_path in (
             (
@@ -221777,6 +221812,8 @@ def raw_block_storage_eligibility(
             ),
             ("capture", session_dir / "raw" / ".capture.lock"),
         ):
+            if lock_name in ignored_lock_names:
+                continue
             if lock_name == "projection_publish":
                 probe = {
                     "status": "held"
@@ -221799,6 +221836,7 @@ def raw_block_storage_eligibility(
         return reject("raw_blocks_missing")
     statuses: Counter[str] = Counter()
     plain_blocks: list[dict[str, Any]] = []
+    open_block_ids: list[str] = []
     for block in blocks:
         status = str(block.get("status") or "unknown")
         statuses[status] += 1
@@ -221806,6 +221844,7 @@ def raw_block_storage_eligibility(
             result["sealed_block_count"] += 1
         elif status == "open":
             result["open_block_count"] += 1
+            open_block_ids.append(str(block.get("block_id") or ""))
         elif sealed_only:
             return reject(f"raw_block_status_unrecognized:{status}")
         plain_path = raw_block_plain_path(session_dir, block)
@@ -221821,6 +221860,9 @@ def raw_block_storage_eligibility(
         result["plain_block_count"] += 1
         result["plain_bytes"] += plain_bytes
     result["guards"]["block_status_counts"] = dict(sorted(statuses.items()))
+    result["guards"]["open_block_ids"] = [
+        item for item in open_block_ids if item
+    ]
     if closed_only and result["open_block_count"]:
         return reject("open_raw_block_present")
     if sealed_only and result["sealed_block_count"] == 0:
@@ -222218,7 +222260,8 @@ def raw_block_storage_compact(
                     deferred_live_lookup=deferred_live_lookup,
                     sealed_only=sealed_only,
                     closed_only=closed_only,
-                    probe_locks=False,
+                    probe_locks=True,
+                    ignored_locks={"projection_build"},
                 )
                 if current_eligibility.get("eligible") is not True:
                     raise ValueError(
@@ -222468,7 +222511,8 @@ def raw_block_storage_compact(
                     deferred_live_lookup=deferred_live_lookup,
                     sealed_only=sealed_only,
                     closed_only=closed_only,
-                    probe_locks=False,
+                    probe_locks=True,
+                    ignored_locks={"projection_build"},
                 )
                 if current_eligibility.get("eligible") is not True:
                     raise ValueError(
@@ -222840,6 +222884,11 @@ def raw_block_storage_maintenance_markdown(payload: dict[str, Any]) -> str:
         f"- cursor_committed: {payload.get('cursor_committed')}",
         f"- scanned_count: {payload.get('scanned_count')}",
         f"- selected_count: {payload.get('selected_count')}",
+        f"- closed_only: {payload.get('closed_only')}",
+        f"- max_plain_bytes: {payload.get('max_plain_bytes')}",
+        f"- eligible_plain_bytes: {payload.get('eligible_plain_bytes_human')}",
+        f"- selected_plain_bytes: {payload.get('selected_plain_bytes_human')}",
+        f"- estimated_compressed_bytes: {payload.get('estimated_compressed_bytes_human')}",
         f"- stop_line: {payload.get('stop_line')}",
         "",
         "## Scanned Candidates",
@@ -222874,6 +222923,8 @@ def raw_block_storage_maintenance(
     target: str = "all",
     limit: int | None = None,
     scan_limit: int | None = None,
+    max_plain_bytes: int | None = None,
+    closed_only: bool = True,
     apply: bool = False,
     confirm_remove_plain: bool = False,
     estimate_compression: bool = False,
@@ -222881,7 +222932,13 @@ def raw_block_storage_maintenance(
     sample_limit: int = 80,
     write_report: bool = False,
 ) -> dict[str, Any]:
-    """Run a bounded owner cursor over closed, sealed raw-block sessions."""
+    """Run a bounded owner cursor over sealed raw-block sessions.
+
+    ``closed_only`` defaults to true for the conservative scheduler lane.
+    An explicit false value admits only sealed blocks from a session with an
+    open tail; the open block remains untouched and all capture/source guards
+    are still rechecked by the existing compact writer.
+    """
     now = utc_now()
     diagnostics: list[str] = []
     if target != "all":
@@ -222897,6 +222954,12 @@ def raw_block_storage_maintenance(
             "apply": bool(apply),
             "target": target,
             "status": "blocked",
+            "max_plain_bytes": (
+                RAW_BLOCK_STORAGE_MAINTENANCE_DEFAULT_PLAIN_BYTES
+                if max_plain_bytes is None
+                else int_value(max_plain_bytes)
+            ),
+            "closed_only": bool(closed_only),
             "cursor_before": "",
             "cursor_after": "",
             "cursor_committed": False,
@@ -222939,6 +223002,18 @@ def raw_block_storage_maintenance(
             RAW_BLOCK_STORAGE_MAINTENANCE_MAX_SCAN_LIMIT,
         ),
     )
+    requested_plain_bytes = (
+        RAW_BLOCK_STORAGE_MAINTENANCE_DEFAULT_PLAIN_BYTES
+        if max_plain_bytes is None
+        else int_value(max_plain_bytes)
+    )
+    effective_plain_bytes = max(
+        1,
+        min(
+            requested_plain_bytes,
+            RAW_BLOCK_STORAGE_MAINTENANCE_MAX_PLAIN_BYTES,
+        ),
+    )
     state = read_raw_block_storage_maintenance_state(aoa_root)
     cursor_before = str(state.get("cursor") or "")
     records = registry_sessions(aoa_root)
@@ -222952,19 +223027,45 @@ def raw_block_storage_maintenance(
     diagnostics.extend(deferred_live_diagnostics)
     scanned: list[dict[str, Any]] = []
     selected_records: list[dict[str, Any]] = []
+    eligible_plain_bytes = 0
+    selected_plain_bytes = 0
+    selection_skips: list[dict[str, Any]] = []
     for record in rotated[:effective_scan_limit]:
         eligibility = raw_block_storage_eligibility(
             aoa_root=aoa_root,
             record=record,
             deferred_live_lookup=deferred_live_lookup,
             sealed_only=True,
-            closed_only=True,
+            closed_only=closed_only,
         )
         scanned.append(eligibility)
-        if eligibility.get("eligible") is True:
-            selected_records.append(record)
-            if len(selected_records) >= effective_session_limit:
-                break
+        if eligibility.get("eligible") is not True:
+            continue
+        candidate_plain_bytes = int_value(eligibility.get("plain_bytes"))
+        eligible_plain_bytes += candidate_plain_bytes
+        if (
+            candidate_plain_bytes > effective_plain_bytes
+            or selected_plain_bytes + candidate_plain_bytes
+            > effective_plain_bytes
+        ):
+            eligibility["selection_status"] = "skipped_plain_byte_limit"
+            eligibility["reasons"] = unique_preserving_order(
+                [
+                    *(
+                        eligibility.get("reasons")
+                        if isinstance(eligibility.get("reasons"), list)
+                        else []
+                    ),
+                    "plain_byte_limit_exceeded",
+                ]
+            )
+            selection_skips.append(eligibility)
+            continue
+        selected_records.append(record)
+        selected_plain_bytes += candidate_plain_bytes
+        eligibility["selection_status"] = "selected"
+        if len(selected_records) >= effective_session_limit:
+            break
     cursor_after = (
         session_record_key(scanned[-1])
         if scanned
@@ -222983,7 +223084,7 @@ def raw_block_storage_maintenance(
         sample_limit=sample_limit,
         write_report=False,
         sealed_only=True,
-        closed_only=True,
+        closed_only=closed_only,
         selected_records_override=selected_records,
     )
     diagnostics.extend(
@@ -223029,7 +223130,11 @@ def raw_block_storage_maintenance(
             "retention": {
                 "raw_transcript": "retained",
                 "stable_plain_refs": "retained_as_plain_rel",
-                "open_blocks": "never_selected",
+                "open_blocks": (
+                    "never_selected"
+                    if closed_only
+                    else "sealed_only_open_tail_preserved"
+                ),
                 "plain_removal": (
                     "explicit_confirm_remove_plain_only"
                 ),
@@ -223077,6 +223182,8 @@ def raw_block_storage_maintenance(
         "status": status,
         "scan_limit": effective_scan_limit,
         "session_limit": effective_session_limit,
+        "max_plain_bytes": effective_plain_bytes,
+        "closed_only": bool(closed_only),
         "cursor_before": cursor_before,
         "cursor_after": cursor_after,
         "cursor_committed": cursor_committed,
@@ -223086,6 +223193,21 @@ def raw_block_storage_maintenance(
             str(record.get("session_id") or "")
             for record in selected_records
         ],
+        "eligible_plain_bytes": eligible_plain_bytes,
+        "eligible_plain_bytes_human": human_size(eligible_plain_bytes),
+        "selected_plain_bytes": selected_plain_bytes,
+        "selected_plain_bytes_human": human_size(selected_plain_bytes),
+        "estimated_compressed_bytes": (
+            int_value(compact.get("compressed_bytes"))
+            if estimate_compression
+            else 0
+        ),
+        "estimated_compressed_bytes_human": human_size(
+            int_value(compact.get("compressed_bytes"))
+            if estimate_compression
+            else 0
+        ),
+        "selection_skips": selection_skips,
         "scanned": scanned,
         "compact": compact,
         "diagnostics": unique_preserving_order(diagnostics),
@@ -223093,13 +223215,18 @@ def raw_block_storage_maintenance(
         "retention": {
             "raw_transcript": "retained",
             "stable_plain_refs": "retained_as_plain_rel",
-            "open_blocks": "never_selected",
+            "open_blocks": (
+                "never_selected"
+                if closed_only
+                else "sealed_only_open_tail_preserved"
+            ),
             "plain_removal": "explicit_confirm_remove_plain_only",
         },
         "stop_line": (
-            "This bounded owner cursor selects only indexed closed sessions "
-            "with current capture/generation guards and sealed plaintext "
-            "blocks; raw/session.raw.jsonl remains authoritative."
+            "This bounded owner cursor selects only indexed sessions with "
+            "current capture/generation guards and sealed plaintext blocks; "
+            "open blocks remain untouched and raw/session.raw.jsonl remains "
+            "authoritative."
         ),
     }
     if write_report:
@@ -228102,6 +228229,22 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Maximum registry candidates examined by --scheduled "
             f"(hard-capped at {RAW_BLOCK_STORAGE_MAINTENANCE_MAX_SCAN_LIMIT})."
+        ),
+    )
+    raw_block_storage_compact_parser.add_argument(
+        "--max-plain-bytes",
+        type=int,
+        help=(
+            "Plain sealed bytes per --scheduled run; default and hard cap "
+            f"are {RAW_BLOCK_STORAGE_MAINTENANCE_MAX_PLAIN_BYTES} bytes."
+        ),
+    )
+    raw_block_storage_compact_parser.add_argument(
+        "--include-open-tail",
+        action="store_true",
+        help=(
+            "In --scheduled mode, admit sealed blocks from sessions with an "
+            "open tail; the open block remains untouched."
         ),
     )
     raw_block_storage_compact_parser.add_argument("--sample-limit", type=int, default=80, help="Maximum pre/post raw-block ref-audit samples.")

@@ -23435,6 +23435,94 @@ def test_raw_block_storage_eligibility_allows_historical_generation_drift(
     assert rejected["reasons"] == ["projection_generation_not_current"]
 
 
+def test_raw_block_storage_validation_keeps_unknown_drift_and_bad_cache_hard(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "raw-block-storage-validation-guards.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-05-12T00:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "storage-validation-guards",
+                    "cwd": str(workspace),
+                },
+            },
+            {
+                "timestamp": "2026-05-12T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Keep storage validation fail-closed.",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    receipt = module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "storage-validation-guards",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    session_dir = Path(str(receipt["session_dir"]))
+    manifest = module.read_json(
+        session_dir / "session.manifest.json",
+        {},
+    )
+    publish_identity = manifest["index_schema"]["projection_publish"]
+    stage_dir = module.stage_existing_session_projection(session_dir)
+    cache_root = module.event_classification_cache_root(stage_dir)
+    cache_index_path = module.event_classification_cache_index_path(
+        cache_root
+    )
+    try:
+        cache_root.mkdir(parents=True)
+        missing = module.validate_staged_session_projection(
+            stage_dir=stage_dir,
+            session_dir=session_dir,
+            publish_identity=publish_identity,
+            storage_only=True,
+        )
+        assert missing["ok"] is False
+        assert "classification_cache_index_invalid" in missing["diagnostics"]
+
+        cache_index_path.write_text("[]\n", encoding="utf-8")
+        non_dict = module.validate_staged_session_projection(
+            stage_dir=stage_dir,
+            session_dir=session_dir,
+            publish_identity=publish_identity,
+            storage_only=True,
+        )
+        assert non_dict["ok"] is False
+        assert "classification_cache_index_invalid" in non_dict[
+            "diagnostics"
+        ]
+    finally:
+        module.remove_projection_publish_path(stage_dir)
+
+    assert module.raw_block_storage_validation_drift_allowed(
+        "generation_migration_transition_target_mismatch:segment_index"
+    ) is True
+    assert module.raw_block_storage_validation_drift_allowed(
+        "generation_migration_transition_target_mismatch:future_component"
+    ) is False
+
+
 def test_raw_block_storage_maintenance_cursor_is_dry_run_and_resumable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -23499,6 +23587,25 @@ def test_raw_block_storage_maintenance_cursor_is_dry_run_and_resumable(
         }
 
     monkeypatch.setattr(module, "raw_block_storage_compact", fake_compact)
+    byte_plan = module.raw_block_storage_maintenance(
+        aoa_root=aoa_root,
+        target="all",
+        limit=2,
+        scan_limit=2,
+        max_plain_bytes=512,
+        closed_only=False,
+        apply=False,
+    )
+    assert byte_plan["ok"] is True
+    assert byte_plan["closed_only"] is False
+    assert byte_plan["eligible_plain_bytes"] == 1024
+    assert byte_plan["selected_plain_bytes"] == 512
+    assert byte_plan["selected_session_ids"] == ["storage-a"]
+    assert byte_plan["selection_skips"][0]["session_id"] == "storage-b"
+    assert byte_plan["selection_skips"][0]["reasons"] == [
+        "plain_byte_limit_exceeded"
+    ]
+
     dry_run = module.raw_block_storage_maintenance(
         aoa_root=aoa_root,
         target="all",
