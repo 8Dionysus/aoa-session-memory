@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import resource
@@ -14,7 +15,52 @@ import time
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
-import aoa_session_memory as session_memory
+
+session_memory: Any | None = None
+_SESSION_MEMORY_MODULE_NAME = "_aoa_session_memory_benchmark_source"
+
+
+def _session_memory_module() -> Any:
+    """Load the large runtime only for projection benchmark operations."""
+    global session_memory
+    if session_memory is not None:
+        return session_memory
+    source_path = Path(__file__).resolve().with_name(
+        "aoa_session_memory.py"
+    )
+    loaded = sys.modules.get(_SESSION_MEMORY_MODULE_NAME)
+    loaded_path = getattr(loaded, "__file__", None)
+    if (
+        loaded is not None
+        and loaded_path is not None
+        and Path(loaded_path).resolve() == source_path
+    ):
+        session_memory = loaded
+        return session_memory
+    spec = importlib.util.spec_from_file_location(
+        _SESSION_MEMORY_MODULE_NAME,
+        source_path,
+    )
+    if spec is None or spec.loader is None:
+        raise ImportError("aoa session-memory source is unavailable")
+    loaded = importlib.util.module_from_spec(spec)
+    sys.modules[_SESSION_MEMORY_MODULE_NAME] = loaded
+    try:
+        spec.loader.exec_module(loaded)
+    except BaseException:
+        if sys.modules.get(_SESSION_MEMORY_MODULE_NAME) is loaded:
+            sys.modules.pop(_SESSION_MEMORY_MODULE_NAME, None)
+        raise
+    session_memory = loaded
+    return session_memory
+
+
+# ``spawn`` executes the benchmark script as ``__mp_main__`` before it
+# unpickles runtime task functions.  Register the private source module in
+# that bootstrap phase so those functions remain importable without touching
+# a foreign public ``aoa_session_memory`` cache.
+if __name__ == "__mp_main__":
+    _session_memory_module()
 
 
 def write_jsonl(
@@ -125,6 +171,7 @@ def mirror_session(
     transcript: Path,
     session_id: str,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    _session_memory_module()
     usage_before = usage_snapshot()
     cgroup_before = cgroup_memory_snapshot()
     started = time.monotonic()
@@ -253,6 +300,7 @@ def benchmark_live_route_probes(
     session_id: str,
     repetitions: int,
 ) -> dict[str, Any]:
+    _session_memory_module()
     runs: list[dict[str, Any]] = []
     for ordinal in range(max(0, repetitions)):
         unique_token = f"liverouteprobe{ordinal:04d}"
@@ -642,6 +690,7 @@ def benchmark_build(
     record: dict[str, Any],
     workers: int,
 ) -> dict[str, Any]:
+    _session_memory_module()
     session_dir = session_memory.session_dir_from_record(record)
     raw_path = Path(
         session_memory.read_json(
@@ -747,6 +796,7 @@ def benchmark_receipt_base(
     *,
     raw_bytes: int,
 ) -> dict[str, Any]:
+    _session_memory_module()
     source_transcript = bool(args.source_transcript)
     fixture: dict[str, Any] = {
         "synthetic": not source_transcript,
@@ -808,6 +858,7 @@ def write_partial_receipt(
 ) -> None:
     if not args.output:
         return
+    _session_memory_module()
     payload = {
         **benchmark_receipt_base(args, raw_bytes=raw_bytes),
         "ok": False,
@@ -819,6 +870,7 @@ def write_partial_receipt(
 
 
 def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
+    _session_memory_module()
     temp_parent = Path(args.temp_root).resolve() if args.temp_root else None
     if temp_parent is not None:
         temp_parent.mkdir(parents=True, exist_ok=True)
