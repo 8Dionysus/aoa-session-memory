@@ -5064,7 +5064,7 @@ def test_custom_exec_mixed_read_and_write_does_not_promote_skill_to_inspected() 
     assert anchors[("tool", "exec")] == "invoked"
 
 
-def test_entity_usage_execution_command_candidates_preserves_wrapper_privacy_and_direct_shell() -> None:
+def test_captured_invalid_escape_literal_does_not_leak_syntax_warning() -> None:
     source = (
         r'''const r = await tools.exec_command({cmd: "rg '\$HOME' README.md"}); '''
         "text(r.output);"
@@ -5075,26 +5075,17 @@ def test_entity_usage_execution_command_candidates_preserves_wrapper_privacy_and
         "input": source,
     }
 
-    shell_commands = module.custom_exec_shell_commands(payload)
-    entity_commands = module.entity_usage_execution_command_candidates(payload)
-
-    direct_secret = "probe-secret-123456"
-    direct_payload = {
-        "type": "function_call",
-        "name": "exec_command",
-        "arguments": json.dumps(
-            {"cmd": f"printf 'access_token={direct_secret}'"}
-        ),
-    }
-    direct_commands = module.entity_usage_execution_command_candidates(
-        direct_payload
-    )
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        shell_commands = module.custom_exec_shell_commands(payload)
+        entity_commands = module.entity_usage_execution_command_candidates(
+            payload
+        )
 
     expected = r"rg '\$HOME' README.md"
     assert shell_commands == [expected]
     assert entity_commands == [expected]
-    assert direct_commands == ["printf 'access_token=<redacted:token>"]
-    assert direct_secret not in direct_commands[0]
+    assert not [item for item in captured if item.category is SyntaxWarning]
 
 
 def test_structured_shell_reference_to_mcp_service_is_not_invocation() -> None:

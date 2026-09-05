@@ -69,7 +69,7 @@ def test_javascript_custom_exec_parser_resolves_literals_variables_and_maps() ->
     ]
 
 
-def test_captured_invalid_escape_literal_does_not_leak_syntax_warning() -> None:
+def test_javascript_custom_exec_parser_suppresses_literal_syntax_warnings() -> None:
     source = (
         r'''const r = await tools.exec_command({cmd: "rg '\$HOME' README.md"}); '''
         "text(r.output);"
