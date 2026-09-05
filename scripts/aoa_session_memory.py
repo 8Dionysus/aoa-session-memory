@@ -2528,7 +2528,19 @@ def atlas_route_entry_artifact_identity() -> dict[str, Any]:
         "trust_layer": list(ATLAS_ROUTE_ENTRY_TRUST_LAYER),
         "verification": [
             "python3 -m py_compile scripts/aoa_session_memory.py",
-            "PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider tests/test_session_memory.py",
+            (
+                "PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider "
+                "tests/test_session_memory.py "
+                "tests/test_session_memory_doctor.py "
+                "tests/test_session_memory_outbox.py "
+                "tests/test_session_memory_task_lifecycle.py "
+                "tests/test_session_memory_tool_usage.py "
+                "tests/test_session_memory_episode_search.py "
+                "tests/test_session_memory_episode_maintenance.py "
+                "tests/test_session_memory_episode_temporal.py "
+                "tests/test_session_memory_capture.py "
+                "tests/test_session_memory_sweep.py"
+            ),
             "python3 scripts/aoa_session_memory.py audit --portable-bundle",
         ],
         "action": "ADD_CONSUMER_EXPECTATION",
@@ -224524,7 +224536,14 @@ def completion_audit(
         checklist_item(
             "Tests cover archive, hooks, compaction, install, distillation, and grounding",
             "covered",
-            {"test_file": str(aoa_root / "tests/test_session_memory.py")},
+            {
+                "test_file": str(aoa_root / "tests/test_session_memory.py"),
+                "test_files": [
+                    str(aoa_root / relative)
+                    for relative in REQUIRED_TEST_ROOT_FILES
+                    if relative.startswith("tests/test_")
+                ],
+            },
         ),
         checklist_item(
             live_prepost_requirement,
@@ -224585,6 +224604,16 @@ def command_audit(args: argparse.Namespace) -> int:
 REQUIRED_TEST_ROOT_FILES = [
     "tests/AGENTS.md",
     "tests/test_session_memory.py",
+    "tests/session_memory_test_support.py",
+    "tests/test_session_memory_doctor.py",
+    "tests/test_session_memory_outbox.py",
+    "tests/test_session_memory_task_lifecycle.py",
+    "tests/test_session_memory_tool_usage.py",
+    "tests/test_session_memory_episode_search.py",
+    "tests/test_session_memory_episode_maintenance.py",
+    "tests/test_session_memory_episode_temporal.py",
+    "tests/test_session_memory_capture.py",
+    "tests/test_session_memory_sweep.py",
     "tests/test_skill_system.py",
     "tests/test_skill_behavioral_sandbox.py",
 ]
