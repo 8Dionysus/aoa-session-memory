@@ -47,8 +47,106 @@ from importlib.machinery import SourceFileLoader
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
-
 _DEFAULT_SQLITE_CONNECT = sqlite3.connect
+
+
+def _load_outbox_core_module() -> Any:
+    """Load the outbox core from this runtime's exact sibling path."""
+    module_name = "_aoa_session_memory_outbox_source"
+    source_digest_attr = "__aoa_session_memory_outbox_source_sha256__"
+    source_path = Path(__file__).resolve().with_name(
+        "aoa_session_memory_outbox.py"
+    )
+    try:
+        source_bytes = source_path.read_bytes()
+    except OSError:
+        source_bytes = None
+    source_sha256 = (
+        hashlib.sha256(source_bytes).hexdigest()
+        if source_bytes is not None
+        else ""
+    )
+    loaded = sys.modules.get(module_name)
+    loaded_path = getattr(loaded, "__file__", None)
+    if (
+        loaded is not None
+        and loaded_path is not None
+        and Path(loaded_path).resolve() == source_path
+        and source_sha256
+        and getattr(loaded, source_digest_attr, None) == source_sha256
+    ):
+        return loaded
+    spec = importlib.util.spec_from_file_location(module_name, source_path)
+    if spec is None or spec.loader is None:
+        raise ImportError("aoa outbox core source is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    missing = object()
+    previous = sys.modules.get(module_name, missing)
+    sys.modules[module_name] = module
+    try:
+        if source_bytes is not None and isinstance(
+            spec.loader,
+            SourceFileLoader,
+        ):
+            # Compile the bytes read above so a stale same-path pyc cannot
+            # satisfy a rapid source edit.
+            exec(
+                compile(source_bytes, str(source_path), "exec"),
+                module.__dict__,
+            )
+        else:
+            spec.loader.exec_module(module)
+        setattr(module, source_digest_attr, source_sha256)
+    except BaseException:
+        if previous is missing:
+            sys.modules.pop(module_name, None)
+        else:
+            sys.modules[module_name] = previous
+        raise
+    return module
+
+
+_OUTBOX_CORE = _load_outbox_core_module()
+
+PROJECTION_OUTBOX_CONSUMER_MAX_ATTEMPTS = (
+    _OUTBOX_CORE.PROJECTION_OUTBOX_CONSUMER_MAX_ATTEMPTS
+)
+PROJECTION_OUTBOX_CONSUMER_RECONCILE_ORDER = (
+    _OUTBOX_CORE.PROJECTION_OUTBOX_CONSUMER_RECONCILE_ORDER
+)
+PROJECTION_OUTBOX_CONSUMERS = _OUTBOX_CORE.PROJECTION_OUTBOX_CONSUMERS
+PROJECTION_OUTBOX_RECORD_IDENTITY_KEYS = (
+    _OUTBOX_CORE.PROJECTION_OUTBOX_RECORD_IDENTITY_KEYS
+)
+PROJECTION_OUTBOX_SCHEMA_VERSION = _OUTBOX_CORE.PROJECTION_OUTBOX_SCHEMA_VERSION
+_projection_outbox_json_digest = _OUTBOX_CORE._projection_outbox_json_digest
+_projection_outbox_record_identity_payload = (
+    _OUTBOX_CORE._projection_outbox_record_identity_payload
+)
+_projection_outbox_record_recomputed_id = (
+    _OUTBOX_CORE._projection_outbox_record_recomputed_id
+)
+_projection_outbox_record_valid = _OUTBOX_CORE._projection_outbox_record_valid
+_projection_outbox_sha256_or_empty = _OUTBOX_CORE._projection_outbox_sha256_or_empty
+_projection_outbox_unique_strings = _OUTBOX_CORE._projection_outbox_unique_strings
+projection_component_required_consumers = (
+    _OUTBOX_CORE.projection_component_required_consumers
+)
+projection_outbox_completion_receipt_identity_valid = (
+    _OUTBOX_CORE.projection_outbox_completion_receipt_identity_valid
+)
+projection_outbox_record_identity_digest = (
+    _OUTBOX_CORE.projection_outbox_record_identity_digest
+)
+projection_outbox_record_identity_matches = (
+    _OUTBOX_CORE.projection_outbox_record_identity_matches
+)
+projection_outbox_record_integrity_valid = (
+    _OUTBOX_CORE.projection_outbox_record_integrity_valid
+)
+projection_outbox_rotate_after_cursor = (
+    _OUTBOX_CORE.projection_outbox_rotate_after_cursor
+)
 
 def _load_epistemic_action_event_chain_module() -> Any:
     """Load the owner-local action-chain source without making it a package dependency."""
@@ -702,9 +800,15 @@ SESSION_MEMORY_LOADED_ENTITY_USAGE_PARSER_PATH = (
         "aoa_session_memory_entity_usage_parsers.py"
     )
 )
+SESSION_MEMORY_LOADED_OUTBOX_CORE_PATH = (
+    SESSION_MEMORY_LOADED_PRODUCER_PATH.with_name(
+        "aoa_session_memory_outbox.py"
+    )
+)
 SESSION_MEMORY_LOADED_PRODUCER_SOURCE_PATHS = (
     SESSION_MEMORY_LOADED_PRODUCER_PATH,
     SESSION_MEMORY_LOADED_ENTITY_USAGE_PARSER_PATH,
+    SESSION_MEMORY_LOADED_OUTBOX_CORE_PATH,
 )
 
 
@@ -727,6 +831,9 @@ try:
     _session_memory_loaded_entity_usage_parser_bytes = (
         SESSION_MEMORY_LOADED_ENTITY_USAGE_PARSER_PATH.read_bytes()
     )
+    _session_memory_loaded_outbox_core_bytes = (
+        SESSION_MEMORY_LOADED_OUTBOX_CORE_PATH.read_bytes()
+    )
 except OSError:
     SESSION_MEMORY_LOADED_PRODUCER_SHA256 = ""
 else:
@@ -744,6 +851,12 @@ else:
                     _session_memory_loaded_entity_usage_parser_bytes
                 ).hexdigest(),
             ),
+            (
+                SESSION_MEMORY_LOADED_OUTBOX_CORE_PATH,
+                hashlib.sha256(
+                    _session_memory_loaded_outbox_core_bytes
+                ).hexdigest(),
+            ),
         )
     )
     SESSION_MEMORY_LOADED_PROJECTION_PRODUCER_CONTRACTS = {
@@ -756,6 +869,7 @@ else:
 finally:
     _session_memory_loaded_producer_bytes = b""
     _session_memory_loaded_entity_usage_parser_bytes = b""
+    _session_memory_loaded_outbox_core_bytes = b""
 
 if "SESSION_MEMORY_LOADED_PROJECTION_PRODUCER_CONTRACTS" not in globals():
     SESSION_MEMORY_LOADED_PROJECTION_PRODUCER_CONTRACTS: dict[
@@ -884,7 +998,6 @@ PROJECTION_OUTBOX_CONSUMER_STATE_DIR = (
 PROJECTION_OUTBOX_RETIREMENTS_DIR = (
     PROJECTION_OUTBOX_ROOT / "retirements"
 )
-PROJECTION_OUTBOX_SCHEMA_VERSION = 1
 PROJECTION_OUTBOX_RETIREMENT_SCHEMA_VERSION = 1
 PROJECTION_OUTBOX_FAIRNESS_SCHEMA_VERSION = 1
 PROJECTION_OUTBOX_FAIRNESS_POLICY = (
@@ -918,7 +1031,6 @@ PROJECTION_OUTBOX_CONSUMER_RETIREMENT_SCHEMA_VERSION = 1
 PROJECTION_OUTBOX_CONSUMER_RETIREMENT_ARTIFACT_TYPE = (
     "projection_outbox_consumer_retirement"
 )
-PROJECTION_OUTBOX_CONSUMER_MAX_ATTEMPTS = 3
 SESSION_PROJECTION_PROGRESS_RECEIPTS_ROOT = (
     DIAGNOSTICS_ROOT / "session-projection-progress"
 )
@@ -927,18 +1039,6 @@ SEARCH_INDEX_PROGRESS_CHECKPOINT_ROOT = (
     DIAGNOSTICS_ROOT / "search-index-progress"
 )
 SEARCH_INDEX_PROGRESS_CHECKPOINT_SCHEMA_VERSION = 1
-PROJECTION_OUTBOX_CONSUMERS = (
-    "exact_and_lexical_search",
-    "episode_semantic",
-    "entity_registry",
-    "graph",
-)
-PROJECTION_OUTBOX_CONSUMER_RECONCILE_ORDER = (
-    "exact_and_lexical_search",
-    "episode_semantic",
-    "entity_registry",
-    "graph",
-)
 PROJECTION_OUTBOX_CONSUMER_RECONCILE_DEPENDENCIES = {
     "exact_and_lexical_search": (),
     "episode_semantic": ("exact_and_lexical_search",),
@@ -28315,21 +28415,6 @@ def projection_component_snapshot(
     return components
 
 
-def projection_component_required_consumers(
-    component_type: str,
-) -> list[str]:
-    if component_type == "task_episode":
-        return [
-            "episode_semantic",
-            "entity_registry",
-            "exact_and_lexical_search",
-            "graph",
-        ]
-    if component_type == "raw_block":
-        return ["exact_and_lexical_search", "entity_registry"]
-    return list(PROJECTION_OUTBOX_CONSUMERS)
-
-
 def session_projection_outbox_record(
     *,
     session_dir: Path,
@@ -28408,14 +28493,7 @@ def session_projection_outbox_record(
             "changed_component_work_intent_not_downstream_completion"
         ),
     }
-    record_id = hashlib.sha256(
-        json.dumps(
-            record_payload,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
+    record_id = _projection_outbox_record_recomputed_id(record_payload)
     return {
         **record_payload,
         "record_id": record_id,
@@ -28430,124 +28508,6 @@ def projection_outbox_record_path(
         projection_outbox_root_for_session(session_dir)
         / "records"
         / f"{record_id}.json"
-    )
-
-
-PROJECTION_OUTBOX_RECORD_IDENTITY_KEYS = (
-    "schema_version",
-    "artifact_type",
-    "record_id",
-    "session_id",
-    "old_publish_id",
-    "new_publish_id",
-    "changes",
-    "required_consumers",
-)
-
-
-def projection_outbox_record_identity_digest(record: dict[str, Any]) -> str:
-    identity_payload = {
-        key: record.get(key)
-        for key in (
-            "schema_version",
-            "session_id",
-            "old_publish_id",
-            "new_publish_id",
-            "changes",
-            "required_consumers",
-        )
-    }
-    return hashlib.sha256(
-        json.dumps(
-            identity_payload,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
-
-
-def projection_outbox_record_identity_matches(
-    left: dict[str, Any],
-    right: dict[str, Any],
-) -> bool:
-    return all(
-        left.get(key) == right.get(key)
-        for key in PROJECTION_OUTBOX_RECORD_IDENTITY_KEYS
-    )
-
-
-def projection_outbox_record_integrity_valid(
-    record: dict[str, Any],
-) -> bool:
-    record_id = str(record.get("record_id") or "")
-    session_id = record.get("session_id")
-    old_publish_id = record.get("old_publish_id")
-    new_publish_id = record.get("new_publish_id")
-    changes = record.get("changes")
-    publication_receipt = record.get("publication_receipt")
-    required_consumers = record.get("required_consumers")
-    retry_policy = record.get("retry_policy")
-    valid_changes = bool(
-        isinstance(changes, list)
-        and all(
-            isinstance(change, dict)
-            and isinstance(change.get("component_id"), str)
-            and bool(change.get("component_id"))
-            and isinstance(change.get("component_type"), str)
-            and bool(change.get("component_type"))
-            and change.get("operation") in {"publish", "replace", "tombstone"}
-            and isinstance(change.get("old_digest"), str)
-            and isinstance(change.get("new_digest"), str)
-            and isinstance(change.get("source_ref"), str)
-            and isinstance(change.get("generation_identity"), dict)
-            and isinstance(change.get("required_consumers"), list)
-            and all(
-                isinstance(consumer, str)
-                for consumer in change.get("required_consumers", [])
-            )
-            and len(change.get("required_consumers", []))
-            == len(set(change.get("required_consumers", [])))
-            and all(
-                consumer in PROJECTION_OUTBOX_CONSUMERS
-                for consumer in change.get("required_consumers", [])
-            )
-            for change in changes
-        )
-    )
-    return bool(
-        record.get("schema_version") == PROJECTION_OUTBOX_SCHEMA_VERSION
-        and record.get("artifact_type")
-        == "session_projection_component_outbox"
-        and re.fullmatch(r"[a-f0-9]{64}", record_id)
-        and (
-            projection_outbox_record_identity_digest(record) == record_id
-            or _projection_outbox_record_recomputed_id(record) == record_id
-        )
-        and isinstance(session_id, str)
-        and bool(session_id)
-        and isinstance(old_publish_id, str)
-        and isinstance(new_publish_id, str)
-        and bool(new_publish_id)
-        and record.get("status") == "pending"
-        and record.get("truth_status")
-        == "changed_component_work_intent_not_downstream_completion"
-        and valid_changes
-        and isinstance(required_consumers, list)
-        and all(isinstance(consumer, str) for consumer in required_consumers)
-        and len(required_consumers) == len(set(required_consumers))
-        and all(
-            consumer in PROJECTION_OUTBOX_CONSUMERS
-            for consumer in required_consumers
-        )
-        and isinstance(record.get("created_at"), str)
-        and bool(record.get("created_at"))
-        and isinstance(retry_policy, dict)
-        and isinstance(publication_receipt, dict)
-        and isinstance(publication_receipt.get("session_dir"), str)
-        and bool(publication_receipt.get("session_dir"))
-        and str(publication_receipt.get("publish_id") or "")
-        == new_publish_id
     )
 
 
@@ -28647,25 +28607,6 @@ def projection_outbox_fairness_state(
     }
 
 
-def projection_outbox_rotate_after_cursor(
-    records: list[dict[str, Any]],
-    cursor: str,
-) -> list[dict[str, Any]]:
-    if not records or not cursor:
-        return list(records)
-    cursor_index = next(
-        (
-            index
-            for index, record in enumerate(records)
-            if str(record.get("outbox_record_id") or "") == cursor
-        ),
-        None,
-    )
-    if cursor_index is None:
-        return list(records)
-    return [*records[cursor_index + 1 :], *records[: cursor_index + 1]]
-
-
 def projection_outbox_advance_fairness_state(
     aoa_root: Path,
     *,
@@ -28744,30 +28685,6 @@ def projection_outbox_advance_fairness_state(
         "consumer": consumer or "global",
         "cursor": selected_ids[-1],
     }
-
-
-def projection_outbox_completion_receipt_identity_valid(
-    receipt: Any,
-    *,
-    record: dict[str, Any],
-    consumer: str,
-) -> bool:
-    """Validate optional receipt identity without constraining legacy detail."""
-    if not isinstance(receipt, dict) or not receipt:
-        return False
-    expected_record_id = str(record.get("record_id") or "")
-    expected_publish_id = str(record.get("new_publish_id") or "")
-    identity_pairs = (
-        ("consumer", consumer),
-        ("outbox_record_id", expected_record_id),
-        ("record_id", expected_record_id),
-        ("source_publish_id", expected_publish_id),
-        ("publish_id", expected_publish_id),
-    )
-    return all(
-        key not in receipt or receipt.get(key) == expected
-        for key, expected in identity_pairs
-    )
 
 
 def write_projection_outbox_record(
@@ -29289,253 +29206,6 @@ def write_search_index_progress_checkpoint(
         "semantic_completion": False,
         "truth_status": payload["truth_status"],
     }
-
-
-def _projection_outbox_json_digest(value: Any) -> str:
-    return hashlib.sha256(
-        json.dumps(
-            value,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
-
-
-def _projection_outbox_record_identity_payload(
-    record: dict[str, Any],
-) -> dict[str, Any]:
-    return {
-        key: record.get(key)
-        for key in (
-            "schema_version",
-            "artifact_type",
-            "session_id",
-            "old_publish_id",
-            "new_publish_id",
-            "changes",
-            "required_consumers",
-            "created_at",
-            "status",
-            "retry_policy",
-            "publication_receipt",
-            "truth_status",
-        )
-    }
-
-
-def _projection_outbox_record_recomputed_id(record: dict[str, Any]) -> str:
-    return _projection_outbox_json_digest(
-        _projection_outbox_record_identity_payload(record)
-    )
-
-
-def _projection_outbox_sha256_or_empty(value: Any) -> bool:
-    return value == "" or bool(
-        isinstance(value, str)
-        and re.fullmatch(r"[a-f0-9]{64}", value)
-    )
-
-
-def _projection_outbox_unique_strings(value: Any) -> bool:
-    return isinstance(value, list) and all(
-        isinstance(item, str) and bool(item) for item in value
-    ) and len(value) == len(set(value))
-
-
-def _projection_outbox_record_valid(
-    record: Any,
-    *,
-    aoa_root: Path | None = None,
-) -> tuple[bool, list[str]]:
-    diagnostics: list[str] = []
-    if not isinstance(record, dict) or not record:
-        return False, ["record_not_object"]
-    required = {
-        "schema_version",
-        "artifact_type",
-        "record_id",
-        "session_id",
-        "old_publish_id",
-        "new_publish_id",
-        "changes",
-        "required_consumers",
-        "created_at",
-        "status",
-        "publication_receipt",
-        "truth_status",
-        "retry_policy",
-    }
-    allowed = required
-    diagnostics.extend(
-        f"record_unknown_field:{key}"
-        for key in sorted(set(record) - allowed)
-    )
-    diagnostics.extend(
-        f"record_required_field_missing:{key}"
-        for key in sorted(required - set(record))
-    )
-    if int_value(record.get("schema_version"), -1) != PROJECTION_OUTBOX_SCHEMA_VERSION:
-        diagnostics.append("record_schema_version_mismatch")
-    if record.get("artifact_type") != "session_projection_component_outbox":
-        diagnostics.append("record_artifact_type_mismatch")
-    record_id = record.get("record_id")
-    if not isinstance(record_id, str) or not re.fullmatch(
-        r"[a-f0-9]{64}", record_id
-    ):
-        diagnostics.append("record_id_must_be_sha256")
-    session_id = record.get("session_id")
-    if not isinstance(session_id, str) or not session_id:
-        diagnostics.append("record_session_id_missing")
-    if not _projection_outbox_sha256_or_empty(record.get("old_publish_id")):
-        diagnostics.append("record_old_publish_id_invalid")
-    if not (
-        isinstance(record.get("new_publish_id"), str)
-        and re.fullmatch(r"[a-f0-9]{64}", record.get("new_publish_id"))
-    ):
-        diagnostics.append("record_new_publish_id_invalid")
-    if not isinstance(record.get("created_at"), str) or not record.get(
-        "created_at"
-    ):
-        diagnostics.append("record_created_at_missing")
-    if record.get("status") != "pending":
-        diagnostics.append("record_status_not_pending")
-    if not isinstance(record.get("retry_policy"), dict):
-        diagnostics.append("record_retry_policy_invalid")
-    elif set(record["retry_policy"]) != {
-        "mode",
-        "max_attempts_per_cycle",
-    }:
-        diagnostics.append("record_retry_policy_shape_invalid")
-    elif record["retry_policy"].get("mode") != (
-        "bounded_idempotent_consumer_replay_v1"
-    ) or not (
-        1
-        <= int_value(record["retry_policy"].get("max_attempts_per_cycle"), 0)
-        <= PROJECTION_OUTBOX_CONSUMER_MAX_ATTEMPTS
-    ):
-        diagnostics.append("record_retry_policy_value_invalid")
-    if record.get("truth_status") != (
-        "changed_component_work_intent_not_downstream_completion"
-    ):
-        diagnostics.append("record_truth_status_invalid")
-
-    required_consumers = record.get("required_consumers")
-    if not _projection_outbox_unique_strings(required_consumers):
-        diagnostics.append("record_required_consumers_not_unique_strings")
-        required_consumers = []
-    canonical_required = [
-        consumer
-        for consumer in PROJECTION_OUTBOX_CONSUMER_RECONCILE_ORDER
-        if consumer in required_consumers
-    ]
-    if required_consumers != canonical_required or not canonical_required:
-        diagnostics.append("record_required_consumers_not_canonical")
-    if any(
-        consumer not in PROJECTION_OUTBOX_CONSUMER_RECONCILE_ORDER
-        for consumer in required_consumers
-    ):
-        diagnostics.append("record_required_consumer_not_allowlisted")
-
-    changes = record.get("changes")
-    if not isinstance(changes, list) or not changes:
-        diagnostics.append("record_changes_missing")
-        changes = []
-    observed_consumers: set[str] = set()
-    component_ids: list[str] = []
-    for index, change in enumerate(changes):
-        prefix = f"record_change_{index}"
-        if not isinstance(change, dict):
-            diagnostics.append(f"{prefix}_not_object")
-            continue
-        change_required = {
-            "component_id",
-            "component_type",
-            "operation",
-            "old_digest",
-            "new_digest",
-            "source_ref",
-            "generation_identity",
-            "required_consumers",
-        }
-        diagnostics.extend(
-            f"{prefix}_unknown_field:{key}"
-            for key in sorted(set(change) - change_required)
-        )
-        diagnostics.extend(
-            f"{prefix}_required_field_missing:{key}"
-            for key in sorted(change_required - set(change))
-        )
-        component_id = change.get("component_id")
-        if not isinstance(component_id, str) or not component_id:
-            diagnostics.append(f"{prefix}_component_id_invalid")
-        else:
-            component_ids.append(component_id)
-        if not isinstance(change.get("component_type"), str) or not change.get(
-            "component_type"
-        ):
-            diagnostics.append(f"{prefix}_component_type_invalid")
-        if change.get("operation") not in {"publish", "replace", "tombstone"}:
-            diagnostics.append(f"{prefix}_operation_invalid")
-        if not _projection_outbox_sha256_or_empty(change.get("old_digest")):
-            diagnostics.append(f"{prefix}_old_digest_invalid")
-        if not _projection_outbox_sha256_or_empty(change.get("new_digest")):
-            diagnostics.append(f"{prefix}_new_digest_invalid")
-        if not isinstance(change.get("source_ref"), str):
-            diagnostics.append(f"{prefix}_source_ref_invalid")
-        if not isinstance(change.get("generation_identity"), dict):
-            diagnostics.append(f"{prefix}_generation_identity_invalid")
-        change_consumers = change.get("required_consumers")
-        if not _projection_outbox_unique_strings(change_consumers):
-            diagnostics.append(f"{prefix}_consumers_not_unique_strings")
-            change_consumers = []
-        expected_change_consumers = projection_component_required_consumers(
-            str(change.get("component_type") or "")
-        )
-        if change_consumers != expected_change_consumers:
-            diagnostics.append(f"{prefix}_consumers_not_owner_derived")
-        observed_consumers.update(change_consumers)
-    if len(component_ids) != len(set(component_ids)):
-        diagnostics.append("record_component_ids_not_unique")
-    if set(canonical_required) != observed_consumers:
-        diagnostics.append("record_consumers_do_not_cover_changes")
-
-    publication = record.get("publication_receipt")
-    if not isinstance(publication, dict):
-        diagnostics.append("record_publication_receipt_invalid")
-        publication = {}
-    if set(publication) != {"session_dir", "publish_id"}:
-        diagnostics.append("record_publication_receipt_shape_invalid")
-    publication_session_dir = publication.get("session_dir")
-    if not isinstance(publication_session_dir, str) or not publication_session_dir:
-        diagnostics.append("record_publication_session_dir_missing")
-    if publication.get("publish_id") != record.get("new_publish_id"):
-        diagnostics.append("record_publication_publish_id_mismatch")
-    if aoa_root is not None and isinstance(publication_session_dir, str):
-        session_dir = Path(publication_session_dir)
-        if not session_dir.is_absolute():
-            session_dir = aoa_root / session_dir
-        try:
-            under_root = session_dir.resolve().parent.parent == aoa_root.resolve()
-        except OSError:
-            under_root = False
-        if not under_root:
-            diagnostics.append("record_publication_session_dir_outside_root")
-        if isinstance(session_id, str):
-            manifest = read_json(session_dir / "session.manifest.json", {})
-            if not isinstance(manifest, dict) or not manifest:
-                diagnostics.append(
-                    "record_publication_session_manifest_missing"
-                )
-            elif str(manifest.get("session_id") or "") != session_id:
-                diagnostics.append(
-                    "record_publication_session_manifest_mismatch"
-                )
-
-    if isinstance(record_id, str) and re.fullmatch(r"[a-f0-9]{64}", record_id):
-        if _projection_outbox_record_recomputed_id(record) != record_id:
-            diagnostics.append("record_id_content_hash_mismatch")
-    return not diagnostics, unique_preserving_order(diagnostics)
 
 
 def _projection_outbox_route_entry(consumer: str) -> dict[str, Any]:
@@ -225041,6 +224711,7 @@ REQUIRED_ROOT_FILES = [
     "scripts/AGENTS.md",
     "scripts/aoa_session_memory.py",
     "scripts/aoa_session_memory_entity_usage_parsers.py",
+    "scripts/aoa_session_memory_outbox.py",
     "scripts/validate_local_stats_port.py",
     "sessions/AGENTS.md",
     "skills/AGENTS.md",

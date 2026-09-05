@@ -65920,6 +65920,9 @@ def test_generation_identity_invalidates_parser_only_source_change(
     assert module.SESSION_MEMORY_LOADED_ENTITY_USAGE_PARSER_PATH in (
         module.SESSION_MEMORY_LOADED_PRODUCER_SOURCE_PATHS
     )
+    assert module.SESSION_MEMORY_LOADED_OUTBOX_CORE_PATH in (
+        module.SESSION_MEMORY_LOADED_PRODUCER_SOURCE_PATHS
+    )
     assert module.SESSION_MEMORY_LOADED_PRODUCER_SHA256 == (
         module._producer_source_identity_digest(
             tuple(
@@ -65936,9 +65939,12 @@ def test_generation_identity_invalidates_parser_only_source_change(
     )
     parser_source = tmp_path / "aoa_session_memory_entity_usage_parsers.py"
     parser_source.write_text("parser-v1\n", encoding="utf-8")
+    outbox_source = tmp_path / "aoa_session_memory_outbox.py"
+    outbox_source.write_text("outbox-v1\n", encoding="utf-8")
     source_paths = (
         module.SESSION_MEMORY_LOADED_PRODUCER_PATH,
         parser_source,
+        outbox_source,
     )
     monkeypatch.setattr(
         module,
@@ -65958,14 +65964,31 @@ def test_generation_identity_invalidates_parser_only_source_change(
     )
 
     parser_source.write_text("parser-v2\n", encoding="utf-8")
-    source_state = module.session_memory_loaded_producer_source_state()
+    parser_state = module.session_memory_loaded_producer_source_state()
 
-    assert source_state["stable"] is False
-    assert source_state["status"] == "changed"
-    assert source_state["loaded_sha256"] == loaded_sha256
-    assert source_state["current_sha256"] != loaded_sha256
+    assert parser_state["stable"] is False
+    assert parser_state["status"] == "changed"
+    assert parser_state["loaded_sha256"] == loaded_sha256
+    assert parser_state["current_sha256"] != loaded_sha256
     assert "producer_source_changed_during_process" in (
-        source_state["diagnostics"]
+        parser_state["diagnostics"]
+    )
+
+    # Restore the parser fixture so the next mutation proves the sibling
+    # outbox source is independently part of the loaded-source identity.
+    parser_source.write_text("parser-v1\n", encoding="utf-8")
+    restored_state = module.session_memory_loaded_producer_source_state()
+    assert restored_state["stable"] is True
+
+    outbox_source.write_text("outbox-v2\n", encoding="utf-8")
+    outbox_state = module.session_memory_loaded_producer_source_state()
+
+    assert outbox_state["stable"] is False
+    assert outbox_state["status"] == "changed"
+    assert outbox_state["loaded_sha256"] == loaded_sha256
+    assert outbox_state["current_sha256"] != loaded_sha256
+    assert "producer_source_changed_during_process" in (
+        outbox_state["diagnostics"]
     )
 
 
@@ -66076,6 +66099,45 @@ def test_entity_usage_parser_loader_binds_exact_sibling_and_cleans_failure(
     with pytest.raises(RuntimeError, match="synthetic parser load failure"):
         module._load_entity_usage_parsers_module()
     assert sys.modules[private_name] is None
+
+
+def test_outbox_core_loader_binds_exact_sibling_over_foreign_cached_module(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private_name = "_aoa_session_memory_outbox_source"
+    fixture_main = tmp_path / "aoa_session_memory.py"
+    fixture_core = tmp_path / "aoa_session_memory_outbox.py"
+    fixture_main.write_text("# fixture runtime\n", encoding="utf-8")
+    fixture_core.write_bytes(b'VALUE = "v1"\n')
+    initial_mtime_ns = fixture_core.stat().st_mtime_ns
+    foreign_path = tmp_path / "foreign" / "aoa_session_memory_outbox.py"
+    foreign_path.parent.mkdir()
+    foreign_path.write_bytes(b'VALUE = "foreign"\n')
+    foreign_spec = importlib.util.spec_from_file_location(
+        private_name,
+        foreign_path,
+    )
+    assert foreign_spec is not None and foreign_spec.loader is not None
+    foreign = importlib.util.module_from_spec(foreign_spec)
+    foreign_spec.loader.exec_module(foreign)
+    foreign.VALUE = "foreign"
+    monkeypatch.setattr(module, "__file__", str(fixture_main))
+    monkeypatch.setitem(sys.modules, private_name, foreign)
+
+    first = module._load_outbox_core_module()
+    assert first is not foreign
+    assert first.VALUE == "v1"
+    assert Path(first.__file__).resolve() == fixture_core.resolve()
+    assert module._load_outbox_core_module() is first
+
+    # Keep size and mtime stable so a timestamp-based bytecode cache cannot
+    # explain the source-edit reload.
+    fixture_core.write_bytes(b'VALUE = "v2"\n')
+    os.utime(fixture_core, ns=(initial_mtime_ns, initial_mtime_ns))
+    second = module._load_outbox_core_module()
+    assert second.VALUE == "v2"
+    assert second is not first
 
 
 def test_stage_work_identity_isolates_session_index_change(
@@ -84879,6 +84941,7 @@ def test_install_portable_bundle_creates_clean_target(tmp_path: Path) -> None:
     assert (
         aoa_root / "scripts" / "aoa_session_memory_entity_usage_parsers.py"
     ).is_file()
+    assert (aoa_root / "scripts" / "aoa_session_memory_outbox.py").is_file()
     assert (aoa_root / "tests" / "test_session_memory.py").exists()
 
     portable_runtime = subprocess.run(

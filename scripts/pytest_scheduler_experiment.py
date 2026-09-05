@@ -23,6 +23,7 @@ import validation_identity
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SOURCE_TEST_TARGETS = (
     "tests/test_session_memory.py",
+    "tests/test_session_memory_outbox_core.py",
     "tests/test_session_memory_doctor.py",
     "tests/test_session_memory_outbox.py",
     "tests/test_session_memory_task_lifecycle.py",
