@@ -11542,15 +11542,7 @@ def graph_entity_registry_dependency_snapshot(
         return value if isinstance(value, dict) else {}
 
     payload = read_persisted()
-    source_surface_state = entity_registry_source_surface_state(aoa_root)
-    cache_key = (
-        snapshot_identity_before_read,
-        float(source_surface_state.get("latest_source_mtime") or 0.0),
-        int_value(source_surface_state.get("source_path_count")),
-        str(source_surface_state.get("latest_source_path") or ""),
-        str(os.environ.get("CODEX_HOME") or ""),
-        str(os.environ.get("AOA_ENTITY_REGISTRY_MCP_SERVICES_ROOTS") or ""),
-    )
+    cache_key: tuple[Any, ...] | None = None
     cacheable_read = bool(
         include_index
         and not ensure_current
@@ -11559,6 +11551,15 @@ def graph_entity_registry_dependency_snapshot(
         and payload.get("artifact_type") == "entity_registry_snapshot"
     )
     if cacheable_read:
+        source_surface_state = entity_registry_source_surface_state(aoa_root)
+        cache_key = (
+            snapshot_identity_before_read,
+            float(source_surface_state.get("latest_source_mtime") or 0.0),
+            int_value(source_surface_state.get("source_path_count")),
+            str(source_surface_state.get("latest_source_path") or ""),
+            str(os.environ.get("CODEX_HOME") or ""),
+            str(os.environ.get("AOA_ENTITY_REGISTRY_MCP_SERVICES_ROOTS") or ""),
+        )
         cached = _GRAPH_ENTITY_REGISTRY_DEPENDENCY_PROCESS_CACHE.get(
             cache_key
         )
@@ -11803,7 +11804,7 @@ def graph_entity_registry_dependency_snapshot(
             "pinned_generated_entity_registry_dependency_not_owner_truth"
         ),
     }
-    if cacheable_read and current:
+    if cacheable_read and current and cache_key is not None:
         _GRAPH_ENTITY_REGISTRY_DEPENDENCY_PROCESS_CACHE.clear()
         _GRAPH_ENTITY_REGISTRY_DEPENDENCY_PROCESS_CACHE[cache_key] = dict(
             result
