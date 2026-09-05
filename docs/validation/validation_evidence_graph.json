@@ -101,8 +101,10 @@
       "id": "portable-kernel",
       "patterns": [
         "scripts/aoa_session_memory.py",
+        "scripts/aoa_session_memory_outbox.py",
         "scripts/benchmark_session_projection.py",
         "tests/test_session_memory.py",
+        "tests/test_session_memory_outbox_core.py",
         "DESIGN.md",
         "PIPELINE.md",
         "READINESS.md"
@@ -209,6 +211,7 @@
             "-p",
             "no:cacheprovider",
             "tests/test_session_memory.py",
+            "tests/test_session_memory_outbox_core.py",
             "tests/test_public_tree_audit.py",
             "tests/test_git_history_audit.py"
           ]
