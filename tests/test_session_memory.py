@@ -23660,6 +23660,9 @@ def test_raw_block_storage_maintenance_skips_legacy_schema_and_reaches_next_cand
             "eligible": True,
             "reasons": [],
             "plain_bytes": 128,
+            "_plain_block_candidates": [
+                {"key": f"{session_id}-block", "plain_bytes": 128}
+            ],
             "guards": {"capture_state_schema_version": 2},
         }
 
@@ -23799,6 +23802,12 @@ def test_raw_block_storage_maintenance_cursor_is_dry_run_and_resumable(
             "open_block_count": 1,
             "plain_block_count": 1,
             "plain_bytes": 512,
+            "_plain_block_candidates": [
+                {
+                    "key": f"{kwargs['record']['session_id']}-block",
+                    "plain_bytes": 512,
+                }
+            ],
             "guards": {},
         },
     )
@@ -23867,6 +23876,7 @@ def test_raw_block_storage_maintenance_cursor_is_dry_run_and_resumable(
     assert first_apply["ok"] is True
     assert first_apply["cursor_committed"] is True
     assert first_apply["cursor_after"] == "storage-a"
+    assert first_apply["block_cursor_committed"] is False
     assert module.read_json(state_path, {})["cursor"] == "storage-a"
 
     second_apply = module.raw_block_storage_maintenance(
@@ -23880,6 +23890,7 @@ def test_raw_block_storage_maintenance_cursor_is_dry_run_and_resumable(
     assert second_apply["selected_session_ids"] == ["storage-b"]
     assert second_apply["cursor_before"] == "storage-a"
     assert second_apply["cursor_after"] == "storage-b"
+    assert second_apply["block_cursor_committed"] is False
     assert [
         call["selected_records_override"][0]["session_id"]
         for call in compact_calls
@@ -23907,8 +23918,355 @@ def test_raw_block_storage_maintenance_cursor_is_dry_run_and_resumable(
     )
     assert failed["ok"] is False
     assert failed["cursor_committed"] is False
+    assert failed["block_cursor_committed"] is False
     assert failed["cursor_before"] == "storage-b"
     assert module.read_json(state_path, {})["cursor"] == "storage-b"
+
+
+def test_raw_block_storage_maintenance_selects_sealed_prefix_and_resumes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A byte cap advances through one large session without touching its tail."""
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "raw-block-storage-prefix.jsonl"
+    events = [
+        {
+            "timestamp": "2026-05-12T00:00:00Z",
+            "type": "session_meta",
+            "payload": {"id": "storage-prefix", "cwd": str(workspace)},
+        },
+        {
+            "timestamp": "2026-05-12T00:00:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "first"}],
+            },
+        },
+        {
+            "timestamp": "2026-05-12T00:00:02Z",
+            "type": "compacted",
+            "payload": {"replacement_history": []},
+        },
+        {
+            "timestamp": "2026-05-12T00:00:03Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "second"}],
+            },
+        },
+        {
+            "timestamp": "2026-05-12T00:00:04Z",
+            "type": "compacted",
+            "payload": {"replacement_history": []},
+        },
+        {
+            "timestamp": "2026-05-12T00:00:05Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "tail"}],
+            },
+        },
+        {
+            "timestamp": "2026-05-12T00:00:06Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "open tail"}],
+            },
+        },
+    ]
+    write_jsonl(transcript, events)
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "storage-prefix",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    record = module.resolve_session_record(aoa_root, "storage-prefix")
+    session_dir = Path(str(record["path"]))
+    manifest_before = module.read_json(
+        session_dir / "session.manifest.json",
+        {},
+    )
+    blocks_before = manifest_before["raw_blocks"]["blocks"]
+    sealed_before = [
+        block for block in blocks_before if block.get("status") == "sealed"
+    ]
+    open_before = next(
+        block for block in blocks_before if block.get("status") == "open"
+    )
+    assert len(sealed_before) == 2
+    original_plain_sha = {
+        str(block["block_id"]): hashlib.sha256(
+            Path(str(block["path"])).read_bytes()
+        ).hexdigest()
+        for block in sealed_before
+    }
+    open_plain_path = Path(str(open_before["path"]))
+    open_plain_sha = hashlib.sha256(open_plain_path.read_bytes()).hexdigest()
+    cap = max(
+        int(item["plain_bytes"])
+        for item in module.raw_block_storage_eligibility(
+            aoa_root=aoa_root,
+            record=record,
+            sealed_only=True,
+            closed_only=False,
+        )["_plain_block_candidates"]
+    )
+    assert sum(
+        int(item["plain_bytes"])
+        for item in module.raw_block_storage_eligibility(
+            aoa_root=aoa_root,
+            record=record,
+            sealed_only=True,
+            closed_only=False,
+        )["_plain_block_candidates"]
+    ) > cap
+
+    def fail_publish(**_kwargs: Any) -> dict[str, Any]:
+        raise OSError("injected prefix publish failure")
+
+    original_atomic_publish = module.atomic_publish_session_projection
+    monkeypatch.setattr(
+        module,
+        "atomic_publish_session_projection",
+        fail_publish,
+    )
+    failed = module.raw_block_storage_maintenance(
+        aoa_root=aoa_root,
+        target="all",
+        limit=1,
+        scan_limit=1,
+        max_plain_bytes=cap,
+        closed_only=False,
+        apply=True,
+        confirm_remove_plain=True,
+    )
+    assert failed["ok"] is False
+    assert failed["block_cursor_committed"] is False
+    assert failed["successful_publish_session_ids"] == []
+    assert not module.raw_block_storage_maintenance_state_path(aoa_root).exists()
+    assert all(
+        Path(str(block["path"])).exists()
+        for block in sealed_before
+    )
+    monkeypatch.setattr(
+        module,
+        "atomic_publish_session_projection",
+        original_atomic_publish,
+    )
+
+    first = module.raw_block_storage_maintenance(
+        aoa_root=aoa_root,
+        target="all",
+        limit=1,
+        scan_limit=1,
+        max_plain_bytes=cap,
+        closed_only=False,
+        apply=True,
+        confirm_remove_plain=True,
+    )
+    assert first["ok"] is True
+    assert first["status"] == "applied"
+    assert first["selected_count"] == 1
+    assert first["selected_block_counts"]["storage-prefix"] == 1
+    assert first["selected_plain_bytes"] <= cap
+    assert first["block_cursor_committed"] is True
+    assert first["successful_publish_session_ids"] == ["storage-prefix"]
+
+    manifest_after_first = module.read_json(
+        session_dir / "session.manifest.json",
+        {},
+    )
+    blocks_after_first = manifest_after_first["raw_blocks"]["blocks"]
+    sealed_after_first = [
+        block for block in blocks_after_first if block.get("status") == "sealed"
+    ]
+    open_after_first = next(
+        block for block in blocks_after_first if block.get("status") == "open"
+    )
+    assert sum(
+        1 for block in sealed_after_first if block.get("plain_removed") is True
+    ) == 1
+    assert sum(
+        1 for block in sealed_after_first if block.get("plain_removed") is not True
+    ) == 1
+    assert open_after_first == open_before
+    assert open_plain_path.exists()
+    assert hashlib.sha256(open_plain_path.read_bytes()).hexdigest() == open_plain_sha
+
+    second = module.raw_block_storage_maintenance(
+        aoa_root=aoa_root,
+        target="all",
+        limit=1,
+        scan_limit=1,
+        max_plain_bytes=cap,
+        closed_only=False,
+        apply=True,
+        confirm_remove_plain=True,
+    )
+    assert second["ok"] is True
+    assert second["status"] == "applied"
+    assert second["selected_count"] == 1
+    assert second["selected_block_counts"]["storage-prefix"] == 1
+    assert second["selected_plain_bytes"] <= cap
+    assert second["block_cursor_committed"] is True
+
+    manifest_after_second = module.read_json(
+        session_dir / "session.manifest.json",
+        {},
+    )
+    blocks_after_second = manifest_after_second["raw_blocks"]["blocks"]
+    sealed_after_second = [
+        block for block in blocks_after_second if block.get("status") == "sealed"
+    ]
+    assert all(block.get("plain_removed") is True for block in sealed_after_second)
+    assert open_after_first == next(
+        block for block in blocks_after_second if block.get("status") == "open"
+    )
+    assert open_plain_path.exists()
+    assert hashlib.sha256(open_plain_path.read_bytes()).hexdigest() == open_plain_sha
+    for block in sealed_after_second:
+        compressed_path = Path(str(block["compressed_path"]))
+        assert compressed_path.exists()
+        assert hashlib.sha256(
+            module.gzip.decompress(compressed_path.read_bytes())
+        ).hexdigest() == original_plain_sha[str(block["block_id"])]
+    assert module.raw_block_ref_audit(
+        aoa_root=aoa_root,
+        target=session_dir.name,
+        sample_limit=8,
+    )["ok"] is True
+
+
+def test_raw_block_storage_maintenance_surfaces_individual_oversize_block(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    record = {
+        "session_id": "storage-oversize",
+        "session_label": "2026-05-12__001__storage-oversize",
+        "path": str(tmp_path / "storage-oversize"),
+    }
+    monkeypatch.setattr(module, "registry_sessions", lambda _root: [record])
+    monkeypatch.setattr(
+        module,
+        "raw_block_compaction_deferred_live_lookup",
+        lambda _root: ({}, []),
+    )
+    monkeypatch.setattr(
+        module,
+        "raw_block_storage_eligibility",
+        lambda **_kwargs: {
+            "session_id": record["session_id"],
+            "session_label": record["session_label"],
+            "session_dir": record["path"],
+            "status": "eligible",
+            "eligible": True,
+            "reasons": [],
+            "plain_bytes": 193,
+            "_plain_block_candidates": [
+                {"key": "oversize", "plain_bytes": 129},
+                {"key": "small-after-oversize", "plain_bytes": 64},
+            ],
+            "guards": {},
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "raw_block_storage_compact",
+        lambda **_kwargs: {
+            "ok": True,
+            "status": "skipped_ineligible",
+            "mutates": False,
+            "apply_failure_count": 0,
+            "diagnostics": [],
+            "results": [],
+        },
+    )
+
+    result = module.raw_block_storage_maintenance(
+        aoa_root=aoa_root,
+        target="all",
+        limit=1,
+        scan_limit=1,
+        max_plain_bytes=128,
+        apply=True,
+    )
+
+    assert result["ok"] is True
+    assert result["selected_count"] == 1
+    assert result["selected_block_counts"]["storage-oversize"] == 1
+    assert result["selected_plain_bytes"] == 64
+    assert result["storage_mutates"] is False
+    assert result["scanned"][0]["selection_block_diagnostics"] == [
+        "individual_plain_block_exceeds_byte_limit"
+    ]
+    assert "_plain_block_candidates" not in result["scanned"][0]
+    assert result["selection_skips"] == []
+
+
+def test_raw_block_storage_compact_strips_private_block_metadata_from_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    record = {
+        "session_id": "storage-private-metadata",
+        "session_label": "2026-05-12__001__storage-private-metadata",
+        "path": str(tmp_path / "storage-private-metadata"),
+    }
+    monkeypatch.setattr(module, "registry_sessions", lambda _root: [record])
+    monkeypatch.setattr(
+        module,
+        "raw_block_storage_eligibility",
+        lambda **_kwargs: {
+            "session_id": record["session_id"],
+            "session_label": record["session_label"],
+            "session_dir": record["path"],
+            "status": "skipped",
+            "eligible": False,
+            "reasons": ["synthetic_skip"],
+            "plain_bytes": 64,
+            "_plain_block_candidates": [
+                {"key": "private-block", "plain_bytes": 64}
+            ],
+            "guards": {},
+        },
+    )
+
+    result = module.raw_block_storage_compact(
+        aoa_root=aoa_root,
+        target="all",
+        selected_records_override=[record],
+    )
+
+    assert result["eligibility_skips"]
+    assert all(
+        "_plain_block_candidates" not in item
+        for item in result["eligibility_skips"]
+    )
+    assert "_plain_block_candidates" not in json.dumps(
+        result,
+        ensure_ascii=False,
+        sort_keys=True,
+    )
 
 
 def test_reindex_sessions_command_uses_split_publish_lock_for_mutation(

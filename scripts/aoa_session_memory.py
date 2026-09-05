@@ -294,7 +294,7 @@ DECLARED_GRAPH_PROJECTION_GENERATION_TRANSITIONS: dict[
     # graph producer range, so the target must be the current generation;
     # retain the immediately preceding integration generation with its exact
     # source snapshot as a declared, source-verified predecessor.
-    "a0ad369692972bceb7283c7439cb2108793bfaac0e178f44b17d0c231a843b7b": (
+    "759fdfd6939c5ea1241ff27fb2365c83910e289b0656a2275d9049dc6900b86a": (
         {
             # The source immediately before the outbox consumer contract was
             # integrated is the current integration parent.  Its whole-file
@@ -322,6 +322,13 @@ DECLARED_GRAPH_PROJECTION_GENERATION_TRANSITIONS: dict[
             # source refresh remains mandatory before this transition.
             "ea73e542d289dd3f62a5801f9d3192f5ff2aec9492dedafaf1ffb46f642c4871": (
                 "5828dbbdc7fb6c54fbcff70ff5ff585ec7889c6ea4286e5548103cede94b6777"
+            ),
+            # The bounded raw-block prefix/cursor scheduler changes only
+            # storage maintenance, but the entity-registry source contract
+            # currently spans the parser tail.  Retain the previous current
+            # graph with its exact source snapshot as a predecessor.
+            "a0ad369692972bceb7283c7439cb2108793bfaac0e178f44b17d0c231a843b7b": (
+                "b7301e1938acba55f0401a35394bac1ef2aab5d47c839fec091e815ae7037ebe"
             ),
         }
     ),
@@ -221849,6 +221856,7 @@ def raw_block_storage_eligibility(
         return reject("raw_blocks_missing")
     statuses: Counter[str] = Counter()
     plain_blocks: list[dict[str, Any]] = []
+    plain_block_candidates: list[dict[str, Any]] = []
     open_block_ids: list[str] = []
     for block in blocks:
         status = str(block.get("status") or "unknown")
@@ -221872,6 +221880,22 @@ def raw_block_storage_eligibility(
         plain_blocks.append(block)
         result["plain_block_count"] += 1
         result["plain_bytes"] += plain_bytes
+        plain_block_candidates.append(
+            {
+                "key": raw_block_record_key(block),
+                "block_id": str(
+                    block.get("block_id")
+                    or block.get("segment_id")
+                    or ""
+                ),
+                "plain_rel": str(
+                    block.get("plain_rel")
+                    or block.get("rel")
+                    or ""
+                ),
+                "plain_bytes": plain_bytes,
+            }
+        )
     result["guards"]["block_status_counts"] = dict(sorted(statuses.items()))
     result["guards"]["open_block_ids"] = [
         item for item in open_block_ids if item
@@ -221882,6 +221906,10 @@ def raw_block_storage_eligibility(
         return reject("sealed_raw_block_missing")
     if not plain_blocks:
         return reject("no_plain_eligible_blocks")
+    # Keep the block-level sizes private to the in-process scheduler.  The
+    # public eligibility packet remains bounded and does not expose a large
+    # block inventory in maintenance reports.
+    result["_plain_block_candidates"] = plain_block_candidates
     result["eligible"] = True
     result["status"] = "eligible"
     return result
@@ -221937,6 +221965,24 @@ def raw_block_storage_maintenance_rotated_records(
 
 def raw_block_record_key(record: dict[str, Any]) -> str:
     return str(record.get("block_id") or record.get("segment_id") or record.get("rel") or record.get("path") or "")
+
+
+def raw_block_storage_rotated_block_candidates(
+    candidates: list[dict[str, Any]],
+    cursor: str,
+) -> list[dict[str, Any]]:
+    """Rotate plain sealed block metadata after a persisted block cursor."""
+    if not candidates or not cursor:
+        return list(candidates)
+    keys = [str(item.get("key") or "") for item in candidates]
+    try:
+        cursor_index = keys.index(cursor)
+    except ValueError:
+        # A removed/compressed block is no longer a remaining candidate.  A
+        # missing cursor therefore starts at the current first remaining
+        # block, rather than pinning the session to a stale key.
+        return list(candidates)
+    return [*candidates[cursor_index + 1 :], *candidates[: cursor_index + 1]]
 
 
 def compressed_raw_block_record(
@@ -222116,6 +222162,7 @@ def raw_block_storage_compact(
     sealed_only: bool = True,
     closed_only: bool = False,
     selected_records_override: list[dict[str, Any]] | None = None,
+    selected_block_ids_override: dict[str, Iterable[str]] | None = None,
 ) -> dict[str, Any]:
     diagnostics: list[str] = []
     selection_limit = None if target == "all" and skip_no_plain else limit
@@ -222133,6 +222180,16 @@ def raw_block_storage_compact(
         selected_records = [record for record in selected_records if session_has_plain_raw_blocks(record)]
         if limit is not None:
             selected_records = selected_records[: max(0, int_value(limit))]
+    selected_block_keys_by_session: dict[str, set[str]] | None = None
+    if selected_block_ids_override is not None:
+        selected_block_keys_by_session = {
+            str(session_key): {
+                str(block_key)
+                for block_key in block_keys
+                if str(block_key)
+            }
+            for session_key, block_keys in selected_block_ids_override.items()
+        }
     deferred_live_lookup, deferred_live_diagnostics = raw_block_compaction_deferred_live_lookup(aoa_root)
     diagnostics.extend(deferred_live_diagnostics)
     skipped_live_deferred_sessions: list[dict[str, Any]] = []
@@ -222171,7 +222228,9 @@ def raw_block_storage_compact(
         if eligibility.get("eligible") is True:
             eligible_records.append(record)
         else:
-            eligibility_skips.append(eligibility)
+            public_eligibility = dict(eligibility)
+            public_eligibility.pop("_plain_block_candidates", None)
+            eligibility_skips.append(public_eligibility)
     selected_records = eligible_records
     empty_selection_override = bool(
         selected_records_override is not None
@@ -222253,6 +222312,12 @@ def raw_block_storage_compact(
         )
     for record in selected_records:
         session_dir = Path(str(record.get("path") or record.get("navigation_path") or ""))
+        session_key = session_record_key(record)
+        selected_block_keys = (
+            selected_block_keys_by_session.get(session_key, set())
+            if selected_block_keys_by_session is not None
+            else None
+        )
         manifest_path = session_dir / "session.manifest.json"
         manifest = read_json(manifest_path, {})
         if not isinstance(manifest, dict) or not manifest:
@@ -222382,6 +222447,19 @@ def raw_block_storage_compact(
                     {
                         "block_id": block.get("block_id"),
                         "status": "skipped_unsealed_block",
+                        "block_status": block_status,
+                        "plain_rel": block.get("rel"),
+                    }
+                )
+                continue
+            if (
+                selected_block_keys is not None
+                and key not in selected_block_keys
+            ):
+                session_results.append(
+                    {
+                        "block_id": block.get("block_id"),
+                        "status": "skipped_selection_limit",
                         "block_status": block_status,
                         "plain_rel": block.get("rel"),
                     }
@@ -222897,6 +222975,7 @@ def raw_block_storage_maintenance_markdown(payload: dict[str, Any]) -> str:
         f"- cursor_committed: {payload.get('cursor_committed')}",
         f"- scanned_count: {payload.get('scanned_count')}",
         f"- selected_count: {payload.get('selected_count')}",
+        f"- selected_block_counts: {payload.get('selected_block_counts')}",
         f"- closed_only: {payload.get('closed_only')}",
         f"- max_plain_bytes: {payload.get('max_plain_bytes')}",
         f"- eligible_plain_bytes: {payload.get('eligible_plain_bytes_human')}",
@@ -223029,6 +223108,15 @@ def raw_block_storage_maintenance(
     )
     state = read_raw_block_storage_maintenance_state(aoa_root)
     cursor_before = str(state.get("cursor") or "")
+    block_cursors_before = {
+        str(session_key): str(block_key)
+        for session_key, block_key in (
+            state.get("block_cursors", {}).items()
+            if isinstance(state.get("block_cursors"), dict)
+            else []
+        )
+        if str(session_key) and str(block_key)
+    }
     records = registry_sessions(aoa_root)
     rotated = raw_block_storage_maintenance_rotated_records(
         records,
@@ -223043,6 +223131,10 @@ def raw_block_storage_maintenance(
     eligible_plain_bytes = 0
     selected_plain_bytes = 0
     selection_skips: list[dict[str, Any]] = []
+    selected_block_ids_by_session: dict[str, list[str]] = {}
+    selected_block_counts_by_session: dict[str, int] = {}
+    block_cursor_before_by_session: dict[str, str] = {}
+    selection_block_diagnostics: dict[str, list[str]] = {}
     for record in rotated[:effective_scan_limit]:
         eligibility = raw_block_storage_eligibility(
             aoa_root=aoa_root,
@@ -223051,32 +223143,145 @@ def raw_block_storage_maintenance(
             sealed_only=True,
             closed_only=closed_only,
         )
-        scanned.append(eligibility)
+        public_eligibility = dict(eligibility)
+        plain_block_candidates = public_eligibility.pop(
+            "_plain_block_candidates",
+            [],
+        )
         if eligibility.get("eligible") is not True:
+            scanned.append(public_eligibility)
             continue
         candidate_plain_bytes = int_value(eligibility.get("plain_bytes"))
         eligible_plain_bytes += candidate_plain_bytes
-        if (
-            candidate_plain_bytes > effective_plain_bytes
-            or selected_plain_bytes + candidate_plain_bytes
-            > effective_plain_bytes
-        ):
-            eligibility["selection_status"] = "skipped_plain_byte_limit"
-            eligibility["reasons"] = unique_preserving_order(
+        if not isinstance(plain_block_candidates, list):
+            plain_block_candidates = []
+        normalized_candidates = [
+            item
+            for item in plain_block_candidates
+            if isinstance(item, dict)
+            and str(item.get("key") or "")
+            and int_value(item.get("plain_bytes")) >= 0
+        ]
+        session_key = session_record_key(record)
+        block_cursor_before = block_cursors_before.get(session_key, "")
+        block_cursor_before_by_session[session_key] = block_cursor_before
+        if not normalized_candidates:
+            public_eligibility["selection_status"] = (
+                "skipped_block_metadata_unavailable"
+            )
+            public_eligibility["reasons"] = unique_preserving_order(
                 [
                     *(
-                        eligibility.get("reasons")
-                        if isinstance(eligibility.get("reasons"), list)
+                        public_eligibility.get("reasons")
+                        if isinstance(public_eligibility.get("reasons"), list)
                         else []
                     ),
-                    "plain_byte_limit_exceeded",
+                    "plain_block_metadata_unavailable",
                 ]
             )
-            selection_skips.append(eligibility)
+            selection_skips.append(public_eligibility)
+            scanned.append(public_eligibility)
+            continue
+        candidate_bytes_total = sum(
+            int_value(item.get("plain_bytes"))
+            for item in normalized_candidates
+        )
+        if candidate_bytes_total != candidate_plain_bytes:
+            public_eligibility["selection_status"] = (
+                "skipped_block_metadata_changed"
+            )
+            public_eligibility["reasons"] = unique_preserving_order(
+                [
+                    *(
+                        public_eligibility.get("reasons")
+                        if isinstance(public_eligibility.get("reasons"), list)
+                        else []
+                    ),
+                    "plain_block_metadata_changed",
+                ]
+            )
+            selection_skips.append(public_eligibility)
+            scanned.append(public_eligibility)
+            continue
+        rotated_candidates = raw_block_storage_rotated_block_candidates(
+            normalized_candidates,
+            block_cursor_before,
+        )
+        remaining_plain_bytes = max(
+            0,
+            effective_plain_bytes - selected_plain_bytes,
+        )
+        selected_block_keys: list[str] = []
+        selected_for_session_bytes = 0
+        block_diagnostics: list[str] = []
+        oversized_block_count = 0
+        for candidate in rotated_candidates:
+            block_bytes = int_value(candidate.get("plain_bytes"))
+            if block_bytes > effective_plain_bytes:
+                oversized_block_count += 1
+                block_diagnostics.append(
+                    "individual_plain_block_exceeds_byte_limit"
+                )
+                # Do not let a future single block larger than the hard run
+                # cap poison the rest of this session.  It remains visibly
+                # skipped, while later smaller sealed blocks can still make
+                # bounded progress without exceeding the cap.
+                continue
+            if block_bytes > remaining_plain_bytes:
+                block_diagnostics.append("plain_byte_limit_exceeded")
+                break
+            selected_block_keys.append(str(candidate.get("key") or ""))
+            selected_for_session_bytes += block_bytes
+            remaining_plain_bytes -= block_bytes
+            if remaining_plain_bytes <= 0:
+                break
+        if block_diagnostics:
+            selection_block_diagnostics[session_key] = unique_preserving_order(
+                block_diagnostics
+            )
+            public_eligibility["selection_block_diagnostics"] = (
+                selection_block_diagnostics[session_key]
+            )
+        public_eligibility["oversized_block_count"] = oversized_block_count
+        public_eligibility["selected_block_count"] = len(selected_block_keys)
+        public_eligibility["selected_plain_bytes"] = selected_for_session_bytes
+        if not selected_block_keys:
+            public_eligibility["selection_status"] = (
+                "skipped_plain_byte_limit"
+            )
+            public_eligibility["reasons"] = unique_preserving_order(
+                [
+                    *(
+                        public_eligibility.get("reasons")
+                        if isinstance(public_eligibility.get("reasons"), list)
+                        else []
+                    ),
+                    *block_diagnostics,
+                    "plain_byte_limit_exceeded"
+                    if not block_diagnostics
+                    else "",
+                ]
+            )
+            public_eligibility["reasons"] = [
+                reason
+                for reason in public_eligibility["reasons"]
+                if reason
+            ]
+            selection_skips.append(public_eligibility)
+            scanned.append(public_eligibility)
             continue
         selected_records.append(record)
-        selected_plain_bytes += candidate_plain_bytes
-        eligibility["selection_status"] = "selected"
+        selected_block_ids_by_session[session_key] = selected_block_keys
+        selected_block_counts_by_session[session_key] = len(
+            selected_block_keys
+        )
+        selected_plain_bytes += selected_for_session_bytes
+        public_eligibility["selection_status"] = (
+            "selected_prefix"
+            if len(selected_block_keys) < len(normalized_candidates)
+            else "selected"
+        )
+        scanned.append(public_eligibility)
         if len(selected_records) >= effective_session_limit:
             break
     cursor_after = (
@@ -223099,6 +223304,7 @@ def raw_block_storage_maintenance(
         sealed_only=True,
         closed_only=closed_only,
         selected_records_override=selected_records,
+        selected_block_ids_override=selected_block_ids_by_session,
     )
     diagnostics.extend(
         str(item)
@@ -223118,15 +223324,59 @@ def raw_block_storage_maintenance(
             for item in compact_results
         )
     )
+    selected_record_keys_by_dir = {
+        str(
+            Path(
+                str(record.get("path") or record.get("navigation_path") or "")
+            )
+        ): session_record_key(record)
+        for record in selected_records
+    }
+    successful_publish_session_keys: set[str] = set()
+    block_cursors_after = dict(block_cursors_before)
+    for item in compact_results:
+        if not isinstance(item, dict):
+            continue
+        publish_result = item.get("publish_result")
+        if not isinstance(publish_result, dict):
+            continue
+        if (
+            item.get("status") != "applied"
+            or publish_result.get("status") != "published"
+            or int_value(item.get("compressed_count")) <= 0
+        ):
+            continue
+        session_dir_key = str(item.get("session_dir") or "")
+        session_key = selected_record_keys_by_dir.get(session_dir_key, "")
+        selected_block_keys = selected_block_ids_by_session.get(session_key, [])
+        if not session_key or not selected_block_keys:
+            continue
+        successful_publish_session_keys.add(session_key)
+        block_cursors_after[session_key] = selected_block_keys[-1]
     cursor_committed = False
-    if apply and scanned and compact.get("ok") is True and not apply_failure:
+    block_cursor_committed = False
+    session_cursor_commit_ready = bool(
+        apply
+        and scanned
+        and compact.get("ok") is True
+        and not apply_failure
+    )
+    state_write_ready = bool(
+        session_cursor_commit_ready or successful_publish_session_keys
+    )
+    if apply and scanned and state_write_ready:
         state_payload = {
             **state,
             "schema_version": RAW_BLOCK_STORAGE_MAINTENANCE_STATE_SCHEMA_VERSION,
             "artifact_type": (
                 "session_memory_raw_block_storage_maintenance_state"
             ),
-            "cursor": cursor_after,
+            "cursor": (
+                cursor_after
+                if session_cursor_commit_ready
+                else cursor_before
+            ),
+            "block_cursors": block_cursors_after,
             "updated_at": now,
             "last_run": {
                 "at": now,
@@ -223137,6 +223387,21 @@ def raw_block_storage_maintenance(
                     str(record.get("session_id") or "")
                     for record in selected_records
                 ],
+                "successful_publish_session_ids": [
+                    str(record.get("session_id") or "")
+                    for record in selected_records
+                    if session_record_key(record)
+                    in successful_publish_session_keys
+                ],
+                "block_cursor_before": {
+                    key: block_cursor_before_by_session.get(key, "")
+                    for key in selected_block_ids_by_session
+                },
+                "block_cursor_after": {
+                    key: block_cursors_after.get(key, "")
+                    for key in selected_block_ids_by_session
+                    if key in successful_publish_session_keys
+                },
                 "status": compact.get("status"),
                 "apply": True,
             },
@@ -223168,7 +223433,8 @@ def raw_block_storage_maintenance(
                 f"{type(exc).__name__}:{exc}"
             )
         else:
-            cursor_committed = True
+            cursor_committed = session_cursor_commit_ready
+            block_cursor_committed = bool(successful_publish_session_keys)
 
     status = (
         "blocked"
@@ -223188,7 +223454,11 @@ def raw_block_storage_maintenance(
         "artifact_type": "session_memory_raw_block_storage_maintenance",
         "generated_at": now,
         "ok": bool(compact.get("ok") is True and not diagnostics),
-        "mutates": bool(compact.get("mutates") or cursor_committed),
+        "mutates": bool(
+            compact.get("mutates")
+            or cursor_committed
+            or block_cursor_committed
+        ),
         "storage_mutates": bool(compact.get("mutates")),
         "apply": bool(apply),
         "target": "all",
@@ -223200,8 +223470,22 @@ def raw_block_storage_maintenance(
         "cursor_before": cursor_before,
         "cursor_after": cursor_after,
         "cursor_committed": cursor_committed,
+        "block_cursor_before": block_cursor_before_by_session,
+        "block_cursor_after": {
+            key: block_cursors_after.get(key, "")
+            for key in selected_block_ids_by_session
+            if key in successful_publish_session_keys
+        },
+        "block_cursor_committed": block_cursor_committed,
+        "successful_publish_session_ids": [
+            str(record.get("session_id") or "")
+            for record in selected_records
+            if session_record_key(record)
+            in successful_publish_session_keys
+        ],
         "scanned_count": len(scanned),
         "selected_count": len(selected_records),
+        "selected_block_counts": selected_block_counts_by_session,
         "selected_session_ids": [
             str(record.get("session_id") or "")
             for record in selected_records
@@ -223221,6 +223505,7 @@ def raw_block_storage_maintenance(
             else 0
         ),
         "selection_skips": selection_skips,
+        "selection_block_diagnostics": selection_block_diagnostics,
         "scanned": scanned,
         "compact": compact,
         "diagnostics": unique_preserving_order(diagnostics),
@@ -228248,8 +228533,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-plain-bytes",
         type=int,
         help=(
-            "Plain sealed bytes per --scheduled run; default and hard cap "
-            f"are {RAW_BLOCK_STORAGE_MAINTENANCE_MAX_PLAIN_BYTES} bytes."
+            "Plain sealed bytes per --scheduled run; a remaining-block "
+            "prefix is selected within the default/hard cap of "
+            f"{RAW_BLOCK_STORAGE_MAINTENANCE_MAX_PLAIN_BYTES} bytes."
         ),
     )
     raw_block_storage_compact_parser.add_argument(
