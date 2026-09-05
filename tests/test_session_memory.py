@@ -10,6 +10,7 @@ import hashlib
 import io
 import json
 import os
+import py_compile
 import shlex
 import shutil
 import sqlite3
@@ -20,7 +21,7 @@ import time
 import warnings
 from datetime import datetime, timezone
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import pytest
@@ -76,11 +77,14 @@ def build_minimal_portable_test_bundle(
         else:
             shutil.copy2(source_path, target_path)
     if runtime_script:
-        runtime_dependency = Path("scripts/aoa_epistemic_action_event_chain.py")
-        shutil.copy2(
-            source_aoa_root / runtime_dependency,
-            target_aoa_root / runtime_dependency,
-        )
+        for runtime_dependency in (
+            Path("scripts/aoa_epistemic_action_event_chain.py"),
+            Path("scripts/aoa_session_memory_entity_usage_parsers.py"),
+        ):
+            shutil.copy2(
+                source_aoa_root / runtime_dependency,
+                target_aoa_root / runtime_dependency,
+            )
     module.write_json(
         target_aoa_root / module.REGISTRY_NAME,
         {
@@ -5074,16 +5078,13 @@ def test_captured_invalid_escape_literal_does_not_leak_syntax_warning() -> None:
     with warnings.catch_warnings(record=True) as captured:
         warnings.simplefilter("always")
         shell_commands = module.custom_exec_shell_commands(payload)
-        entity_commands = module.entity_usage_custom_exec_command_candidates(payload)
-        episode_command = module.episode_exact_operational_nested_literal(
-            source,
-            module.CUSTOM_EXEC_NESTED_COMMAND_LITERAL_RE,
+        entity_commands = module.entity_usage_execution_command_candidates(
+            payload
         )
 
     expected = r"rg '\$HOME' README.md"
     assert shell_commands == [expected]
     assert entity_commands == [expected]
-    assert episode_command == expected
     assert not [item for item in captured if item.category is SyntaxWarning]
 
 
@@ -22600,7 +22601,7 @@ def test_raw_block_storage_compact_reads_compressed_blocks_after_plain_removal(t
     )
     assert plan["ok"] is True
     assert plan["mutates"] is False
-    assert plan["planned_count"] == 2
+    assert plan["planned_count"] == 1
     assert plan["compressed_count"] == 0
     assert plan["plain_bytes"] > 0
     assert plan["compressed_bytes"] > 0
@@ -22614,8 +22615,8 @@ def test_raw_block_storage_compact_reads_compressed_blocks_after_plain_removal(t
     )
     assert applied["ok"] is True
     assert applied["mutates"] is True
-    assert applied["compressed_count"] == 2
-    assert applied["removed_plain_count"] == 2
+    assert applied["compressed_count"] == 1
+    assert applied["removed_plain_count"] == 1
     assert applied["post_apply_raw_block_ref_audit"]["ok"] is True
 
     manifest = json.loads((session_dir / "session.manifest.json").read_text(encoding="utf-8"))
@@ -22649,11 +22650,11 @@ def test_raw_block_storage_compact_reads_compressed_blocks_after_plain_removal(t
     assert boundary_window["ok"] is True
     assert [event["line"] for event in boundary_window["events"]] == [3, 4]
     assert boundary_window["source_integrity"]["verified_count"] == 2
-    assert all(
+    assert any(
         str(block["payload_ref"]).endswith(".raw.jsonl.gz")
         for block in boundary_window["raw_blocks"]
     )
-    assert all(
+    assert any(
         str(event["refs"]["raw_block_payload"]).endswith(".raw.jsonl.gz")
         for event in boundary_window["events"]
     )
@@ -22664,9 +22665,9 @@ def test_raw_block_storage_compact_reads_compressed_blocks_after_plain_removal(t
     assert audit["missing_count"] == 0
 
     storage = module.session_storage_breakdown(aoa_root)
-    assert storage["raw_block_storage"]["plain_bytes"] == 0
+    assert storage["raw_block_storage"]["plain_bytes"] > 0
     assert storage["raw_block_storage"]["compressed_bytes"] > 0
-    assert storage["raw_block_duplication_candidate_bytes"] == 0
+    assert storage["raw_block_duplication_candidate_bytes"] > 0
 
     no_candidates = module.raw_block_storage_compact(
         aoa_root=aoa_root,
@@ -22675,7 +22676,7 @@ def test_raw_block_storage_compact_reads_compressed_blocks_after_plain_removal(t
         limit=20,
     )
     assert no_candidates["ok"] is True
-    assert no_candidates["status"] == "current_no_plain_candidates"
+    assert no_candidates["status"] == "skipped_ineligible"
     assert no_candidates["selected_count"] == 0
 
 
@@ -22855,15 +22856,23 @@ def test_raw_block_storage_compact_rolls_back_whole_projection_on_publish_failur
 
     assert recovered["ok"] is True
     assert recovered["mutates"] is True
-    assert recovered["compressed_count"] == 2
-    assert recovered["removed_plain_count"] == 2
+    assert recovered["compressed_count"] == 1
+    assert recovered["removed_plain_count"] == 1
     assert recovered["results"][0]["publish_result"][
         "status"
     ] == "published"
     assert all(
-        block["storage_mode"]
-        == module.RAW_BLOCK_STORAGE_MODE_GZIP
-        and block["plain_removed"] is True
+        (
+            block["storage_mode"]
+            == module.RAW_BLOCK_STORAGE_MODE_GZIP
+            and block["plain_removed"] is True
+        )
+        if block.get("status") == "sealed"
+        else (
+            block["storage_mode"]
+            == module.RAW_BLOCK_STORAGE_MODE_PLAIN
+            and block.get("plain_removed") is not True
+        )
         for block in manifest["raw_blocks"]["blocks"]
     )
     assert module.projection_publish_id(
@@ -23009,6 +23018,964 @@ def test_raw_block_storage_compact_apply_uses_maintenance_lock(tmp_path: Path, m
     assert calls["mode"] == "manual-bulk"
     assert calls["target"] == "all"
     assert {"raw_blocks", "session_manifests", "session_registry"} <= set(calls["touched_surfaces"])
+
+
+def test_raw_block_storage_eligibility_allows_historical_generation_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Storage compaction must not force a semantic reindex of old sessions."""
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-12T00-00-00-storage-generation.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-05-12T00:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": "storage-generation", "cwd": str(workspace)},
+            },
+            {
+                "timestamp": "2026-05-12T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "Keep old generation storage eligible."}],
+                },
+            },
+            {
+                "timestamp": "2026-05-12T00:00:02Z",
+                "type": "turn_context",
+                "payload": {"summary": "sealed storage boundary"},
+            },
+            {
+                "timestamp": "2026-05-12T00:00:03Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Raw refs remain stable."}],
+                },
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "storage-generation",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    session_dir = aoa_root / "sessions" / "2026-05-12__001__keep-old-generation-storage-eligible"
+    record = module.resolve_session_record(aoa_root, "storage-generation")
+    allowed = sorted(module.RAW_BLOCK_STORAGE_ALLOWED_GENERATION_DRIFT_REASONS)
+    monkeypatch.setattr(
+        module,
+        "generated_session_index_stale_reasons_for_session",
+        lambda *_args, **_kwargs: allowed,
+    )
+
+    eligible = module.raw_block_storage_eligibility(
+        aoa_root=aoa_root,
+        record=record,
+        sealed_only=True,
+        closed_only=False,
+    )
+
+    assert eligible["eligible"] is True
+    assert eligible["reasons"] == []
+    assert eligible["guards"]["projection_generation_drift"] == allowed
+
+    monkeypatch.setattr(
+        module,
+        "generated_session_index_stale_reasons_for_session",
+        lambda *_args, **_kwargs: [*allowed, "task_episode_semantic_digest_mismatch"],
+    )
+    rejected = module.raw_block_storage_eligibility(
+        aoa_root=aoa_root,
+        record=record,
+        sealed_only=True,
+        closed_only=False,
+    )
+    assert rejected["eligible"] is False
+    assert rejected["reasons"] == ["projection_generation_not_current"]
+
+
+def test_raw_block_storage_validation_keeps_unknown_drift_and_bad_cache_hard(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "raw-block-storage-validation-guards.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-05-12T00:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "storage-validation-guards",
+                    "cwd": str(workspace),
+                },
+            },
+            {
+                "timestamp": "2026-05-12T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Keep storage validation fail-closed.",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    receipt = module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "storage-validation-guards",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    session_dir = Path(str(receipt["session_dir"]))
+    manifest = module.read_json(
+        session_dir / "session.manifest.json",
+        {},
+    )
+    publish_identity = manifest["index_schema"]["projection_publish"]
+    stage_dir = module.stage_existing_session_projection(session_dir)
+    cache_root = module.event_classification_cache_root(stage_dir)
+    cache_index_path = module.event_classification_cache_index_path(
+        cache_root
+    )
+    try:
+        cache_root.mkdir(parents=True)
+        missing = module.validate_staged_session_projection(
+            stage_dir=stage_dir,
+            session_dir=session_dir,
+            publish_identity=publish_identity,
+            storage_only=True,
+        )
+        assert missing["ok"] is False
+        assert "classification_cache_index_invalid" in missing["diagnostics"]
+
+        cache_index_path.write_text("[]\n", encoding="utf-8")
+        non_dict = module.validate_staged_session_projection(
+            stage_dir=stage_dir,
+            session_dir=session_dir,
+            publish_identity=publish_identity,
+            storage_only=True,
+        )
+        assert non_dict["ok"] is False
+        assert "classification_cache_index_invalid" in non_dict[
+            "diagnostics"
+        ]
+    finally:
+        module.remove_projection_publish_path(stage_dir)
+
+    assert module.raw_block_storage_validation_drift_allowed(
+        "generation_migration_transition_target_mismatch:segment_index"
+    ) is True
+    assert module.raw_block_storage_validation_drift_allowed(
+        "generation_migration_transition_target_mismatch:future_component"
+    ) is False
+
+
+def test_raw_block_storage_eligibility_skips_legacy_capture_schema_before_staging(
+    tmp_path: Path,
+) -> None:
+    """Legacy capture readers remain compatible while storage stays current-only."""
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "raw-block-storage-legacy-capture-schema.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-05-12T00:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "storage-legacy-capture-schema",
+                    "cwd": str(workspace),
+                },
+            },
+            {
+                "timestamp": "2026-05-12T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Keep the legacy capture state readable.",
+                        }
+                    ],
+                },
+            },
+            {
+                "timestamp": "2026-05-12T00:00:02Z",
+                "type": "turn_context",
+                "payload": {"summary": "sealed storage boundary"},
+            },
+            {
+                "timestamp": "2026-05-12T00:00:03Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "The raw block remains available.",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "storage-legacy-capture-schema",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    session_dir = module.resolve_session_record(
+        aoa_root,
+        "storage-legacy-capture-schema",
+    )["path"]
+    session_dir = Path(str(session_dir))
+    state_path = module.raw_capture_state_path(session_dir)
+    state = module.read_json(state_path, {})
+    assert state["schema_version"] == module.RAW_CAPTURE_STATE_SCHEMA_VERSION
+    state["schema_version"] = 1
+    module.write_json(state_path, state)
+
+    result = module.raw_block_storage_eligibility(
+        aoa_root=aoa_root,
+        record=module.resolve_session_record(
+            aoa_root,
+            "storage-legacy-capture-schema",
+        ),
+        sealed_only=True,
+        closed_only=False,
+    )
+
+    assert result["eligible"] is False
+    assert result["reasons"] == ["raw_capture_state_schema_incompatible"]
+    assert result["guards"]["capture_state_schema_version"] == 1
+
+
+def test_raw_block_storage_maintenance_skips_legacy_schema_and_reaches_next_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bounded scan advances past an unsupported legacy capture candidate."""
+    aoa_root = tmp_path / ".aoa"
+    records = [
+        {
+            "session_id": "storage-legacy",
+            "session_label": "2026-05-12__001__storage-legacy",
+            "path": str(tmp_path / "storage-legacy"),
+        },
+        {
+            "session_id": "storage-good",
+            "session_label": "2026-05-12__002__storage-good",
+            "path": str(tmp_path / "storage-good"),
+        },
+    ]
+    monkeypatch.setattr(module, "registry_sessions", lambda _root: records)
+    monkeypatch.setattr(
+        module,
+        "raw_block_compaction_deferred_live_lookup",
+        lambda _root: ({}, []),
+    )
+
+    def fake_eligibility(**kwargs: Any) -> dict[str, Any]:
+        record = kwargs["record"]
+        session_id = record["session_id"]
+        if session_id == "storage-legacy":
+            return {
+                "session_id": session_id,
+                "session_label": record["session_label"],
+                "session_dir": record["path"],
+                "status": "skipped",
+                "eligible": False,
+                "reasons": ["raw_capture_state_schema_incompatible"],
+                "plain_bytes": 0,
+                "guards": {"capture_state_schema_version": 1},
+            }
+        return {
+            "session_id": session_id,
+            "session_label": record["session_label"],
+            "session_dir": record["path"],
+            "status": "eligible",
+            "eligible": True,
+            "reasons": [],
+            "plain_bytes": 128,
+            "_plain_block_candidates": [
+                {"key": f"{session_id}-block", "plain_bytes": 128}
+            ],
+            "guards": {"capture_state_schema_version": 2},
+        }
+
+    monkeypatch.setattr(module, "raw_block_storage_eligibility", fake_eligibility)
+    monkeypatch.setattr(
+        module,
+        "raw_block_storage_compact",
+        lambda **kwargs: {
+            "ok": True,
+            "status": "applied",
+            "mutates": bool(kwargs["apply"] and kwargs["selected_records_override"]),
+            "apply_failure_count": 0,
+            "diagnostics": [],
+            "results": [],
+        },
+    )
+
+    result = module.raw_block_storage_maintenance(
+        aoa_root=aoa_root,
+        target="all",
+        limit=1,
+        scan_limit=2,
+        max_plain_bytes=128,
+        apply=True,
+    )
+
+    assert result["ok"] is True
+    assert result["status"] == "applied"
+    assert result["scanned_count"] == 2
+    assert result["selected_session_ids"] == ["storage-good"]
+    assert result["scanned"][0]["reasons"] == [
+        "raw_capture_state_schema_incompatible"
+    ]
+    assert result["cursor_after"] == "storage-good"
+    assert result["cursor_committed"] is True
+    assert result["storage_mutates"] is True
+
+
+def test_raw_block_storage_maintenance_reports_unsupported_only_as_no_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unsupported candidate may move only the cursor, never claim compression."""
+    aoa_root = tmp_path / ".aoa"
+    record = {
+        "session_id": "storage-legacy-only",
+        "session_label": "2026-05-12__001__storage-legacy-only",
+        "path": str(tmp_path / "storage-legacy-only"),
+    }
+    monkeypatch.setattr(module, "registry_sessions", lambda _root: [record])
+    monkeypatch.setattr(
+        module,
+        "raw_block_compaction_deferred_live_lookup",
+        lambda _root: ({}, []),
+    )
+    monkeypatch.setattr(
+        module,
+        "raw_block_storage_eligibility",
+        lambda **_kwargs: {
+            "session_id": record["session_id"],
+            "session_label": record["session_label"],
+            "session_dir": record["path"],
+            "status": "skipped",
+            "eligible": False,
+            "reasons": ["raw_capture_state_schema_incompatible"],
+            "plain_bytes": 0,
+            "guards": {"capture_state_schema_version": 1},
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "raw_block_storage_compact",
+        lambda **_kwargs: {
+            "ok": True,
+            "status": "skipped_ineligible",
+            "mutates": False,
+            "apply_failure_count": 0,
+            "diagnostics": [],
+            "results": [],
+        },
+    )
+
+    result = module.raw_block_storage_maintenance(
+        aoa_root=aoa_root,
+        target="all",
+        limit=1,
+        scan_limit=1,
+        apply=True,
+    )
+
+    assert result["ok"] is True
+    assert result["status"] == "no_eligible_candidates"
+    assert result["selected_count"] == 0
+    assert result["storage_mutates"] is False
+    assert result["mutates"] is True
+    assert result["cursor_committed"] is True
+    assert result["scanned"][0]["reasons"] == [
+        "raw_capture_state_schema_incompatible"
+    ]
+
+
+def test_raw_block_storage_maintenance_cursor_is_dry_run_and_resumable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    records = [
+        {
+            "session_id": "storage-a",
+            "session_label": "2026-05-12__001__storage-a",
+            "path": str(tmp_path / "storage-a"),
+        },
+        {
+            "session_id": "storage-b",
+            "session_label": "2026-05-12__002__storage-b",
+            "path": str(tmp_path / "storage-b"),
+        },
+    ]
+    monkeypatch.setattr(module, "registry_sessions", lambda _root: records)
+    monkeypatch.setattr(
+        module,
+        "raw_block_compaction_deferred_live_lookup",
+        lambda _root: ({}, []),
+    )
+    monkeypatch.setattr(
+        module,
+        "raw_block_storage_eligibility",
+        lambda **kwargs: {
+            "session_id": kwargs["record"]["session_id"],
+            "session_label": kwargs["record"]["session_label"],
+            "session_dir": kwargs["record"]["path"],
+            "status": "eligible",
+            "eligible": True,
+            "reasons": [],
+            "block_count": 2,
+            "sealed_block_count": 1,
+            "open_block_count": 1,
+            "plain_block_count": 1,
+            "plain_bytes": 512,
+            "_plain_block_candidates": [
+                {
+                    "key": f"{kwargs['record']['session_id']}-block",
+                    "plain_bytes": 512,
+                }
+            ],
+            "guards": {},
+        },
+    )
+    compact_calls: list[dict[str, Any]] = []
+
+    def fake_compact(**kwargs: Any) -> dict[str, Any]:
+        compact_calls.append(kwargs)
+        if kwargs["apply"] and kwargs.get("selected_records_override"):
+            return {
+                "ok": True,
+                "status": "applied",
+                "mutates": True,
+                "apply_failure_count": 0,
+                "diagnostics": [],
+                "results": [],
+            }
+        return {
+            "ok": True,
+            "status": "planned",
+            "mutates": False,
+            "apply_failure_count": 0,
+            "diagnostics": [],
+            "results": [],
+        }
+
+    monkeypatch.setattr(module, "raw_block_storage_compact", fake_compact)
+    byte_plan = module.raw_block_storage_maintenance(
+        aoa_root=aoa_root,
+        target="all",
+        limit=2,
+        scan_limit=2,
+        max_plain_bytes=512,
+        closed_only=False,
+        apply=False,
+    )
+    assert byte_plan["ok"] is True
+    assert byte_plan["closed_only"] is False
+    assert byte_plan["eligible_plain_bytes"] == 1024
+    assert byte_plan["selected_plain_bytes"] == 512
+    assert byte_plan["selected_session_ids"] == ["storage-a"]
+    assert byte_plan["selection_skips"][0]["session_id"] == "storage-b"
+    assert byte_plan["selection_skips"][0]["reasons"] == [
+        "plain_byte_limit_exceeded"
+    ]
+
+    dry_run = module.raw_block_storage_maintenance(
+        aoa_root=aoa_root,
+        target="all",
+        limit=1,
+        scan_limit=2,
+        apply=False,
+    )
+    state_path = module.raw_block_storage_maintenance_state_path(aoa_root)
+    assert dry_run["ok"] is True
+    assert dry_run["selected_session_ids"] == ["storage-a"]
+    assert dry_run["cursor_committed"] is False
+    assert not state_path.exists()
+
+    first_apply = module.raw_block_storage_maintenance(
+        aoa_root=aoa_root,
+        target="all",
+        limit=1,
+        scan_limit=2,
+        apply=True,
+    )
+    assert first_apply["ok"] is True
+    assert first_apply["cursor_committed"] is True
+    assert first_apply["cursor_after"] == "storage-a"
+    assert first_apply["block_cursor_committed"] is False
+    assert module.read_json(state_path, {})["cursor"] == "storage-a"
+
+    second_apply = module.raw_block_storage_maintenance(
+        aoa_root=aoa_root,
+        target="all",
+        limit=1,
+        scan_limit=2,
+        apply=True,
+    )
+    assert second_apply["ok"] is True
+    assert second_apply["selected_session_ids"] == ["storage-b"]
+    assert second_apply["cursor_before"] == "storage-a"
+    assert second_apply["cursor_after"] == "storage-b"
+    assert second_apply["block_cursor_committed"] is False
+    assert [
+        call["selected_records_override"][0]["session_id"]
+        for call in compact_calls
+        if call["apply"] and call["selected_records_override"]
+    ] == ["storage-a", "storage-b"]
+
+    monkeypatch.setattr(
+        module,
+        "raw_block_storage_compact",
+        lambda **_kwargs: {
+            "ok": False,
+            "status": "failed_last_good_projection_preserved",
+            "mutates": False,
+            "apply_failure_count": 1,
+            "diagnostics": ["injected_failure"],
+            "results": [],
+        },
+    )
+    failed = module.raw_block_storage_maintenance(
+        aoa_root=aoa_root,
+        target="all",
+        limit=1,
+        scan_limit=2,
+        apply=True,
+    )
+    assert failed["ok"] is False
+    assert failed["cursor_committed"] is False
+    assert failed["block_cursor_committed"] is False
+    assert failed["cursor_before"] == "storage-b"
+    assert module.read_json(state_path, {})["cursor"] == "storage-b"
+
+
+def test_raw_block_storage_maintenance_selects_sealed_prefix_and_resumes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A byte cap advances through one large session without touching its tail."""
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "raw-block-storage-prefix.jsonl"
+    events = [
+        {
+            "timestamp": "2026-05-12T00:00:00Z",
+            "type": "session_meta",
+            "payload": {"id": "storage-prefix", "cwd": str(workspace)},
+        },
+        {
+            "timestamp": "2026-05-12T00:00:01Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "first"}],
+            },
+        },
+        {
+            "timestamp": "2026-05-12T00:00:02Z",
+            "type": "compacted",
+            "payload": {"replacement_history": []},
+        },
+        {
+            "timestamp": "2026-05-12T00:00:03Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "second"}],
+            },
+        },
+        {
+            "timestamp": "2026-05-12T00:00:04Z",
+            "type": "compacted",
+            "payload": {"replacement_history": []},
+        },
+        {
+            "timestamp": "2026-05-12T00:00:05Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "tail"}],
+            },
+        },
+        {
+            "timestamp": "2026-05-12T00:00:06Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "open tail"}],
+            },
+        },
+    ]
+    write_jsonl(transcript, events)
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "storage-prefix",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+
+    record = module.resolve_session_record(aoa_root, "storage-prefix")
+    session_dir = Path(str(record["path"]))
+    manifest_before = module.read_json(
+        session_dir / "session.manifest.json",
+        {},
+    )
+    blocks_before = manifest_before["raw_blocks"]["blocks"]
+    sealed_before = [
+        block for block in blocks_before if block.get("status") == "sealed"
+    ]
+    open_before = next(
+        block for block in blocks_before if block.get("status") == "open"
+    )
+    assert len(sealed_before) == 2
+    original_plain_sha = {
+        str(block["block_id"]): hashlib.sha256(
+            Path(str(block["path"])).read_bytes()
+        ).hexdigest()
+        for block in sealed_before
+    }
+    open_plain_path = Path(str(open_before["path"]))
+    open_plain_sha = hashlib.sha256(open_plain_path.read_bytes()).hexdigest()
+    cap = max(
+        int(item["plain_bytes"])
+        for item in module.raw_block_storage_eligibility(
+            aoa_root=aoa_root,
+            record=record,
+            sealed_only=True,
+            closed_only=False,
+        )["_plain_block_candidates"]
+    )
+    assert sum(
+        int(item["plain_bytes"])
+        for item in module.raw_block_storage_eligibility(
+            aoa_root=aoa_root,
+            record=record,
+            sealed_only=True,
+            closed_only=False,
+        )["_plain_block_candidates"]
+    ) > cap
+
+    def fail_publish(**_kwargs: Any) -> dict[str, Any]:
+        raise OSError("injected prefix publish failure")
+
+    original_atomic_publish = module.atomic_publish_session_projection
+    monkeypatch.setattr(
+        module,
+        "atomic_publish_session_projection",
+        fail_publish,
+    )
+    failed = module.raw_block_storage_maintenance(
+        aoa_root=aoa_root,
+        target="all",
+        limit=1,
+        scan_limit=1,
+        max_plain_bytes=cap,
+        closed_only=False,
+        apply=True,
+        confirm_remove_plain=True,
+    )
+    assert failed["ok"] is False
+    assert failed["block_cursor_committed"] is False
+    assert failed["successful_publish_session_ids"] == []
+    assert not module.raw_block_storage_maintenance_state_path(aoa_root).exists()
+    assert all(
+        Path(str(block["path"])).exists()
+        for block in sealed_before
+    )
+    monkeypatch.setattr(
+        module,
+        "atomic_publish_session_projection",
+        original_atomic_publish,
+    )
+
+    first = module.raw_block_storage_maintenance(
+        aoa_root=aoa_root,
+        target="all",
+        limit=1,
+        scan_limit=1,
+        max_plain_bytes=cap,
+        closed_only=False,
+        apply=True,
+        confirm_remove_plain=True,
+    )
+    assert first["ok"] is True
+    assert first["status"] == "applied"
+    assert first["selected_count"] == 1
+    assert first["selected_block_counts"]["storage-prefix"] == 1
+    assert first["selected_plain_bytes"] <= cap
+    assert first["block_cursor_committed"] is True
+    assert first["successful_publish_session_ids"] == ["storage-prefix"]
+
+    manifest_after_first = module.read_json(
+        session_dir / "session.manifest.json",
+        {},
+    )
+    blocks_after_first = manifest_after_first["raw_blocks"]["blocks"]
+    sealed_after_first = [
+        block for block in blocks_after_first if block.get("status") == "sealed"
+    ]
+    open_after_first = next(
+        block for block in blocks_after_first if block.get("status") == "open"
+    )
+    assert sum(
+        1 for block in sealed_after_first if block.get("plain_removed") is True
+    ) == 1
+    assert sum(
+        1 for block in sealed_after_first if block.get("plain_removed") is not True
+    ) == 1
+    assert open_after_first == open_before
+    assert open_plain_path.exists()
+    assert hashlib.sha256(open_plain_path.read_bytes()).hexdigest() == open_plain_sha
+
+    state_after_first = module.read_json(
+        module.raw_block_storage_maintenance_state_path(aoa_root),
+        {},
+    )
+    first_block_cursor = state_after_first["block_cursors"][
+        "storage-prefix"
+    ]
+    monkeypatch.setattr(
+        module,
+        "atomic_publish_session_projection",
+        fail_publish,
+    )
+    failed_after_cursor = module.raw_block_storage_maintenance(
+        aoa_root=aoa_root,
+        target="all",
+        limit=1,
+        scan_limit=1,
+        max_plain_bytes=cap,
+        closed_only=False,
+        apply=True,
+        confirm_remove_plain=True,
+    )
+    assert failed_after_cursor["ok"] is False
+    assert failed_after_cursor["block_cursor_committed"] is False
+    assert failed_after_cursor["block_cursor_before"][
+        "storage-prefix"
+    ] == first_block_cursor
+    assert module.read_json(
+        module.raw_block_storage_maintenance_state_path(aoa_root),
+        {},
+    )["block_cursors"]["storage-prefix"] == first_block_cursor
+    monkeypatch.setattr(
+        module,
+        "atomic_publish_session_projection",
+        original_atomic_publish,
+    )
+
+    second = module.raw_block_storage_maintenance(
+        aoa_root=aoa_root,
+        target="all",
+        limit=1,
+        scan_limit=1,
+        max_plain_bytes=cap,
+        closed_only=False,
+        apply=True,
+        confirm_remove_plain=True,
+    )
+    assert second["ok"] is True
+    assert second["status"] == "applied"
+    assert second["selected_count"] == 1
+    assert second["selected_block_counts"]["storage-prefix"] == 1
+    assert second["selected_plain_bytes"] <= cap
+    assert second["block_cursor_committed"] is True
+
+    manifest_after_second = module.read_json(
+        session_dir / "session.manifest.json",
+        {},
+    )
+    blocks_after_second = manifest_after_second["raw_blocks"]["blocks"]
+    sealed_after_second = [
+        block for block in blocks_after_second if block.get("status") == "sealed"
+    ]
+    assert all(block.get("plain_removed") is True for block in sealed_after_second)
+    assert open_after_first == next(
+        block for block in blocks_after_second if block.get("status") == "open"
+    )
+    assert open_plain_path.exists()
+    assert hashlib.sha256(open_plain_path.read_bytes()).hexdigest() == open_plain_sha
+    for block in sealed_after_second:
+        compressed_path = Path(str(block["compressed_path"]))
+        assert compressed_path.exists()
+        assert hashlib.sha256(
+            module.gzip.decompress(compressed_path.read_bytes())
+        ).hexdigest() == original_plain_sha[str(block["block_id"])]
+    assert module.raw_block_ref_audit(
+        aoa_root=aoa_root,
+        target=session_dir.name,
+        sample_limit=8,
+    )["ok"] is True
+
+
+def test_raw_block_storage_maintenance_surfaces_individual_oversize_block(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    record = {
+        "session_id": "storage-oversize",
+        "session_label": "2026-05-12__001__storage-oversize",
+        "path": str(tmp_path / "storage-oversize"),
+    }
+    monkeypatch.setattr(module, "registry_sessions", lambda _root: [record])
+    monkeypatch.setattr(
+        module,
+        "raw_block_compaction_deferred_live_lookup",
+        lambda _root: ({}, []),
+    )
+    monkeypatch.setattr(
+        module,
+        "raw_block_storage_eligibility",
+        lambda **_kwargs: {
+            "session_id": record["session_id"],
+            "session_label": record["session_label"],
+            "session_dir": record["path"],
+            "status": "eligible",
+            "eligible": True,
+            "reasons": [],
+            "plain_bytes": 193,
+            "_plain_block_candidates": [
+                {"key": "oversize", "plain_bytes": 129},
+                {"key": "small-after-oversize", "plain_bytes": 64},
+            ],
+            "guards": {},
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "raw_block_storage_compact",
+        lambda **_kwargs: {
+            "ok": True,
+            "status": "skipped_ineligible",
+            "mutates": False,
+            "apply_failure_count": 0,
+            "diagnostics": [],
+            "results": [],
+        },
+    )
+
+    result = module.raw_block_storage_maintenance(
+        aoa_root=aoa_root,
+        target="all",
+        limit=1,
+        scan_limit=1,
+        max_plain_bytes=128,
+        apply=True,
+    )
+
+    assert result["ok"] is True
+    assert result["selected_count"] == 1
+    assert result["selected_block_counts"]["storage-oversize"] == 1
+    assert result["selected_plain_bytes"] == 64
+    assert result["storage_mutates"] is False
+    assert result["scanned"][0]["selection_block_diagnostics"] == [
+        "individual_plain_block_exceeds_byte_limit"
+    ]
+    assert "_plain_block_candidates" not in result["scanned"][0]
+    assert result["selection_skips"] == []
+
+
+def test_raw_block_storage_compact_strips_private_block_metadata_from_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    record = {
+        "session_id": "storage-private-metadata",
+        "session_label": "2026-05-12__001__storage-private-metadata",
+        "path": str(tmp_path / "storage-private-metadata"),
+    }
+    monkeypatch.setattr(module, "registry_sessions", lambda _root: [record])
+    monkeypatch.setattr(
+        module,
+        "raw_block_storage_eligibility",
+        lambda **_kwargs: {
+            "session_id": record["session_id"],
+            "session_label": record["session_label"],
+            "session_dir": record["path"],
+            "status": "skipped",
+            "eligible": False,
+            "reasons": ["synthetic_skip"],
+            "plain_bytes": 64,
+            "_plain_block_candidates": [
+                {"key": "private-block", "plain_bytes": 64}
+            ],
+            "guards": {},
+        },
+    )
+
+    result = module.raw_block_storage_compact(
+        aoa_root=aoa_root,
+        target="all",
+        selected_records_override=[record],
+    )
+
+    assert result["eligibility_skips"]
+    assert all(
+        "_plain_block_candidates" not in item
+        for item in result["eligibility_skips"]
+    )
+    assert "_plain_block_candidates" not in json.dumps(
+        result,
+        ensure_ascii=False,
+        sort_keys=True,
+    )
 
 
 def test_reindex_sessions_command_uses_split_publish_lock_for_mutation(
@@ -78632,6 +79599,171 @@ def test_generation_identity_uses_loaded_projection_producer_snapshot(
     )
 
 
+def test_generation_identity_invalidates_parser_only_source_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert module.SESSION_MEMORY_LOADED_ENTITY_USAGE_PARSER_PATH in (
+        module.SESSION_MEMORY_LOADED_PRODUCER_SOURCE_PATHS
+    )
+    assert module.SESSION_MEMORY_LOADED_PRODUCER_SHA256 == (
+        module._producer_source_identity_digest(
+            tuple(
+                (
+                    path,
+                    module.sha256_file_exact(path),
+                )
+                for path in module.SESSION_MEMORY_LOADED_PRODUCER_SOURCE_PATHS
+            )
+        )
+    )
+    assert module.session_memory_generation_common()["producer_sha256"] == (
+        module.SESSION_MEMORY_LOADED_PRODUCER_SHA256
+    )
+    parser_source = tmp_path / "aoa_session_memory_entity_usage_parsers.py"
+    parser_source.write_text("parser-v1\n", encoding="utf-8")
+    source_paths = (
+        module.SESSION_MEMORY_LOADED_PRODUCER_PATH,
+        parser_source,
+    )
+    monkeypatch.setattr(
+        module,
+        "SESSION_MEMORY_LOADED_PRODUCER_SOURCE_PATHS",
+        source_paths,
+    )
+    loaded_sha256 = module._producer_source_identity_digest(
+        tuple(
+            (path, module.sha256_file_exact(path))
+            for path in source_paths
+        )
+    )
+    monkeypatch.setattr(
+        module,
+        "SESSION_MEMORY_LOADED_PRODUCER_SHA256",
+        loaded_sha256,
+    )
+
+    parser_source.write_text("parser-v2\n", encoding="utf-8")
+    source_state = module.session_memory_loaded_producer_source_state()
+
+    assert source_state["stable"] is False
+    assert source_state["status"] == "changed"
+    assert source_state["loaded_sha256"] == loaded_sha256
+    assert source_state["current_sha256"] != loaded_sha256
+    assert "producer_source_changed_during_process" in (
+        source_state["diagnostics"]
+    )
+
+
+def test_entity_usage_parser_loader_binds_exact_sibling_and_cleans_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private_name = "_aoa_session_memory_entity_usage_parsers_source"
+    fixture_main = tmp_path / "aoa_session_memory.py"
+    fixture_parser = tmp_path / "aoa_session_memory_entity_usage_parsers.py"
+    fixture_main.write_text("# fixture runtime\n", encoding="utf-8")
+    fixture_parser.write_bytes(b"VALUE = 1  \n")
+    initial_mtime_ns = fixture_parser.stat().st_mtime_ns
+    monkeypatch.setattr(module, "__file__", str(fixture_main))
+    monkeypatch.setitem(sys.modules, private_name, None)
+
+    first = module._load_entity_usage_parsers_module()
+    assert first.VALUE == 1
+    first_digest = getattr(
+        first,
+        "__aoa_session_memory_entity_usage_parsers_source_sha256__",
+    )
+    assert module._load_entity_usage_parsers_module() is first
+    py_compile.compile(
+        str(fixture_parser),
+        cfile=importlib.util.cache_from_source(str(fixture_parser)),
+        doraise=True,
+    )
+
+    # Keep size and mtime stable so a timestamp-based bytecode cache cannot
+    # explain the reload result.
+    fixture_parser.write_bytes(b"VALUE = 222\n")
+    os.utime(fixture_parser, ns=(initial_mtime_ns, initial_mtime_ns))
+    second = module._load_entity_usage_parsers_module()
+    assert second.VALUE == 222
+    assert second is not first
+    assert getattr(
+        second,
+        "__aoa_session_memory_entity_usage_parsers_source_sha256__",
+    ) != first_digest
+
+    monkeypatch.setattr(
+        module,
+        "__file__",
+        str(module.SESSION_MEMORY_LOADED_PRODUCER_PATH),
+    )
+    foreign = ModuleType(private_name)
+    foreign.__file__ = str(tmp_path / "foreign-parsers.py")
+    monkeypatch.setitem(sys.modules, private_name, foreign)
+    expected_path = (
+        module.SESSION_MEMORY_LOADED_ENTITY_USAGE_PARSER_PATH
+    )
+    calls: list[tuple[str, Path]] = []
+
+    class Loader:
+        def create_module(self, spec: Any) -> ModuleType:
+            return ModuleType(spec.name)
+
+        def exec_module(self, loaded: ModuleType) -> None:
+            loaded.__file__ = str(expected_path)
+            loaded.loaded_from_exact_sibling = True
+
+    def fake_spec_from_file_location(
+        name: str,
+        path: str | Path,
+        **_: Any,
+    ) -> Any:
+        calls.append((name, Path(path).resolve()))
+        return importlib.util.spec_from_loader(
+            name,
+            Loader(),
+            origin=str(path),
+        )
+
+    monkeypatch.setattr(
+        module.importlib.util,
+        "spec_from_file_location",
+        fake_spec_from_file_location,
+    )
+    loaded = module._load_entity_usage_parsers_module()
+
+    assert loaded is not foreign
+    assert loaded.loaded_from_exact_sibling is True
+    assert calls == [(private_name, expected_path)]
+
+    monkeypatch.setitem(sys.modules, private_name, None)
+
+    class FailingLoader(Loader):
+        def exec_module(self, _loaded: ModuleType) -> None:
+            raise RuntimeError("synthetic parser load failure")
+
+    def failing_spec_from_file_location(
+        name: str,
+        path: str | Path,
+        **_: Any,
+    ) -> Any:
+        return importlib.util.spec_from_loader(
+            name,
+            FailingLoader(),
+            origin=str(path),
+        )
+
+    monkeypatch.setattr(
+        module.importlib.util,
+        "spec_from_file_location",
+        failing_spec_from_file_location,
+    )
+    with pytest.raises(RuntimeError, match="synthetic parser load failure"):
+        module._load_entity_usage_parsers_module()
+    assert sys.modules[private_name] is None
+
+
 def test_stage_work_identity_isolates_session_index_change(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -97835,7 +98967,42 @@ def test_install_portable_bundle_creates_clean_target(tmp_path: Path) -> None:
     assert (aoa_root / module.LOCAL_STATS_PACKET_PATH).exists()
     assert (aoa_root / "tests" / "AGENTS.md").exists()
     assert (aoa_root / "scripts" / "aoa_session_memory.py").exists()
+    assert (
+        aoa_root / "scripts" / "aoa_session_memory_entity_usage_parsers.py"
+    ).is_file()
     assert (aoa_root / "tests" / "test_session_memory.py").exists()
+
+    portable_runtime = subprocess.run(
+        [
+            sys.executable,
+            str(aoa_root / "scripts" / "aoa_session_memory.py"),
+            "--help",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert portable_runtime.returncode == 0, (
+        portable_runtime.stdout + portable_runtime.stderr
+    )
+    portable_validation = subprocess.run(
+        [
+            sys.executable,
+            str(aoa_root / "scripts" / "aoa_session_memory.py"),
+            "validate",
+            "--workspace-root",
+            str(workspace),
+            "--aoa-root",
+            str(aoa_root),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert portable_validation.returncode == 0, (
+        portable_validation.stdout + portable_validation.stderr
+    )
+    assert json.loads(portable_validation.stdout)["ok"] is True
     assert (aoa_root / "tests" / "test_skill_system.py").exists()
     registry = json.loads((aoa_root / "session-registry.json").read_text(encoding="utf-8"))
     assert registry["sessions"] == []

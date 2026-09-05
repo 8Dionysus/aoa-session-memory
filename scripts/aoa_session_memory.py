@@ -37,10 +37,12 @@ import warnings
 import zlib
 import uuid
 from collections import Counter, defaultdict, deque
+from contextlib import contextmanager
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
+from importlib.machinery import SourceFileLoader
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
@@ -65,7 +67,124 @@ def _load_epistemic_action_event_chain_module() -> Any:
     return module
 
 
+def _load_entity_usage_parsers_module() -> Any:
+    """Load the bounded command-shape parser source without runtime imports."""
+    module_name = "_aoa_session_memory_entity_usage_parsers_source"
+    source_digest_attr = (
+        "__aoa_session_memory_entity_usage_parsers_source_sha256__"
+    )
+    source_path = Path(__file__).resolve().with_name(
+        "aoa_session_memory_entity_usage_parsers.py"
+    )
+    try:
+        source_bytes = source_path.read_bytes()
+    except OSError:
+        source_bytes = None
+    source_sha256 = (
+        hashlib.sha256(source_bytes).hexdigest()
+        if source_bytes is not None
+        else ""
+    )
+    loaded = sys.modules.get(module_name)
+    loaded_path = getattr(loaded, "__file__", None)
+    if (
+        loaded is not None
+        and loaded_path is not None
+        and Path(loaded_path).resolve() == source_path
+        and source_sha256
+        and getattr(loaded, source_digest_attr, None) == source_sha256
+    ):
+        return loaded
+    spec = importlib.util.spec_from_file_location(module_name, source_path)
+    if spec is None or spec.loader is None:
+        raise ImportError("aoa entity-usage parser source is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    missing = object()
+    previous = sys.modules.get(module_name, missing)
+    sys.modules[module_name] = module
+    try:
+        if source_bytes is not None and isinstance(
+            spec.loader,
+            SourceFileLoader,
+        ):
+            # Compile the exact bytes read above instead of allowing a
+            # timestamp/size-matching pyc to satisfy a same-path reload.
+            exec(
+                compile(source_bytes, str(source_path), "exec"),
+                module.__dict__,
+            )
+        else:
+            spec.loader.exec_module(module)
+        setattr(module, source_digest_attr, source_sha256)
+    except BaseException:
+        if previous is missing:
+            sys.modules.pop(module_name, None)
+        else:
+            sys.modules[module_name] = previous
+        raise
+    return module
+
+
 _EPISTEMIC_ACTION_EVENT_CHAIN = _load_epistemic_action_event_chain_module()
+_ENTITY_USAGE_PARSERS = _load_entity_usage_parsers_module()
+
+entity_usage_javascript_code_mask = (
+    _ENTITY_USAGE_PARSERS.entity_usage_javascript_code_mask
+)
+entity_usage_javascript_matching_delimiter = (
+    _ENTITY_USAGE_PARSERS.entity_usage_javascript_matching_delimiter
+)
+entity_usage_javascript_literal_value = (
+    _ENTITY_USAGE_PARSERS.entity_usage_javascript_literal_value
+)
+entity_usage_javascript_variable_expression_start = (
+    _ENTITY_USAGE_PARSERS.entity_usage_javascript_variable_expression_start
+)
+entity_usage_javascript_array_item_starts = (
+    _ENTITY_USAGE_PARSERS.entity_usage_javascript_array_item_starts
+)
+entity_usage_javascript_array_item_start = (
+    _ENTITY_USAGE_PARSERS.entity_usage_javascript_array_item_start
+)
+entity_usage_javascript_mapped_command_values = (
+    _ENTITY_USAGE_PARSERS.entity_usage_javascript_mapped_command_values
+)
+entity_usage_javascript_command_expression = (
+    _ENTITY_USAGE_PARSERS.entity_usage_javascript_command_expression
+)
+entity_usage_custom_exec_command_candidates = (
+    _ENTITY_USAGE_PARSERS.entity_usage_custom_exec_command_candidates
+)
+entity_usage_python_command_vectors = (
+    _ENTITY_USAGE_PARSERS.entity_usage_python_command_vectors
+)
+entity_usage_python_subprocess_call = (
+    _ENTITY_USAGE_PARSERS.entity_usage_python_subprocess_call
+)
+entity_usage_python_heredoc_subprocess_commands = (
+    _ENTITY_USAGE_PARSERS.entity_usage_python_heredoc_subprocess_commands
+)
+ENTITY_USAGE_CUSTOM_EXEC_CALL_RE = (
+    _ENTITY_USAGE_PARSERS.ENTITY_USAGE_CUSTOM_EXEC_CALL_RE
+)
+ENTITY_USAGE_CUSTOM_EXEC_COMMAND_PROPERTY_RE = (
+    _ENTITY_USAGE_PARSERS.ENTITY_USAGE_CUSTOM_EXEC_COMMAND_PROPERTY_RE
+)
+ENTITY_USAGE_CUSTOM_EXEC_COMMAND_SHORTHAND_RE = (
+    _ENTITY_USAGE_PARSERS.ENTITY_USAGE_CUSTOM_EXEC_COMMAND_SHORTHAND_RE
+)
+ENTITY_USAGE_CUSTOM_EXEC_DESTRUCTURED_MAP_RE = (
+    _ENTITY_USAGE_PARSERS.ENTITY_USAGE_CUSTOM_EXEC_DESTRUCTURED_MAP_RE
+)
+ENTITY_USAGE_DIRECT_SHELL_TOOL_NAMES = {
+    "bash",
+    "exec_command",
+    "shell",
+    "shell_command",
+    "terminal",
+    "zsh",
+}
+
 EPISTEMIC_ACTION_SCHEMA_VERSION = (
     _EPISTEMIC_ACTION_EVENT_CHAIN.EPISTEMIC_ACTION_SCHEMA_VERSION
 )
@@ -167,6 +286,28 @@ DERIVED_TEXT_PRIVACY_LOOKAHEAD_CHARS = 8192
 SESSION_PROJECTION_PUBLISH_IDENTITY_VERSION = 1
 SESSION_PROJECTION_WORK_STATE_SCHEMA_VERSION = 1
 SESSION_PROJECTION_REHYDRATION_PLAN_VERSION = 2
+# A storage-only rewrite may preserve a semantically valid historical
+# projection generation.  These are the session dependency graph drift
+# diagnostics (plus the segment component equivalent); every other stale
+# reason remains a hard rejection for raw-block storage maintenance.
+RAW_BLOCK_STORAGE_ALLOWED_GENERATION_DRIFT_REASONS = frozenset(
+    {
+        "session_index_generation_identity_changed",
+        "segment_index_generation_identity_changed",
+        "segment_index_dependency_generation_identity_changed",
+        "task_episode_source_dependency_generation_identity_changed",
+    }
+)
+RAW_BLOCK_STORAGE_ALLOWED_VALIDATION_DRIFT_REASONS = frozenset(
+    {
+        *RAW_BLOCK_STORAGE_ALLOWED_GENERATION_DRIFT_REASONS,
+        "classification_cache_generation_mismatch",
+        "first_pass_distillation_generation_mismatch",
+        "generation_migration_transition_target_mismatch:raw_event_classification_cache",
+        "generation_migration_transition_target_mismatch:segment_index",
+        "generation_migration_transition_target_mismatch:task_episode_source",
+    }
+)
 EVENT_CLASSIFICATION_CACHE_SCHEMA_VERSION = 1
 EVENT_CLASSIFICATION_BLOCK_MAX_LINES = 512
 EVENT_CLASSIFICATION_BLOCK_TARGET_BYTES = 4 * 1024 * 1024
@@ -270,11 +411,8 @@ DECLARED_GRAPH_PROJECTION_GENERATION_TRANSITIONS: dict[
     # graph-registry-rebind.  The outbox consumer contract changes the
     # graph producer range, so the target must be the current generation;
     # retain the immediately preceding integration generation with its exact
-    # source snapshot as a declared, source-verified predecessor.  The
-    # current target advances only because unreachable legacy graph builder
-    # and accumulator bodies were removed; D-0067 exact-pair proof remains
-    # mandatory for every predecessor, including the baseline source below.
-    "0b2f4adecac6fe1c93d10792b51a72435f824bf33aa33d77565d7ad53d4a588f": (
+    # source snapshot as a declared, source-verified predecessor.
+    "9fc7d5d9fb6a97d4380092d5a56fc3da765f0abe2f7864baecba82ebb04de3c4": (
         {
             # The source immediately before the outbox consumer contract was
             # integrated is the current integration parent.  Its whole-file
@@ -303,10 +441,17 @@ DECLARED_GRAPH_PROJECTION_GENERATION_TRANSITIONS: dict[
             "ea73e542d289dd3f62a5801f9d3192f5ff2aec9492dedafaf1ffb46f642c4871": (
                 "5828dbbdc7fb6c54fbcff70ff5ff585ec7889c6ea4286e5548103cede94b6777"
             ),
-            # Baseline before the unreachable legacy graph implementation was
-            # removed; admit only its exact source snapshot.
-            "5f7a149fbef6c6f605e7d5eb387bacc023eef3a98f87c81dc6758660ab828e06": (
-                "942d60b03d7db2c1aa4f495bb7dbbfb40f16ab27b4db428cbb0c3745347d4844"
+            # The bounded raw-block prefix/cursor scheduler changes only
+            # storage maintenance, but the entity-registry source contract
+            # currently spans the parser tail.  Retain the previous current
+            # graph with its exact source snapshot as a predecessor.
+            "a0ad369692972bceb7283c7439cb2108793bfaac0e178f44b17d0c231a843b7b": (
+                "b7301e1938acba55f0401a35394bac1ef2aab5d47c839fec091e815ae7037ebe"
+            ),
+            # Exact graph source from the integrated upstream main before
+            # removing the unreachable legacy builder and accumulator.
+            "759fdfd6939c5ea1241ff27fb2365c83910e289b0656a2275d9049dc6900b86a": (
+                "74eb4cf48c0d531792c4f818f46153cdd96d3e1ae0afc363aac9559f675d0080"
             ),
         }
     ),
@@ -546,16 +691,55 @@ def projection_producer_contract_from_source_bytes(
 
 
 SESSION_MEMORY_LOADED_PRODUCER_PATH = Path(__file__).resolve()
+SESSION_MEMORY_LOADED_ENTITY_USAGE_PARSER_PATH = (
+    SESSION_MEMORY_LOADED_PRODUCER_PATH.with_name(
+        "aoa_session_memory_entity_usage_parsers.py"
+    )
+)
+SESSION_MEMORY_LOADED_PRODUCER_SOURCE_PATHS = (
+    SESSION_MEMORY_LOADED_PRODUCER_PATH,
+    SESSION_MEMORY_LOADED_ENTITY_USAGE_PARSER_PATH,
+)
+
+
+def _producer_source_identity_digest(
+    source_hashes: tuple[tuple[Path, str], ...],
+) -> str:
+    digest = hashlib.sha256()
+    for path, source_sha256 in source_hashes:
+        digest.update(path.name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(source_sha256.encode("ascii"))
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
 try:
     _session_memory_loaded_producer_bytes = (
         SESSION_MEMORY_LOADED_PRODUCER_PATH.read_bytes()
     )
+    _session_memory_loaded_entity_usage_parser_bytes = (
+        SESSION_MEMORY_LOADED_ENTITY_USAGE_PARSER_PATH.read_bytes()
+    )
 except OSError:
     SESSION_MEMORY_LOADED_PRODUCER_SHA256 = ""
 else:
-    SESSION_MEMORY_LOADED_PRODUCER_SHA256 = hashlib.sha256(
-        _session_memory_loaded_producer_bytes
-    ).hexdigest()
+    SESSION_MEMORY_LOADED_PRODUCER_SHA256 = _producer_source_identity_digest(
+        (
+            (
+                SESSION_MEMORY_LOADED_PRODUCER_PATH,
+                hashlib.sha256(
+                    _session_memory_loaded_producer_bytes
+                ).hexdigest(),
+            ),
+            (
+                SESSION_MEMORY_LOADED_ENTITY_USAGE_PARSER_PATH,
+                hashlib.sha256(
+                    _session_memory_loaded_entity_usage_parser_bytes
+                ).hexdigest(),
+            ),
+        )
+    )
     SESSION_MEMORY_LOADED_PROJECTION_PRODUCER_CONTRACTS = {
         projection: projection_producer_contract_from_source_bytes(
             _session_memory_loaded_producer_bytes,
@@ -565,6 +749,7 @@ else:
     }
 finally:
     _session_memory_loaded_producer_bytes = b""
+    _session_memory_loaded_entity_usage_parser_bytes = b""
 
 if "SESSION_MEMORY_LOADED_PROJECTION_PRODUCER_CONTRACTS" not in globals():
     SESSION_MEMORY_LOADED_PROJECTION_PRODUCER_CONTRACTS: dict[
@@ -921,6 +1106,16 @@ RAW_BLOCK_INDEX_JSON = "blocks.index.json"
 RAW_COMPACTION_EVENTS_JSONL = "compaction-events.jsonl"
 RAW_BLOCK_STORAGE_MODE_PLAIN = "plain_raw_jsonl_v1"
 RAW_BLOCK_STORAGE_MODE_GZIP = "compressed_gzip_v1"
+RAW_BLOCK_STORAGE_MAINTENANCE_STATE_SCHEMA_VERSION = 1
+RAW_BLOCK_STORAGE_MAINTENANCE_STATE_JSON = (
+    "raw-block-storage-maintenance-state.json"
+)
+RAW_BLOCK_STORAGE_MAINTENANCE_DEFAULT_SCAN_LIMIT = 8
+RAW_BLOCK_STORAGE_MAINTENANCE_MAX_SCAN_LIMIT = 32
+RAW_BLOCK_STORAGE_MAINTENANCE_DEFAULT_SESSION_LIMIT = 1
+RAW_BLOCK_STORAGE_MAINTENANCE_MAX_SESSION_LIMIT = 4
+RAW_BLOCK_STORAGE_MAINTENANCE_DEFAULT_PLAIN_BYTES = 1 * 1024 * 1024 * 1024
+RAW_BLOCK_STORAGE_MAINTENANCE_MAX_PLAIN_BYTES = 1 * 1024 * 1024 * 1024
 CONVERSATION_ACT_SCHEMA_VERSION = 4
 SESSION_ACT_SCHEMA_VERSION = 3
 AGENT_EVENT_SCHEMA_VERSION = 3
@@ -4849,12 +5044,18 @@ def runtime_install_profile_source_identity(
 
 
 def session_memory_loaded_producer_source_state() -> dict[str, Any]:
-    """Compare the live source file with the source snapshot loaded by this process."""
+    """Compare loaded producer sources with their live sibling files."""
     current_sha256 = ""
     diagnostics: list[str] = []
     try:
-        current_sha256 = sha256_file_exact(
-            SESSION_MEMORY_LOADED_PRODUCER_PATH
+        current_sha256 = _producer_source_identity_digest(
+            tuple(
+                (
+                    path,
+                    sha256_file_exact(path),
+                )
+                for path in SESSION_MEMORY_LOADED_PRODUCER_SOURCE_PATHS
+            )
         )
     except OSError as exc:
         diagnostics.append(
@@ -6300,6 +6501,37 @@ def normalized_tool_name(tool_name: str) -> str:
     if not name:
         return ""
     return name.split(".")[-1]
+
+
+def entity_usage_execution_command_candidates(
+    payload: dict[str, Any],
+) -> list[str]:
+    """Recover and privacy-project commands proven by one tool call."""
+    if str(payload.get("type") or "") == "custom_tool_call":
+        candidates = entity_usage_custom_exec_command_candidates(payload)
+    else:
+        if normalized_tool_name(
+            tool_name_from_payload(payload)
+        ) not in ENTITY_USAGE_DIRECT_SHELL_TOOL_NAMES:
+            return []
+        direct = raw_command_text_from_payload(payload)
+        candidates = [direct] if direct else []
+    nested = [
+        nested_command
+        for command in candidates
+        for nested_command in entity_usage_python_heredoc_subprocess_commands(command)
+    ]
+    raw_candidates = list(
+        dict.fromkeys(
+            candidate
+            for candidate in [*candidates, *nested]
+            if candidate
+        )
+    )
+    return [
+        derived_text_privacy_text(candidate)
+        for candidate in raw_candidates
+    ]
 
 
 def tool_namespace_for_name(tool_name: str) -> str:
@@ -13199,6 +13431,29 @@ def generated_segment_index_is_current(
         expected_publish_id=expected_publish_id,
         expected_raw_sha256=expected_raw_sha256,
     )
+
+
+def raw_block_storage_projection_stale_reasons(
+    reasons: Sequence[Any],
+) -> list[str]:
+    """Keep storage maintenance bound to raw identity, not current code SHA.
+
+    A historical session may have been indexed by an older producer while its
+    raw source, publish identity, component refs, and capture epoch remain
+    unchanged.  Storage maintenance can preserve that projection verbatim;
+    semantic reindexing remains a separate owner route.  Unknown or content
+    integrity diagnostics stay fail-closed.
+    """
+    return [
+        str(reason)
+        for reason in reasons
+        if str(reason) not in RAW_BLOCK_STORAGE_ALLOWED_GENERATION_DRIFT_REASONS
+    ]
+
+
+def raw_block_storage_validation_drift_allowed(reason: Any) -> bool:
+    value = str(reason or "")
+    return value in RAW_BLOCK_STORAGE_ALLOWED_VALIDATION_DRIFT_REASONS
 
 
 def compact_signal_detail(value: Any, *, max_chars: int = 240) -> str:
@@ -35510,6 +35765,7 @@ def validate_staged_session_projection(
     stage_dir: Path,
     session_dir: Path,
     publish_identity: dict[str, Any],
+    storage_only: bool = False,
 ) -> dict[str, Any]:
     expected_publish_id = projection_publish_id(
         publish_identity
@@ -35619,11 +35875,17 @@ def validate_staged_session_projection(
     ) != expected_publish_id:
         diagnostics.append("manifest_publish_id_mismatch")
     if isinstance(staged_session_index, dict):
+        session_index_stale_reasons = generated_session_index_stale_reasons(
+            staged_session_index,
+            expected_publish_id=expected_publish_id,
+            expected_raw_sha256=expected_raw_sha256,
+        )
         diagnostics.extend(
-            generated_session_index_stale_reasons(
-                staged_session_index,
-                expected_publish_id=expected_publish_id,
-                expected_raw_sha256=expected_raw_sha256,
+            reason
+            for reason in session_index_stale_reasons
+            if not (
+                storage_only
+                and reason in RAW_BLOCK_STORAGE_ALLOWED_GENERATION_DRIFT_REASONS
             )
         )
         diagnostics.extend(
@@ -35722,6 +35984,10 @@ def validate_staged_session_projection(
                 staged_segment_index,
                 expected_publish_id=expected_publish_id,
                 expected_raw_sha256=expected_raw_sha256,
+            )
+            if not (
+                storage_only
+                and reason in RAW_BLOCK_STORAGE_ALLOWED_GENERATION_DRIFT_REASONS
             )
         )
         if not staged_markdown_path.is_file():
@@ -35884,27 +36150,59 @@ def validate_staged_session_projection(
                             "staged_compressed_raw_block_payload_mismatch:"
                             f"{block_id}"
                         )
-    classification_cache_root = (
-        event_classification_cache_root(stage_dir)
+    classification_cache_root = event_classification_cache_root(stage_dir)
+    classification_cache_index_path = (
+        event_classification_cache_index_path(classification_cache_root)
+    )
+    classification_cache_index_present = (
+        classification_cache_index_path.is_file()
     )
     classification_cache_index = read_json(
-        event_classification_cache_index_path(
-            classification_cache_root
-        ),
+        classification_cache_index_path,
         {},
     )
     expected_classification_generation = (
         event_classification_generation_identity()
     )
-    if classification_cache_root.exists() and (
-        not isinstance(classification_cache_index, dict)
-        or classification_cache_index.get(
+    classification_cache_index_structurally_valid = bool(
+        classification_cache_root.is_dir()
+        and classification_cache_index_present
+        and isinstance(classification_cache_index, dict)
+        and isinstance(
+            classification_cache_index.get("generation_identity"),
+            dict,
+        )
+        and classification_cache_index.get("generation_identity")
+        and isinstance(
+            classification_cache_index.get("blocks"),
+            dict,
+        )
+        and bool(
+            str(
+                classification_cache_index.get("records_root_sha256")
+                or ""
+            )
+        )
+    )
+    if classification_cache_root.exists() and not (
+        classification_cache_index_structurally_valid
+    ):
+        diagnostics.append("classification_cache_index_invalid")
+    classification_cache_generation_current = bool(
+        classification_cache_index_structurally_valid
+        and classification_cache_index.get(
             "generation_identity"
         )
-        != expected_classification_generation
+        == expected_classification_generation
+    )
+    if (
+        classification_cache_root.exists()
+        and classification_cache_index_structurally_valid
+        and not classification_cache_generation_current
     ):
-        diagnostics.append("classification_cache_generation_mismatch")
-    elif classification_cache_root.exists():
+        if not storage_only:
+            diagnostics.append("classification_cache_generation_mismatch")
+    if classification_cache_index_structurally_valid:
         classification_records = (
             classification_cache_index.get("blocks")
             if isinstance(
@@ -35976,9 +36274,14 @@ def validate_staged_session_projection(
                 classification_cache_root
                 / str(classification_record.get("artifact") or "")
             )
+            expected_cached_generation = (
+                expected_classification_generation
+                if classification_cache_generation_current
+                else classification_cache_index.get("generation_identity")
+            )
             if (
                 cached_payload.get("generation_identity")
-                != expected_classification_generation
+                != expected_cached_generation
                 or cached_payload.get("block") != block
             ):
                 diagnostics.append(
@@ -36034,20 +36337,26 @@ def validate_staged_session_projection(
                 "staged_first_pass_distillation_missing"
             )
         else:
+            distillation_reasons = first_pass_distillation_stale_reasons(
+                aoa_root=session_dir.parents[1],
+                projection_dir=stage_dir,
+                session_dir=session_dir,
+                manifest=(
+                    staged_manifest
+                    if isinstance(
+                        staged_manifest,
+                        dict,
+                    )
+                    else {}
+                ),
+                payload=staged_distillation,
+            )
             diagnostics.extend(
-                first_pass_distillation_stale_reasons(
-                    aoa_root=session_dir.parents[1],
-                    projection_dir=stage_dir,
-                    session_dir=session_dir,
-                    manifest=(
-                        staged_manifest
-                        if isinstance(
-                            staged_manifest,
-                            dict,
-                        )
-                        else {}
-                    ),
-                    payload=staged_distillation,
+                reason
+                for reason in distillation_reasons
+                if not (
+                    storage_only
+                    and reason == "first_pass_distillation_generation_mismatch"
                 )
             )
         if not (
@@ -36172,6 +36481,12 @@ def validate_staged_session_projection(
         diagnostics.append(
             "producer_source_changed_during_process"
         )
+    if storage_only:
+        diagnostics = [
+            reason
+            for reason in diagnostics
+            if not raw_block_storage_validation_drift_allowed(reason)
+        ]
     return {
         "ok": not diagnostics,
         "publish_id": expected_publish_id,
@@ -36394,6 +36709,7 @@ def _atomic_publish_session_projection_unfenced(
     publish_identity: dict[str, Any],
     execution_id: str | None = None,
     work_id: str = "",
+    storage_only: bool = False,
 ) -> dict[str, Any]:
     execution_id = execution_id or (
         f"projection-{compact_stamp()}-{os.getpid()}-"
@@ -36408,6 +36724,7 @@ def _atomic_publish_session_projection_unfenced(
         stage_dir=stage_dir,
         session_dir=session_dir,
         publish_identity=publish_identity,
+        storage_only=storage_only,
     )
     validation_ms = int(
         (time.monotonic() - validation_started) * 1000
@@ -36660,6 +36977,7 @@ def atomic_publish_session_projection(
     publish_identity: dict[str, Any],
     execution_id: str | None = None,
     work_id: str = "",
+    storage_only: bool = False,
 ) -> dict[str, Any]:
     fence = _projection_outbox_acquire_publication_fence(session_dir)
     try:
@@ -36669,6 +36987,7 @@ def atomic_publish_session_projection(
             publish_identity=publish_identity,
             execution_id=execution_id,
             work_id=work_id,
+            storage_only=storage_only,
         )
     finally:
         _projection_outbox_release_publication_fence(fence)
@@ -158666,8 +158985,6 @@ def graph_index_payload_from_counts(
     }
 
 
-
-
 def build_session_graph(
     *,
     aoa_root: Path,
@@ -195526,28 +195843,6 @@ ENTITY_USAGE_DIRECT_TYPES = {"TOOL_CALL", "COMMAND", "FILE_READ", "FILE_WRITE", 
 ENTITY_USAGE_RESULT_TYPES = {"TOOL_OUTPUT", "COMMAND_OUTPUT", "VERIFICATION", "ERROR"}
 ENTITY_USAGE_OUTCOME_TYPES = {"ASSISTANT_MESSAGE", "DECISION", "ASSUMPTION", "OPEN_THREAD", "CHECKPOINT", "FINAL_STATE", "PROCESS_LESSON"}
 ENTITY_USAGE_EXECUTION_ADMISSION_KINDS = {"script", "test", "validator"}
-ENTITY_USAGE_CUSTOM_EXEC_CALL_RE = re.compile(
-    r"\btools\.exec_command\s*\(",
-)
-ENTITY_USAGE_CUSTOM_EXEC_COMMAND_PROPERTY_RE = re.compile(
-    r"(?:(?P<quote>['\"])(?:cmd|command|shell_command)(?P=quote)"
-    r"|\b(?:cmd|command|shell_command))\s*:"
-)
-ENTITY_USAGE_CUSTOM_EXEC_COMMAND_SHORTHAND_RE = re.compile(
-    r"(?P<prefix>[{,])\s*(?P<name>cmd|command|shell_command)\s*(?P<suffix>[,}])"
-)
-ENTITY_USAGE_CUSTOM_EXEC_DESTRUCTURED_MAP_RE = re.compile(
-    r"\b(?P<collection>[A-Za-z_$][A-Za-z0-9_$]*)"
-    r"\.map\s*\(\s*\(\s*\[(?P<bindings>[A-Za-z0-9_$,\s]+)\]\s*\)\s*=>"
-)
-ENTITY_USAGE_DIRECT_SHELL_TOOL_NAMES = {
-    "bash",
-    "exec_command",
-    "shell",
-    "shell_command",
-    "terminal",
-    "zsh",
-}
 ENTITY_USAGE_STRUCTURED_RUNNER_LINE_RE = re.compile(
     r"^\[(?P<prefix>run|mechanics-local|test|verify)\]\s+(?P<body>\S.*)$",
     flags=re.IGNORECASE,
@@ -195803,500 +196098,6 @@ def entity_usage_event_role(event_type: str, conversation_act: str = "", session
     if "request" in conversation_act or "request" in session_act:
         return "entrypoint"
     return "context"
-
-
-def entity_usage_javascript_code_mask(source: str) -> bytearray:
-    """Mark JavaScript code while excluding quoted text and comments.
-
-    Custom ``exec`` calls are JavaScript wrappers around nested tools.  A
-    validator command inside a patch, regex, or documentation string is not a
-    shell invocation, so command recovery must first distinguish executable
-    wrapper syntax from inert string content.
-    """
-    mask = bytearray(b"\x01" * len(source))
-    index = 0
-    while index < len(source):
-        if source.startswith("//", index):
-            end = source.find("\n", index + 2)
-            end = len(source) if end < 0 else end
-            mask[index:end] = b"\x00" * (end - index)
-            index = end
-            continue
-        if source.startswith("/*", index):
-            end = source.find("*/", index + 2)
-            end = len(source) if end < 0 else end + 2
-            mask[index:end] = b"\x00" * (end - index)
-            index = end
-            continue
-        quote = source[index]
-        if quote not in {"'", '"', "`"}:
-            index += 1
-            continue
-        start = index
-        index += 1
-        while index < len(source):
-            if source[index] == "\\":
-                index = min(len(source), index + 2)
-                continue
-            if source[index] == quote:
-                index += 1
-                break
-            index += 1
-        mask[start:index] = b"\x00" * (index - start)
-    return mask
-
-
-def entity_usage_javascript_matching_delimiter(
-    source: str,
-    *,
-    start: int,
-    opening: str,
-    closing: str,
-    code_mask: bytearray,
-) -> int | None:
-    depth = 0
-    for index in range(start, len(source)):
-        if not code_mask[index]:
-            continue
-        if source[index] == opening:
-            depth += 1
-        elif source[index] == closing:
-            depth -= 1
-            if depth == 0:
-                return index
-    return None
-
-
-def entity_usage_javascript_literal_value(
-    source: str,
-    *,
-    start: int,
-    code_mask: bytearray,
-) -> str | None:
-    if start >= len(source) or source[start] not in {"'", '"', "`"}:
-        return None
-    end = start + 1
-    while end < len(source) and not code_mask[end]:
-        end += 1
-    literal = source[start:end]
-    if len(literal) < 2:
-        return None
-    if literal[0] == "`" and literal[-1] == "`":
-        return literal[1:-1].strip()
-    try:
-        value = literal_eval_untrusted_source(literal)
-    except (SyntaxError, ValueError):
-        return None
-    return value.strip() if isinstance(value, str) and value.strip() else None
-
-
-def entity_usage_javascript_variable_expression_start(
-    source: str,
-    *,
-    name: str,
-    before: int,
-    code_mask: bytearray,
-) -> int | None:
-    declaration_re = re.compile(
-        rf"\b(?:const|let|var)\s+{re.escape(name)}\s*="
-    )
-    starts = [
-        match.end()
-        for match in declaration_re.finditer(source, 0, before)
-        if code_mask[match.start()]
-    ]
-    if not starts:
-        return None
-    start = starts[-1]
-    while start < before and source[start].isspace():
-        start += 1
-    return start
-
-
-def entity_usage_javascript_array_item_starts(
-    source: str,
-    *,
-    start: int,
-    code_mask: bytearray,
-) -> list[int]:
-    if start >= len(source) or source[start] != "[":
-        return []
-    end = entity_usage_javascript_matching_delimiter(
-        source,
-        start=start,
-        opening="[",
-        closing="]",
-        code_mask=code_mask,
-    )
-    if end is None:
-        return []
-    item_starts = [start + 1]
-    depths = {"(": 0, "[": 0, "{": 0}
-    closing_to_opening = {")": "(", "]": "[", "}": "{"}
-    for index in range(start + 1, end):
-        if not code_mask[index]:
-            continue
-        char = source[index]
-        if char in depths:
-            depths[char] += 1
-        elif char in closing_to_opening:
-            opening = closing_to_opening[char]
-            depths[opening] = max(0, depths[opening] - 1)
-        elif char == "," and not any(depths.values()):
-            item_starts.append(index + 1)
-    normalized: list[int] = []
-    for item_start in item_starts:
-        while item_start < end and source[item_start].isspace():
-            item_start += 1
-        if item_start < end:
-            normalized.append(item_start)
-    return normalized
-
-
-def entity_usage_javascript_array_item_start(
-    source: str,
-    *,
-    start: int,
-    item_index: int,
-    code_mask: bytearray,
-) -> int | None:
-    item_starts = entity_usage_javascript_array_item_starts(
-        source,
-        start=start,
-        code_mask=code_mask,
-    )
-    if item_index >= len(item_starts):
-        return None
-    return item_starts[item_index]
-
-
-def entity_usage_javascript_mapped_command_values(
-    source: str,
-    *,
-    name: str,
-    call_start: int,
-    code_mask: bytearray,
-) -> list[str]:
-    values: list[str] = []
-    for map_match in ENTITY_USAGE_CUSTOM_EXEC_DESTRUCTURED_MAP_RE.finditer(
-        source,
-        0,
-        call_start,
-    ):
-        if not code_mask[map_match.start()]:
-            continue
-        bindings = [
-            value.strip()
-            for value in map_match.group("bindings").split(",")
-        ]
-        if name not in bindings:
-            continue
-        map_opening = source.find("(", map_match.start(), map_match.end())
-        map_closing = entity_usage_javascript_matching_delimiter(
-            source,
-            start=map_opening,
-            opening="(",
-            closing=")",
-            code_mask=code_mask,
-        )
-        if map_closing is None or call_start > map_closing:
-            continue
-        collection_start = entity_usage_javascript_variable_expression_start(
-            source,
-            name=map_match.group("collection"),
-            before=map_match.start(),
-            code_mask=code_mask,
-        )
-        if collection_start is None:
-            continue
-        for row_start in entity_usage_javascript_array_item_starts(
-            source,
-            start=collection_start,
-            code_mask=code_mask,
-        ):
-            value_start = entity_usage_javascript_array_item_start(
-                source,
-                start=row_start,
-                item_index=bindings.index(name),
-                code_mask=code_mask,
-            )
-            if value_start is None:
-                continue
-            value = entity_usage_javascript_literal_value(
-                source,
-                start=value_start,
-                code_mask=code_mask,
-            )
-            if value:
-                values.append(value)
-    return list(dict.fromkeys(values))
-
-
-def entity_usage_javascript_command_expression(
-    source: str,
-    *,
-    start: int,
-    before: int,
-    code_mask: bytearray,
-    depth: int = 0,
-) -> str | None:
-    if depth > 4:
-        return None
-    while start < len(source) and source[start].isspace():
-        start += 1
-    direct = entity_usage_javascript_literal_value(
-        source,
-        start=start,
-        code_mask=code_mask,
-    )
-    if direct:
-        return direct
-    reference = re.match(
-        r"(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)(?:\[(?P<index>\d+)\])?",
-        source[start:],
-    )
-    if not reference:
-        return None
-    variable_start = entity_usage_javascript_variable_expression_start(
-        source,
-        name=reference.group("name"),
-        before=before,
-        code_mask=code_mask,
-    )
-    if variable_start is None:
-        return None
-    if reference.group("index") is not None:
-        variable_start = entity_usage_javascript_array_item_start(
-            source,
-            start=variable_start,
-            item_index=int(reference.group("index")),
-            code_mask=code_mask,
-        )
-        if variable_start is None:
-            return None
-    return entity_usage_javascript_command_expression(
-        source,
-        start=variable_start,
-        before=before,
-        code_mask=code_mask,
-        depth=depth + 1,
-    )
-
-
-def entity_usage_custom_exec_command_candidates(payload: dict[str, Any]) -> list[str]:
-    if (
-        str(payload.get("type") or "") != "custom_tool_call"
-        or normalized_tool_name(tool_name_from_payload(payload)) != "exec"
-    ):
-        return []
-    raw_source = payload.get("input")
-    if not isinstance(raw_source, str) or not raw_source.strip():
-        return []
-    source = raw_source[:131072]
-    code_mask = entity_usage_javascript_code_mask(source)
-    candidates: list[str] = []
-    for call_match in ENTITY_USAGE_CUSTOM_EXEC_CALL_RE.finditer(source):
-        if not code_mask[call_match.start()]:
-            continue
-        opening = source.find("(", call_match.start(), call_match.end())
-        closing = entity_usage_javascript_matching_delimiter(
-            source,
-            start=opening,
-            opening="(",
-            closing=")",
-            code_mask=code_mask,
-        )
-        if closing is None:
-            continue
-        for property_match in ENTITY_USAGE_CUSTOM_EXEC_COMMAND_PROPERTY_RE.finditer(
-            source,
-            opening + 1,
-            closing,
-        ):
-            # A JSON-style property key (``{"cmd": ...}``) is quoted and
-            # therefore masked as inert string content.  Its trailing colon is
-            # still executable object syntax; checking that position admits
-            # real quoted keys without matching ``"cmd: ..."`` inside a value
-            # or documentation string.
-            property_syntax_index = max(
-                property_match.start(),
-                property_match.end() - 1,
-            )
-            if not code_mask[property_syntax_index]:
-                continue
-            value = entity_usage_javascript_command_expression(
-                source,
-                start=property_match.end(),
-                before=call_match.start(),
-                code_mask=code_mask,
-            )
-            if value:
-                candidates.append(value)
-            else:
-                reference = re.match(
-                    r"(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)",
-                    source[property_match.end() :],
-                )
-                if reference:
-                    candidates.extend(
-                        entity_usage_javascript_mapped_command_values(
-                            source,
-                            name=reference.group("name"),
-                            call_start=call_match.start(),
-                            code_mask=code_mask,
-                        )
-                    )
-        for shorthand_match in ENTITY_USAGE_CUSTOM_EXEC_COMMAND_SHORTHAND_RE.finditer(
-            source,
-            opening + 1,
-            closing,
-        ):
-            name_start = shorthand_match.start("name")
-            if not code_mask[name_start]:
-                continue
-            value = entity_usage_javascript_command_expression(
-                source,
-                start=name_start,
-                before=call_match.start(),
-                code_mask=code_mask,
-            )
-            if value:
-                candidates.append(value)
-            else:
-                candidates.extend(
-                    entity_usage_javascript_mapped_command_values(
-                        source,
-                        name=shorthand_match.group("name"),
-                        call_start=call_match.start(),
-                        code_mask=code_mask,
-                    )
-                )
-        if len(candidates) >= 16:
-            break
-    return list(dict.fromkeys(candidate for candidate in candidates if candidate))
-
-
-def entity_usage_python_command_vectors(node: ast.AST) -> list[list[str]]:
-    try:
-        value = literal_eval_untrusted_source(node)
-    except (TypeError, ValueError, SyntaxError):
-        return []
-    if (
-        isinstance(value, (list, tuple))
-        and value
-        and all(isinstance(item, str) for item in value)
-    ):
-        return [[str(item) for item in value]]
-    if isinstance(value, (list, tuple)):
-        return [
-            [str(item) for item in candidate]
-            for candidate in value
-            if (
-                isinstance(candidate, (list, tuple))
-                and candidate
-                and all(isinstance(item, str) for item in candidate)
-            )
-        ]
-    return []
-
-
-def entity_usage_python_subprocess_call(node: ast.Call) -> bool:
-    function = node.func
-    if not isinstance(function, ast.Attribute):
-        return False
-    if function.attr not in {"Popen", "call", "check_call", "check_output", "run"}:
-        return False
-    return isinstance(function.value, ast.Name) and function.value.id == "subprocess"
-
-
-def entity_usage_python_heredoc_subprocess_commands(command: str) -> list[str]:
-    """Recover static argv vectors that an executed Python heredoc invokes."""
-    commands: list[str] = []
-    heredoc_re = re.compile(
-        r"<<-?\s*(?P<quote>['\"]?)(?P<marker>[A-Za-z_][A-Za-z0-9_]*)"
-        r"(?P=quote)[^\n]*\n"
-    )
-    for heredoc in heredoc_re.finditer(command):
-        marker = heredoc.group("marker")
-        terminator = re.search(
-            rf"(?m)^{re.escape(marker)}\s*$",
-            command[heredoc.end() :],
-        )
-        if not terminator:
-            continue
-        body = command[
-            heredoc.end() : heredoc.end() + terminator.start()
-        ]
-        try:
-            tree = ast.parse(body)
-        except SyntaxError:
-            continue
-        assigned_vectors: dict[str, list[list[str]]] = {}
-        for node in ast.walk(tree):
-            if not isinstance(node, (ast.Assign, ast.AnnAssign)):
-                continue
-            value = node.value
-            vectors = entity_usage_python_command_vectors(value)
-            if not vectors:
-                continue
-            targets = (
-                node.targets
-                if isinstance(node, ast.Assign)
-                else [node.target]
-            )
-            for target in targets:
-                if isinstance(target, ast.Name):
-                    assigned_vectors[target.id] = vectors
-        for node in ast.walk(tree):
-            if isinstance(node, ast.For) and isinstance(node.target, ast.Name):
-                vectors = entity_usage_python_command_vectors(node.iter)
-                if vectors and any(
-                    isinstance(candidate, ast.Call)
-                    and entity_usage_python_subprocess_call(candidate)
-                    and candidate.args
-                    and isinstance(candidate.args[0], ast.Name)
-                    and candidate.args[0].id == node.target.id
-                    for candidate in ast.walk(node)
-                ):
-                    commands.extend(shlex.join(vector) for vector in vectors)
-            if not isinstance(node, ast.Call) or not entity_usage_python_subprocess_call(node):
-                continue
-            if not node.args:
-                continue
-            vectors = entity_usage_python_command_vectors(node.args[0])
-            if isinstance(node.args[0], ast.Name):
-                vectors = assigned_vectors.get(node.args[0].id, [])
-            commands.extend(shlex.join(vector) for vector in vectors)
-    return list(dict.fromkeys(commands))
-
-
-def entity_usage_execution_command_candidates(payload: dict[str, Any]) -> list[str]:
-    """Recover only shell commands proven by one structured raw tool call."""
-    if str(payload.get("type") or "") == "custom_tool_call":
-        candidates = entity_usage_custom_exec_command_candidates(payload)
-    else:
-        if normalized_tool_name(
-            tool_name_from_payload(payload)
-        ) not in ENTITY_USAGE_DIRECT_SHELL_TOOL_NAMES:
-            return []
-        direct = raw_command_text_from_payload(payload)
-        candidates = [direct] if direct else []
-    nested = [
-        nested_command
-        for command in candidates
-        for nested_command in entity_usage_python_heredoc_subprocess_commands(command)
-    ]
-    raw_candidates = list(
-        dict.fromkeys(
-            candidate
-            for candidate in [*candidates, *nested]
-            if candidate
-        )
-    )
-    return [
-        derived_text_privacy_text(candidate)
-        for candidate in raw_candidates
-    ]
 
 
 def entity_usage_hook_command_proves_invocation(
@@ -216121,8 +215922,26 @@ def command_raw_block_ref_audit(args: argparse.Namespace) -> int:
 def command_raw_block_storage_compact(args: argparse.Namespace) -> int:
     explicit_workspace = Path(args.workspace_root) if args.workspace_root else None
     root = aoa_root_for(explicit_workspace, Path(args.aoa_root) if args.aoa_root else None)
+    scheduled = bool(getattr(args, "scheduled", False))
 
     def run_compact() -> dict[str, Any]:
+        if scheduled:
+            return raw_block_storage_maintenance(
+                aoa_root=root,
+                target=args.session,
+                limit=args.limit,
+                scan_limit=getattr(args, "scan_limit", None),
+                max_plain_bytes=getattr(args, "max_plain_bytes", None),
+                closed_only=not bool(
+                    getattr(args, "include_open_tail", False)
+                ),
+                apply=args.apply,
+                confirm_remove_plain=args.confirm_remove_plain,
+                estimate_compression=args.estimate_compression,
+                compression_level=args.compression_level,
+                sample_limit=args.sample_limit,
+                write_report=args.write_report,
+            )
         return raw_block_storage_compact(
             aoa_root=root,
             target=args.session,
@@ -216134,6 +215953,8 @@ def command_raw_block_storage_compact(args: argparse.Namespace) -> int:
             compression_level=args.compression_level,
             sample_limit=args.sample_limit,
             write_report=args.write_report,
+            sealed_only=bool(getattr(args, "sealed_only", True)),
+            closed_only=bool(getattr(args, "closed_only", False)),
         )
 
     payload = (
@@ -216141,9 +215962,17 @@ def command_raw_block_storage_compact(args: argparse.Namespace) -> int:
             root,
             run_compact,
             owner_job="raw-block-storage-compact",
-            mode="manual-bulk",
+            mode=(
+                "scheduled-bounded"
+                if scheduled
+                else "manual-bulk"
+            ),
             target=args.session,
-            reason="operator_requested",
+            reason=(
+                "owner_scheduled_bounded"
+                if scheduled
+                else "operator_requested"
+            ),
             touched_surfaces=["raw_blocks", "session_manifests", "session_registry"],
         )
         if args.apply
@@ -220731,8 +220560,459 @@ def raw_block_compaction_deferred_live_info(record: dict[str, Any], lookup: dict
     return {}
 
 
+def raw_block_storage_maintenance_state_path(aoa_root: Path) -> Path:
+    return aoa_root / DIAGNOSTICS_ROOT / RAW_BLOCK_STORAGE_MAINTENANCE_STATE_JSON
+
+
+def read_raw_block_storage_maintenance_state(aoa_root: Path) -> dict[str, Any]:
+    state = read_json(raw_block_storage_maintenance_state_path(aoa_root), {})
+    if (
+        not isinstance(state, dict)
+        or state.get("artifact_type")
+        != "session_memory_raw_block_storage_maintenance_state"
+        or int_value(state.get("schema_version"))
+        != RAW_BLOCK_STORAGE_MAINTENANCE_STATE_SCHEMA_VERSION
+    ):
+        return {
+            "schema_version": RAW_BLOCK_STORAGE_MAINTENANCE_STATE_SCHEMA_VERSION,
+            "artifact_type": (
+                "session_memory_raw_block_storage_maintenance_state"
+            ),
+            "cursor": "",
+        }
+    return state
+
+
+def raw_block_storage_session_lock_probe(lock_path: Path) -> dict[str, Any]:
+    """Probe one existing session lock without creating or changing it."""
+    if not lock_path.is_file():
+        return {"status": "absent", "held": False, "path": str(lock_path)}
+    try:
+        with lock_path.open("r+", encoding="utf-8") as handle:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return {
+                    "status": "held",
+                    "held": True,
+                    "path": str(lock_path),
+                }
+            else:
+                fcntl.flock(handle, fcntl.LOCK_UN)
+    except OSError as exc:
+        return {
+            "status": "unverifiable",
+            "held": False,
+            "path": str(lock_path),
+            "diagnostic": (
+                f"session_lock_probe_failed:{type(exc).__name__}:{exc}"
+            ),
+        }
+    return {"status": "free", "held": False, "path": str(lock_path)}
+
+
+def raw_block_storage_eligibility(
+    *,
+    aoa_root: Path,
+    record: dict[str, Any],
+    deferred_live_lookup: dict[str, dict[str, Any]] | None = None,
+    sealed_only: bool = True,
+    closed_only: bool = False,
+    probe_locks: bool = True,
+    ignored_locks: Iterable[str] | None = None,
+) -> dict[str, Any]:
+    """Admit one bounded raw-block storage candidate fail-closed.
+
+    This gate reads manifests, indexes, capture metadata, and file metadata.
+    It never reads the raw transcript body.  The writer still revalidates the
+    same identity immediately before its atomic publication.
+    """
+    del aoa_root  # Kept in the signature to make ownership explicit to callers.
+    session_dir = session_dir_from_record(record)
+    session_id = str(record.get("session_id") or "")
+    session_label = str(record.get("session_label") or session_dir.name)
+    result: dict[str, Any] = {
+        "session_id": session_id,
+        "session_label": session_label,
+        "session_dir": str(session_dir),
+        "status": "skipped",
+        "eligible": False,
+        "reasons": [],
+        "sealed_only": bool(sealed_only),
+        "closed_only": bool(closed_only),
+        "block_count": 0,
+        "sealed_block_count": 0,
+        "open_block_count": 0,
+        "plain_block_count": 0,
+        "plain_bytes": 0,
+        "guards": {},
+    }
+
+    def reject(reason: str) -> dict[str, Any]:
+        result["reasons"] = unique_preserving_order(
+            [*result.get("reasons", []), reason]
+        )
+        return result
+
+    if not session_dir.is_dir():
+        return reject("session_directory_missing")
+    manifest = read_json(session_dir / "session.manifest.json", {})
+    if not isinstance(manifest, dict) or not manifest:
+        return reject("session_manifest_missing")
+    result["session_id"] = str(
+        manifest.get("session_id") or session_id
+    )
+    display = (
+        manifest.get("display")
+        if isinstance(manifest.get("display"), dict)
+        else {}
+    )
+    result["session_label"] = str(
+        display.get("label")
+        or manifest.get("session_label")
+        or session_label
+        or session_dir.name
+    )
+
+    archive_status = str(manifest.get("archive_status") or "")
+    raw = manifest.get("raw") if isinstance(manifest.get("raw"), dict) else {}
+    if archive_status != "indexed":
+        return reject(f"archive_status:{archive_status or 'missing'}")
+    if str(raw.get("indexing_status") or "") != "indexed":
+        return reject(
+            f"raw_indexing_status:{str(raw.get('indexing_status') or 'missing')}"
+        )
+
+    raw_path = manifest_raw_path(session_dir, manifest)
+    if not raw_path.is_file():
+        return reject("raw_transcript_missing")
+    raw_bytes = int_value(raw.get("bytes"), -1)
+    try:
+        raw_stat = raw_path.stat()
+    except OSError as exc:
+        return reject(f"raw_transcript_stat_failed:{type(exc).__name__}")
+    if raw_bytes >= 0 and raw_stat.st_size != raw_bytes:
+        return reject("raw_transcript_watermark_mismatch")
+    result["raw_bytes"] = raw_stat.st_size
+    result["raw_ref"] = str(raw_path)
+
+    if deferred_live_lookup is not None:
+        deferred_info = raw_block_compaction_deferred_live_info(
+            record,
+            deferred_live_lookup,
+        )
+        if deferred_info:
+            result["guards"]["deferred_live"] = deferred_info
+            return reject("deferred_live")
+
+    session_index_path = session_dir / SESSION_INDEX_JSON
+    session_index = read_json(session_index_path, {})
+    if not isinstance(session_index, dict) or not session_index:
+        return reject("session_index_missing")
+    result["guards"]["session_index"] = str(session_index_path)
+    projection_stale_reasons = generated_session_index_stale_reasons_for_session(
+        session_dir,
+        session_index,
+        verify_task_episode_semantic_digest=False,
+    )
+    retained_projection_stale_reasons = (
+        raw_block_storage_projection_stale_reasons(
+            projection_stale_reasons
+        )
+    )
+    if projection_stale_reasons:
+        result["guards"]["projection_stale_reasons"] = projection_stale_reasons
+        result["guards"]["projection_generation_drift"] = [
+            reason
+            for reason in projection_stale_reasons
+            if reason in RAW_BLOCK_STORAGE_ALLOWED_GENERATION_DRIFT_REASONS
+        ]
+    if retained_projection_stale_reasons:
+        return reject("projection_generation_not_current")
+    expected_publish_id, expected_raw_sha256 = (
+        session_manifest_projection_expectations(manifest)
+    )
+    if not expected_publish_id or not expected_raw_sha256:
+        return reject("projection_identity_missing")
+    result["guards"]["projection_publish_id"] = expected_publish_id
+    result["guards"]["raw_sha256"] = expected_raw_sha256
+
+    live_freshness = manifest_live_source_snapshot_freshness(manifest)
+    result["guards"]["live_source_freshness"] = {
+        "status": live_freshness.get("status"),
+        "reasons": live_freshness.get("reasons", []),
+        "source_path": live_freshness.get("source_path"),
+    }
+    if live_freshness.get("status") not in {"current", "archive_only"}:
+        return reject(
+            "live_source_"
+            f"{str(live_freshness.get('status') or 'unverifiable')}"
+        )
+
+    capture_state = raw_capture_state_for_session(session_dir)
+    if not capture_state:
+        return reject("raw_capture_state_missing")
+    capture_state_schema_version = int_value(
+        capture_state.get("schema_version")
+    )
+    result["guards"]["capture_state_schema_version"] = (
+        capture_state_schema_version
+    )
+    if capture_state_schema_version != RAW_CAPTURE_STATE_SCHEMA_VERSION:
+        # The general reader retains a bounded compatibility path for legacy
+        # capture state, but storage staging/publish validates the current
+        # state shape.  Reject before any staging or compression so an old
+        # projection cannot become a poison-pill apply failure.
+        return reject("raw_capture_state_schema_incompatible")
+    result["guards"]["capture_state_status"] = str(
+        capture_state.get("status") or ""
+    )
+    if str(capture_state.get("status") or "") != "indexed_with_projection":
+        return reject("raw_capture_state_not_indexed_with_projection")
+    capture_stale_reasons = raw_capture_state_semantic_stale_reasons(
+        session_dir,
+        manifest,
+        state_override=capture_state,
+    )
+    if capture_stale_reasons:
+        result["guards"]["capture_stale_reasons"] = capture_stale_reasons
+        return reject("raw_capture_state_not_current")
+    capture_path = Path(str(capture_state.get("capture_path") or ""))
+    if not capture_path.is_file():
+        return reject("raw_capture_payload_missing")
+    try:
+        if capture_path.stat().st_size != raw_stat.st_size:
+            return reject("raw_capture_watermark_mismatch")
+    except OSError as exc:
+        return reject(f"raw_capture_stat_failed:{type(exc).__name__}")
+
+    capture_mode = str(capture_state.get("capture_mode") or "")
+    if capture_mode == "append_only_immutable_block_ledger_v1":
+        ledger_path = Path(
+            str(capture_state.get("ledger_path") or "")
+        )
+        if not ledger_path.is_file():
+            ledger_path = raw_capture_ledger_path(session_dir)
+        ledger = read_json(ledger_path, {})
+        epochs = (
+            ledger.get("epochs")
+            if isinstance(ledger, dict)
+            and isinstance(ledger.get("epochs"), list)
+            else []
+        )
+        current_epoch_id = str(
+            ledger.get("current_epoch_id")
+            if isinstance(ledger, dict)
+            else ""
+        )
+        captured_epoch_id = str(
+            capture_state.get("ledger_epoch_id") or ""
+        )
+        if not current_epoch_id or not captured_epoch_id:
+            return reject("capture_epoch_identity_missing")
+        if current_epoch_id != captured_epoch_id:
+            return reject("capture_epoch_changed_since_projection")
+        epoch = next(
+            (
+                item
+                for item in reversed(epochs)
+                if isinstance(item, dict)
+                and str(item.get("epoch_id") or "") == current_epoch_id
+            ),
+            None,
+        )
+        if not isinstance(epoch, dict):
+            return reject("capture_epoch_missing")
+        captured_bytes = int_value(epoch.get("captured_bytes"), -1)
+        if captured_bytes != raw_stat.st_size:
+            return reject("capture_epoch_watermark_mismatch")
+        if not str(epoch.get("chain_sha256") or ""):
+            return reject("capture_epoch_chain_missing")
+        source_path = Path(str(capture_state.get("source_path") or ""))
+        if source_path.is_file():
+            epoch_current, epoch_reasons = raw_capture_epoch_boundary_current(
+                epoch=epoch,
+                source_path=source_path,
+                session_dir=session_dir,
+            )
+            if not epoch_current:
+                result["guards"]["capture_epoch_boundary_reasons"] = (
+                    epoch_reasons
+                )
+                return reject("capture_epoch_boundary_not_current")
+        result["guards"]["capture_epoch_id"] = current_epoch_id
+        result["guards"]["capture_ledger"] = str(ledger_path)
+    else:
+        result["guards"]["capture_mode"] = capture_mode or "legacy_snapshot"
+
+    ignored_lock_names = {
+        str(item)
+        for item in (ignored_locks or [])
+        if str(item)
+    }
+    if probe_locks:
+        for lock_name, lock_path in (
+            (
+                "projection_publish",
+                session_projection_publish_journal_path(session_dir),
+            ),
+            (
+                "projection_build",
+                session_projection_build_lease_path(session_dir),
+            ),
+            ("capture", session_dir / "raw" / ".capture.lock"),
+        ):
+            if lock_name in ignored_lock_names:
+                continue
+            if lock_name == "projection_publish":
+                probe = {
+                    "status": "held"
+                    if lock_path.is_file()
+                    else "absent",
+                    "held": lock_path.is_file(),
+                    "path": str(lock_path),
+                }
+            else:
+                probe = raw_block_storage_session_lock_probe(lock_path)
+            result["guards"][f"{lock_name}_lock"] = probe
+            if probe.get("held"):
+                return reject(f"{lock_name}_lock_held")
+            if probe.get("status") == "unverifiable":
+                return reject(f"{lock_name}_lock_unverifiable")
+
+    blocks = raw_block_records_for_session(session_dir, manifest)
+    result["block_count"] = len(blocks)
+    if not blocks:
+        return reject("raw_blocks_missing")
+    statuses: Counter[str] = Counter()
+    plain_blocks: list[dict[str, Any]] = []
+    plain_block_candidates: list[dict[str, Any]] = []
+    open_block_ids: list[str] = []
+    for block in blocks:
+        status = str(block.get("status") or "unknown")
+        statuses[status] += 1
+        if status == "sealed":
+            result["sealed_block_count"] += 1
+        elif status == "open":
+            result["open_block_count"] += 1
+            open_block_ids.append(str(block.get("block_id") or ""))
+        elif sealed_only:
+            return reject(f"raw_block_status_unrecognized:{status}")
+        plain_path = raw_block_plain_path(session_dir, block)
+        if not plain_path.is_file():
+            continue
+        try:
+            plain_bytes = plain_path.stat().st_size
+        except OSError as exc:
+            return reject(f"raw_block_stat_failed:{type(exc).__name__}")
+        if sealed_only and status != "sealed":
+            continue
+        plain_blocks.append(block)
+        result["plain_block_count"] += 1
+        result["plain_bytes"] += plain_bytes
+        plain_block_candidates.append(
+            {
+                "key": raw_block_record_key(block),
+                "block_id": str(
+                    block.get("block_id")
+                    or block.get("segment_id")
+                    or ""
+                ),
+                "plain_rel": str(
+                    block.get("plain_rel")
+                    or block.get("rel")
+                    or ""
+                ),
+                "plain_bytes": plain_bytes,
+            }
+        )
+    result["guards"]["block_status_counts"] = dict(sorted(statuses.items()))
+    result["guards"]["open_block_ids"] = [
+        item for item in open_block_ids if item
+    ]
+    if closed_only and result["open_block_count"]:
+        return reject("open_raw_block_present")
+    if sealed_only and result["sealed_block_count"] == 0:
+        return reject("sealed_raw_block_missing")
+    if not plain_blocks:
+        return reject("no_plain_eligible_blocks")
+    # Keep the block-level sizes private to the in-process scheduler.  The
+    # public eligibility packet remains bounded and does not expose a large
+    # block inventory in maintenance reports.
+    result["_plain_block_candidates"] = plain_block_candidates
+    result["eligible"] = True
+    result["status"] = "eligible"
+    return result
+
+
+@contextmanager
+def raw_block_storage_session_lease(session_dir: Path) -> Iterable[Any]:
+    """Hold the projection build lease while staging and publishing storage."""
+    lease_path = session_projection_build_lease_path(session_dir)
+    lease_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lease_path.open("a+", encoding="utf-8")
+    try:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise BlockingIOError(
+                f"raw_block_storage_projection_lease_held:{lease_path}"
+            ) from exc
+        write_maintenance_lock_owner(
+            handle,
+            {
+                "schema_version": 1,
+                "owner": "raw-block-storage-compact",
+                "pid": os.getpid(),
+                "session_dir": str(session_dir),
+                "acquired_at": utc_now(),
+            },
+        )
+        yield handle
+    finally:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+        finally:
+            handle.close()
+
+
+def raw_block_storage_maintenance_rotated_records(
+    records: list[dict[str, Any]],
+    cursor: str,
+) -> list[dict[str, Any]]:
+    ordered = sort_session_records_chronologically(
+        unique_session_records(records)
+    )
+    if not ordered or not cursor:
+        return ordered
+    keys = [session_record_key(record) for record in ordered]
+    try:
+        cursor_index = keys.index(cursor)
+    except ValueError:
+        return ordered
+    return [*ordered[cursor_index + 1 :], *ordered[: cursor_index + 1]]
+
+
 def raw_block_record_key(record: dict[str, Any]) -> str:
     return str(record.get("block_id") or record.get("segment_id") or record.get("rel") or record.get("path") or "")
+
+
+def raw_block_storage_rotated_block_candidates(
+    candidates: list[dict[str, Any]],
+    cursor: str,
+) -> list[dict[str, Any]]:
+    """Rotate plain sealed block metadata after a persisted block cursor."""
+    if not candidates or not cursor:
+        return list(candidates)
+    keys = [str(item.get("key") or "") for item in candidates]
+    try:
+        cursor_index = keys.index(cursor)
+    except ValueError:
+        # A removed/compressed block is no longer a remaining candidate.  A
+        # missing cursor therefore starts at the current first remaining
+        # block, rather than pinning the session to a stale key.
+        return list(candidates)
+    return [*candidates[cursor_index + 1 :], *candidates[: cursor_index + 1]]
 
 
 def compressed_raw_block_record(
@@ -220909,15 +221189,37 @@ def raw_block_storage_compact(
     compression_level: int = 6,
     sample_limit: int = 80,
     write_report: bool = False,
+    sealed_only: bool = True,
+    closed_only: bool = False,
+    selected_records_override: list[dict[str, Any]] | None = None,
+    selected_block_ids_override: dict[str, Iterable[str]] | None = None,
 ) -> dict[str, Any]:
     diagnostics: list[str] = []
     selection_limit = None if target == "all" and skip_no_plain else limit
-    selected_records, selection_diagnostics = select_session_records(aoa_root, target, limit=selection_limit)
+    if selected_records_override is not None:
+        selected_records = list(selected_records_override)
+        selection_diagnostics: list[str] = []
+    else:
+        selected_records, selection_diagnostics = select_session_records(
+            aoa_root,
+            target,
+            limit=selection_limit,
+        )
     diagnostics.extend(selection_diagnostics)
-    if skip_no_plain:
+    if skip_no_plain and selected_records_override is None:
         selected_records = [record for record in selected_records if session_has_plain_raw_blocks(record)]
         if limit is not None:
             selected_records = selected_records[: max(0, int_value(limit))]
+    selected_block_keys_by_session: dict[str, set[str]] | None = None
+    if selected_block_ids_override is not None:
+        selected_block_keys_by_session = {
+            str(session_key): {
+                str(block_key)
+                for block_key in block_keys
+                if str(block_key)
+            }
+            for session_key, block_keys in selected_block_ids_override.items()
+        }
     deferred_live_lookup, deferred_live_diagnostics = raw_block_compaction_deferred_live_lookup(aoa_root)
     diagnostics.extend(deferred_live_diagnostics)
     skipped_live_deferred_sessions: list[dict[str, Any]] = []
@@ -220943,7 +221245,35 @@ def raw_block_storage_compact(
             guarded_records.append(record)
         selected_records = guarded_records
     live_deferred_only = bool(skipped_live_deferred_sessions and not selected_records and not selection_diagnostics)
-    no_plain_candidates = bool(skip_no_plain and not selected_records and not selection_diagnostics and not skipped_live_deferred_sessions)
+    eligibility_skips: list[dict[str, Any]] = []
+    eligible_records: list[dict[str, Any]] = []
+    for record in selected_records:
+        eligibility = raw_block_storage_eligibility(
+            aoa_root=aoa_root,
+            record=record,
+            deferred_live_lookup=deferred_live_lookup,
+            sealed_only=sealed_only,
+            closed_only=closed_only,
+        )
+        if eligibility.get("eligible") is True:
+            eligible_records.append(record)
+        else:
+            public_eligibility = dict(eligibility)
+            public_eligibility.pop("_plain_block_candidates", None)
+            eligibility_skips.append(public_eligibility)
+    selected_records = eligible_records
+    empty_selection_override = bool(
+        selected_records_override is not None
+        and not selected_records
+        and not selection_diagnostics
+    )
+    no_plain_candidates = bool(
+        skip_no_plain
+        and not selected_records
+        and not selection_diagnostics
+        and not skipped_live_deferred_sessions
+        and not eligibility_skips
+    )
     if confirm_remove_plain and not apply:
         diagnostics.append("confirm_remove_plain_requires_apply")
     preflight = raw_block_ref_audit(
@@ -220966,6 +221296,29 @@ def raw_block_storage_compact(
     compressed_bytes_total = 0
     removed_plain_bytes_total = 0
     created_compressed_bytes_total = 0
+    deferred_session_count = 0
+    for skipped in eligibility_skips:
+        results.append(
+            {
+                "session_id": skipped.get("session_id"),
+                "session_label": skipped.get("session_label"),
+                "session_dir": skipped.get("session_dir"),
+                "status": "skipped_ineligible",
+                "planned_count": 0,
+                "compressed_count": 0,
+                "removed_plain_count": 0,
+                "plain_bytes": int_value(skipped.get("plain_bytes")),
+                "plain_bytes_human": human_size(
+                    int_value(skipped.get("plain_bytes"))
+                ),
+                "compressed_bytes": 0,
+                "compressed_bytes_human": "0 B",
+                "created_compressed_bytes": 0,
+                "removed_plain_bytes": 0,
+                "reasons": skipped.get("reasons", []),
+                "guards": skipped.get("guards", {}),
+            }
+        )
     for skipped in skipped_live_deferred_sessions:
         results.append(
             {
@@ -220989,15 +221342,45 @@ def raw_block_storage_compact(
         )
     for record in selected_records:
         session_dir = Path(str(record.get("path") or record.get("navigation_path") or ""))
+        session_key = session_record_key(record)
+        selected_block_keys = (
+            selected_block_keys_by_session.get(session_key, set())
+            if selected_block_keys_by_session is not None
+            else None
+        )
         manifest_path = session_dir / "session.manifest.json"
         manifest = read_json(manifest_path, {})
         if not isinstance(manifest, dict) or not manifest:
             diagnostics.append(f"manifest_missing:{session_dir.name}")
             continue
         stage_dir: Path | None = None
+        session_lease_context: Any = None
         working_manifest = manifest
         if can_apply:
             try:
+                session_lease_context = raw_block_storage_session_lease(
+                    session_dir
+                )
+                session_lease_context.__enter__()
+                current_eligibility = raw_block_storage_eligibility(
+                    aoa_root=aoa_root,
+                    record=record,
+                    deferred_live_lookup=deferred_live_lookup,
+                    sealed_only=sealed_only,
+                    closed_only=closed_only,
+                    probe_locks=True,
+                    ignored_locks={"projection_build"},
+                )
+                if current_eligibility.get("eligible") is not True:
+                    raise ValueError(
+                        "raw_block_storage_eligibility_changed:"
+                        + ",".join(
+                            str(reason)
+                            for reason in current_eligibility.get(
+                                "reasons", []
+                            )
+                        )
+                    )
                 stage_dir = stage_existing_session_projection(
                     session_dir
                 )
@@ -221011,12 +221394,33 @@ def raw_block_storage_compact(
                     )
                 working_manifest = staged_manifest
             except (OSError, ValueError) as exc:
+                deferred_guard = isinstance(exc, BlockingIOError)
+                generation_guard = (
+                    isinstance(exc, ValueError)
+                    and str(exc).startswith(
+                        "raw_block_storage_eligibility_changed:"
+                    )
+                )
                 diagnostics.append(
-                    f"raw_block_storage_stage_failed:"
-                    f"{session_dir.name}:{type(exc).__name__}:{exc}"
+                    (
+                        "raw_block_storage_session_deferred:"
+                        if deferred_guard or generation_guard
+                        else "raw_block_storage_stage_failed:"
+                    )
+                    + f"{session_dir.name}:{type(exc).__name__}:{exc}"
                 )
                 if stage_dir is not None:
                     remove_projection_publish_path(stage_dir)
+                if session_lease_context is not None:
+                    session_lease_context.__exit__(
+                        type(exc),
+                        exc,
+                        exc.__traceback__,
+                    )
+                    session_lease_context = None
+                if deferred_guard or generation_guard:
+                    deferred_session_count += 1
+                    session_deferred = True
                 results.append(
                     {
                         "session_id": record.get("session_id"),
@@ -221026,7 +221430,13 @@ def raw_block_storage_compact(
                         ),
                         "session_dir": str(session_dir),
                         "status": (
-                            "failed_last_good_projection_preserved"
+                            "deferred_session_lease"
+                            if deferred_guard
+                            else (
+                                "deferred_generation_change"
+                                if generation_guard
+                                else "failed_last_good_projection_preserved"
+                            )
                         ),
                         "planned_count": 0,
                         "compressed_count": 0,
@@ -221036,7 +221446,15 @@ def raw_block_storage_compact(
                         "created_compressed_bytes": 0,
                         "removed_plain_bytes": 0,
                         "diagnostics": [
-                            "raw_block_storage_stage_failed"
+                            (
+                                "raw_block_storage_session_lease_held"
+                                if deferred_guard
+                                else (
+                                    "raw_block_storage_eligibility_changed"
+                                    if generation_guard
+                                    else "raw_block_storage_stage_failed"
+                                )
+                            )
                         ],
                     }
                 )
@@ -221050,8 +221468,33 @@ def raw_block_storage_compact(
         session_planned = 0
         session_compressed = 0
         session_removed = 0
+        session_deferred = False
         for block in raw_block_records_for_session(session_dir, manifest):
             key = raw_block_record_key(block)
+            block_status = str(block.get("status") or "unknown")
+            if sealed_only and block_status != "sealed":
+                session_results.append(
+                    {
+                        "block_id": block.get("block_id"),
+                        "status": "skipped_unsealed_block",
+                        "block_status": block_status,
+                        "plain_rel": block.get("rel"),
+                    }
+                )
+                continue
+            if (
+                selected_block_keys is not None
+                and key not in selected_block_keys
+            ):
+                session_results.append(
+                    {
+                        "block_id": block.get("block_id"),
+                        "status": "skipped_selection_limit",
+                        "block_status": block_status,
+                        "plain_rel": block.get("rel"),
+                    }
+                )
+                continue
             final_plain_path = raw_block_plain_path(
                 session_dir,
                 block,
@@ -221183,6 +221626,25 @@ def raw_block_storage_compact(
                     raise ValueError(
                         "raw_block_storage_stage_missing"
                     )
+                current_eligibility = raw_block_storage_eligibility(
+                    aoa_root=aoa_root,
+                    record=record,
+                    deferred_live_lookup=deferred_live_lookup,
+                    sealed_only=sealed_only,
+                    closed_only=closed_only,
+                    probe_locks=True,
+                    ignored_locks={"projection_build"},
+                )
+                if current_eligibility.get("eligible") is not True:
+                    raise ValueError(
+                        "raw_block_storage_eligibility_changed_before_publish:"
+                        + ",".join(
+                            str(reason)
+                            for reason in current_eligibility.get(
+                                "reasons", []
+                            )
+                        )
+                    )
                 sync_raw_block_storage_records(
                     stage_dir,
                     working_manifest,
@@ -221278,6 +221740,7 @@ def raw_block_storage_compact(
                         stage_dir=stage_dir,
                         session_dir=session_dir,
                         publish_identity=publish_identity,
+                        storage_only=True,
                     )
                 )
                 stage_dir = None
@@ -221335,6 +221798,9 @@ def raw_block_storage_compact(
         elif stage_dir is not None:
             remove_projection_publish_path(stage_dir)
             stage_dir = None
+        if session_lease_context is not None:
+            session_lease_context.__exit__(None, None, None)
+            session_lease_context = None
         results.append(
             {
                 "session_id": record.get("session_id"),
@@ -221344,12 +221810,16 @@ def raw_block_storage_compact(
                     "failed_last_good_projection_preserved"
                     if session_apply_failed
                     else (
-                        "applied"
-                        if can_apply and session_compressed
+                        "deferred_session_lease"
+                        if session_deferred
                         else (
-                            "planned"
-                            if session_planned
-                            else "no_plain_blocks"
+                            "applied"
+                            if can_apply and session_compressed
+                            else (
+                                "planned"
+                                if session_planned
+                                else "no_plain_blocks"
+                            )
                         )
                     )
                 ),
@@ -221401,16 +221871,26 @@ def raw_block_storage_compact(
             "skipped_live_deferred"
             if live_deferred_only
             else (
-                (
-                    "partial_failure"
-                    if compressed_count
-                    else "failed_last_good_projection_preserved"
-                )
-                if apply_failure_count
+                "deferred_session_lease"
+                if deferred_session_count
+                and not compressed_count
+                and not apply_failure_count
                 else (
-                    "applied"
-                    if can_apply
-                    else "planned"
+                    "skipped_ineligible"
+                    if eligibility_skips and not selected_records
+                    else (
+                    (
+                        "partial_failure"
+                        if compressed_count
+                        else "failed_last_good_projection_preserved"
+                    )
+                    if apply_failure_count
+                    else (
+                        "applied"
+                        if can_apply
+                        else "planned"
+                    )
+                    )
                 )
             )
         )
@@ -221426,6 +221906,8 @@ def raw_block_storage_compact(
                 no_plain_candidates
                 or bool(selected_records)
                 or live_deferred_only
+                or bool(eligibility_skips)
+                or empty_selection_override
             )
             and not apply_failure_count
             and not any(
@@ -221447,6 +221929,10 @@ def raw_block_storage_compact(
         "compression_level": max(1, min(int_value(compression_level, 6), 9)),
         "storage_mode": RAW_BLOCK_STORAGE_MODE_GZIP,
         "status": status,
+        "sealed_only": bool(sealed_only),
+        "closed_only": bool(closed_only),
+        "deferred_session_count": deferred_session_count,
+        "eligibility_skips": eligibility_skips,
         "selected_count": len(selected_records),
         "skipped_live_deferred_count": len(skipped_live_deferred_sessions),
         "apply_failure_count": apply_failure_count,
@@ -221464,6 +221950,16 @@ def raw_block_storage_compact(
         "removed_plain_bytes_human": human_size(removed_plain_bytes_total),
         "net_reclaim_bytes": net_reclaim_bytes,
         "net_reclaim_human": human_size(max(0, net_reclaim_bytes)),
+        "retention": {
+            "raw_transcript": "retained",
+            "stable_plain_refs": "retained_as_plain_rel",
+            "open_blocks": (
+                "never_selected"
+                if sealed_only
+                else "operator_explicitly_in_scope"
+            ),
+            "plain_removal": "explicit_confirm_remove_plain_only",
+        },
         "preflight_raw_block_ref_audit": {
             "ok": preflight.get("ok"),
             "status": preflight.get("status"),
@@ -221492,6 +221988,586 @@ def raw_block_storage_compact(
         report_md = diagnostics_dir / f"{stem}.md"
         write_json(report_json, payload)
         write_markdown(report_md, raw_block_storage_compact_markdown(payload))
+        payload["report_json"] = str(report_json)
+        payload["report_markdown"] = str(report_md)
+    return payload
+
+
+def raw_block_storage_maintenance_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Raw Block Storage Maintenance",
+        "",
+        f"- generated_at: {payload.get('generated_at')}",
+        f"- status: {payload.get('status')}",
+        f"- apply: {payload.get('apply')}",
+        f"- cursor_before: {payload.get('cursor_before')}",
+        f"- cursor_after: {payload.get('cursor_after')}",
+        f"- cursor_committed: {payload.get('cursor_committed')}",
+        f"- scanned_count: {payload.get('scanned_count')}",
+        f"- selected_count: {payload.get('selected_count')}",
+        f"- selected_block_counts: {payload.get('selected_block_counts')}",
+        f"- closed_only: {payload.get('closed_only')}",
+        f"- max_plain_bytes: {payload.get('max_plain_bytes')}",
+        f"- eligible_plain_bytes: {payload.get('eligible_plain_bytes_human')}",
+        f"- selected_plain_bytes: {payload.get('selected_plain_bytes_human')}",
+        f"- estimated_compressed_bytes: {payload.get('estimated_compressed_bytes_human')}",
+        f"- stop_line: {payload.get('stop_line')}",
+        "",
+        "## Scanned Candidates",
+        "",
+        "| session | eligibility | blocks | plain bytes | reasons |",
+        "| --- | --- | ---: | ---: | --- |",
+    ]
+    for item in payload.get("scanned", []):
+        if isinstance(item, dict):
+            lines.append(
+                "| {} | {} | {} | {} | {} |".format(
+                    item.get("session_label", ""),
+                    item.get("status", ""),
+                    item.get("block_count", 0),
+                    item.get("plain_bytes", 0),
+                    ", ".join(
+                        str(reason)
+                        for reason in item.get("reasons", [])
+                    ),
+                )
+            )
+    diagnostics = payload.get("diagnostics")
+    if isinstance(diagnostics, list) and diagnostics:
+        lines.extend(["", "## Diagnostics", ""])
+        lines.extend(f"- {item}" for item in diagnostics)
+    return "\n".join(lines) + "\n"
+
+
+def raw_block_storage_maintenance(
+    *,
+    aoa_root: Path,
+    target: str = "all",
+    limit: int | None = None,
+    scan_limit: int | None = None,
+    max_plain_bytes: int | None = None,
+    closed_only: bool = True,
+    apply: bool = False,
+    confirm_remove_plain: bool = False,
+    estimate_compression: bool = False,
+    compression_level: int = 6,
+    sample_limit: int = 80,
+    write_report: bool = False,
+) -> dict[str, Any]:
+    """Run a bounded owner cursor over sealed raw-block sessions.
+
+    ``closed_only`` defaults to true for the conservative scheduler lane.
+    An explicit false value admits only sealed blocks from a session with an
+    open tail; the open block remains untouched and all capture/source guards
+    are still rechecked by the existing compact writer.
+    """
+    now = utc_now()
+    diagnostics: list[str] = []
+    if target != "all":
+        diagnostics.append("raw_block_storage_maintenance_requires_target_all")
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "artifact_type": (
+                "session_memory_raw_block_storage_maintenance"
+            ),
+            "generated_at": now,
+            "ok": False,
+            "mutates": False,
+            "apply": bool(apply),
+            "target": target,
+            "status": "blocked",
+            "max_plain_bytes": (
+                RAW_BLOCK_STORAGE_MAINTENANCE_DEFAULT_PLAIN_BYTES
+                if max_plain_bytes is None
+                else int_value(max_plain_bytes)
+            ),
+            "closed_only": bool(closed_only),
+            "cursor_before": "",
+            "cursor_after": "",
+            "cursor_committed": False,
+            "scanned_count": 0,
+            "selected_count": 0,
+            "scanned": [],
+            "selected_session_ids": [],
+            "diagnostics": diagnostics,
+            "stop_line": (
+                "Only the existing raw-block storage route may mutate a "
+                "selected closed session; raw transcript authority and refs "
+                "remain retained."
+            ),
+        }
+
+    requested_session_limit = (
+        RAW_BLOCK_STORAGE_MAINTENANCE_DEFAULT_SESSION_LIMIT
+        if limit is None
+        else int_value(limit)
+    )
+    effective_session_limit = max(
+        1,
+        min(
+            requested_session_limit,
+            RAW_BLOCK_STORAGE_MAINTENANCE_MAX_SESSION_LIMIT,
+        ),
+    )
+    requested_scan_limit = (
+        max(
+            RAW_BLOCK_STORAGE_MAINTENANCE_DEFAULT_SCAN_LIMIT,
+            effective_session_limit,
+        )
+        if scan_limit is None
+        else int_value(scan_limit)
+    )
+    effective_scan_limit = max(
+        effective_session_limit,
+        min(
+            requested_scan_limit,
+            RAW_BLOCK_STORAGE_MAINTENANCE_MAX_SCAN_LIMIT,
+        ),
+    )
+    requested_plain_bytes = (
+        RAW_BLOCK_STORAGE_MAINTENANCE_DEFAULT_PLAIN_BYTES
+        if max_plain_bytes is None
+        else int_value(max_plain_bytes)
+    )
+    effective_plain_bytes = max(
+        1,
+        min(
+            requested_plain_bytes,
+            RAW_BLOCK_STORAGE_MAINTENANCE_MAX_PLAIN_BYTES,
+        ),
+    )
+    state = read_raw_block_storage_maintenance_state(aoa_root)
+    cursor_before = str(state.get("cursor") or "")
+    block_cursors_before = {
+        str(session_key): str(block_key)
+        for session_key, block_key in (
+            state.get("block_cursors", {}).items()
+            if isinstance(state.get("block_cursors"), dict)
+            else []
+        )
+        if str(session_key) and str(block_key)
+    }
+    records = registry_sessions(aoa_root)
+    rotated = raw_block_storage_maintenance_rotated_records(
+        records,
+        cursor_before,
+    )
+    deferred_live_lookup, deferred_live_diagnostics = (
+        raw_block_compaction_deferred_live_lookup(aoa_root)
+    )
+    diagnostics.extend(deferred_live_diagnostics)
+    scanned: list[dict[str, Any]] = []
+    selected_records: list[dict[str, Any]] = []
+    eligible_plain_bytes = 0
+    selected_plain_bytes = 0
+    selection_skips: list[dict[str, Any]] = []
+    selected_block_ids_by_session: dict[str, list[str]] = {}
+    selected_block_counts_by_session: dict[str, int] = {}
+    block_cursor_before_by_session: dict[str, str] = {}
+    selection_block_diagnostics: dict[str, list[str]] = {}
+    for record in rotated[:effective_scan_limit]:
+        eligibility = raw_block_storage_eligibility(
+            aoa_root=aoa_root,
+            record=record,
+            deferred_live_lookup=deferred_live_lookup,
+            sealed_only=True,
+            closed_only=closed_only,
+        )
+        public_eligibility = dict(eligibility)
+        plain_block_candidates = public_eligibility.pop(
+            "_plain_block_candidates",
+            [],
+        )
+        if eligibility.get("eligible") is not True:
+            scanned.append(public_eligibility)
+            continue
+        candidate_plain_bytes = int_value(eligibility.get("plain_bytes"))
+        eligible_plain_bytes += candidate_plain_bytes
+        if not isinstance(plain_block_candidates, list):
+            plain_block_candidates = []
+        normalized_candidates = [
+            item
+            for item in plain_block_candidates
+            if isinstance(item, dict)
+            and str(item.get("key") or "")
+            and int_value(item.get("plain_bytes")) >= 0
+        ]
+        session_key = session_record_key(record)
+        block_cursor_before = block_cursors_before.get(session_key, "")
+        block_cursor_before_by_session[session_key] = block_cursor_before
+        if not normalized_candidates:
+            public_eligibility["selection_status"] = (
+                "skipped_block_metadata_unavailable"
+            )
+            public_eligibility["reasons"] = unique_preserving_order(
+                [
+                    *(
+                        public_eligibility.get("reasons")
+                        if isinstance(public_eligibility.get("reasons"), list)
+                        else []
+                    ),
+                    "plain_block_metadata_unavailable",
+                ]
+            )
+            selection_skips.append(public_eligibility)
+            scanned.append(public_eligibility)
+            continue
+        candidate_bytes_total = sum(
+            int_value(item.get("plain_bytes"))
+            for item in normalized_candidates
+        )
+        if candidate_bytes_total != candidate_plain_bytes:
+            public_eligibility["selection_status"] = (
+                "skipped_block_metadata_changed"
+            )
+            public_eligibility["reasons"] = unique_preserving_order(
+                [
+                    *(
+                        public_eligibility.get("reasons")
+                        if isinstance(public_eligibility.get("reasons"), list)
+                        else []
+                    ),
+                    "plain_block_metadata_changed",
+                ]
+            )
+            selection_skips.append(public_eligibility)
+            scanned.append(public_eligibility)
+            continue
+        rotated_candidates = raw_block_storage_rotated_block_candidates(
+            normalized_candidates,
+            block_cursor_before,
+        )
+        remaining_plain_bytes = max(
+            0,
+            effective_plain_bytes - selected_plain_bytes,
+        )
+        selected_block_keys: list[str] = []
+        selected_for_session_bytes = 0
+        block_diagnostics: list[str] = []
+        oversized_block_count = 0
+        for candidate in rotated_candidates:
+            block_bytes = int_value(candidate.get("plain_bytes"))
+            if block_bytes > effective_plain_bytes:
+                oversized_block_count += 1
+                block_diagnostics.append(
+                    "individual_plain_block_exceeds_byte_limit"
+                )
+                # Do not let a future single block larger than the hard run
+                # cap poison the rest of this session.  It remains visibly
+                # skipped, while later smaller sealed blocks can still make
+                # bounded progress without exceeding the cap.
+                continue
+            if block_bytes > remaining_plain_bytes:
+                block_diagnostics.append("plain_byte_limit_exceeded")
+                break
+            selected_block_keys.append(str(candidate.get("key") or ""))
+            selected_for_session_bytes += block_bytes
+            remaining_plain_bytes -= block_bytes
+            if remaining_plain_bytes <= 0:
+                break
+        if block_diagnostics:
+            selection_block_diagnostics[session_key] = unique_preserving_order(
+                block_diagnostics
+            )
+            public_eligibility["selection_block_diagnostics"] = (
+                selection_block_diagnostics[session_key]
+            )
+        public_eligibility["oversized_block_count"] = oversized_block_count
+        public_eligibility["selected_block_count"] = len(selected_block_keys)
+        public_eligibility["selected_plain_bytes"] = selected_for_session_bytes
+        if not selected_block_keys:
+            public_eligibility["selection_status"] = (
+                "skipped_plain_byte_limit"
+            )
+            public_eligibility["reasons"] = unique_preserving_order(
+                [
+                    *(
+                        public_eligibility.get("reasons")
+                        if isinstance(public_eligibility.get("reasons"), list)
+                        else []
+                    ),
+                    *block_diagnostics,
+                    "plain_byte_limit_exceeded"
+                    if not block_diagnostics
+                    else "",
+                ]
+            )
+            public_eligibility["reasons"] = [
+                reason
+                for reason in public_eligibility["reasons"]
+                if reason
+            ]
+            selection_skips.append(public_eligibility)
+            scanned.append(public_eligibility)
+            continue
+        selected_records.append(record)
+        selected_block_ids_by_session[session_key] = selected_block_keys
+        selected_block_counts_by_session[session_key] = len(
+            selected_block_keys
+        )
+        selected_plain_bytes += selected_for_session_bytes
+        public_eligibility["selection_status"] = (
+            "selected_prefix"
+            if len(selected_block_keys) < len(normalized_candidates)
+            else "selected"
+        )
+        scanned.append(public_eligibility)
+        if len(selected_records) >= effective_session_limit:
+            break
+    cursor_after = (
+        session_record_key(scanned[-1])
+        if scanned
+        else cursor_before
+    )
+
+    compact = raw_block_storage_compact(
+        aoa_root=aoa_root,
+        target="all",
+        limit=effective_session_limit,
+        skip_no_plain=True,
+        apply=apply,
+        confirm_remove_plain=confirm_remove_plain,
+        estimate_compression=estimate_compression,
+        compression_level=compression_level,
+        sample_limit=sample_limit,
+        write_report=False,
+        sealed_only=True,
+        closed_only=closed_only,
+        selected_records_override=selected_records,
+        selected_block_ids_override=selected_block_ids_by_session,
+    )
+    diagnostics.extend(
+        str(item)
+        for item in compact.get("diagnostics", [])
+        if item
+    )
+    compact_results = (
+        compact.get("results")
+        if isinstance(compact.get("results"), list)
+        else []
+    )
+    apply_failure = bool(
+        int_value(compact.get("apply_failure_count"))
+        or any(
+            isinstance(item, dict)
+            and item.get("status") == "failed_last_good_projection_preserved"
+            for item in compact_results
+        )
+    )
+    selected_record_keys_by_dir = {
+        str(
+            Path(
+                str(record.get("path") or record.get("navigation_path") or "")
+            )
+        ): session_record_key(record)
+        for record in selected_records
+    }
+    successful_publish_session_keys: set[str] = set()
+    block_cursors_after = dict(block_cursors_before)
+    for item in compact_results:
+        if not isinstance(item, dict):
+            continue
+        publish_result = item.get("publish_result")
+        if not isinstance(publish_result, dict):
+            continue
+        if (
+            item.get("status") != "applied"
+            or publish_result.get("status") != "published"
+            or int_value(item.get("compressed_count")) <= 0
+        ):
+            continue
+        session_dir_key = str(item.get("session_dir") or "")
+        session_key = selected_record_keys_by_dir.get(session_dir_key, "")
+        selected_block_keys = selected_block_ids_by_session.get(session_key, [])
+        if not session_key or not selected_block_keys:
+            continue
+        successful_publish_session_keys.add(session_key)
+        block_cursors_after[session_key] = selected_block_keys[-1]
+    cursor_committed = False
+    block_cursor_committed = False
+    session_cursor_commit_ready = bool(
+        apply
+        and scanned
+        and compact.get("ok") is True
+        and not apply_failure
+    )
+    state_write_ready = bool(
+        session_cursor_commit_ready or successful_publish_session_keys
+    )
+    if apply and scanned and state_write_ready:
+        state_payload = {
+            **state,
+            "schema_version": RAW_BLOCK_STORAGE_MAINTENANCE_STATE_SCHEMA_VERSION,
+            "artifact_type": (
+                "session_memory_raw_block_storage_maintenance_state"
+            ),
+            "cursor": (
+                cursor_after
+                if session_cursor_commit_ready
+                else cursor_before
+            ),
+            "block_cursors": block_cursors_after,
+            "updated_at": now,
+            "last_run": {
+                "at": now,
+                "cursor_before": cursor_before,
+                "cursor_after": cursor_after,
+                "scanned_count": len(scanned),
+                "selected_session_ids": [
+                    str(record.get("session_id") or "")
+                    for record in selected_records
+                ],
+                "successful_publish_session_ids": [
+                    str(record.get("session_id") or "")
+                    for record in selected_records
+                    if session_record_key(record)
+                    in successful_publish_session_keys
+                ],
+                "block_cursor_before": {
+                    key: block_cursor_before_by_session.get(key, "")
+                    for key in selected_block_ids_by_session
+                },
+                "block_cursor_after": {
+                    key: block_cursors_after.get(key, "")
+                    for key in selected_block_ids_by_session
+                    if key in successful_publish_session_keys
+                },
+                "status": compact.get("status"),
+                "apply": True,
+            },
+            "retention": {
+                "raw_transcript": "retained",
+                "stable_plain_refs": "retained_as_plain_rel",
+                "open_blocks": (
+                    "never_selected"
+                    if closed_only
+                    else "sealed_only_open_tail_preserved"
+                ),
+                "plain_removal": (
+                    "explicit_confirm_remove_plain_only"
+                ),
+            },
+            "truth_status": (
+                "scheduler cursor only; eligibility and publish receipts "
+                "remain authoritative"
+            ),
+        }
+        try:
+            write_json_durable(
+                raw_block_storage_maintenance_state_path(aoa_root),
+                state_payload,
+            )
+        except OSError as exc:
+            diagnostics.append(
+                "raw_block_storage_maintenance_state_write_failed:"
+                f"{type(exc).__name__}:{exc}"
+            )
+        else:
+            cursor_committed = session_cursor_commit_ready
+            block_cursor_committed = bool(successful_publish_session_keys)
+
+    status = (
+        "blocked"
+        if diagnostics and compact.get("ok") is not True
+        else (
+            "applied"
+            if compact.get("mutates")
+            else (
+                "no_eligible_candidates"
+                if not selected_records
+                else "planned"
+            )
+        )
+    )
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_type": "session_memory_raw_block_storage_maintenance",
+        "generated_at": now,
+        "ok": bool(compact.get("ok") is True and not diagnostics),
+        "mutates": bool(
+            compact.get("mutates")
+            or cursor_committed
+            or block_cursor_committed
+        ),
+        "storage_mutates": bool(compact.get("mutates")),
+        "apply": bool(apply),
+        "target": "all",
+        "status": status,
+        "scan_limit": effective_scan_limit,
+        "session_limit": effective_session_limit,
+        "max_plain_bytes": effective_plain_bytes,
+        "closed_only": bool(closed_only),
+        "cursor_before": cursor_before,
+        "cursor_after": cursor_after,
+        "cursor_committed": cursor_committed,
+        "block_cursor_before": block_cursor_before_by_session,
+        "block_cursor_after": {
+            key: block_cursors_after.get(key, "")
+            for key in selected_block_ids_by_session
+            if key in successful_publish_session_keys
+        },
+        "block_cursor_committed": block_cursor_committed,
+        "successful_publish_session_ids": [
+            str(record.get("session_id") or "")
+            for record in selected_records
+            if session_record_key(record)
+            in successful_publish_session_keys
+        ],
+        "scanned_count": len(scanned),
+        "selected_count": len(selected_records),
+        "selected_block_counts": selected_block_counts_by_session,
+        "selected_session_ids": [
+            str(record.get("session_id") or "")
+            for record in selected_records
+        ],
+        "eligible_plain_bytes": eligible_plain_bytes,
+        "eligible_plain_bytes_human": human_size(eligible_plain_bytes),
+        "selected_plain_bytes": selected_plain_bytes,
+        "selected_plain_bytes_human": human_size(selected_plain_bytes),
+        "estimated_compressed_bytes": (
+            int_value(compact.get("compressed_bytes"))
+            if estimate_compression
+            else 0
+        ),
+        "estimated_compressed_bytes_human": human_size(
+            int_value(compact.get("compressed_bytes"))
+            if estimate_compression
+            else 0
+        ),
+        "selection_skips": selection_skips,
+        "selection_block_diagnostics": selection_block_diagnostics,
+        "scanned": scanned,
+        "compact": compact,
+        "diagnostics": unique_preserving_order(diagnostics),
+        "state_path": str(raw_block_storage_maintenance_state_path(aoa_root)),
+        "retention": {
+            "raw_transcript": "retained",
+            "stable_plain_refs": "retained_as_plain_rel",
+            "open_blocks": (
+                "never_selected"
+                if closed_only
+                else "sealed_only_open_tail_preserved"
+            ),
+            "plain_removal": "explicit_confirm_remove_plain_only",
+        },
+        "stop_line": (
+            "This bounded owner cursor selects only indexed sessions with "
+            "current capture/generation guards and sealed plaintext blocks; "
+            "open blocks remain untouched and raw/session.raw.jsonl remains "
+            "authoritative."
+        ),
+    }
+    if write_report:
+        diagnostics_dir = aoa_root / DIAGNOSTICS_ROOT
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{compact_stamp()}__raw-block-storage-maintenance"
+        report_json = diagnostics_dir / f"{stem}.json"
+        report_md = diagnostics_dir / f"{stem}.md"
+        write_json(report_json, payload)
+        write_markdown(
+            report_md,
+            raw_block_storage_maintenance_markdown(payload),
+        )
         payload["report_json"] = str(report_json)
         payload["report_markdown"] = str(report_md)
     return payload
@@ -223904,6 +224980,7 @@ REQUIRED_ROOT_FILES = [
     "maps/by-mutation-surface/README.md",
     "scripts/AGENTS.md",
     "scripts/aoa_session_memory.py",
+    "scripts/aoa_session_memory_entity_usage_parsers.py",
     "scripts/validate_local_stats_port.py",
     "sessions/AGENTS.md",
     "skills/AGENTS.md",
@@ -226467,10 +227544,50 @@ def build_parser() -> argparse.ArgumentParser:
     raw_block_storage_compact_parser.add_argument("--workspace-root")
     raw_block_storage_compact_parser.add_argument("--aoa-root")
     raw_block_storage_compact_parser.add_argument("--limit", type=int, help="Maximum sessions to inspect when session=all.")
+    raw_block_storage_compact_parser.add_argument(
+        "--scheduled",
+        action="store_true",
+        help=(
+            "Run the owner bounded cursor over indexed closed sessions; "
+            "scheduled mode requires session=all and never selects open blocks."
+        ),
+    )
+    raw_block_storage_compact_parser.add_argument(
+        "--scan-limit",
+        type=int,
+        help=(
+            "Maximum registry candidates examined by --scheduled "
+            f"(hard-capped at {RAW_BLOCK_STORAGE_MAINTENANCE_MAX_SCAN_LIMIT})."
+        ),
+    )
+    raw_block_storage_compact_parser.add_argument(
+        "--max-plain-bytes",
+        type=int,
+        help=(
+            "Plain sealed bytes per --scheduled run; a remaining-block "
+            "prefix is selected within the default/hard cap of "
+            f"{RAW_BLOCK_STORAGE_MAINTENANCE_MAX_PLAIN_BYTES} bytes."
+        ),
+    )
+    raw_block_storage_compact_parser.add_argument(
+        "--include-open-tail",
+        action="store_true",
+        help=(
+            "In --scheduled mode, admit sealed blocks from sessions with an "
+            "open tail; the open block remains untouched."
+        ),
+    )
     raw_block_storage_compact_parser.add_argument("--sample-limit", type=int, default=80, help="Maximum pre/post raw-block ref-audit samples.")
     raw_block_storage_compact_parser.add_argument("--skip-no-plain", action="store_true", help="When session=all, select the next sessions that still have plaintext raw-block duplicates.")
     raw_block_storage_compact_parser.add_argument("--estimate-compression", action="store_true", help="Read plaintext blocks during dry-run to estimate gzip size.")
     raw_block_storage_compact_parser.add_argument("--compression-level", type=int, default=6, help="gzip compression level, clamped to 1..9.")
+    raw_block_storage_compact_parser.add_argument(
+        "--sealed-only",
+        dest="sealed_only",
+        action="store_true",
+        default=True,
+        help="Compact only blocks whose manifest status is sealed (the default).",
+    )
     raw_block_storage_compact_parser.add_argument("--apply", action="store_true", help="Write compressed raw-block sidecars and update manifest/index metadata.")
     raw_block_storage_compact_parser.add_argument("--confirm-remove-plain", action="store_true", help="After verified apply, remove plaintext raw-block duplicates to reclaim disk.")
     raw_block_storage_compact_parser.add_argument("--write-report", action="store_true", help="Write JSON and Markdown raw-block storage compact reports under .aoa/diagnostics.")
