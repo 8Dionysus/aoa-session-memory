@@ -16,7 +16,6 @@ jobs:
       AOA_STATS_ROOT: ${{ github.workspace }}/.deps/aoa-stats
       AOA_SKILLS_ROOT: ${{ github.workspace }}/.deps/aoa-skills
       AOA_EVALS_ROOT: ${{ github.workspace }}/.deps/aoa-evals
-      PYTHONPYCACHEPREFIX: ${{ runner.temp }}/aoa-session-memory-pycache
 
     steps:
       - name: Checkout
@@ -50,6 +49,9 @@ jobs:
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
         with:
           python-version: "3.12"
+
+      - name: Configure external Python bytecode cache
+        run: echo "PYTHONPYCACHEPREFIX=$RUNNER_TEMP/aoa-session-memory-pycache" >> "$GITHUB_ENV"
 
       - name: Install ecosystem test dependencies
         run: >-

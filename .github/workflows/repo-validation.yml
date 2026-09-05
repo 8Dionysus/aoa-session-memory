@@ -13,8 +13,6 @@ jobs:
   standalone:
     name: Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
-    env:
-      PYTHONPYCACHEPREFIX: ${{ runner.temp }}/aoa-session-memory-pycache
     strategy:
       fail-fast: false
       matrix:
@@ -30,6 +28,9 @@ jobs:
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
         with:
           python-version: ${{ matrix.python-version }}
+
+      - name: Configure external Python bytecode cache
+        run: echo "PYTHONPYCACHEPREFIX=$RUNNER_TEMP/aoa-session-memory-pycache" >> "$GITHUB_ENV"
 
       - name: Install standalone test dependencies
         run: >-
