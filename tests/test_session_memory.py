@@ -10,6 +10,7 @@ import hashlib
 import io
 import json
 import os
+import py_compile
 import shlex
 import shutil
 import sqlite3
@@ -20,7 +21,7 @@ import time
 import warnings
 from datetime import datetime, timezone
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import pytest
@@ -76,11 +77,14 @@ def build_minimal_portable_test_bundle(
         else:
             shutil.copy2(source_path, target_path)
     if runtime_script:
-        runtime_dependency = Path("scripts/aoa_epistemic_action_event_chain.py")
-        shutil.copy2(
-            source_aoa_root / runtime_dependency,
-            target_aoa_root / runtime_dependency,
-        )
+        for runtime_dependency in (
+            Path("scripts/aoa_epistemic_action_event_chain.py"),
+            Path("scripts/aoa_session_memory_entity_usage_parsers.py"),
+        ):
+            shutil.copy2(
+                source_aoa_root / runtime_dependency,
+                target_aoa_root / runtime_dependency,
+            )
     module.write_json(
         target_aoa_root / module.REGISTRY_NAME,
         {
@@ -5074,16 +5078,13 @@ def test_captured_invalid_escape_literal_does_not_leak_syntax_warning() -> None:
     with warnings.catch_warnings(record=True) as captured:
         warnings.simplefilter("always")
         shell_commands = module.custom_exec_shell_commands(payload)
-        entity_commands = module.entity_usage_custom_exec_command_candidates(payload)
-        episode_command = module.episode_exact_operational_nested_literal(
-            source,
-            module.CUSTOM_EXEC_NESTED_COMMAND_LITERAL_RE,
+        entity_commands = module.entity_usage_execution_command_candidates(
+            payload
         )
 
     expected = r"rg '\$HOME' README.md"
     assert shell_commands == [expected]
     assert entity_commands == [expected]
-    assert episode_command == expected
     assert not [item for item in captured if item.category is SyntaxWarning]
 
 
@@ -79598,6 +79599,171 @@ def test_generation_identity_uses_loaded_projection_producer_snapshot(
     )
 
 
+def test_generation_identity_invalidates_parser_only_source_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert module.SESSION_MEMORY_LOADED_ENTITY_USAGE_PARSER_PATH in (
+        module.SESSION_MEMORY_LOADED_PRODUCER_SOURCE_PATHS
+    )
+    assert module.SESSION_MEMORY_LOADED_PRODUCER_SHA256 == (
+        module._producer_source_identity_digest(
+            tuple(
+                (
+                    path,
+                    module.sha256_file_exact(path),
+                )
+                for path in module.SESSION_MEMORY_LOADED_PRODUCER_SOURCE_PATHS
+            )
+        )
+    )
+    assert module.session_memory_generation_common()["producer_sha256"] == (
+        module.SESSION_MEMORY_LOADED_PRODUCER_SHA256
+    )
+    parser_source = tmp_path / "aoa_session_memory_entity_usage_parsers.py"
+    parser_source.write_text("parser-v1\n", encoding="utf-8")
+    source_paths = (
+        module.SESSION_MEMORY_LOADED_PRODUCER_PATH,
+        parser_source,
+    )
+    monkeypatch.setattr(
+        module,
+        "SESSION_MEMORY_LOADED_PRODUCER_SOURCE_PATHS",
+        source_paths,
+    )
+    loaded_sha256 = module._producer_source_identity_digest(
+        tuple(
+            (path, module.sha256_file_exact(path))
+            for path in source_paths
+        )
+    )
+    monkeypatch.setattr(
+        module,
+        "SESSION_MEMORY_LOADED_PRODUCER_SHA256",
+        loaded_sha256,
+    )
+
+    parser_source.write_text("parser-v2\n", encoding="utf-8")
+    source_state = module.session_memory_loaded_producer_source_state()
+
+    assert source_state["stable"] is False
+    assert source_state["status"] == "changed"
+    assert source_state["loaded_sha256"] == loaded_sha256
+    assert source_state["current_sha256"] != loaded_sha256
+    assert "producer_source_changed_during_process" in (
+        source_state["diagnostics"]
+    )
+
+
+def test_entity_usage_parser_loader_binds_exact_sibling_and_cleans_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private_name = "_aoa_session_memory_entity_usage_parsers_source"
+    fixture_main = tmp_path / "aoa_session_memory.py"
+    fixture_parser = tmp_path / "aoa_session_memory_entity_usage_parsers.py"
+    fixture_main.write_text("# fixture runtime\n", encoding="utf-8")
+    fixture_parser.write_bytes(b"VALUE = 1  \n")
+    initial_mtime_ns = fixture_parser.stat().st_mtime_ns
+    monkeypatch.setattr(module, "__file__", str(fixture_main))
+    monkeypatch.setitem(sys.modules, private_name, None)
+
+    first = module._load_entity_usage_parsers_module()
+    assert first.VALUE == 1
+    first_digest = getattr(
+        first,
+        "__aoa_session_memory_entity_usage_parsers_source_sha256__",
+    )
+    assert module._load_entity_usage_parsers_module() is first
+    py_compile.compile(
+        str(fixture_parser),
+        cfile=importlib.util.cache_from_source(str(fixture_parser)),
+        doraise=True,
+    )
+
+    # Keep size and mtime stable so a timestamp-based bytecode cache cannot
+    # explain the reload result.
+    fixture_parser.write_bytes(b"VALUE = 222\n")
+    os.utime(fixture_parser, ns=(initial_mtime_ns, initial_mtime_ns))
+    second = module._load_entity_usage_parsers_module()
+    assert second.VALUE == 222
+    assert second is not first
+    assert getattr(
+        second,
+        "__aoa_session_memory_entity_usage_parsers_source_sha256__",
+    ) != first_digest
+
+    monkeypatch.setattr(
+        module,
+        "__file__",
+        str(module.SESSION_MEMORY_LOADED_PRODUCER_PATH),
+    )
+    foreign = ModuleType(private_name)
+    foreign.__file__ = str(tmp_path / "foreign-parsers.py")
+    monkeypatch.setitem(sys.modules, private_name, foreign)
+    expected_path = (
+        module.SESSION_MEMORY_LOADED_ENTITY_USAGE_PARSER_PATH
+    )
+    calls: list[tuple[str, Path]] = []
+
+    class Loader:
+        def create_module(self, spec: Any) -> ModuleType:
+            return ModuleType(spec.name)
+
+        def exec_module(self, loaded: ModuleType) -> None:
+            loaded.__file__ = str(expected_path)
+            loaded.loaded_from_exact_sibling = True
+
+    def fake_spec_from_file_location(
+        name: str,
+        path: str | Path,
+        **_: Any,
+    ) -> Any:
+        calls.append((name, Path(path).resolve()))
+        return importlib.util.spec_from_loader(
+            name,
+            Loader(),
+            origin=str(path),
+        )
+
+    monkeypatch.setattr(
+        module.importlib.util,
+        "spec_from_file_location",
+        fake_spec_from_file_location,
+    )
+    loaded = module._load_entity_usage_parsers_module()
+
+    assert loaded is not foreign
+    assert loaded.loaded_from_exact_sibling is True
+    assert calls == [(private_name, expected_path)]
+
+    monkeypatch.setitem(sys.modules, private_name, None)
+
+    class FailingLoader(Loader):
+        def exec_module(self, _loaded: ModuleType) -> None:
+            raise RuntimeError("synthetic parser load failure")
+
+    def failing_spec_from_file_location(
+        name: str,
+        path: str | Path,
+        **_: Any,
+    ) -> Any:
+        return importlib.util.spec_from_loader(
+            name,
+            FailingLoader(),
+            origin=str(path),
+        )
+
+    monkeypatch.setattr(
+        module.importlib.util,
+        "spec_from_file_location",
+        failing_spec_from_file_location,
+    )
+    with pytest.raises(RuntimeError, match="synthetic parser load failure"):
+        module._load_entity_usage_parsers_module()
+    assert sys.modules[private_name] is None
+
+
 def test_stage_work_identity_isolates_session_index_change(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -98801,7 +98967,42 @@ def test_install_portable_bundle_creates_clean_target(tmp_path: Path) -> None:
     assert (aoa_root / module.LOCAL_STATS_PACKET_PATH).exists()
     assert (aoa_root / "tests" / "AGENTS.md").exists()
     assert (aoa_root / "scripts" / "aoa_session_memory.py").exists()
+    assert (
+        aoa_root / "scripts" / "aoa_session_memory_entity_usage_parsers.py"
+    ).is_file()
     assert (aoa_root / "tests" / "test_session_memory.py").exists()
+
+    portable_runtime = subprocess.run(
+        [
+            sys.executable,
+            str(aoa_root / "scripts" / "aoa_session_memory.py"),
+            "--help",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert portable_runtime.returncode == 0, (
+        portable_runtime.stdout + portable_runtime.stderr
+    )
+    portable_validation = subprocess.run(
+        [
+            sys.executable,
+            str(aoa_root / "scripts" / "aoa_session_memory.py"),
+            "validate",
+            "--workspace-root",
+            str(workspace),
+            "--aoa-root",
+            str(aoa_root),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert portable_validation.returncode == 0, (
+        portable_validation.stdout + portable_validation.stderr
+    )
+    assert json.loads(portable_validation.stdout)["ok"] is True
     assert (aoa_root / "tests" / "test_skill_system.py").exists()
     registry = json.loads((aoa_root / "session-registry.json").read_text(encoding="utf-8"))
     assert registry["sessions"] == []
