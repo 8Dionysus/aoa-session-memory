@@ -270,8 +270,11 @@ DECLARED_GRAPH_PROJECTION_GENERATION_TRANSITIONS: dict[
     # graph-registry-rebind.  The outbox consumer contract changes the
     # graph producer range, so the target must be the current generation;
     # retain the immediately preceding integration generation with its exact
-    # source snapshot as a declared, source-verified predecessor.
-    "5f7a149fbef6c6f605e7d5eb387bacc023eef3a98f87c81dc6758660ab828e06": (
+    # source snapshot as a declared, source-verified predecessor.  The
+    # current target advances only because unreachable legacy graph builder
+    # and accumulator bodies were removed; D-0067 exact-pair proof remains
+    # mandatory for every predecessor, including the baseline source below.
+    "0b2f4adecac6fe1c93d10792b51a72435f824bf33aa33d77565d7ad53d4a588f": (
         {
             # The source immediately before the outbox consumer contract was
             # integrated is the current integration parent.  Its whole-file
@@ -299,6 +302,11 @@ DECLARED_GRAPH_PROJECTION_GENERATION_TRANSITIONS: dict[
             # source refresh remains mandatory before this transition.
             "ea73e542d289dd3f62a5801f9d3192f5ff2aec9492dedafaf1ffb46f642c4871": (
                 "5828dbbdc7fb6c54fbcff70ff5ff585ec7889c6ea4286e5548103cede94b6777"
+            ),
+            # Baseline before the unreachable legacy graph implementation was
+            # removed; admit only its exact source snapshot.
+            "5f7a149fbef6c6f605e7d5eb387bacc023eef3a98f87c81dc6758660ab828e06": (
+                "942d60b03d7db2c1aa4f495bb7dbbfb40f16ab27b4db428cbb0c3745347d4844"
             ),
         }
     ),
