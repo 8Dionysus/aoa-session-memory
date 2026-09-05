@@ -294,7 +294,7 @@ DECLARED_GRAPH_PROJECTION_GENERATION_TRANSITIONS: dict[
     # graph producer range, so the target must be the current generation;
     # retain the immediately preceding integration generation with its exact
     # source snapshot as a declared, source-verified predecessor.
-    "5f7a149fbef6c6f605e7d5eb387bacc023eef3a98f87c81dc6758660ab828e06": (
+    "a0ad369692972bceb7283c7439cb2108793bfaac0e178f44b17d0c231a843b7b": (
         {
             # The source immediately before the outbox consumer contract was
             # integrated is the current integration parent.  Its whole-file
@@ -221715,6 +221715,18 @@ def raw_block_storage_eligibility(
     capture_state = raw_capture_state_for_session(session_dir)
     if not capture_state:
         return reject("raw_capture_state_missing")
+    capture_state_schema_version = int_value(
+        capture_state.get("schema_version")
+    )
+    result["guards"]["capture_state_schema_version"] = (
+        capture_state_schema_version
+    )
+    if capture_state_schema_version != RAW_CAPTURE_STATE_SCHEMA_VERSION:
+        # The general reader retains a bounded compatibility path for legacy
+        # capture state, but storage staging/publish validates the current
+        # state shape.  Reject before any staging or compression so an old
+        # projection cannot become a poison-pill apply failure.
+        return reject("raw_capture_state_schema_incompatible")
     result["guards"]["capture_state_status"] = str(
         capture_state.get("status") or ""
     )

@@ -23523,6 +23523,244 @@ def test_raw_block_storage_validation_keeps_unknown_drift_and_bad_cache_hard(
     ) is False
 
 
+def test_raw_block_storage_eligibility_skips_legacy_capture_schema_before_staging(
+    tmp_path: Path,
+) -> None:
+    """Legacy capture readers remain compatible while storage stays current-only."""
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "raw-block-storage-legacy-capture-schema.jsonl"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-05-12T00:00:00Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "storage-legacy-capture-schema",
+                    "cwd": str(workspace),
+                },
+            },
+            {
+                "timestamp": "2026-05-12T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Keep the legacy capture state readable.",
+                        }
+                    ],
+                },
+            },
+            {
+                "timestamp": "2026-05-12T00:00:02Z",
+                "type": "turn_context",
+                "payload": {"summary": "sealed storage boundary"},
+            },
+            {
+                "timestamp": "2026-05-12T00:00:03Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "The raw block remains available.",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+    module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": "storage-legacy-capture-schema",
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    session_dir = module.resolve_session_record(
+        aoa_root,
+        "storage-legacy-capture-schema",
+    )["path"]
+    session_dir = Path(str(session_dir))
+    state_path = module.raw_capture_state_path(session_dir)
+    state = module.read_json(state_path, {})
+    assert state["schema_version"] == module.RAW_CAPTURE_STATE_SCHEMA_VERSION
+    state["schema_version"] = 1
+    module.write_json(state_path, state)
+
+    result = module.raw_block_storage_eligibility(
+        aoa_root=aoa_root,
+        record=module.resolve_session_record(
+            aoa_root,
+            "storage-legacy-capture-schema",
+        ),
+        sealed_only=True,
+        closed_only=False,
+    )
+
+    assert result["eligible"] is False
+    assert result["reasons"] == ["raw_capture_state_schema_incompatible"]
+    assert result["guards"]["capture_state_schema_version"] == 1
+
+
+def test_raw_block_storage_maintenance_skips_legacy_schema_and_reaches_next_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bounded scan advances past an unsupported legacy capture candidate."""
+    aoa_root = tmp_path / ".aoa"
+    records = [
+        {
+            "session_id": "storage-legacy",
+            "session_label": "2026-05-12__001__storage-legacy",
+            "path": str(tmp_path / "storage-legacy"),
+        },
+        {
+            "session_id": "storage-good",
+            "session_label": "2026-05-12__002__storage-good",
+            "path": str(tmp_path / "storage-good"),
+        },
+    ]
+    monkeypatch.setattr(module, "registry_sessions", lambda _root: records)
+    monkeypatch.setattr(
+        module,
+        "raw_block_compaction_deferred_live_lookup",
+        lambda _root: ({}, []),
+    )
+
+    def fake_eligibility(**kwargs: Any) -> dict[str, Any]:
+        record = kwargs["record"]
+        session_id = record["session_id"]
+        if session_id == "storage-legacy":
+            return {
+                "session_id": session_id,
+                "session_label": record["session_label"],
+                "session_dir": record["path"],
+                "status": "skipped",
+                "eligible": False,
+                "reasons": ["raw_capture_state_schema_incompatible"],
+                "plain_bytes": 0,
+                "guards": {"capture_state_schema_version": 1},
+            }
+        return {
+            "session_id": session_id,
+            "session_label": record["session_label"],
+            "session_dir": record["path"],
+            "status": "eligible",
+            "eligible": True,
+            "reasons": [],
+            "plain_bytes": 128,
+            "guards": {"capture_state_schema_version": 2},
+        }
+
+    monkeypatch.setattr(module, "raw_block_storage_eligibility", fake_eligibility)
+    monkeypatch.setattr(
+        module,
+        "raw_block_storage_compact",
+        lambda **kwargs: {
+            "ok": True,
+            "status": "applied",
+            "mutates": bool(kwargs["apply"] and kwargs["selected_records_override"]),
+            "apply_failure_count": 0,
+            "diagnostics": [],
+            "results": [],
+        },
+    )
+
+    result = module.raw_block_storage_maintenance(
+        aoa_root=aoa_root,
+        target="all",
+        limit=1,
+        scan_limit=2,
+        max_plain_bytes=128,
+        apply=True,
+    )
+
+    assert result["ok"] is True
+    assert result["status"] == "applied"
+    assert result["scanned_count"] == 2
+    assert result["selected_session_ids"] == ["storage-good"]
+    assert result["scanned"][0]["reasons"] == [
+        "raw_capture_state_schema_incompatible"
+    ]
+    assert result["cursor_after"] == "storage-good"
+    assert result["cursor_committed"] is True
+    assert result["storage_mutates"] is True
+
+
+def test_raw_block_storage_maintenance_reports_unsupported_only_as_no_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unsupported candidate may move only the cursor, never claim compression."""
+    aoa_root = tmp_path / ".aoa"
+    record = {
+        "session_id": "storage-legacy-only",
+        "session_label": "2026-05-12__001__storage-legacy-only",
+        "path": str(tmp_path / "storage-legacy-only"),
+    }
+    monkeypatch.setattr(module, "registry_sessions", lambda _root: [record])
+    monkeypatch.setattr(
+        module,
+        "raw_block_compaction_deferred_live_lookup",
+        lambda _root: ({}, []),
+    )
+    monkeypatch.setattr(
+        module,
+        "raw_block_storage_eligibility",
+        lambda **_kwargs: {
+            "session_id": record["session_id"],
+            "session_label": record["session_label"],
+            "session_dir": record["path"],
+            "status": "skipped",
+            "eligible": False,
+            "reasons": ["raw_capture_state_schema_incompatible"],
+            "plain_bytes": 0,
+            "guards": {"capture_state_schema_version": 1},
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "raw_block_storage_compact",
+        lambda **_kwargs: {
+            "ok": True,
+            "status": "skipped_ineligible",
+            "mutates": False,
+            "apply_failure_count": 0,
+            "diagnostics": [],
+            "results": [],
+        },
+    )
+
+    result = module.raw_block_storage_maintenance(
+        aoa_root=aoa_root,
+        target="all",
+        limit=1,
+        scan_limit=1,
+        apply=True,
+    )
+
+    assert result["ok"] is True
+    assert result["status"] == "no_eligible_candidates"
+    assert result["selected_count"] == 0
+    assert result["storage_mutates"] is False
+    assert result["mutates"] is True
+    assert result["cursor_committed"] is True
+    assert result["scanned"][0]["reasons"] == [
+        "raw_capture_state_schema_incompatible"
+    ]
+
+
 def test_raw_block_storage_maintenance_cursor_is_dry_run_and_resumable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
