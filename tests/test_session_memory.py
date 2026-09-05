@@ -5077,14 +5077,13 @@ def test_captured_invalid_escape_literal_does_not_leak_syntax_warning() -> None:
     with warnings.catch_warnings(record=True) as captured:
         warnings.simplefilter("always")
         shell_commands = module.custom_exec_shell_commands(payload)
-        episode_command = module.episode_exact_operational_nested_literal(
-            source,
-            module.CUSTOM_EXEC_NESTED_COMMAND_LITERAL_RE,
+        entity_commands = module.entity_usage_execution_command_candidates(
+            payload
         )
 
     expected = r"rg '\$HOME' README.md"
     assert shell_commands == [expected]
-    assert episode_command == expected
+    assert entity_commands == [expected]
     assert not [item for item in captured if item.category is SyntaxWarning]
 
 
@@ -78637,6 +78636,23 @@ def test_generation_identity_invalidates_parser_only_source_change(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    assert module.SESSION_MEMORY_LOADED_ENTITY_USAGE_PARSER_PATH in (
+        module.SESSION_MEMORY_LOADED_PRODUCER_SOURCE_PATHS
+    )
+    assert module.SESSION_MEMORY_LOADED_PRODUCER_SHA256 == (
+        module._producer_source_identity_digest(
+            tuple(
+                (
+                    path,
+                    module.sha256_file_exact(path),
+                )
+                for path in module.SESSION_MEMORY_LOADED_PRODUCER_SOURCE_PATHS
+            )
+        )
+    )
+    assert module.session_memory_generation_common()["producer_sha256"] == (
+        module.SESSION_MEMORY_LOADED_PRODUCER_SHA256
+    )
     parser_source = tmp_path / "aoa_session_memory_entity_usage_parsers.py"
     parser_source.write_text("parser-v1\n", encoding="utf-8")
     source_paths = (
@@ -97946,7 +97962,42 @@ def test_install_portable_bundle_creates_clean_target(tmp_path: Path) -> None:
     assert (aoa_root / module.LOCAL_STATS_PACKET_PATH).exists()
     assert (aoa_root / "tests" / "AGENTS.md").exists()
     assert (aoa_root / "scripts" / "aoa_session_memory.py").exists()
+    assert (
+        aoa_root / "scripts" / "aoa_session_memory_entity_usage_parsers.py"
+    ).is_file()
     assert (aoa_root / "tests" / "test_session_memory.py").exists()
+
+    portable_runtime = subprocess.run(
+        [
+            sys.executable,
+            str(aoa_root / "scripts" / "aoa_session_memory.py"),
+            "--help",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert portable_runtime.returncode == 0, (
+        portable_runtime.stdout + portable_runtime.stderr
+    )
+    portable_validation = subprocess.run(
+        [
+            sys.executable,
+            str(aoa_root / "scripts" / "aoa_session_memory.py"),
+            "validate",
+            "--workspace-root",
+            str(workspace),
+            "--aoa-root",
+            str(aoa_root),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert portable_validation.returncode == 0, (
+        portable_validation.stdout + portable_validation.stderr
+    )
+    assert json.loads(portable_validation.stdout)["ok"] is True
     assert (aoa_root / "tests" / "test_skill_system.py").exists()
     registry = json.loads((aoa_root / "session-registry.json").read_text(encoding="utf-8"))
     assert registry["sessions"] == []

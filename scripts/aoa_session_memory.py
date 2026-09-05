@@ -224200,6 +224200,7 @@ REQUIRED_ROOT_FILES = [
     "maps/by-mutation-surface/README.md",
     "scripts/AGENTS.md",
     "scripts/aoa_session_memory.py",
+    "scripts/aoa_session_memory_entity_usage_parsers.py",
     "scripts/validate_local_stats_port.py",
     "sessions/AGENTS.md",
     "skills/AGENTS.md",
