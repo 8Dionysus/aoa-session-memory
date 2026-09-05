@@ -9399,6 +9399,18 @@ _ENTITY_REGISTRY_SEMANTIC_DIGEST_PROCESS_CACHE: dict[
     dict[str, Any],
 ] = {}
 
+# Graph read routes ask for the same persisted registry dependency repeatedly
+# while serving one request (freshness, neighborhood, timeline, and packet
+# routes each re-check it).  Keep one bounded, read-only result for the exact
+# unchanged snapshot/source surface.  The file identity and source-surface
+# token preserve the existing invalidation boundary; a new test/root or a
+# rewritten registry replaces the single cached entry instead of retaining a
+# process-wide collection of temporary roots.
+_GRAPH_ENTITY_REGISTRY_DEPENDENCY_PROCESS_CACHE: dict[
+    tuple[Any, ...],
+    dict[str, Any],
+] = {}
+
 
 def entity_registry_snapshot_file_identity(
     path: Path,
@@ -11530,6 +11542,32 @@ def graph_entity_registry_dependency_snapshot(
         return value if isinstance(value, dict) else {}
 
     payload = read_persisted()
+    source_surface_state = entity_registry_source_surface_state(aoa_root)
+    cache_key = (
+        snapshot_identity_before_read,
+        float(source_surface_state.get("latest_source_mtime") or 0.0),
+        int_value(source_surface_state.get("source_path_count")),
+        str(source_surface_state.get("latest_source_path") or ""),
+        str(os.environ.get("CODEX_HOME") or ""),
+        str(os.environ.get("AOA_ENTITY_REGISTRY_MCP_SERVICES_ROOTS") or ""),
+    )
+    cacheable_read = bool(
+        include_index
+        and not ensure_current
+        and not allow_ephemeral
+        and snapshot_identity_before_read is not None
+        and payload.get("artifact_type") == "entity_registry_snapshot"
+    )
+    if cacheable_read:
+        cached = _GRAPH_ENTITY_REGISTRY_DEPENDENCY_PROCESS_CACHE.get(
+            cache_key
+        )
+        if isinstance(cached, dict):
+            cached_result = dict(cached)
+            cached_result["semantic_digest_verification_mode"] = (
+                "process_cache_exact_file_identity"
+            )
+            return cached_result
     for attempt in range(2):
         persisted = bool(
             registry_path.is_file()
@@ -11721,7 +11759,7 @@ def graph_entity_registry_dependency_snapshot(
     if runtime_overlay_required:
         reasons.append("entity_registry_owner_sources_newer")
     current = not reasons and bool(dependency_id)
-    return {
+    result = {
         "schema_version": GRAPH_ENTITY_REGISTRY_DEPENDENCY_VERSION,
         "artifact_type": (
             "session_memory_graph_entity_registry_dependency"
@@ -11765,6 +11803,12 @@ def graph_entity_registry_dependency_snapshot(
             "pinned_generated_entity_registry_dependency_not_owner_truth"
         ),
     }
+    if cacheable_read and current:
+        _GRAPH_ENTITY_REGISTRY_DEPENDENCY_PROCESS_CACHE.clear()
+        _GRAPH_ENTITY_REGISTRY_DEPENDENCY_PROCESS_CACHE[cache_key] = dict(
+            result
+        )
+    return result
 
 
 def graph_entity_registry_dependency_transition_state(
