@@ -14,8 +14,12 @@ python3 scripts/aoa_session_memory.py doctor --workspace-root /path/to/workspace
 ```
 
 The bytecode prefix must remain outside the checkout. Pytest assertion
-rewriting remains enabled for diagnostics, and Python invalidates the external
-cache when a source or test file changes.
+rewriting remains enabled for diagnostics. Python's default timestamp/size
+invalidation recompiles when a source or test `mtime` or byte length changes,
+but a same-size edit that preserves both fields can reuse stale external
+bytecode. Rotate or clear the prefix (or use hash-based invalidation) when
+metadata-preserving edits are possible. CI's `runner.temp` prefix is fresh per
+job.
 
 ## Decisions
 
