@@ -6,6 +6,7 @@ import array
 import ast
 import base64
 import binascii
+import copy
 import ctypes
 import ctypes.util
 import difflib
@@ -412,8 +413,13 @@ DECLARED_GRAPH_PROJECTION_GENERATION_TRANSITIONS: dict[
     # graph producer range, so the target must be the current generation;
     # retain the immediately preceding integration generation with its exact
     # source snapshot as a declared, source-verified predecessor.
-    "9fc7d5d9fb6a97d4380092d5a56fc3da765f0abe2f7864baecba82ebb04de3c4": (
+    "2fa11c19ef0d5fdab8d63acf43c3f469230fc10e92a13bedd7932145101bec02": (
         {
+            # Index reuse changes execution cost, not registry admission or
+            # graph materialization. Require the exact pre-optimization source.
+            "9fc7d5d9fb6a97d4380092d5a56fc3da765f0abe2f7864baecba82ebb04de3c4": (
+                "0416c082802ae84b4ae13c2d73246646f598480943b7e22fdbc617d6aa3320d7"
+            ),
             # The source immediately before the outbox consumer contract was
             # integrated is the current integration parent.  Its whole-file
             # digest is the admission proof for the prior 73d generation.
@@ -9404,6 +9410,14 @@ _ENTITY_REGISTRY_SEMANTIC_DIGEST_PROCESS_CACHE: dict[
     dict[str, Any],
 ] = {}
 
+# Cache only the expensive index of one verified persisted snapshot. Freshness
+# and semantic admission still run on every read; callers receive independent
+# mutable indexes rather than references into this process-local cache.
+_GRAPH_ENTITY_REGISTRY_INDEX_PROCESS_CACHE: dict[
+    tuple[Any, ...],
+    dict[tuple[str, str], dict[str, Any]],
+] = {}
+
 
 def entity_registry_snapshot_file_identity(
     path: Path,
@@ -11726,6 +11740,27 @@ def graph_entity_registry_dependency_snapshot(
     if runtime_overlay_required:
         reasons.append("entity_registry_owner_sources_newer")
     current = not reasons and bool(dependency_id)
+    index: dict[tuple[str, str], dict[str, Any]] = {}
+    if current and include_index:
+        identity_after_read = entity_registry_snapshot_file_identity(registry_path)
+        cache_key = (
+            (snapshot_identity_before_read, dependency_id)
+            if not ephemeral
+            and snapshot_identity_before_read is not None
+            and snapshot_identity_before_read == identity_after_read
+            else None
+        )
+        cached_index = (
+            _GRAPH_ENTITY_REGISTRY_INDEX_PROCESS_CACHE.get(cache_key)
+            if cache_key is not None else None
+        )
+        if cached_index is None:
+            index = entity_registry_entry_index_from_snapshot(payload)
+            if cache_key is not None:
+                _GRAPH_ENTITY_REGISTRY_INDEX_PROCESS_CACHE.clear()
+                _GRAPH_ENTITY_REGISTRY_INDEX_PROCESS_CACHE[cache_key] = copy.deepcopy(index)
+        else:
+            index = copy.deepcopy(cached_index)
     return {
         "schema_version": GRAPH_ENTITY_REGISTRY_DEPENDENCY_VERSION,
         "artifact_type": (
@@ -11760,11 +11795,7 @@ def graph_entity_registry_dependency_snapshot(
         "runtime_overlay_state": runtime_overlay_state,
         "entry_count": len(entries),
         "entries": entries,
-        "index": (
-            entity_registry_entry_index_from_snapshot(payload)
-            if current and include_index
-            else {}
-        ),
+        "index": index,
         "reasons": reasons,
         "truth_status": (
             "pinned_generated_entity_registry_dependency_not_owner_truth"
