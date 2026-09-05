@@ -8,7 +8,17 @@ env -u PYTHONDONTWRITEBYTECODE \
   python3 -m py_compile scripts/aoa_session_memory.py
 env -u PYTHONDONTWRITEBYTECODE \
   PYTHONPYCACHEPREFIX="${PYTHONPYCACHEPREFIX:-${TMPDIR:-/tmp}/aoa-session-memory-pycache}" \
-  python3 -m pytest -q -p no:cacheprovider tests/test_session_memory.py
+  python3 -m pytest -q -p no:cacheprovider \
+    tests/test_session_memory.py \
+    tests/test_session_memory_doctor.py \
+    tests/test_session_memory_outbox.py \
+    tests/test_session_memory_task_lifecycle.py \
+    tests/test_session_memory_tool_usage.py \
+    tests/test_session_memory_episode_search.py \
+    tests/test_session_memory_episode_maintenance.py \
+    tests/test_session_memory_episode_temporal.py \
+    tests/test_session_memory_capture.py \
+    tests/test_session_memory_sweep.py
 python3 scripts/aoa_session_memory.py validate --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa
 python3 scripts/aoa_session_memory.py doctor --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa
 ```
