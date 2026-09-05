@@ -1,0 +1,17 @@
+{
+  "allowed_bytes": 31325634,
+  "allowed_tracked_bytes": 32238349,
+  "approved_by": "repository-owner",
+  "base_ref": "60c2eb103f11feb997783e8cbabcc92c7638b931",
+  "changed_generated_bytes": 31325634,
+  "changed_generated_files": 415,
+  "decision_ref": "aoa-kag:docs/decisions/AOA-KAG-D-0017-portable-content-addressed-repository-family.md",
+  "default_limit_bytes": 1048576,
+  "head_family_digest": "48b948e89260c440f48b3c568af12c65509c2c8908ff05c43766ecc3dafdfc41",
+  "reason": "Reviewed Session feedback optimization: keep pytest assertion rewriting enabled while routing Python bytecode to an external cache prefix; default timestamp/size invalidation is retained with documented metadata-preserving edit limits and fresh CI runner.temp caches.",
+  "repo": "aoa-session-memory",
+  "schema_version": "aoa-repo-local-kag-budget-receipt-v1",
+  "scope": "generated_delta_and_tracked_size",
+  "tracked_bytes": 32238349,
+  "tracked_bytes_max": 13631488
+}
