@@ -10,6 +10,7 @@ import hashlib
 import io
 import json
 import os
+import py_compile
 import shlex
 import shutil
 import sqlite3
@@ -78693,6 +78694,44 @@ def test_entity_usage_parser_loader_binds_exact_sibling_and_cleans_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     private_name = "_aoa_session_memory_entity_usage_parsers_source"
+    fixture_main = tmp_path / "aoa_session_memory.py"
+    fixture_parser = tmp_path / "aoa_session_memory_entity_usage_parsers.py"
+    fixture_main.write_text("# fixture runtime\n", encoding="utf-8")
+    fixture_parser.write_bytes(b"VALUE = 1  \n")
+    initial_mtime_ns = fixture_parser.stat().st_mtime_ns
+    monkeypatch.setattr(module, "__file__", str(fixture_main))
+    monkeypatch.setitem(sys.modules, private_name, None)
+
+    first = module._load_entity_usage_parsers_module()
+    assert first.VALUE == 1
+    first_digest = getattr(
+        first,
+        "__aoa_session_memory_entity_usage_parsers_source_sha256__",
+    )
+    assert module._load_entity_usage_parsers_module() is first
+    py_compile.compile(
+        str(fixture_parser),
+        cfile=importlib.util.cache_from_source(str(fixture_parser)),
+        doraise=True,
+    )
+
+    # Keep size and mtime stable so a timestamp-based bytecode cache cannot
+    # explain the reload result.
+    fixture_parser.write_bytes(b"VALUE = 222\n")
+    os.utime(fixture_parser, ns=(initial_mtime_ns, initial_mtime_ns))
+    second = module._load_entity_usage_parsers_module()
+    assert second.VALUE == 222
+    assert second is not first
+    assert getattr(
+        second,
+        "__aoa_session_memory_entity_usage_parsers_source_sha256__",
+    ) != first_digest
+
+    monkeypatch.setattr(
+        module,
+        "__file__",
+        str(module.SESSION_MEMORY_LOADED_PRODUCER_PATH),
+    )
     foreign = ModuleType(private_name)
     foreign.__file__ = str(tmp_path / "foreign-parsers.py")
     monkeypatch.setitem(sys.modules, private_name, foreign)

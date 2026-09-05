@@ -41,6 +41,7 @@ from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
+from importlib.machinery import SourceFileLoader
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
@@ -68,8 +69,20 @@ def _load_epistemic_action_event_chain_module() -> Any:
 def _load_entity_usage_parsers_module() -> Any:
     """Load the bounded command-shape parser source without runtime imports."""
     module_name = "_aoa_session_memory_entity_usage_parsers_source"
+    source_digest_attr = (
+        "__aoa_session_memory_entity_usage_parsers_source_sha256__"
+    )
     source_path = Path(__file__).resolve().with_name(
         "aoa_session_memory_entity_usage_parsers.py"
+    )
+    try:
+        source_bytes = source_path.read_bytes()
+    except OSError:
+        source_bytes = None
+    source_sha256 = (
+        hashlib.sha256(source_bytes).hexdigest()
+        if source_bytes is not None
+        else ""
     )
     loaded = sys.modules.get(module_name)
     loaded_path = getattr(loaded, "__file__", None)
@@ -77,6 +90,8 @@ def _load_entity_usage_parsers_module() -> Any:
         loaded is not None
         and loaded_path is not None
         and Path(loaded_path).resolve() == source_path
+        and source_sha256
+        and getattr(loaded, source_digest_attr, None) == source_sha256
     ):
         return loaded
     spec = importlib.util.spec_from_file_location(module_name, source_path)
@@ -87,7 +102,19 @@ def _load_entity_usage_parsers_module() -> Any:
     previous = sys.modules.get(module_name, missing)
     sys.modules[module_name] = module
     try:
-        spec.loader.exec_module(module)
+        if source_bytes is not None and isinstance(
+            spec.loader,
+            SourceFileLoader,
+        ):
+            # Compile the exact bytes read above instead of allowing a
+            # timestamp/size-matching pyc to satisfy a same-path reload.
+            exec(
+                compile(source_bytes, str(source_path), "exec"),
+                module.__dict__,
+            )
+        else:
+            spec.loader.exec_module(module)
+        setattr(module, source_digest_attr, source_sha256)
     except BaseException:
         if previous is missing:
             sys.modules.pop(module_name, None)
