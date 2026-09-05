@@ -6,6 +6,7 @@ import array
 import ast
 import base64
 import binascii
+import copy
 import ctypes
 import ctypes.util
 import difflib
@@ -9399,16 +9400,12 @@ _ENTITY_REGISTRY_SEMANTIC_DIGEST_PROCESS_CACHE: dict[
     dict[str, Any],
 ] = {}
 
-# Graph read routes ask for the same persisted registry dependency repeatedly
-# while serving one request (freshness, neighborhood, timeline, and packet
-# routes each re-check it).  Keep one bounded, read-only result for the exact
-# unchanged snapshot/source surface.  The file identity and source-surface
-# token preserve the existing invalidation boundary; a new test/root or a
-# rewritten registry replaces the single cached entry instead of retaining a
-# process-wide collection of temporary roots.
-_GRAPH_ENTITY_REGISTRY_DEPENDENCY_PROCESS_CACHE: dict[
+# Cache only the expensive index of one verified persisted snapshot. Freshness
+# and semantic admission still run on every read; callers receive independent
+# mutable indexes rather than references into this process-local cache.
+_GRAPH_ENTITY_REGISTRY_INDEX_PROCESS_CACHE: dict[
     tuple[Any, ...],
-    dict[str, Any],
+    dict[tuple[str, str], dict[str, Any]],
 ] = {}
 
 
@@ -11542,33 +11539,6 @@ def graph_entity_registry_dependency_snapshot(
         return value if isinstance(value, dict) else {}
 
     payload = read_persisted()
-    cache_key: tuple[Any, ...] | None = None
-    cacheable_read = bool(
-        include_index
-        and not ensure_current
-        and not allow_ephemeral
-        and snapshot_identity_before_read is not None
-        and payload.get("artifact_type") == "entity_registry_snapshot"
-    )
-    if cacheable_read:
-        source_surface_state = entity_registry_source_surface_state(aoa_root)
-        cache_key = (
-            snapshot_identity_before_read,
-            float(source_surface_state.get("latest_source_mtime") or 0.0),
-            int_value(source_surface_state.get("source_path_count")),
-            str(source_surface_state.get("latest_source_path") or ""),
-            str(os.environ.get("CODEX_HOME") or ""),
-            str(os.environ.get("AOA_ENTITY_REGISTRY_MCP_SERVICES_ROOTS") or ""),
-        )
-        cached = _GRAPH_ENTITY_REGISTRY_DEPENDENCY_PROCESS_CACHE.get(
-            cache_key
-        )
-        if isinstance(cached, dict):
-            cached_result = dict(cached)
-            cached_result["semantic_digest_verification_mode"] = (
-                "process_cache_exact_file_identity"
-            )
-            return cached_result
     for attempt in range(2):
         persisted = bool(
             registry_path.is_file()
@@ -11760,7 +11730,28 @@ def graph_entity_registry_dependency_snapshot(
     if runtime_overlay_required:
         reasons.append("entity_registry_owner_sources_newer")
     current = not reasons and bool(dependency_id)
-    result = {
+    index: dict[tuple[str, str], dict[str, Any]] = {}
+    if current and include_index:
+        identity_after_read = entity_registry_snapshot_file_identity(registry_path)
+        cache_key = (
+            (snapshot_identity_before_read, dependency_id)
+            if not ephemeral
+            and snapshot_identity_before_read is not None
+            and snapshot_identity_before_read == identity_after_read
+            else None
+        )
+        cached_index = (
+            _GRAPH_ENTITY_REGISTRY_INDEX_PROCESS_CACHE.get(cache_key)
+            if cache_key is not None else None
+        )
+        if cached_index is None:
+            index = entity_registry_entry_index_from_snapshot(payload)
+            if cache_key is not None:
+                _GRAPH_ENTITY_REGISTRY_INDEX_PROCESS_CACHE.clear()
+                _GRAPH_ENTITY_REGISTRY_INDEX_PROCESS_CACHE[cache_key] = copy.deepcopy(index)
+        else:
+            index = copy.deepcopy(cached_index)
+    return {
         "schema_version": GRAPH_ENTITY_REGISTRY_DEPENDENCY_VERSION,
         "artifact_type": (
             "session_memory_graph_entity_registry_dependency"
@@ -11794,22 +11785,12 @@ def graph_entity_registry_dependency_snapshot(
         "runtime_overlay_state": runtime_overlay_state,
         "entry_count": len(entries),
         "entries": entries,
-        "index": (
-            entity_registry_entry_index_from_snapshot(payload)
-            if current and include_index
-            else {}
-        ),
+        "index": index,
         "reasons": reasons,
         "truth_status": (
             "pinned_generated_entity_registry_dependency_not_owner_truth"
         ),
     }
-    if cacheable_read and current and cache_key is not None:
-        _GRAPH_ENTITY_REGISTRY_DEPENDENCY_PROCESS_CACHE.clear()
-        _GRAPH_ENTITY_REGISTRY_DEPENDENCY_PROCESS_CACHE[cache_key] = dict(
-            result
-        )
-    return result
 
 
 def graph_entity_registry_dependency_transition_state(

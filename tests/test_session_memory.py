@@ -105084,6 +105084,63 @@ def test_graph_blocked_session_reuses_source_fingerprints(
     assert computed_paths.count(segment_paths[1]) == 1
 
 
+@pytest.mark.parametrize("mutation", ["returned_objects", "replace_during_read"])
+def test_graph_registry_cache_preserves_read_isolation_and_admission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    aoa_root = tmp_path / ".aoa"
+    entries = [module.entity_registry_make_entry(
+        kind="tool", key="fixture-tool", aliases=["fixture-alias"],
+        source_refs=[], source_surface="fixture", owner="fixture", status="active",
+    )]
+    payload = {
+        "artifact_type": "entity_registry_snapshot",
+        "schema_version": module.ENTITY_REGISTRY_SCHEMA_VERSION,
+        "generation_identity": module.entity_registry_generation_identity(),
+        "generated_at_epoch": time.time() + 1,
+        "entries": entries,
+        "source_fingerprint": module.entity_registry_source_fingerprint(entries),
+    }
+    payload["semantic_digest"] = module.entity_registry_semantic_digest(
+        payload, aoa_root=aoa_root,
+    )
+    registry_path = aoa_root / module.ENTITY_REGISTRY_PATH
+    registry_path.parent.mkdir(parents=True)
+    registry_path.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr(module, "entity_registry_source_surface_state", lambda _root: {})
+    first = module.graph_entity_registry_dependency_snapshot(aoa_root)
+    assert first["current"] is True
+    original = copy.deepcopy(first)
+
+    if mutation == "returned_objects":
+        first["entries"][0]["aliases"].append("contaminated")
+        first["index"].clear()
+        first["identity"]["entity_count"] = 999
+        second = module.graph_entity_registry_dependency_snapshot(aoa_root)
+        assert second["entries"] == original["entries"]
+        assert second["index"] == original["index"]
+        assert second["identity"] == original["identity"]
+    else:
+        read_json = module.read_json
+        replaced = False
+
+        def replace_before_read(path: Path, default: Any) -> Any:
+            nonlocal replaced
+            if path == registry_path and not replaced:
+                replaced = True
+                payload["entries"][0]["aliases"].append("unverified-new-content")
+                registry_path.write_text(json.dumps(payload), encoding="utf-8")
+            return read_json(path, default)
+
+        monkeypatch.setattr(module, "read_json", replace_before_read)
+        second = module.graph_entity_registry_dependency_snapshot(aoa_root)
+        assert replaced
+        assert second["current"] is False
+        assert "entity_registry_source_fingerprint_unverified" in second["reasons"]
+
+
 def test_graph_store_resolves_registry_index_only_once_per_store(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
