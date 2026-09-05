@@ -16,6 +16,7 @@ jobs:
       AOA_STATS_ROOT: ${{ github.workspace }}/.deps/aoa-stats
       AOA_SKILLS_ROOT: ${{ github.workspace }}/.deps/aoa-skills
       AOA_EVALS_ROOT: ${{ github.workspace }}/.deps/aoa-evals
+      PYTHONPYCACHEPREFIX: ${{ runner.temp }}/aoa-session-memory-pycache
 
     steps:
       - name: Checkout
@@ -66,17 +67,15 @@ jobs:
 
       - name: Check owner-local capability contract and generated parity
         run: >-
-          PYTHONDONTWRITEBYTECODE=1
           python scripts/validate_local_capability_port.py --check-generated
 
       - name: Check owner-local eval port and execution sidecars
         run: >-
-          PYTHONDONTWRITEBYTECODE=1
           python "$AOA_EVALS_ROOT/scripts/validate_local_eval_port.py"
           --target-root "$GITHUB_WORKSPACE"
 
       - name: Run owner-coupled skill tests
         run: >-
-          PYTHONDONTWRITEBYTECODE=1 python -m pytest -q -p no:cacheprovider
+          python -m pytest -q -p no:cacheprovider
           tests/test_skill_system.py
           tests/test_skill_behavioral_sandbox.py

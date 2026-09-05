@@ -14,7 +14,7 @@ jobs:
     name: Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
     env:
-      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONPYCACHEPREFIX: ${{ runner.temp }}/aoa-session-memory-pycache
     strategy:
       fail-fast: false
       matrix:
@@ -52,7 +52,7 @@ jobs:
 
       - name: Run portable source tests
         run: >-
-          PYTHONDONTWRITEBYTECODE=1 python -m pytest -q -p no:cacheprovider
+          python -m pytest -q -p no:cacheprovider
           tests/test_session_memory.py
           tests/test_public_tree_audit.py
           tests/test_git_history_audit.py
