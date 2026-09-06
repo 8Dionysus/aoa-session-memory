@@ -34,12 +34,12 @@ older `.pyc`; these direct tests include interpreter and module startup:
 # Privacy sibling edit:
 privacy_core_pycache="$(mktemp -d "${TMPDIR:-/tmp}/aoa-session-memory-privacy.XXXXXX")"
 env -u PYTHONDONTWRITEBYTECODE PYTHONPYCACHEPREFIX="$privacy_core_pycache" \
-  python3 -m pytest -q -p no:cacheprovider \
+  python3 -m pytest -q -p no:cacheprovider --rootdir=. --confcutdir=. \
     tests/test_session_memory_privacy_core.py
 # Outbox sibling edit:
 outbox_core_pycache="$(mktemp -d "${TMPDIR:-/tmp}/aoa-session-memory-outbox.XXXXXX")"
 env -u PYTHONDONTWRITEBYTECODE PYTHONPYCACHEPREFIX="$outbox_core_pycache" \
-  python3 -m pytest -q -p no:cacheprovider \
+  python3 -m pytest -q -p no:cacheprovider --rootdir=. --confcutdir=. \
     tests/test_session_memory_outbox_core.py
 ```
 
@@ -50,7 +50,8 @@ either sibling, add the monolith identity regression:
 ```bash
 identity_pycache="$(mktemp -d "${TMPDIR:-/tmp}/aoa-session-memory-identity.XXXXXX")"
 env -u PYTHONDONTWRITEBYTECODE PYTHONPYCACHEPREFIX="$identity_pycache" \
-  python3 -m pytest -q -p no:cacheprovider tests/test_session_memory.py \
+  python3 -m pytest -q -p no:cacheprovider --rootdir=. --confcutdir=. \
+  tests/test_session_memory.py \
   -k 'generation_identity or loaded_producer_source'
 ```
 
