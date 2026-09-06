@@ -10,6 +10,8 @@ env -u PYTHONDONTWRITEBYTECODE \
   PYTHONPYCACHEPREFIX="${PYTHONPYCACHEPREFIX:-${TMPDIR:-/tmp}/aoa-session-memory-pycache}" \
   python3 -m pytest -q -p no:cacheprovider \
     tests/test_session_memory.py \
+    tests/test_session_memory_privacy_core.py \
+    tests/test_session_memory_outbox_core.py \
     tests/test_session_memory_doctor.py \
     tests/test_session_memory_outbox.py \
     tests/test_session_memory_task_lifecycle.py \
