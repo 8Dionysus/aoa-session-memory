@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import importlib
+import json
 import sys
 from pathlib import Path
+
+import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -12,6 +15,70 @@ pytest_scheduler_experiment = importlib.import_module("pytest_scheduler_experime
 validation_scheduler_experiment = importlib.import_module(
     "validation_scheduler_experiment"
 )
+validation_lanes = importlib.import_module("validation_lanes")
+
+
+def test_scheduler_targets_follow_current_full_lane() -> None:
+    step = next(
+        item
+        for item in validation_lanes.lane_command_sequence("standalone-full")
+        if item.label == "portable source tests"
+    )
+
+    prefix = (sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider")
+    assert step.command[: len(prefix)] == prefix
+    targets = step.command[len(prefix) :]
+    assert pytest_scheduler_experiment.source_test_targets() == targets
+    assert all(target.startswith("tests/") for target in targets)
+
+
+@pytest.mark.parametrize(
+    "bad_target",
+    (
+        "--lf",
+        "../tests/outside.py",
+        "tests/../outside.py",
+        "tests\\inside.py",
+        "tests/bad\x00.py",
+        "tests/test_session_memory.py",
+    ),
+)
+def test_scheduler_target_binding_rejects_invalid_metadata(
+    tmp_path: Path, bad_target: str
+) -> None:
+    payload = json.loads(validation_lanes.MANIFEST_PATH.read_text(encoding="utf-8"))
+    source_step = next(
+        item
+        for item in payload["command_sequences"]["standalone_full"]
+        if item["label"] == "portable source tests"
+    )
+    source_step["command"].append(bad_target)
+    manifest = tmp_path / "validation_lanes.json"
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(
+        pytest_scheduler_experiment.ExperimentError,
+        match="only repo-relative tests/ targets",
+    ):
+        pytest_scheduler_experiment.source_test_targets(manifest)
+
+
+def test_scheduler_cli_allows_ordinary_route_without_experiment_receipts() -> None:
+    args = pytest_scheduler_experiment.build_parser().parse_args(
+        ["--method", "static2"]
+    )
+
+    assert args.artifact_root is None
+    assert args.receipt is None
+    with pytest.raises(
+        pytest_scheduler_experiment.ExperimentError,
+        match="--receipt requires --artifact-root",
+    ):
+        pytest_scheduler_experiment.run_trial(
+            pytest_scheduler_experiment.build_parser().parse_args(
+                ["--method", "static2", "--receipt", "/tmp/trial.json"]
+            )
+        )
 
 
 def test_scheduler_plan_keeps_all_candidates_in_shadow() -> None:
@@ -70,6 +137,19 @@ def test_duration_balanced_shards_preserve_corpus_and_balance_heavy_cases() -> N
     assert set().union(*map(set, shards)) == set(nodeids)
     assert sum(len(shard) for shard in shards) == len(nodeids)
     assert max(projected) - min(projected) <= 1.0
+
+
+def test_duration_balanced_shards_keep_cases_without_hints() -> None:
+    nodeids = [f"tests/test_example.py::test_case_{index}" for index in range(5)]
+
+    shards, _ = pytest_scheduler_experiment.duration_balanced_static_shards(
+        nodeids,
+        2,
+        {nodeids[0]: 10.0},
+    )
+
+    assert set().union(*map(set, shards)) == set(nodeids)
+    assert sum(len(shard) for shard in shards) == len(nodeids)
 
 
 def _receipt(
