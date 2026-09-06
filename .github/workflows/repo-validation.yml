@@ -48,12 +48,14 @@ jobs:
         run: python scripts/audit_public_tree.py --root . --fail-on blocking
 
       - name: Inventory retained history on public repository
-        if: github.event.repository.visibility == 'public'
+        # Inventory the same Git object graph once; auditor behavior is still
+        # tested on both Python versions in the portable source test matrix.
+        if: github.event.repository.visibility == 'public' && matrix.python-version == '3.11'
         run: python scripts/audit_git_history.py --repo . --fail-on none
 
       - name: Run portable source tests
         run: >-
-          python -m pytest -q -p no:cacheprovider
+          python -m pytest -q -p no:cacheprovider --durations=20
           tests/test_session_memory.py
           tests/test_session_memory_outbox_core.py
           tests/test_session_memory_doctor.py
