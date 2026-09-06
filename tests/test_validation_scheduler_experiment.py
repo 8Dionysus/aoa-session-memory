@@ -81,6 +81,30 @@ def test_scheduler_cli_allows_ordinary_route_without_experiment_receipts() -> No
         )
 
 
+def test_ordinary_route_uses_fresh_external_bytecode_prefix(tmp_path: Path) -> None:
+    pycache_root = tmp_path / "artifact" / "pycache"
+    env, cache = pytest_scheduler_experiment._cache_environment(
+        {
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONPYCACHEPREFIX": "/stale-prefix",
+        },
+        pycache_root=None,
+        ordinary_pycache_root=pycache_root,
+        repository={},
+        environment={},
+        method=pytest_scheduler_experiment.METHODS["static2"],
+    )
+
+    assert env["PYTHONPYCACHEPREFIX"] == str(pycache_root.resolve())
+    assert "PYTHONDONTWRITEBYTECODE" not in env
+    assert cache == {
+        "enabled": True,
+        "observed_state_before": "fresh-per-invocation",
+        "reusable": False,
+    }
+    assert pycache_root.is_dir()
+
+
 def test_scheduler_plan_keeps_all_candidates_in_shadow() -> None:
     plan = validation_scheduler_experiment.candidate_plan()
     methods = {item["name"]: item for item in plan["methods"]}

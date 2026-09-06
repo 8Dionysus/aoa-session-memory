@@ -458,6 +458,7 @@ def _cache_environment(
     base: dict[str, str],
     *,
     pycache_root: Path | None,
+    ordinary_pycache_root: Path | None = None,
     repository: dict[str, Any],
     environment: dict[str, Any],
     method: Method,
@@ -467,6 +468,18 @@ def _cache_environment(
         filter(None, (str(REPO_ROOT / "scripts"), env.get("PYTHONPATH")))
     )
     if pycache_root is None:
+        if ordinary_pycache_root is not None:
+            ordinary_root = _require_external_path(
+                ordinary_pycache_root, "ordinary pycache root"
+            )
+            ordinary_root.mkdir(parents=True, exist_ok=True)
+            env.pop("PYTHONDONTWRITEBYTECODE", None)
+            env["PYTHONPYCACHEPREFIX"] = str(ordinary_root)
+            return env, {
+                "enabled": True,
+                "observed_state_before": "fresh-per-invocation",
+                "reusable": False,
+            }
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         return env, {"enabled": False, "observed_state_before": "disabled"}
     root = _require_external_path(pycache_root, "pycache root")
@@ -511,6 +524,7 @@ def _run_static(
     timeout_seconds: float,
     timing_junit: Path | None,
     timing_receipt: Path | None,
+    emit_live_failures: bool,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str], dict[str, Any]]:
     collection_log = artifact_root / "collection.probe.jsonl"
     collect_env = {**env, PROBE_LOG_ENV: str(collection_log)}
@@ -577,6 +591,18 @@ def _run_static(
             timeout_seconds=timeout_seconds,
         )
         result["selection"] = corpus_identity(shard)
+        if emit_live_failures and (
+            result["returncode"] != 0 or result["timed_out"]
+        ):
+            print(
+                f"[{step_id}] failed before sibling shards completed "
+                f"(returncode={result['returncode']}, timed_out={result['timed_out']})\n"
+                f"stdout tail:\n{result['stdout']['tail']}\n"
+                f"stderr tail:\n{result['stderr']['tail']}",
+                file=sys.stderr,
+                flush=True,
+            )
+            result["failure_reported_live"] = True
         return result, _load_probe_events(probe_log)
 
     started = time.monotonic()
@@ -666,6 +692,7 @@ def _run_trial(
         env, cache = _cache_environment(
             os.environ.copy(),
             pycache_root=args.pycache_root,
+            ordinary_pycache_root=(artifact_root / "pycache" if not experiment else None),
             repository=before,
             environment=environment,
             method=method,
@@ -679,6 +706,7 @@ def _run_trial(
                 timeout_seconds=args.timeout_seconds,
                 timing_junit=args.timing_junit,
                 timing_receipt=args.timing_receipt,
+                emit_live_failures=receipt_path is None,
             )
         else:
             probe_log = artifact_root / "trial.probe.jsonl"
@@ -800,6 +828,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         if payload["error"]:
             print(f"scheduler error: {payload['error']}", file=sys.stderr)
         for step in payload["steps"]:
+            if step.get("failure_reported_live"):
+                continue
             for stream_name in ("stdout", "stderr"):
                 tail = step[stream_name]["tail"]
                 if tail:
