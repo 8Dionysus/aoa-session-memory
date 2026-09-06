@@ -11,31 +11,19 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Sequence
 
 import validation_identity
+import validation_lanes
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SOURCE_TEST_TARGETS = (
-    "tests/test_session_memory.py",
-    "tests/test_session_memory_outbox_core.py",
-    "tests/test_session_memory_doctor.py",
-    "tests/test_session_memory_outbox.py",
-    "tests/test_session_memory_task_lifecycle.py",
-    "tests/test_session_memory_tool_usage.py",
-    "tests/test_session_memory_episode_search.py",
-    "tests/test_session_memory_episode_maintenance.py",
-    "tests/test_session_memory_episode_temporal.py",
-    "tests/test_session_memory_capture.py",
-    "tests/test_session_memory_sweep.py",
-    "tests/test_public_tree_audit.py",
-    "tests/test_git_history_audit.py",
-)
+SOURCE_TEST_STEP_LABEL = "portable source tests"
 PROBE_MODULE = "pytest_scheduler_probe"
 PROBE_LOG_ENV = "AOA_SESSION_MEMORY_PYTEST_REPORT_LOG"
 TAIL_CHARACTERS = 16_000
@@ -82,6 +70,62 @@ METHODS = {
 
 class ExperimentError(RuntimeError):
     pass
+
+
+def source_test_targets(
+    manifest_path: Path | None = None,
+) -> tuple[str, ...]:
+    """Return the current full source-test selection from the owner lane."""
+    try:
+        steps = validation_lanes.lane_command_sequence(
+            "standalone-full",
+            manifest_path or validation_lanes.MANIFEST_PATH,
+        )
+    except validation_lanes.ManifestError as exc:
+        raise ExperimentError(f"cannot load source-test lane: {exc}") from exc
+    source_steps = [step for step in steps if step.label == SOURCE_TEST_STEP_LABEL]
+    if len(source_steps) != 1:
+        raise ExperimentError(
+            "standalone-full must contain exactly one portable source-test step"
+        )
+    command = source_steps[0].command
+    prefix = (
+        sys.executable,
+        "-m",
+        "pytest",
+        "-q",
+        "-p",
+        "no:cacheprovider",
+    )
+    if command[: len(prefix)] != prefix:
+        raise ExperimentError(
+            "portable source-test step must be a plain pytest command"
+        )
+    targets = tuple(command[len(prefix) :])
+    def is_safe_target(target: str) -> bool:
+        path = PurePosixPath(target)
+        if (
+            not target.startswith("tests/")
+            or path.is_absolute()
+            or ".." in path.parts
+            or "\\" in target
+            or "\x00" in target
+            or path.as_posix() != target
+        ):
+            return False
+        resolved = (REPO_ROOT / Path(*path.parts)).resolve()
+        try:
+            resolved.relative_to(REPO_ROOT)
+        except ValueError:
+            return False
+        return True
+
+    valid_targets = all(is_safe_target(target) for target in targets)
+    if not targets or len(set(targets)) != len(targets) or not valid_targets:
+        raise ExperimentError(
+            "portable source-test step must contain only repo-relative tests/ targets"
+        )
+    return targets
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -175,6 +219,7 @@ def _pytest_argv(
     *,
     junit_path: Path,
     nodeids: Sequence[str] | None = None,
+    targets: Sequence[str] | None = None,
     collect_only: bool = False,
 ) -> list[str]:
     argv = [
@@ -184,6 +229,12 @@ def _pytest_argv(
         "-q",
         "-p",
         "no:cacheprovider",
+        # Worktrees can be nested under a host checkout; keep pytest from
+        # inheriting an ancestor root/config and conftest fixtures.
+        "--rootdir",
+        str(REPO_ROOT),
+        "--confcutdir",
+        str(REPO_ROOT),
         "-p",
         PROBE_MODULE,
     ]
@@ -195,7 +246,11 @@ def _pytest_argv(
         argv.extend(("-n", str(method.workers), "--dist", method.scheduler.removeprefix("xdist-")))
     if not collect_only:
         argv.extend(("--junitxml", str(junit_path)))
-    argv.extend(nodeids if nodeids is not None else SOURCE_TEST_TARGETS)
+    argv.extend(
+        nodeids
+        if nodeids is not None
+        else (targets if targets is not None else source_test_targets())
+    )
     return argv
 
 
@@ -403,6 +458,7 @@ def _cache_environment(
     base: dict[str, str],
     *,
     pycache_root: Path | None,
+    ordinary_pycache_root: Path | None = None,
     repository: dict[str, Any],
     environment: dict[str, Any],
     method: Method,
@@ -412,6 +468,18 @@ def _cache_environment(
         filter(None, (str(REPO_ROOT / "scripts"), env.get("PYTHONPATH")))
     )
     if pycache_root is None:
+        if ordinary_pycache_root is not None:
+            ordinary_root = _require_external_path(
+                ordinary_pycache_root, "ordinary pycache root"
+            )
+            ordinary_root.mkdir(parents=True, exist_ok=True)
+            env.pop("PYTHONDONTWRITEBYTECODE", None)
+            env["PYTHONPYCACHEPREFIX"] = str(ordinary_root)
+            return env, {
+                "enabled": True,
+                "observed_state_before": "fresh-per-invocation",
+                "reusable": False,
+            }
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         return env, {"enabled": False, "observed_state_before": "disabled"}
     root = _require_external_path(pycache_root, "pycache root")
@@ -452,9 +520,11 @@ def _run_static(
     *,
     env: dict[str, str],
     artifact_root: Path,
+    targets: Sequence[str],
     timeout_seconds: float,
     timing_junit: Path | None,
     timing_receipt: Path | None,
+    emit_live_failures: bool,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str], dict[str, Any]]:
     collection_log = artifact_root / "collection.probe.jsonl"
     collect_env = {**env, PROBE_LOG_ENV: str(collection_log)}
@@ -464,6 +534,7 @@ def _run_static(
         _pytest_argv(
             method,
             junit_path=artifact_root / "unused.xml",
+            targets=targets,
             collect_only=True,
         ),
         env=collect_env,
@@ -472,7 +543,17 @@ def _run_static(
     )
     collection_wall = time.monotonic() - collection_started
     if collection_result["returncode"] != 0:
-        raise ExperimentError("static corpus collection failed")
+        details = []
+        for stream_name in ("stdout", "stderr"):
+            stream = collection_result[stream_name]
+            details.append(
+                f"collection {stream_name} ({stream['path']}):\n{stream['tail']}"
+            )
+        raise ExperimentError(
+            "static corpus collection failed "
+            f"(returncode={collection_result['returncode']})\n"
+            + "\n".join(details)
+        )
     collection = _collection_from_events(_load_probe_events(collection_log))
     nodeids = collection["nodeids"]
     timing_source: dict[str, Any] | None = None
@@ -510,6 +591,18 @@ def _run_static(
             timeout_seconds=timeout_seconds,
         )
         result["selection"] = corpus_identity(shard)
+        if emit_live_failures and (
+            result["returncode"] != 0 or result["timed_out"]
+        ):
+            print(
+                f"[{step_id}] failed before sibling shards completed "
+                f"(returncode={result['returncode']}, timed_out={result['timed_out']})\n"
+                f"stdout tail:\n{result['stdout']['tail']}\n"
+                f"stderr tail:\n{result['stderr']['tail']}",
+                file=sys.stderr,
+                flush=True,
+            )
+            result["failure_reported_live"] = True
         return result, _load_probe_events(probe_log)
 
     started = time.monotonic()
@@ -536,23 +629,52 @@ def _run_static(
 
 
 def run_trial(args: argparse.Namespace) -> dict[str, Any]:
+    artifact_arg = args.artifact_root
+    receipt_arg = args.receipt
+    if receipt_arg is not None and artifact_arg is None:
+        raise ExperimentError("--receipt requires --artifact-root")
+    experiment_options = (args.pycache_root, args.pair_id, args.trial)
+    if receipt_arg is None and any(value is not None for value in experiment_options):
+        raise ExperimentError("experiment options require --receipt")
+    if artifact_arg is not None:
+        return _run_trial(
+            args,
+            artifact_root=_require_external_path(artifact_arg, "artifact root"),
+            receipt_path=(
+                _require_external_path(receipt_arg, "receipt")
+                if receipt_arg is not None
+                else None
+            ),
+        )
+    with tempfile.TemporaryDirectory(
+        prefix="aoa-session-memory-pytest-",
+        dir=tempfile.gettempdir(),
+    ) as temporary_root:
+        return _run_trial(
+            args,
+            artifact_root=Path(temporary_root),
+            receipt_path=None,
+        )
+
+
+def _run_trial(
+    args: argparse.Namespace,
+    *,
+    artifact_root: Path,
+    receipt_path: Path | None,
+) -> dict[str, Any]:
     method = METHODS[args.method]
-    artifact_root = _require_external_path(args.artifact_root, "artifact root")
-    receipt_path = _require_external_path(args.receipt, "receipt")
     artifact_root.mkdir(parents=True, exist_ok=True)
     if any(artifact_root.iterdir()):
         raise ExperimentError(f"artifact root must start empty: {artifact_root}")
+    experiment = receipt_path is not None
     started_at = dt.datetime.now(dt.UTC)
     started = time.monotonic()
-    before = validation_identity.repository_identity()
-    environment = validation_identity.environment_identity()
-    env, cache = _cache_environment(
-        os.environ.copy(),
-        pycache_root=args.pycache_root,
-        repository=before,
-        environment=environment,
-        method=method,
-    )
+    before = validation_identity.repository_identity() if experiment else {}
+    environment = validation_identity.environment_identity() if experiment else {}
+    targets: tuple[str, ...] = ()
+    env: dict[str, str] = {}
+    cache: dict[str, Any] = {"enabled": False, "observed_state_before": "disabled"}
     error: str | None = None
     steps: list[dict[str, Any]] = []
     nodeids: list[str] = []
@@ -566,14 +688,25 @@ def run_trial(args: argparse.Namespace) -> dict[str, Any]:
     }
     sharding: dict[str, Any] | None = None
     try:
+        targets = source_test_targets()
+        env, cache = _cache_environment(
+            os.environ.copy(),
+            pycache_root=args.pycache_root,
+            ordinary_pycache_root=(artifact_root / "pycache" if not experiment else None),
+            repository=before,
+            environment=environment,
+            method=method,
+        )
         if method.static:
             steps, events, nodeids, sharding = _run_static(
                 method,
                 env=env,
                 artifact_root=artifact_root,
+                targets=targets,
                 timeout_seconds=args.timeout_seconds,
                 timing_junit=args.timing_junit,
                 timing_receipt=args.timing_receipt,
+                emit_live_failures=receipt_path is None,
             )
         else:
             probe_log = artifact_root / "trial.probe.jsonl"
@@ -583,6 +716,7 @@ def run_trial(args: argparse.Namespace) -> dict[str, Any]:
                 _pytest_argv(
                     method,
                     junit_path=artifact_root / "pytest.junit.xml",
+                    targets=targets,
                 ),
                 env=run_env,
                 artifact_root=artifact_root,
@@ -599,8 +733,8 @@ def run_trial(args: argparse.Namespace) -> dict[str, Any]:
         execution = _execution_from_events(events, nodeids)
     except (ExperimentError, OSError, subprocess.SubprocessError) as exc:
         error = str(exc)
-    after = validation_identity.repository_identity()
-    stable = before == after
+    after = validation_identity.repository_identity() if experiment else {}
+    stable = before == after if experiment else True
     corpus = corpus_identity(nodeids)
     all_steps_passed = bool(steps) and all(
         step.get("returncode") == 0 and not step.get("timed_out") for step in steps
@@ -628,29 +762,34 @@ def run_trial(args: argparse.Namespace) -> dict[str, Any]:
         "wall_seconds": round(time.monotonic() - started, 6),
         "ok": ok,
         "error": error,
-        "repository_identity": {"before": before, "after": after, "stable": stable},
-        "environment_identity": environment,
+        "repository_identity": (
+            {"before": before, "after": after, "stable": stable}
+            if experiment
+            else None
+        ),
+        "environment_identity": environment if experiment else None,
         "cache": cache,
-        "targets": list(SOURCE_TEST_TARGETS),
+        "targets": list(targets),
         "corpus": corpus,
         "execution": execution,
         "sharding": sharding,
         "steps": steps,
-        "receipt_path": str(receipt_path),
+        "receipt_path": str(receipt_path) if receipt_path is not None else None,
         "authority_boundary": (
             "non-authoritative owner-local scheduler comparison only; no owner gate, "
             "routing, reuse, release, publication, or sibling-rollout authority"
         ),
     }
-    _write_json(receipt_path, payload)
+    if receipt_path is not None:
+        _write_json(receipt_path, payload)
     return payload
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--method", required=True, choices=sorted(METHODS))
-    parser.add_argument("--artifact-root", required=True, type=Path)
-    parser.add_argument("--receipt", required=True, type=Path)
+    parser.add_argument("--artifact-root", type=Path)
+    parser.add_argument("--receipt", type=Path)
     parser.add_argument("--pycache-root", type=Path)
     timing = parser.add_mutually_exclusive_group()
     timing.add_argument("--timing-junit", type=Path)
@@ -676,6 +815,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "corpus_count": payload["corpus"]["count"],
         "coverage_complete": payload["execution"]["coverage_complete"],
         "failed_nodeids": payload["execution"]["failed_nodeids"],
+        "skipped_nodeids": payload["execution"]["skipped_nodeids"],
+        "error": payload["error"],
         "receipt": payload["receipt_path"],
     }
     print(
@@ -683,6 +824,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.json
         else summary
     )
+    if not payload["ok"] and payload["receipt_path"] is None:
+        if payload["error"]:
+            print(f"scheduler error: {payload['error']}", file=sys.stderr)
+        for step in payload["steps"]:
+            if step.get("failure_reported_live"):
+                continue
+            for stream_name in ("stdout", "stderr"):
+                tail = step[stream_name]["tail"]
+                if tail:
+                    print(f"[{step['id']} {stream_name}]\n{tail}", file=sys.stderr)
     return 0 if payload["ok"] else 1
 
 

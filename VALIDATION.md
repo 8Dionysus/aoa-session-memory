@@ -6,24 +6,22 @@ Run session-memory checks on demand after source or session-pipeline changes:
 env -u PYTHONDONTWRITEBYTECODE \
   PYTHONPYCACHEPREFIX="${PYTHONPYCACHEPREFIX:-${TMPDIR:-/tmp}/aoa-session-memory-pycache}" \
   python3 -m py_compile scripts/aoa_session_memory.py
-env -u PYTHONDONTWRITEBYTECODE \
-  PYTHONPYCACHEPREFIX="${PYTHONPYCACHEPREFIX:-${TMPDIR:-/tmp}/aoa-session-memory-pycache}" \
-  python3 -m pytest -q -p no:cacheprovider \
-    tests/test_session_memory.py \
-    tests/test_session_memory_privacy_core.py \
-    tests/test_session_memory_outbox_core.py \
-    tests/test_session_memory_doctor.py \
-    tests/test_session_memory_outbox.py \
-    tests/test_session_memory_task_lifecycle.py \
-    tests/test_session_memory_tool_usage.py \
-    tests/test_session_memory_episode_search.py \
-    tests/test_session_memory_episode_maintenance.py \
-    tests/test_session_memory_episode_temporal.py \
-    tests/test_session_memory_capture.py \
-    tests/test_session_memory_sweep.py
+python3 scripts/pytest_scheduler_experiment.py --method static2
 python3 scripts/aoa_session_memory.py validate --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa
 python3 scripts/aoa_session_memory.py doctor --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa
 ```
+
+The ordinary `static2` route reads the current portable source-test targets
+from `docs/validation/validation_lanes.json`, collects them once, and runs an
+exact two-process partition.  It creates a fresh bytecode prefix inside its
+temporary invocation directory, writes no receipt, and does not require
+repository or environment identity.  Use `--method serial` as the direct
+fallback when process parallelism is unsuitable.  Receipt, artifact, and
+identity options remain comparison-only; this local route is feedback and
+does not replace the full release or installed-protocol gates.
+If a static child fails, its captured pytest tails are emitted when that shard
+completes instead of waiting for the sibling; this is an early shard-completion
+signal, not per-test streaming or an incremental release verdict.
 
 For a pure predicate edit to a standalone producer sibling, run only the
 corresponding focused route before the full suite. Use a fresh bytecode prefix
@@ -33,12 +31,12 @@ older `.pyc`; these direct tests include interpreter and module startup:
 ```bash
 # Privacy sibling edit:
 privacy_core_pycache="$(mktemp -d "${TMPDIR:-/tmp}/aoa-session-memory-privacy.XXXXXX")"
-env -u PYTHONDONTWRITEBYTECODE PYTHONPYCACHEPREFIX="$privacy_core_pycache" \
+env -u PYTHONDONTWRITEBYTECODE PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPYCACHEPREFIX="$privacy_core_pycache" \
   python3 -m pytest -q -p no:cacheprovider --rootdir=. --confcutdir=. \
     tests/test_session_memory_privacy_core.py
 # Outbox sibling edit:
 outbox_core_pycache="$(mktemp -d "${TMPDIR:-/tmp}/aoa-session-memory-outbox.XXXXXX")"
-env -u PYTHONDONTWRITEBYTECODE PYTHONPYCACHEPREFIX="$outbox_core_pycache" \
+env -u PYTHONDONTWRITEBYTECODE PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPYCACHEPREFIX="$outbox_core_pycache" \
   python3 -m pytest -q -p no:cacheprovider --rootdir=. --confcutdir=. \
     tests/test_session_memory_outbox_core.py
 ```
@@ -49,7 +47,7 @@ either sibling, add the monolith identity regression:
 
 ```bash
 identity_pycache="$(mktemp -d "${TMPDIR:-/tmp}/aoa-session-memory-identity.XXXXXX")"
-env -u PYTHONDONTWRITEBYTECODE PYTHONPYCACHEPREFIX="$identity_pycache" \
+env -u PYTHONDONTWRITEBYTECODE PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPYCACHEPREFIX="$identity_pycache" \
   python3 -m pytest -q -p no:cacheprovider --rootdir=. --confcutdir=. \
   tests/test_session_memory.py \
   -k 'generation_identity or loaded_producer_source'

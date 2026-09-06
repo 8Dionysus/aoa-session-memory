@@ -102,8 +102,10 @@
       "patterns": [
         "scripts/aoa_session_memory.py",
         "scripts/aoa_session_memory_outbox.py",
+        "scripts/aoa_session_memory_privacy.py",
         "scripts/benchmark_session_projection.py",
         "tests/test_session_memory.py",
+        "tests/test_session_memory_privacy_core.py",
         "tests/test_session_memory_outbox_core.py",
         "tests/session_memory_test_support.py",
         "tests/test_session_memory_doctor.py",
@@ -221,6 +223,7 @@
             "-p",
             "no:cacheprovider",
             "tests/test_session_memory.py",
+            "tests/test_session_memory_privacy_core.py",
             "tests/test_session_memory_outbox_core.py",
             "tests/test_session_memory_doctor.py",
             "tests/test_session_memory_outbox.py",
