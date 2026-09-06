@@ -229,8 +229,8 @@ def _pytest_argv(
         "-q",
         "-p",
         "no:cacheprovider",
-        # Worktrees live below /srv/abyss-machine; keep pytest from inheriting
-        # that host's root/config and conftest fixtures.
+        # Worktrees can be nested under a host checkout; keep pytest from
+        # inheriting an ancestor root/config and conftest fixtures.
         "--rootdir",
         str(REPO_ROOT),
         "--confcutdir",
