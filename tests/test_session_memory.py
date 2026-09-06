@@ -87952,6 +87952,305 @@ def test_task_episode_cli_route_uses_manifest_first_selective_hydration(
     )
 
 
+def _goal_lifecycle_manifest_fixture(
+    tmp_path: Path,
+    *,
+    include_unselected: bool = True,
+) -> tuple[Path, Path, dict[str, Any], dict[str, Any]]:
+    aoa_root = tmp_path / ".aoa"
+    session_dir = aoa_root / "sessions" / "goal-route-session"
+    episodes = [
+        {
+            "episode_id": "task-skipped",
+            "stable_id": "session:task-skipped:event-1",
+            "identity": {"canonical_id": "episode:skipped"},
+            "status": "closed",
+            "semantic_text": "skipped episode",
+            "event_range": {"from_line": 1, "to_line": 1},
+        },
+        {
+            "episode_id": "task-selected",
+            "stable_id": "session:task-selected:event-2",
+            "identity": {"canonical_id": "episode:selected"},
+            "status": "closed",
+            "semantic_text": "selected episode",
+            "event_range": {"from_line": 2, "to_line": 2},
+        },
+    ] if include_unselected else [
+        {
+            "episode_id": "task-selected",
+            "stable_id": "session:task-selected:event-2",
+            "identity": {"canonical_id": "episode:selected"},
+            "status": "closed",
+            "semantic_text": "selected episode",
+            "event_range": {"from_line": 2, "to_line": 2},
+        },
+    ]
+    publish_identity = {
+        "source": {
+            "raw_sha256": "a" * 64,
+            "raw_bytes": 200,
+            "raw_line_count": 2,
+        },
+        "publish_id": "b" * 64,
+    }
+    shards = module.materialize_session_index_task_episode_shards(
+        session_dir,
+        episodes,
+        publish_identity=publish_identity,
+        literal_policy=module.DerivedSessionSensitiveLiteralPolicy(
+            values_by_kind={}
+        ),
+        workers=1,
+    )
+    module.write_session_index_shard_manifest(
+        session_dir,
+        publish_identity=publish_identity,
+        source_identity=shards["source_identity"],
+        task_episode_records=shards["records"],
+    )
+
+    def lifecycle(goal_id: str, episode_id: str) -> dict[str, Any]:
+        return {
+            "goal_id": goal_id,
+            "goal_instance_id": f"{goal_id}-instance",
+            "status": "complete",
+            "objective": goal_id,
+            "objective_source": "test",
+            "event_count": 0,
+            "event_kinds": ["goal_completed"],
+            "event_ids": [],
+            "task_episode_ids": [episode_id],
+            "ambiguity_flags": [],
+            "usage": {},
+            "state_observations": [],
+            "usage_observations": [],
+            "first_ref": {},
+            "last_ref": {},
+            "requested_ref": {},
+            "failed_ref": {},
+            "created_ref": {},
+            "completed_ref": {},
+            "blocked_ref": {},
+            "graph_refs": [],
+            "raw_refs": [],
+            "segment_refs": [],
+            "events": [],
+        }
+
+    lifecycles = [lifecycle("goal-skipped", "task-skipped")]
+    if include_unselected:
+        lifecycles.append(lifecycle("goal-selected", "task-selected"))
+    session_index = {
+        "session_id": "goal-route-session-id",
+        "display": {"label": "goal-route-session"},
+        "goal_lifecycles": lifecycles,
+        "task_episodes": [],
+        "projection_publish": publish_identity,
+        "component_storage": {
+            "manifest_ref": str(
+                Path(module.SESSION_INDEX_SHARDS_DIR)
+                / module.SESSION_INDEX_SHARD_MANIFEST_JSON
+            ),
+            "task_episode_shard_count": len(episodes),
+            "embedded_compatibility_view": False,
+            "reader_mode": "manifest_first",
+        },
+    }
+    module.write_json(session_dir / module.SESSION_INDEX_JSON, session_index)
+    record = {
+        "session_id": "goal-route-session-id",
+        "session_label": "goal-route-session",
+        "path": str(session_dir),
+    }
+    return aoa_root, session_dir, record, shards
+
+
+def test_goal_lifecycle_route_filters_before_linked_component_hydration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aoa_root, _session_dir, record, _shards = _goal_lifecycle_manifest_fixture(
+        tmp_path
+    )
+    monkeypatch.setattr(
+        module,
+        "chronological_session_records",
+        lambda _aoa_root, limit=None: [record],
+    )
+    monkeypatch.setattr(
+        module,
+        "generated_session_index_stale_reasons_from_file",
+        lambda _path: [],
+    )
+    monkeypatch.setattr(
+        module,
+        "generated_session_index_stale_reasons_for_session",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(module, "search_provider_status", lambda **_kwargs: {})
+    monkeypatch.setattr(
+        module,
+        "compact_search_provider_status_for_route",
+        lambda *_args, **_kwargs: {},
+    )
+    calls: list[list[str]] = []
+    original = module.goal_lifecycle_task_episode_components
+
+    def observed(
+        session_dir: Path,
+        session_index: dict[str, Any],
+        lifecycle: dict[str, Any],
+    ) -> dict[str, Any]:
+        calls.append([str(item) for item in lifecycle["task_episode_ids"]])
+        return original(session_dir, session_index, lifecycle)
+
+    monkeypatch.setattr(module, "goal_lifecycle_task_episode_components", observed)
+
+    payload = module.goal_lifecycle_route_search(
+        aoa_root=aoa_root,
+        target="all",
+        goal_id="goal-selected",
+        limit=1,
+    )
+
+    assert payload["ok"] is True
+    assert payload["result_count"] == 1
+    assert calls == [["task-selected"]]
+    result = payload["results"][0]
+    assert result["goal_id"] == "goal-selected"
+    assert result["work_chain"]["episodes"][0]["episode_id"] == (
+        "task-selected"
+    )
+    assert result["task_episode_integrity"] == {
+        "mode": "bounded_content_addressed_linked_components",
+        "requested_episode_count": 1,
+        "verified_episode_count": 1,
+        "selected_component_integrity": "verified_content_addressed",
+        "component_count": 2,
+        "hydrated_component_count": 1,
+        "scan_complete": False,
+        "global_task_episode_semantic_digest_verified": False,
+    }
+    assert payload["component_errors"] == []
+
+
+def test_goal_lifecycle_route_does_not_compute_global_episode_digest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aoa_root, _session_dir, record, _shards = _goal_lifecycle_manifest_fixture(
+        tmp_path
+    )
+    monkeypatch.setattr(
+        module,
+        "chronological_session_records",
+        lambda _aoa_root, limit=None: [record],
+    )
+    monkeypatch.setattr(
+        module,
+        "generated_session_index_stale_reasons_from_file",
+        lambda _path: [],
+    )
+    original_stale_reasons = module.generated_session_index_stale_reasons_for_session
+    observed_verify_flags: list[bool] = []
+
+    def observed_stale_reasons(
+        session_dir: Path,
+        session_index: dict[str, Any],
+        **kwargs: Any,
+    ) -> list[str]:
+        observed_verify_flags.append(
+            bool(kwargs["verify_task_episode_semantic_digest"])
+        )
+        return original_stale_reasons(session_dir, session_index, **kwargs)
+
+    monkeypatch.setattr(
+        module,
+        "generated_session_index_stale_reasons_for_session",
+        observed_stale_reasons,
+    )
+    monkeypatch.setattr(
+        module,
+        "task_episode_semantic_digest_for_session_index",
+        lambda *_args, **_kwargs: pytest.fail(
+            "goal lifecycle route must not compute the global episode digest"
+        ),
+    )
+    monkeypatch.setattr(module, "search_provider_status", lambda **_kwargs: {})
+    monkeypatch.setattr(
+        module,
+        "compact_search_provider_status_for_route",
+        lambda *_args, **_kwargs: {},
+    )
+
+    module.goal_lifecycle_route_search(
+        aoa_root=aoa_root,
+        target="all",
+        goal_id="goal-selected",
+        limit=1,
+    )
+
+    assert observed_verify_flags == [False]
+
+
+@pytest.mark.parametrize("tamper", ["missing", "corrupt"])
+def test_goal_lifecycle_route_rejects_invalid_linked_component(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tamper: str,
+) -> None:
+    aoa_root, session_dir, record, shards = _goal_lifecycle_manifest_fixture(
+        tmp_path,
+        include_unselected=False,
+    )
+    shard_path = session_dir / shards["records"][0]["ref"]
+    if tamper == "missing":
+        shard_path.unlink()
+    else:
+        shard_path.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        module,
+        "chronological_session_records",
+        lambda _aoa_root, limit=None: [record],
+    )
+    monkeypatch.setattr(
+        module,
+        "generated_session_index_stale_reasons_from_file",
+        lambda _path: [],
+    )
+    monkeypatch.setattr(
+        module,
+        "generated_session_index_stale_reasons_for_session",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(module, "search_provider_status", lambda **_kwargs: {})
+    monkeypatch.setattr(
+        module,
+        "compact_search_provider_status_for_route",
+        lambda *_args, **_kwargs: {},
+    )
+
+    payload = module.goal_lifecycle_route_search(
+        aoa_root=aoa_root,
+        target="all",
+        goal_id="goal-skipped",
+        limit=1,
+    )
+
+    assert payload["ok"] is True
+    assert payload["result_count"] == 0
+    assert payload["results"] == []
+    assert payload["diagnostics"] == [
+        "goal_lifecycle_task_episode_component_invalid"
+    ]
+    assert payload["component_errors"][0]["goal_id"] == "goal-skipped"
+    assert any(
+        reason.startswith("session_index_task_episode_shard_artifact_mismatch")
+        for reason in payload["component_errors"][0]["diagnostics"]
+    )
+
+
 def test_navigation_routes_reject_fast_stale_indexes_before_full_json_read(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

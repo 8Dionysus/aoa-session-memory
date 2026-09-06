@@ -137714,6 +137714,113 @@ def compact_goal_lifecycle(
     }
 
 
+def goal_lifecycle_task_episode_components(
+    session_dir: Path,
+    session_index: dict[str, Any],
+    lifecycle: dict[str, Any],
+) -> dict[str, Any]:
+    """Select one lifecycle's linked components from the bounded reader.
+
+    The existing manifest-first reader may inspect earlier non-selected shards
+    while looking for the requested IDs; every selected component is
+    content-address verified.  A bounded selection does not establish
+    validity of unvisited components or the global task-episode digest.
+    """
+    episode_ids = (
+        {
+            str(item)
+            for item in lifecycle.get("task_episode_ids", [])
+            if item
+        }
+        if isinstance(lifecycle.get("task_episode_ids"), list)
+        else set()
+    )
+    requested_count = len(episode_ids)
+    base = {
+        "status": "current",
+        "payloads": [],
+        "diagnostics": [],
+        "reader_mode": "not_requested" if not episode_ids else "manifest_first",
+        "component_count": 0,
+        "hydrated_component_count": 0,
+        "selected_component_count": 0,
+        "scan_complete": requested_count == 0,
+        "requested_episode_count": requested_count,
+        "verified_episode_count": 0,
+        "selected_component_integrity": (
+            "not_requested" if not episode_ids else "unresolved"
+        ),
+        "global_task_episode_semantic_digest_verified": False,
+    }
+    if not episode_ids:
+        return base
+
+    result = session_index_task_episode_component_read(
+        session_dir,
+        session_index,
+        order="recent",
+        limit=requested_count,
+        selector=lambda payload: str(payload.get("episode_id") or "")
+        in episode_ids,
+    )
+    payloads = [
+        dict(item)
+        for item in result.get("payloads", [])
+        if isinstance(item, dict)
+    ]
+    payload_ids = {
+        str(item.get("episode_id") or "")
+        for item in payloads
+    }
+    selection_is_exact = (
+        result.get("status") == "current"
+        and len(payloads) == requested_count
+        and len(payload_ids) == requested_count
+        and payload_ids == episode_ids
+    )
+    if not selection_is_exact:
+        diagnostics = [
+            str(item)
+            for item in result.get("diagnostics", [])
+            if item
+        ]
+        if not diagnostics:
+            diagnostics = [
+                "goal_lifecycle_task_episode_component_selection_mismatch"
+            ]
+        return {
+            **base,
+            "status": "invalid",
+            "diagnostics": diagnostics,
+            "reader_mode": str(result.get("reader_mode") or "manifest_first"),
+            "component_count": int_value(result.get("component_count")),
+            "hydrated_component_count": int_value(
+                result.get("hydrated_component_count")
+            ),
+        }
+    return {
+        **base,
+        "payloads": payloads,
+        "reader_mode": str(result.get("reader_mode") or "manifest_first"),
+        "component_count": int_value(result.get("component_count")),
+        "hydrated_component_count": int_value(
+            result.get("hydrated_component_count")
+        ),
+        "selected_component_count": len(payloads),
+        "scan_complete": bool(result.get("scan_complete")),
+        "verified_episode_count": (
+            len(payloads)
+            if result.get("reader_mode") == "manifest_first"
+            else 0
+        ),
+        "selected_component_integrity": (
+            "verified_content_addressed"
+            if result.get("reader_mode") == "manifest_first"
+            else "embedded_legacy_unverified"
+        ),
+    }
+
+
 def goal_lifecycle_route_search(
     *,
     aoa_root: Path,
@@ -137747,6 +137854,7 @@ def goal_lifecycle_route_search(
     results: list[dict[str, Any]] = []
     selected_count = 0
     incompatible_session_indexes: list[dict[str, Any]] = []
+    component_errors: list[dict[str, Any]] = []
     ordered_records = list(reversed(records)) if order == "recent" else list(records)
     normalized_event_kind = route_key_slug(event_kind, fallback="") if event_kind else ""
     for record in ordered_records:
@@ -137782,6 +137890,10 @@ def goal_lifecycle_route_search(
             generated_session_index_stale_reasons_for_session(
                 session_dir,
                 index,
+                # The route proves only the selected content-addressed linked
+                # components below; a global episode digest would hydrate the
+                # whole component set before lifecycle filtering.
+                verify_task_episode_semantic_digest=False,
             )
         )
         if index_stale_reasons:
@@ -137806,32 +137918,69 @@ def goal_lifecycle_route_search(
         session_label = str(display.get("label") or record.get("session_label") or session_dir.name)
         session_id = str(index.get("session_id") or record.get("session_id") or "")
         lifecycles = index.get("goal_lifecycles", []) if isinstance(index.get("goal_lifecycles"), list) else []
-        task_episodes = session_index_task_episode_components(
-            session_dir,
-            index,
-        )
         lifecycle_items = list(reversed(lifecycles)) if order == "recent" else list(lifecycles)
         for item in lifecycle_items:
             if not isinstance(item, dict):
                 continue
             selected_count += 1
+            if goal_id and str(item.get("goal_id") or "") != goal_id:
+                continue
+            if status and str(item.get("status") or "") != status:
+                continue
+            if normalized_event_kind and normalized_event_kind not in {
+                route_key_slug(kind, fallback="")
+                for kind in (
+                    item.get("event_kinds", [])
+                    if isinstance(item.get("event_kinds"), list)
+                    else []
+                )
+                if kind
+            }:
+                continue
+            component_result = goal_lifecycle_task_episode_components(
+                session_dir,
+                index,
+                item,
+            )
+            if component_result.get("status") != "current":
+                component_errors.append(
+                    {
+                        "session": session_id or session_label,
+                        "goal_id": str(item.get("goal_id") or ""),
+                        "diagnostics": list(
+                            component_result.get("diagnostics", [])
+                        ),
+                    }
+                )
+                continue
             compact = compact_goal_lifecycle(
                 item,
                 session_label=session_label,
                 session_id=session_id,
                 aoa_root=aoa_root,
-                task_episodes=task_episodes,
+                task_episodes=list(component_result.get("payloads", [])),
             )
-            if goal_id and str(compact.get("goal_id") or "") != goal_id:
-                continue
-            if status and str(compact.get("status") or "") != status:
-                continue
-            if normalized_event_kind and normalized_event_kind not in {
-                route_key_slug(kind, fallback="")
-                for kind in compact.get("event_kinds", [])
-                if kind
-            }:
-                continue
+            compact["task_episode_integrity"] = {
+                "mode": "bounded_content_addressed_linked_components",
+                "requested_episode_count": int_value(
+                    component_result.get("requested_episode_count")
+                ),
+                "verified_episode_count": int_value(
+                    component_result.get("verified_episode_count")
+                ),
+                "selected_component_integrity": str(
+                    component_result.get("selected_component_integrity")
+                    or "unresolved"
+                ),
+                "component_count": int_value(
+                    component_result.get("component_count")
+                ),
+                "hydrated_component_count": int_value(
+                    component_result.get("hydrated_component_count")
+                ),
+                "scan_complete": bool(component_result.get("scan_complete")),
+                "global_task_episode_semantic_digest_verified": False,
+            }
             results.append(compact)
             if len(results) >= max(1, limit):
                 break
@@ -137839,6 +137988,11 @@ def goal_lifecycle_route_search(
             break
     provider_status = search_provider_status(aoa_root=aoa_root, provider_name="portable_sqlite")
     provider_summary = compact_search_provider_status_for_route(provider_status, provider_name="portable_sqlite")
+    diagnostics: list[str] = []
+    if incompatible_session_indexes:
+        diagnostics.append("goal_lifecycle_source_generation_incompatible")
+    if component_errors:
+        diagnostics.append("goal_lifecycle_task_episode_component_invalid")
     return {
         "schema_version": SCHEMA_VERSION,
         "artifact_type": "goal_lifecycle_route_results",
@@ -137857,13 +138011,10 @@ def goal_lifecycle_route_search(
         "incompatible_session_indexes": (
             incompatible_session_indexes
         ),
+        "component_errors": component_errors,
         "generation_identity": session_index_generation_identity(),
         "provider": provider_summary,
-        "diagnostics": (
-            ["goal_lifecycle_source_generation_incompatible"]
-            if incompatible_session_indexes
-            else []
-        ),
+        "diagnostics": diagnostics,
         "next_route": "Use work_chain next_expansion for task/answer context, then refs, graph_refs, raw_refs, and segment_refs for authority; lifecycle packets are generated navigation.",
     }
 
