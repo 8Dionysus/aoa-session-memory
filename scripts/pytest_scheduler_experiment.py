@@ -654,7 +654,11 @@ def run_trial(args: argparse.Namespace) -> dict[str, Any]:
             ),
         )
     with tempfile.TemporaryDirectory(
-        prefix="aoa-session-memory-pytest-",
+        # Keep the scheduler's temporary path semantically neutral.  Session
+        # memory derives route/session facets from path text, so an owner name
+        # such as ``aoa-session-memory`` here can change the meaning of a
+        # fixture's synthetic command path.
+        prefix="pytest-scheduler-",
         dir=tempfile.gettempdir(),
     ) as temporary_root:
         return _run_trial(
