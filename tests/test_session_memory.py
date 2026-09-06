@@ -87929,6 +87929,76 @@ def test_task_episode_cli_route_uses_manifest_first_selective_hydration(
     )
 
 
+def test_navigation_routes_reject_fast_stale_indexes_before_full_json_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_dir = tmp_path / "sessions" / "stale-session"
+    session_dir.mkdir(parents=True)
+    record = {
+        "session_id": "stale-session-id",
+        "session_label": "stale-session",
+        "path": str(session_dir),
+    }
+    stale_reason = ["session_index_generation_identity_changed"]
+    monkeypatch.setattr(
+        module,
+        "chronological_session_records",
+        lambda _aoa_root, limit=None: [record],
+    )
+    monkeypatch.setattr(
+        module,
+        "generated_session_index_stale_reasons_from_file",
+        lambda _path: list(stale_reason),
+    )
+
+    def unexpected_index_read(path: Path, _default: Any) -> Any:
+        if path == session_dir / module.SESSION_INDEX_JSON:
+            raise AssertionError("fast stale rejection must precede full JSON read")
+        return {}
+
+    monkeypatch.setattr(module, "read_json", unexpected_index_read)
+    monkeypatch.setattr(
+        module,
+        "search_provider_status",
+        lambda **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        module,
+        "compact_search_provider_status_for_route",
+        lambda *_args, **_kwargs: {},
+    )
+
+    task_route = module.task_answer_chain_route_packet(
+        aoa_root=tmp_path,
+        target="all",
+        limit=1,
+    )
+    goal_route = module.goal_lifecycle_route_search(
+        aoa_root=tmp_path,
+        target="all",
+        limit=1,
+    )
+
+    for payload, diagnostic in (
+        (task_route, "task_episode_source_generation_incompatible"),
+        (goal_route, "goal_lifecycle_source_generation_incompatible"),
+    ):
+        assert payload["ok"] is True
+        assert payload["result_count"] == 0
+        assert payload["incompatible_session_indexes"] == [
+            {
+                "session": "stale-session-id",
+                "reasons": stale_reason,
+                "next_command": (
+                    "python3 scripts/aoa_session_memory.py "
+                    "reindex-sessions stale-session-id"
+                ),
+            }
+        ]
+        assert diagnostic in payload["diagnostics"]
+
+
 def test_repair_session_titles_skips_ide_context_prompt(tmp_path: Path) -> None:
     aoa_root = tmp_path / ".aoa"
     session_dir = aoa_root / "sessions" / "2026-05-17__001__files-mentioned-by-the-user"

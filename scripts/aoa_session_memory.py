@@ -137705,7 +137705,31 @@ def task_answer_chain_route_packet(
         ordered_records = list(reversed(ordered_records))
     for record in ordered_records:
         session_dir = session_dir_from_record(record)
-        index = read_json(session_dir / SESSION_INDEX_JSON, {})
+        session_index_path = session_dir / SESSION_INDEX_JSON
+        fast_stale_reasons = (
+            generated_session_index_stale_reasons_from_file(
+                session_index_path,
+            )
+        )
+        if fast_stale_reasons:
+            session_identity = str(
+                record.get("session_id")
+                or record.get("session_label")
+                or session_dir.name
+            )
+            incompatible_session_indexes.append(
+                {
+                    "session": session_identity,
+                    "reasons": fast_stale_reasons,
+                    "next_command": (
+                        "python3 scripts/aoa_session_memory.py "
+                        "reindex-sessions "
+                        f"{shlex.quote(session_identity)}"
+                    ),
+                }
+            )
+            continue
+        index = read_json(session_index_path, {})
         if not isinstance(index, dict):
             continue
         index_stale_reasons = (
@@ -138110,7 +138134,31 @@ def goal_lifecycle_route_search(
     normalized_event_kind = route_key_slug(event_kind, fallback="") if event_kind else ""
     for record in ordered_records:
         session_dir = session_dir_from_record(record)
-        index = read_json(session_dir / SESSION_INDEX_JSON, {})
+        session_index_path = session_dir / SESSION_INDEX_JSON
+        fast_stale_reasons = (
+            generated_session_index_stale_reasons_from_file(
+                session_index_path,
+            )
+        )
+        if fast_stale_reasons:
+            session_identity = str(
+                record.get("session_id")
+                or record.get("session_label")
+                or session_dir.name
+            )
+            incompatible_session_indexes.append(
+                {
+                    "session": session_identity,
+                    "reasons": fast_stale_reasons,
+                    "next_command": (
+                        "python3 scripts/aoa_session_memory.py "
+                        "reindex-sessions "
+                        f"{shlex.quote(session_identity)}"
+                    ),
+                }
+            )
+            continue
+        index = read_json(session_index_path, {})
         if not isinstance(index, dict):
             continue
         index_stale_reasons = (
