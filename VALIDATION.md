@@ -10,6 +10,8 @@ env -u PYTHONDONTWRITEBYTECODE \
   PYTHONPYCACHEPREFIX="${PYTHONPYCACHEPREFIX:-${TMPDIR:-/tmp}/aoa-session-memory-pycache}" \
   python3 -m pytest -q -p no:cacheprovider \
     tests/test_session_memory.py \
+    tests/test_session_memory_privacy_core.py \
+    tests/test_session_memory_outbox_core.py \
     tests/test_session_memory_doctor.py \
     tests/test_session_memory_outbox.py \
     tests/test_session_memory_task_lifecycle.py \
@@ -22,6 +24,39 @@ env -u PYTHONDONTWRITEBYTECODE \
 python3 scripts/aoa_session_memory.py validate --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa
 python3 scripts/aoa_session_memory.py doctor --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa
 ```
+
+For a pure predicate edit to a standalone producer sibling, run only the
+corresponding focused route before the full suite. Use a fresh bytecode prefix
+outside the checkout so a same-size, same-second source edit cannot reuse an
+older `.pyc`; these direct tests include interpreter and module startup:
+
+```bash
+# Privacy sibling edit:
+privacy_core_pycache="$(mktemp -d "${TMPDIR:-/tmp}/aoa-session-memory-privacy.XXXXXX")"
+env -u PYTHONDONTWRITEBYTECODE PYTHONPYCACHEPREFIX="$privacy_core_pycache" \
+  python3 -m pytest -q -p no:cacheprovider --rootdir=. --confcutdir=. \
+    tests/test_session_memory_privacy_core.py
+# Outbox sibling edit:
+outbox_core_pycache="$(mktemp -d "${TMPDIR:-/tmp}/aoa-session-memory-outbox.XXXXXX")"
+env -u PYTHONDONTWRITEBYTECODE PYTHONPYCACHEPREFIX="$outbox_core_pycache" \
+  python3 -m pytest -q -p no:cacheprovider --rootdir=. --confcutdir=. \
+    tests/test_session_memory_outbox_core.py
+```
+
+Use the privacy-core command for privacy edits and the outbox-core command
+for outbox edits. When changing the loader, source identity, or wiring around
+either sibling, add the monolith identity regression:
+
+```bash
+identity_pycache="$(mktemp -d "${TMPDIR:-/tmp}/aoa-session-memory-identity.XXXXXX")"
+env -u PYTHONDONTWRITEBYTECODE PYTHONPYCACHEPREFIX="$identity_pycache" \
+  python3 -m pytest -q -p no:cacheprovider --rootdir=. --confcutdir=. \
+  tests/test_session_memory.py \
+  -k 'generation_identity or loaded_producer_source'
+```
+
+The real portable CLI/copy/install checks and the full source suite remain
+separate integration gates.
 
 The bytecode prefix must remain outside the checkout. Pytest assertion
 rewriting remains enabled for diagnostics. Python's default timestamp/size

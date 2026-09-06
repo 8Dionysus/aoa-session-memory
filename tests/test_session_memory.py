@@ -66321,6 +66321,9 @@ def test_generation_identity_invalidates_parser_only_source_change(
     assert module.SESSION_MEMORY_LOADED_OUTBOX_CORE_PATH in (
         module.SESSION_MEMORY_LOADED_PRODUCER_SOURCE_PATHS
     )
+    assert module.SESSION_MEMORY_LOADED_PRIVACY_CORE_PATH in (
+        module.SESSION_MEMORY_LOADED_PRODUCER_SOURCE_PATHS
+    )
     assert module.SESSION_MEMORY_LOADED_PRODUCER_SHA256 == (
         module._producer_source_identity_digest(
             tuple(
@@ -66339,10 +66342,13 @@ def test_generation_identity_invalidates_parser_only_source_change(
     parser_source.write_text("parser-v1\n", encoding="utf-8")
     outbox_source = tmp_path / "aoa_session_memory_outbox.py"
     outbox_source.write_text("outbox-v1\n", encoding="utf-8")
+    privacy_source = tmp_path / "aoa_session_memory_privacy.py"
+    privacy_source.write_text("privacy-v1\n", encoding="utf-8")
     source_paths = (
         module.SESSION_MEMORY_LOADED_PRODUCER_PATH,
         parser_source,
         outbox_source,
+        privacy_source,
     )
     monkeypatch.setattr(
         module,
@@ -66387,6 +66393,21 @@ def test_generation_identity_invalidates_parser_only_source_change(
     assert outbox_state["current_sha256"] != loaded_sha256
     assert "producer_source_changed_during_process" in (
         outbox_state["diagnostics"]
+    )
+
+    outbox_source.write_text("outbox-v1\n", encoding="utf-8")
+    restored_outbox_state = module.session_memory_loaded_producer_source_state()
+    assert restored_outbox_state["stable"] is True
+
+    privacy_source.write_text("privacy-v2\n", encoding="utf-8")
+    privacy_state = module.session_memory_loaded_producer_source_state()
+
+    assert privacy_state["stable"] is False
+    assert privacy_state["status"] == "changed"
+    assert privacy_state["loaded_sha256"] == loaded_sha256
+    assert privacy_state["current_sha256"] != loaded_sha256
+    assert "producer_source_changed_during_process" in (
+        privacy_state["diagnostics"]
     )
 
 
@@ -85340,6 +85361,7 @@ def test_install_portable_bundle_creates_clean_target(tmp_path: Path) -> None:
         aoa_root / "scripts" / "aoa_session_memory_entity_usage_parsers.py"
     ).is_file()
     assert (aoa_root / "scripts" / "aoa_session_memory_outbox.py").is_file()
+    assert (aoa_root / "scripts" / "aoa_session_memory_privacy.py").is_file()
     assert (aoa_root / "tests" / "test_session_memory.py").exists()
 
     portable_runtime = subprocess.run(
@@ -91271,93 +91293,6 @@ def test_sensitive_literal_candidate_ranges_avoid_historical_block_reads(
     assert admitted["source_bytes_read"] < len(payload) // 100
 
 
-def test_derived_privacy_prefilters_skip_expensive_matchers_for_benign_text(
-    monkeypatch,
-) -> None:
-    class ForbiddenSubMatcher:
-        def sub(self, _replacement, _source: str):
-            raise AssertionError("candidate matcher scanned benign text")
-
-    for name in (
-        "DERIVED_TEXT_NAMED_QUOTED_ASSIGNMENT_RE",
-        "DERIVED_TEXT_NAMED_BARE_ASSIGNMENT_RE",
-        "DERIVED_TEXT_SENSITIVE_FLAG_RE",
-    ):
-        monkeypatch.setattr(module, name, ForbiddenSubMatcher())
-
-    benign = "ordinary transcript payload " + ("x" * 450_000)
-    projection = module.derived_text_privacy_projection(benign)
-
-    assert projection["status"] == "unchanged"
-    assert projection["text"] == benign
-
-
-def test_derived_privacy_skips_opaque_rewrite_when_all_matches_are_benign(
-    monkeypatch,
-) -> None:
-    original = module.DERIVED_TEXT_OPAQUE_CREDENTIAL_RE
-
-    class FindOnlyOpaqueMatcher:
-        def finditer(self, source: str):
-            return original.finditer(source)
-
-        def sub(self, _replacement, _source: str):
-            raise AssertionError("benign opaque candidates triggered rewrite")
-
-    monkeypatch.setattr(
-        module,
-        "DERIVED_TEXT_OPAQUE_CREDENTIAL_RE",
-        FindOnlyOpaqueMatcher(),
-    )
-    benign = (
-        "source_sha256="
-        "0123456789abcdef0123456789abcdef"
-        "0123456789abcdef0123456789abcdef"
-    )
-
-    projection = module.derived_text_privacy_projection(benign)
-
-    assert projection["status"] == "unchanged"
-    assert projection["text"] == benign
-    assert projection["redaction_count"] == 0
-
-
-def test_derived_privacy_skips_named_rewrite_for_safe_metadata(
-    monkeypatch,
-) -> None:
-    class FindOnlyNamedMatcher:
-        def __init__(self, original):
-            self.original = original
-
-        def match(self, source: str, start: int = 0):
-            return self.original.match(source, start)
-
-        def sub(self, _replacement, _source: str):
-            raise AssertionError("safe named metadata triggered rewrite")
-
-    for name in (
-        "DERIVED_TEXT_NAMED_QUOTED_ASSIGNMENT_RE",
-        "DERIVED_TEXT_NAMED_BARE_ASSIGNMENT_RE",
-        "DERIVED_TEXT_SENSITIVE_FLAG_RE",
-    ):
-        monkeypatch.setattr(
-            module,
-            name,
-            FindOnlyNamedMatcher(getattr(module, name)),
-        )
-    benign = (
-        'API_KEY_STATUS="configured" '\
-        "token_status_path=/srv/example/token-status.json "
-        "--access-token '${ACCESS_TOKEN}'"
-    )
-
-    projection = module.derived_text_privacy_projection(benign)
-
-    assert projection["status"] == "unchanged"
-    assert projection["text"] == benign
-    assert projection["redaction_count"] == 0
-
-
 @pytest.mark.parametrize(
     "label,separator,secret",
     [
@@ -91703,30 +91638,6 @@ def test_generated_session_search_and_graph_views_do_not_duplicate_credentials(
         ensure_ascii=False,
         sort_keys=True,
     )
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        "API_KEY_STATUS=configured",
-        "token_status_path=/srv/example/token-status.json",
-        "max_output_tokens=10000",
-        "tokenizer_name=cl100k_base",
-        "The API key is configured; value not shown.",
-        "${OVMS_EMBEDDINGS_API_KEY}",
-        "source_sha256=0123456789abcdef0123456789abcdef",
-    ],
-)
-def test_derived_text_privacy_projection_preserves_safe_metadata(
-    text: str,
-) -> None:
-    first = module.derived_text_privacy_projection(text)
-    second = module.derived_text_privacy_projection(text)
-
-    assert first == second
-    assert first["status"] == "unchanged"
-    assert first["text"] == text
-    assert first["redaction_count"] == 0
 
 
 def test_derived_text_privacy_metadata_never_repeats_value_shaped_labels() -> None:
