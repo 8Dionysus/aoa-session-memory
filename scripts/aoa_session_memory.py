@@ -24397,20 +24397,83 @@ def write_raw_block_artifacts(
         )
         if isinstance(item, dict) and item.get("segment_id")
     }
-    for prefix_block in block_records:
-        relative = Path(str(prefix_block.get("rel") or ""))
-        source_block_path = reference_session_dir / relative if (
-            reference_session_dir is not None
-            and relative
-            and not relative.is_absolute()
-        ) else Path(str(prefix_block.get("path") or ""))
-        target_block_path = blocks_dir / source_block_path.name
-        if not source_block_path.is_file():
-            raise ValueError("incremental_prefix_raw_block_missing")
-        target_block_path.unlink(missing_ok=True)
+
+    reference_source_dir = reference_session_dir or session_dir
+
+    def compressed_storage_metadata_current(
+        record: dict[str, Any], path: Path
+    ) -> bool:
+        compressed_sha256 = str(record.get("compressed_sha256") or "")
+        uncompressed_sha256 = str(
+            record.get("uncompressed_sha256")
+            or record.get("sha256")
+            or ""
+        )
+        return bool(
+            path.is_file()
+            and re.fullmatch(r"[0-9a-f]{64}", compressed_sha256)
+            and re.fullmatch(r"[0-9a-f]{64}", uncompressed_sha256)
+            and int_value(record.get("compressed_bytes"), -1)
+            == path.stat().st_size
+            and int_value(record.get("uncompressed_bytes"), -1)
+            == int_value(record.get("bytes"), -1)
+        )
+
+    def stage_existing_block(
+        record: dict[str, Any],
+        *,
+        missing_prefix_error: str,
+    ) -> tuple[Path, Path | None, str]:
+        """Link a prior block without changing its storage representation."""
+        plain_source = raw_block_plain_path(reference_source_dir, record)
+        compressed_source = raw_block_compressed_path(
+            reference_source_dir, record
+        )
+        plain_name = Path(
+            str(
+                record.get("plain_rel")
+                or record.get("rel")
+                or plain_source.name
+            )
+        ).name
+        target_plain = blocks_dir / plain_name
+        target_plain.unlink(missing_ok=True)
+        target_compressed = blocks_dir / f"{plain_name}.gz"
+        target_compressed.unlink(missing_ok=True)
+        storage_mode = str(
+            record.get("storage_mode") or RAW_BLOCK_STORAGE_MODE_PLAIN
+        )
+        if storage_mode == RAW_BLOCK_STORAGE_MODE_GZIP:
+            if not compressed_storage_metadata_current(
+                record, compressed_source
+            ):
+                raise ValueError(missing_prefix_error)
+            stage_projection_path_with_links(
+                source=compressed_source,
+                target=target_compressed,
+            )
+            if not bool(record.get("plain_removed")):
+                if not plain_source.is_file():
+                    raise ValueError(missing_prefix_error)
+                stage_projection_path_with_links(
+                    source=plain_source,
+                    target=target_plain,
+                )
+            return target_plain, target_compressed, storage_mode
+        if not plain_source.is_file():
+            raise ValueError(missing_prefix_error)
         stage_projection_path_with_links(
-            source=source_block_path,
-            target=target_block_path,
+            source=plain_source,
+            target=target_plain,
+        )
+        return target_plain, None, RAW_BLOCK_STORAGE_MODE_PLAIN
+
+    for prefix_block in block_records:
+        stage_existing_block(
+            prefix_block,
+            missing_prefix_error=(
+                "incremental_prefix_raw_block_storage_missing_or_invalid"
+            ),
         )
     if reference_session_dir is not None and block_records:
         previous_compaction_path = (
@@ -24444,8 +24507,27 @@ def write_raw_block_artifacts(
         first_line = block_events[0].line_no if block_events else None
         last_line = block_events[-1].line_no if block_events else None
         boundary_events = [event for event in block_events if event.compaction_boundary]
-        source_block_path = reference_blocks_dir / block_name
         prior_block = prior_blocks_by_segment.get(segment_id)
+        prior_storage_mode = str(
+            prior_block.get("storage_mode")
+            if isinstance(prior_block, dict)
+            else RAW_BLOCK_STORAGE_MODE_PLAIN
+        )
+        source_plain_path = (
+            raw_block_plain_path(reference_source_dir, prior_block)
+            if isinstance(prior_block, dict)
+            else reference_blocks_dir / block_name
+        )
+        source_compressed_path = (
+            raw_block_compressed_path(reference_source_dir, prior_block)
+            if isinstance(prior_block, dict)
+            else reference_blocks_dir / f"{block_name}.gz"
+        )
+        source_block_path = (
+            source_compressed_path
+            if prior_storage_mode == RAW_BLOCK_STORAGE_MODE_GZIP
+            else source_plain_path
+        )
         prior_summary = (
             prior_block.get("token_accounting")
             if isinstance(prior_block, dict)
@@ -24468,8 +24550,14 @@ def write_raw_block_artifacts(
             and prior_range.get("from_line") == first_line
             and prior_range.get("to_line") == last_line
             and source_block_path.is_file()
-            and source_block_path.stat().st_size
-            == int_value(prior_block.get("bytes"), -1)
+            and (
+                compressed_storage_metadata_current(
+                    prior_block, source_block_path
+                )
+                if prior_storage_mode == RAW_BLOCK_STORAGE_MODE_GZIP
+                else source_block_path.stat().st_size
+                == int_value(prior_block.get("bytes"), -1)
+            )
         )
         if attested_sealed_reuse:
             block_bytes = int_value(prior_block.get("bytes"))
@@ -24486,31 +24574,63 @@ def write_raw_block_artifacts(
         reusable_block = bool(
             attested_sealed_reuse
             or (
-            isinstance(prior_block, dict)
-            and str(prior_block.get("role") or "") == role
-            and int_value(prior_block.get("line_count"), -1)
-            == len(block_events)
-            and int_value(prior_block.get("bytes"), -1)
-            == block_bytes
-            and str(prior_block.get("sha256") or "")
-            == block_sha256
-            and prior_range.get("from_line") == first_line
-            and prior_range.get("to_line") == last_line
-            and source_block_path.is_file()
-            and source_block_path.stat().st_size == block_bytes
-            and sha256_file(source_block_path) == block_sha256
+                isinstance(prior_block, dict)
+                and str(prior_block.get("role") or "") == role
+                and int_value(prior_block.get("line_count"), -1)
+                == len(block_events)
+                and int_value(prior_block.get("bytes"), -1)
+                == block_bytes
+                and str(prior_block.get("sha256") or "")
+                == block_sha256
+                and prior_range.get("from_line") == first_line
+                and prior_range.get("to_line") == last_line
+                and source_block_path.is_file()
+                and (
+                    (
+                        prior_storage_mode == RAW_BLOCK_STORAGE_MODE_GZIP
+                        and compressed_storage_metadata_current(
+                            prior_block, source_block_path
+                        )
+                    )
+                    or (
+                        prior_storage_mode != RAW_BLOCK_STORAGE_MODE_GZIP
+                        and source_block_path.stat().st_size == block_bytes
+                        and sha256_file(source_block_path) == block_sha256
+                    )
+                )
             )
         )
+        compressed_block_path: Path | None = None
         if reusable_block:
             block_path.unlink(missing_ok=True)
-            stage_projection_path_with_links(
-                source=source_block_path,
-                target=block_path,
-            )
+            if prior_storage_mode == RAW_BLOCK_STORAGE_MODE_GZIP:
+                compressed_block_path = blocks_dir / f"{block_name}.gz"
+                compressed_block_path.unlink(missing_ok=True)
+                stage_projection_path_with_links(
+                    source=source_block_path,
+                    target=compressed_block_path,
+                )
+                if not bool(prior_block.get("plain_removed")):
+                    if not source_plain_path.is_file():
+                        reusable_block = False
+                        compressed_block_path.unlink(missing_ok=True)
+                    else:
+                        stage_projection_path_with_links(
+                            source=source_plain_path,
+                            target=block_path,
+                        )
+            else:
+                stage_projection_path_with_links(
+                    source=source_block_path,
+                    target=block_path,
+                )
+        if reusable_block:
             reused_block_count += 1
             if attested_sealed_reuse:
                 attested_sealed_reused_block_count += 1
         else:
+            compressed_block_path = None
+            block_path.unlink(missing_ok=True)
             with block_path.open("w", encoding="utf-8") as handle:
                 for event in block_events:
                     handle.write(event.raw)
@@ -24536,7 +24656,7 @@ def write_raw_block_artifacts(
                 include_observations=False,
             )
         token_accounting_seconds += time.monotonic() - token_started
-        block_stat = block_path.stat()
+        block_stat = block_path.stat() if block_path.is_file() else None
         record = {
             "block_id": segment_id,
             "segment_id": segment_id,
@@ -24556,13 +24676,81 @@ def write_raw_block_artifacts(
             "boundary_event_ids": [event.event_id for event in boundary_events],
             "artifact_receipts": {
                 "plain": {
-                    "bytes": block_stat.st_size,
+                    "bytes": (
+                        block_stat.st_size
+                        if block_stat is not None
+                        else block_bytes
+                    ),
                     "sha256": block_sha256,
-                    "mtime_ns": block_stat.st_mtime_ns,
-                    "ctime_ns": block_stat.st_ctime_ns,
+                    "mtime_ns": (
+                        block_stat.st_mtime_ns
+                        if block_stat is not None
+                        else 0
+                    ),
+                    "ctime_ns": (
+                        block_stat.st_ctime_ns
+                        if block_stat is not None
+                        else 0
+                    ),
                 },
             },
         }
+        if reusable_block and prior_storage_mode == RAW_BLOCK_STORAGE_MODE_GZIP:
+            record = dict(prior_block)
+            record.update(
+                {
+                    "block_id": segment_id,
+                    "segment_id": segment_id,
+                    "role": role,
+                    "status": raw_block_status_for_role(role),
+                    "storage_mode": RAW_BLOCK_STORAGE_MODE_GZIP,
+                    "path": str(reference_blocks_dir / block_name),
+                    "rel": f"raw/{RAW_BLOCKS_DIR}/{block_name}",
+                    "plain_path": str(reference_blocks_dir / block_name),
+                    "plain_rel": f"raw/{RAW_BLOCKS_DIR}/{block_name}",
+                    "compressed_path": str(
+                        reference_blocks_dir / f"{block_name}.gz"
+                    ),
+                    "compressed_rel": (
+                        f"raw/{RAW_BLOCKS_DIR}/{block_name}.gz"
+                    ),
+                    "source_raw": raw_rel,
+                    "source_range": {
+                        "from_line": first_line,
+                        "to_line": last_line,
+                    },
+                    "line_count": len(block_events),
+                    "bytes": block_bytes,
+                    "sha256": block_sha256,
+                    "uncompressed_bytes": block_bytes,
+                    "uncompressed_sha256": block_sha256,
+                    "closed_by_compaction": bool(boundary_events),
+                    "boundary_event_ids": [
+                        event.event_id for event in boundary_events
+                    ],
+                }
+            )
+            compressed_stat = (
+                compressed_block_path.stat()
+                if compressed_block_path is not None
+                else source_compressed_path.stat()
+            )
+            compressed_sha256 = str(
+                record.get("compressed_sha256") or ""
+            )
+            artifact_receipts = (
+                dict(record.get("artifact_receipts"))
+                if isinstance(record.get("artifact_receipts"), dict)
+                else {}
+            )
+            artifact_receipts["compressed"] = {
+                "bytes": compressed_stat.st_size,
+                "sha256": compressed_sha256,
+                "mtime_ns": compressed_stat.st_mtime_ns,
+                "ctime_ns": compressed_stat.st_ctime_ns,
+                "metadata_mode": "size_mtime_v1",
+            }
+            record["artifact_receipts"] = artifact_receipts
         if block_token_accounting is not None:
             record["token_accounting"] = block_token_accounting
         block_records.append(record)
@@ -35790,6 +35978,7 @@ def validate_staged_session_projection(
     }
     raw_block_metadata_admitted_count = 0
     raw_block_reused_last_good_count = 0
+    raw_block_reused_last_good_compressed_count = 0
     raw_block_full_sha256_count = 0
     if projection_publish_id(raw_block_index) != expected_publish_id:
         diagnostics.append("raw_block_index_publish_id_mismatch")
@@ -35837,6 +36026,22 @@ def validate_staged_session_projection(
                 or ""
             )
         )
+        published_compressed_path = (
+            raw_block_compressed_path(session_dir, published_block)
+            if isinstance(published_block, dict) and published_block
+            else Path("")
+        )
+        published_artifact_receipts = (
+            published_block.get("artifact_receipts")
+            if isinstance(published_block, dict)
+            and isinstance(published_block.get("artifact_receipts"), dict)
+            else {}
+        )
+        published_compressed_receipt = (
+            published_artifact_receipts.get("compressed")
+            if isinstance(published_artifact_receipts.get("compressed"), dict)
+            else {}
+        )
         reused_last_good_plain = bool(
             isinstance(published_block, dict)
             and str(block.get("status") or "") == "sealed"
@@ -35869,6 +36074,28 @@ def validate_staged_session_projection(
                 plain_artifact_receipt,
             )
         )
+        reused_last_good_compressed = bool(
+            storage_mode == RAW_BLOCK_STORAGE_MODE_GZIP
+            and isinstance(published_block, dict)
+            and str(block.get("status") or "") == "sealed"
+            and str(published_block.get("storage_mode") or "")
+            == RAW_BLOCK_STORAGE_MODE_GZIP
+            and str(published_block.get("sha256") or "")
+            == expected_uncompressed_sha256
+            and str(published_block.get("compressed_sha256") or "")
+            == str(block.get("compressed_sha256") or "")
+            and published_block.get("source_range")
+            == block.get("source_range")
+            and staged_compressed_path.is_file()
+            and published_compressed_path.is_file()
+            and os.path.samefile(
+                staged_compressed_path, published_compressed_path
+            )
+            and immutable_component_artifact_receipt_metadata_current(
+                staged_compressed_path,
+                published_compressed_receipt,
+            )
+        )
         if not plain_removed:
             if not staged_plain_path.is_file():
                 diagnostics.append(
@@ -35891,6 +36118,8 @@ def validate_staged_session_projection(
                 diagnostics.append(
                     f"staged_compressed_raw_block_missing:{block_id}"
                 )
+            elif reused_last_good_compressed:
+                raw_block_reused_last_good_compressed_count += 1
             else:
                 expected_compressed_sha256 = str(
                     block.get("compressed_sha256") or ""
@@ -36280,9 +36509,12 @@ def validate_staged_session_projection(
             "reused_last_good_count": (
                 raw_block_reused_last_good_count
             ),
+            "reused_last_good_compressed_count": (
+                raw_block_reused_last_good_compressed_count
+            ),
             "full_sha256_count": raw_block_full_sha256_count,
             "policy": (
-                "metadata_receipt_or_samefile_reuse_else_full_sha256_v1"
+                "metadata_receipt_or_samefile_reuse_else_full_sha256_v2"
             ),
         },
         "session_index_shard_validation": (
@@ -220794,6 +221026,7 @@ def compressed_raw_block_record(
     record: dict[str, Any],
     *,
     compressed_path: Path,
+    artifact_path: Path | None = None,
     compressed_bytes: int,
     compressed_sha256: str,
     original_bytes: int,
@@ -220826,6 +221059,24 @@ def compressed_raw_block_record(
     if plain_removed:
         updated["plain_removed_at"] = now
         updated["plain_removed_bytes"] = original_bytes
+    artifact_receipts = (
+        dict(updated.get("artifact_receipts"))
+        if isinstance(updated.get("artifact_receipts"), dict)
+        else {}
+    )
+    # The compressed sidecar was verified by the compactor before this
+    # metadata crossed the publication boundary.  A later append may link
+    # that immutable sidecar without hashing or inflating it again; the
+    # validator still falls back to full content verification when this
+    # receipt is absent or its stat identity drifts.
+    artifact_receipts["compressed"] = {
+        "bytes": compressed_bytes,
+        "sha256": compressed_sha256,
+        "mtime_ns": (artifact_path or compressed_path).stat().st_mtime_ns,
+        "ctime_ns": (artifact_path or compressed_path).stat().st_ctime_ns,
+        "metadata_mode": "size_mtime_v1",
+    }
+    updated["artifact_receipts"] = artifact_receipts
     return updated
 
 
@@ -221356,6 +221607,7 @@ def raw_block_storage_compact(
                     session_dir,
                     block,
                     compressed_path=final_compressed_path,
+                    artifact_path=compressed_path,
                     compressed_bytes=compressed_size,
                     compressed_sha256=compressed_sha,
                     original_bytes=original_bytes,

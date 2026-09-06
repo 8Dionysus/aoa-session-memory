@@ -8994,6 +8994,404 @@ def test_raw_block_storage_compact_reads_compressed_blocks_after_plain_removal(t
     assert no_candidates["selected_count"] == 0
 
 
+def test_raw_block_storage_compact_preserves_gzip_across_append_reindex(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-12T00-00-00-gzip-append.jsonl"
+    session_id = "raw-block-gzip-append"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-05-12T00:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": session_id, "cwd": str(workspace)},
+            },
+            {
+                "timestamp": "2026-05-12T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "sealed prefix survives ordinary append",
+                        }
+                    ],
+                },
+            },
+            {
+                "timestamp": "2026-05-12T00:00:02Z",
+                "type": "turn_context",
+                "payload": {"summary": "sealed prefix boundary"},
+            },
+            {
+                "timestamp": "2026-05-12T00:00:03Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "new tail remains readable",
+                        }
+                    ],
+                },
+            },
+        ],
+    )
+
+    receipt = module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": session_id,
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    session_dir = Path(str(receipt["session_dir"]))
+    record = module.resolve_session_record(aoa_root, session_id)
+    manifest_path = session_dir / "session.manifest.json"
+    manifest = module.read_json(manifest_path, {})
+    first_rel = str(manifest["raw_blocks"]["blocks"][0]["rel"])
+
+    compacted = module.raw_block_storage_compact(
+        aoa_root=aoa_root,
+        target=session_dir.name,
+        apply=True,
+        confirm_remove_plain=True,
+        sample_limit=8,
+    )
+    assert compacted["ok"] is True
+    assert compacted["removed_plain_count"] == 1
+
+    manifest = module.read_json(manifest_path, {})
+    first_before = dict(manifest["raw_blocks"]["blocks"][0])
+    compressed_path = Path(first_before["compressed_path"])
+    compressed_sha256 = str(first_before["compressed_sha256"])
+    logical_sha256 = str(first_before["sha256"])
+    source_range = dict(first_before["source_range"])
+    assert first_before["storage_mode"] == module.RAW_BLOCK_STORAGE_MODE_GZIP
+    assert not Path(first_before["plain_path"]).exists()
+    assert compressed_path.is_file()
+
+    raw_path = Path(manifest["raw"]["path"])
+    with raw_path.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "timestamp": "2026-05-12T00:00:04Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "append after sealed compression",
+                            }
+                        ],
+                    },
+                }
+            )
+            + "\n"
+        )
+
+    original_hash_exact = module.sha256_file_exact
+    original_decompress = module.gzip.decompress
+
+    def reject_historical_gzip_hash(path: Path) -> str:
+        if Path(path).name == compressed_path.name:
+            raise AssertionError(
+                "append reindex must not rehash the preserved gzip sidecar"
+            )
+        return original_hash_exact(path)
+
+    def reject_historical_gzip_inflate(data: bytes) -> bytes:
+        if hashlib.sha256(data).hexdigest() == compressed_sha256:
+            raise AssertionError(
+                "append reindex must not inflate the preserved gzip sidecar"
+            )
+        return original_decompress(data)
+
+    monkeypatch.setattr(module, "sha256_file_exact", reject_historical_gzip_hash)
+    monkeypatch.setattr(module.gzip, "decompress", reject_historical_gzip_inflate)
+    grown = module.reindex_session_from_raw(
+        aoa_root,
+        record,
+        segment_workers=1,
+        execution_id="gzip-append-reindex",
+    )
+
+    assert grown["status"] == "reindexed", grown.get("diagnostics")
+    validation = grown["publish_result"]["validation"]
+    assert validation["raw_block_validation"][
+        "reused_last_good_compressed_count"
+    ] >= 1
+    assert grown["raw_block_execution"]["reused_block_count"] >= 1
+
+    manifest = module.read_json(manifest_path, {})
+    first_after = next(
+        block
+        for block in manifest["raw_blocks"]["blocks"]
+        if block["rel"] == first_rel
+    )
+    assert first_after["storage_mode"] == module.RAW_BLOCK_STORAGE_MODE_GZIP
+    assert first_after["plain_removed"] is True
+    assert first_after["sha256"] == logical_sha256
+    assert first_after["source_range"] == source_range
+    assert first_after["compressed_sha256"] == compressed_sha256
+    assert not Path(first_after["plain_path"]).exists()
+    assert Path(first_after["compressed_path"]).is_file()
+
+    open_tail = [
+        block
+        for block in manifest["raw_blocks"]["blocks"]
+        if block.get("status") == "open"
+    ]
+    assert open_tail
+    assert any(Path(block["plain_path"]).is_file() for block in open_tail)
+    assert any(
+        int(block["source_range"]["to_line"]) >= 5 for block in open_tail
+    )
+
+    restored = original_decompress(compressed_path.read_bytes())
+    assert hashlib.sha256(restored).hexdigest() == logical_sha256
+    audit = module.raw_block_ref_audit(
+        aoa_root=aoa_root,
+        target=session_dir.name,
+        sample_limit=8,
+    )
+    assert audit["ok"] is True, audit.get("diagnostics")
+    preview = module.raw_block_line_preview(
+        session_dir,
+        manifest,
+        "raw:line:2",
+        raw_block_ref=first_rel,
+    )
+    assert preview["status"] == "available"
+    assert preview["compressed"] is True
+    assert preview["storage_mode"] == module.RAW_BLOCK_STORAGE_MODE_GZIP
+
+
+def test_raw_block_storage_compact_rebuilds_changed_gzip_prefix(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-12T00-00-00-gzip-drift.jsonl"
+    session_id = "raw-block-gzip-drift"
+    write_jsonl(
+        transcript,
+        [
+            {
+                "timestamp": "2026-05-12T00:00:00Z",
+                "type": "session_meta",
+                "payload": {"id": session_id, "cwd": str(workspace)},
+            },
+            {
+                "timestamp": "2026-05-12T00:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "stable raw"}
+                    ],
+                },
+            },
+            {
+                "timestamp": "2026-05-12T00:00:02Z",
+                "type": "turn_context",
+                "payload": {"summary": "sealed boundary"},
+            },
+            {
+                "timestamp": "2026-05-12T00:00:03Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {"type": "output_text", "text": "open tail"}
+                    ],
+                },
+            },
+        ],
+    )
+    receipt = module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": session_id,
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    session_dir = Path(str(receipt["session_dir"]))
+    record = module.resolve_session_record(aoa_root, session_id)
+    compacted = module.raw_block_storage_compact(
+        aoa_root=aoa_root,
+        target=session_dir.name,
+        apply=True,
+        confirm_remove_plain=True,
+        sample_limit=8,
+    )
+    assert compacted["ok"] is True
+    manifest = module.read_json(session_dir / "session.manifest.json", {})
+    first = dict(manifest["raw_blocks"]["blocks"][0])
+    compressed_path = Path(first["compressed_path"])
+    first["artifact_receipts"].pop("compressed", None)
+    module.write_json(session_dir / "session.manifest.json", manifest)
+    compressed_path.write_bytes(compressed_path.read_bytes()[:-1])
+    raw_path = Path(manifest["raw"]["path"])
+    with raw_path.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "timestamp": "2026-05-12T00:00:04Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": "tail growth"}
+                        ],
+                    },
+                }
+            )
+            + "\n"
+        )
+
+    grown = module.reindex_session_from_raw(
+        aoa_root,
+        record,
+        segment_workers=1,
+        execution_id="gzip-drift-reindex",
+    )
+    assert grown["status"] == "reindexed", grown.get("diagnostics")
+    assert grown["raw_block_execution"]["rebuilt_block_count"] >= 1
+    rebuilt = module.read_json(session_dir / "session.manifest.json", {})[
+        "raw_blocks"
+    ]["blocks"][0]
+    assert rebuilt["storage_mode"] == module.RAW_BLOCK_STORAGE_MODE_PLAIN
+    assert Path(rebuilt["plain_path"]).is_file()
+    assert not rebuilt.get("compressed_path")
+
+
+def test_raw_block_storage_compact_legacy_gzip_receipt_is_verified_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "AbyssOS"
+    aoa_root = workspace / ".aoa"
+    transcript = tmp_path / "rollout-2026-05-12T00-00-00-gzip-legacy.jsonl"
+    session_id = "raw-block-gzip-legacy"
+    write_jsonl(
+        transcript,
+        [
+            {"timestamp": "2026-05-12T00:00:00Z", "type": "session_meta", "payload": {"id": session_id, "cwd": str(workspace)}},
+            {"timestamp": "2026-05-12T00:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "legacy gzip prefix"}]}},
+            {"timestamp": "2026-05-12T00:00:02Z", "type": "turn_context", "payload": {"summary": "legacy boundary"}},
+            {"timestamp": "2026-05-12T00:00:03Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "legacy open tail"}]}},
+        ],
+    )
+    receipt = module.handle_hook_event(
+        "Stop",
+        {
+            "session_id": session_id,
+            "transcript_path": str(transcript),
+            "cwd": str(workspace),
+            "hook_event_name": "Stop",
+        },
+        workspace_root=workspace,
+        aoa_root=aoa_root,
+    )
+    session_dir = Path(str(receipt["session_dir"]))
+    record = module.resolve_session_record(aoa_root, session_id)
+    compacted = module.raw_block_storage_compact(
+        aoa_root=aoa_root,
+        target=session_dir.name,
+        apply=True,
+        confirm_remove_plain=True,
+        sample_limit=8,
+    )
+    assert compacted["ok"] is True
+    manifest_path = session_dir / "session.manifest.json"
+    manifest = module.read_json(manifest_path, {})
+    first = manifest["raw_blocks"]["blocks"][0]
+    compressed_path = Path(first["compressed_path"])
+    compressed_sha256 = str(first["compressed_sha256"])
+    first["artifact_receipts"].pop("compressed", None)
+    module.write_json(manifest_path, manifest)
+    raw_path = Path(manifest["raw"]["path"])
+    with raw_path.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "timestamp": "2026-05-12T00:00:04Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": "legacy tail"}
+                        ],
+                    },
+                }
+            )
+            + "\n"
+        )
+
+    original_hash_exact = module.sha256_file_exact
+    original_decompress = module.gzip.decompress
+    hash_calls: list[str] = []
+    inflate_calls: list[str] = []
+
+    def track_hash(path: Path) -> str:
+        if Path(path).name == compressed_path.name:
+            hash_calls.append(Path(path).name)
+        return original_hash_exact(path)
+
+    def track_decompress(data: bytes) -> bytes:
+        if hashlib.sha256(data).hexdigest() == compressed_sha256:
+            inflate_calls.append(compressed_sha256)
+        return original_decompress(data)
+
+    monkeypatch.setattr(module, "sha256_file_exact", track_hash)
+    monkeypatch.setattr(module.gzip, "decompress", track_decompress)
+    grown = module.reindex_session_from_raw(
+        aoa_root,
+        record,
+        segment_workers=1,
+        execution_id="gzip-legacy-reindex",
+    )
+
+    assert grown["status"] == "reindexed", grown.get("diagnostics")
+    assert hash_calls
+    assert inflate_calls
+    validation = grown["publish_result"]["validation"]
+    assert validation["raw_block_validation"][
+        "reused_last_good_compressed_count"
+    ] == 0
+    current = module.read_json(manifest_path, {})
+    current_first = current["raw_blocks"]["blocks"][0]
+    assert current_first["storage_mode"] == module.RAW_BLOCK_STORAGE_MODE_GZIP
+    assert current_first["artifact_receipts"]["compressed"][
+        "sha256"
+    ] == compressed_sha256
+    assert compressed_path.is_file()
+
+
 def test_raw_block_storage_compact_rolls_back_whole_projection_on_publish_failure(
     tmp_path: Path,
     monkeypatch: Any,
