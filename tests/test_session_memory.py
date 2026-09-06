@@ -106,6 +106,41 @@ def build_minimal_portable_test_bundle(
     return target_aoa_root
 
 
+@pytest.fixture(scope="module")
+def compact_install_source(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Provide a Git-backed source for doctor state tests without a full tree copy.
+
+    The doctor tests exercise install provenance and filesystem transitions, not
+    authored-tree fidelity.  Full-source copy/install coverage remains in the
+    dedicated portable sentinel tests below.
+    """
+    source_root = tmp_path_factory.mktemp("compact-install-source") / "source"
+    build_minimal_portable_test_bundle(SCRIPT.parents[1], source_root)
+    git_args = ["git", "-C", str(source_root)]
+    for command in (
+        ("init", "--quiet"),
+        ("add", "."),
+        (
+            "-c",
+            "user.email=fixture@example.invalid",
+            "-c",
+            "user.name=portable fixture",
+            "commit",
+            "--quiet",
+            "-m",
+            "compact doctor fixture",
+        ),
+    ):
+        subprocess.run(
+            [*git_args, *command],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    return source_root
+
+
 def test_best_effort_progress_emitter_quarantines_broken_pipe() -> None:
     class BrokenPipeStream:
         def write(self, _text: str) -> int:
@@ -85551,8 +85586,9 @@ def test_portable_copy_ignores_atomic_publish_scratch_files(
 
 def test_doctor_accepts_runtime_install_without_local_tests(
     tmp_path: Path,
+    compact_install_source: Path,
 ) -> None:
-    source_aoa = SCRIPT.parents[1]
+    source_aoa = compact_install_source
     workspace = tmp_path / "RuntimeWorkspace"
     aoa_root = workspace / ".aoa"
     install_payload = module.install_portable_bundle(
@@ -85602,22 +85638,11 @@ def test_doctor_accepts_runtime_install_without_local_tests(
     )
 
     install_profile_path.unlink()
-    unmarked_result = subprocess.run(
-        [
-            sys.executable,
-            str(SCRIPT),
-            "doctor",
-            "--workspace-root",
-            str(workspace),
-            "--aoa-root",
-            str(aoa_root),
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    unmarked_payload = json.loads(unmarked_result.stdout)
-    assert unmarked_result.returncode == 1
+    # Keep the real CLI sentinel above and below; the intermediate negative
+    # states exercise the same production command without three extra process
+    # startups that add no distinct filesystem coverage.
+    unmarked_code, unmarked_payload = run_doctor_payload(workspace, aoa_root)
+    assert unmarked_code == 1
     assert unmarked_payload["ok"] is False
     assert unmarked_payload["runtime_install_profile"]["present"] is False
     assert "missing required root file: tests/AGENTS.md" in (
@@ -85633,23 +85658,9 @@ def test_doctor_accepts_runtime_install_without_local_tests(
         "# Partial test tree\n",
         encoding="utf-8",
     )
-    partial_result = subprocess.run(
-        [
-            sys.executable,
-            str(SCRIPT),
-            "doctor",
-            "--workspace-root",
-            str(workspace),
-            "--aoa-root",
-            str(aoa_root),
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    partial_payload = json.loads(partial_result.stdout)
+    partial_code, partial_payload = run_doctor_payload(workspace, aoa_root)
 
-    assert partial_result.returncode == 1
+    assert partial_code == 1
     assert partial_payload["ok"] is False
     assert partial_payload["runtime_optional_absent_root_files"] == []
     assert "missing required root file: tests/test_session_memory.py" in (
@@ -85689,22 +85700,11 @@ def test_doctor_accepts_runtime_install_without_local_tests(
     assert full_payload["problems"] == []
 
     shutil.rmtree(aoa_root / "tests")
-    lost_tests_result = subprocess.run(
-        [
-            sys.executable,
-            str(SCRIPT),
-            "doctor",
-            "--workspace-root",
-            str(workspace),
-            "--aoa-root",
-            str(aoa_root),
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
+    lost_tests_code, lost_tests_payload = run_doctor_payload(
+        workspace,
+        aoa_root,
     )
-    lost_tests_payload = json.loads(lost_tests_result.stdout)
-    assert lost_tests_result.returncode == 1
+    assert lost_tests_code == 1
     assert lost_tests_payload["runtime_install_profile"]["valid"] is True
     assert lost_tests_payload["runtime_install_profile"]["include_tests"] is True
     assert lost_tests_payload["runtime_optional_absent_root_files"] == []
@@ -85715,8 +85715,9 @@ def test_doctor_accepts_runtime_install_without_local_tests(
 
 def test_doctor_rejects_runtime_install_without_source_provenance(
     tmp_path: Path,
+    compact_install_source: Path,
 ) -> None:
-    source_aoa = SCRIPT.parents[1]
+    source_aoa = compact_install_source
     workspace = tmp_path / "RuntimeWorkspace"
     aoa_root = workspace / ".aoa"
     install_payload = module.install_portable_bundle(
