@@ -224390,6 +224390,7 @@ REQUIRED_ROOT_FILES = [
     "scripts/aoa_session_memory.py",
     "scripts/aoa_session_memory_entity_usage_parsers.py",
     "scripts/aoa_session_memory_outbox.py",
+    "scripts/aoa_session_memory_privacy.py",
     "scripts/validate_local_stats_port.py",
     "sessions/AGENTS.md",
     "skills/AGENTS.md",

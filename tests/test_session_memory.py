@@ -84963,6 +84963,7 @@ def test_install_portable_bundle_creates_clean_target(tmp_path: Path) -> None:
         aoa_root / "scripts" / "aoa_session_memory_entity_usage_parsers.py"
     ).is_file()
     assert (aoa_root / "scripts" / "aoa_session_memory_outbox.py").is_file()
+    assert (aoa_root / "scripts" / "aoa_session_memory_privacy.py").is_file()
     assert (aoa_root / "tests" / "test_session_memory.py").exists()
 
     portable_runtime = subprocess.run(
