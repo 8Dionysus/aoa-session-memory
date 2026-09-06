@@ -25,25 +25,35 @@ python3 scripts/aoa_session_memory.py validate --workspace-root /path/to/workspa
 python3 scripts/aoa_session_memory.py doctor --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa
 ```
 
-For an edit to a standalone producer sibling, run the corresponding focused
-route before the full suite. Use a fresh bytecode prefix outside the checkout
-so a same-size, same-second source edit cannot reuse an older `.pyc`:
+For a pure predicate edit to a standalone producer sibling, run only the
+corresponding focused route before the full suite. Use a fresh bytecode prefix
+outside the checkout so a same-size, same-second source edit cannot reuse an
+older `.pyc`; these direct tests include interpreter and module startup:
 
 ```bash
-affected_pycache="$(mktemp -d "${TMPDIR:-/tmp}/aoa-session-memory-affected.XXXXXX")"
-env -u PYTHONDONTWRITEBYTECODE PYTHONPYCACHEPREFIX="$affected_pycache" \
+# Privacy sibling edit:
+privacy_core_pycache="$(mktemp -d "${TMPDIR:-/tmp}/aoa-session-memory-privacy.XXXXXX")"
+env -u PYTHONDONTWRITEBYTECODE PYTHONPYCACHEPREFIX="$privacy_core_pycache" \
   python3 -m pytest -q -p no:cacheprovider \
     tests/test_session_memory_privacy_core.py
-env -u PYTHONDONTWRITEBYTECODE PYTHONPYCACHEPREFIX="$affected_pycache" \
+# Outbox sibling edit:
+outbox_core_pycache="$(mktemp -d "${TMPDIR:-/tmp}/aoa-session-memory-outbox.XXXXXX")"
+env -u PYTHONDONTWRITEBYTECODE PYTHONPYCACHEPREFIX="$outbox_core_pycache" \
   python3 -m pytest -q -p no:cacheprovider \
     tests/test_session_memory_outbox_core.py
-env -u PYTHONDONTWRITEBYTECODE PYTHONPYCACHEPREFIX="$affected_pycache" \
+```
+
+Use the privacy-core command for privacy edits and the outbox-core command
+for outbox edits. When changing the loader, source identity, or wiring around
+either sibling, add the monolith identity regression:
+
+```bash
+identity_pycache="$(mktemp -d "${TMPDIR:-/tmp}/aoa-session-memory-identity.XXXXXX")"
+env -u PYTHONDONTWRITEBYTECODE PYTHONPYCACHEPREFIX="$identity_pycache" \
   python3 -m pytest -q -p no:cacheprovider tests/test_session_memory.py \
   -k 'generation_identity or loaded_producer_source'
 ```
 
-Run the privacy-core command for privacy edits and the outbox-core command
-for outbox edits; retain the source-identity regression for either sibling.
 The real portable CLI/copy/install checks and the full source suite remain
 separate integration gates.
 
