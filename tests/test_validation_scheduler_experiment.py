@@ -105,6 +105,80 @@ def test_ordinary_route_uses_fresh_external_bytecode_prefix(tmp_path: Path) -> N
     assert pycache_root.is_dir()
 
 
+@pytest.mark.parametrize("failed_step", (None, "shard-1"))
+def test_ephemeral_scheduler_binds_and_reclaims_each_pytest_temp_root(
+    monkeypatch: pytest.MonkeyPatch,
+    failed_step: str | None,
+) -> None:
+    nodeids = ("tests/test_example.py::test_one", "tests/test_example.py::test_two")
+    calls: list[tuple[str, Path, Path]] = []
+    artifact_roots: list[Path] = []
+    fixture_was_created: list[bool] = []
+
+    def fake_run_process(
+        step_id: str,
+        argv: list[str],
+        *,
+        env: dict[str, str],
+        artifact_root: Path,
+        timeout_seconds: float,
+    ) -> dict[str, object]:
+        del timeout_seconds
+        basetemp = Path(argv[argv.index("--basetemp") + 1])
+        assert basetemp.parent.is_dir()
+        basetemp.mkdir()
+        fixture_path = basetemp / "fixture-marker"
+        fixture_path.mkdir()
+        probe_path = Path(env[pytest_scheduler_experiment.PROBE_LOG_ENV])
+        probe_path.parent.mkdir(parents=True, exist_ok=True)
+        if step_id == "collection":
+            events = [{"event": "collection", "worker": "controller", "nodeids": list(nodeids)}]
+        else:
+            junit_index = argv.index("--junitxml")
+            selected = argv[junit_index + 2 :]
+            events = [
+                {
+                    "event": "report",
+                    "nodeid": nodeid,
+                    "when": "call",
+                    "outcome": "passed",
+                    "duration_seconds": 0.001,
+                }
+                for nodeid in selected
+            ]
+        probe_path.write_text(
+            "".join(json.dumps(event) + "\n" for event in events),
+            encoding="utf-8",
+        )
+        artifact_roots.append(artifact_root)
+        calls.append((step_id, basetemp, fixture_path))
+        fixture_was_created.append(fixture_path.is_dir())
+        return {
+            "id": step_id,
+            "returncode": 1 if step_id == failed_step else 0,
+            "timed_out": False,
+            "stdout": {"path": str(artifact_root / f"{step_id}.stdout"), "tail": ""},
+            "stderr": {"path": str(artifact_root / f"{step_id}.stderr"), "tail": ""},
+        }
+
+    monkeypatch.setattr(pytest_scheduler_experiment, "source_test_targets", lambda: nodeids)
+    monkeypatch.setattr(pytest_scheduler_experiment, "_run_process", fake_run_process)
+    args = pytest_scheduler_experiment.build_parser().parse_args(["--method", "static2"])
+
+    result = pytest_scheduler_experiment.run_trial(args)
+
+    assert result["ok"] is (failed_step is None)
+    assert {step_id for step_id, _, _ in calls} == {"collection", "shard-1", "shard-2"}
+    assert len({basetemp for _, basetemp, _ in calls}) == 3
+    artifact_root = artifact_roots[0]
+    assert all(
+        basetemp.is_relative_to(artifact_root / "pytest-basetemp")
+        for _, basetemp, _ in calls
+    )
+    assert all(fixture_was_created)
+    assert artifact_roots and not artifact_roots[0].exists()
+
+
 def test_scheduler_plan_keeps_all_candidates_in_shadow() -> None:
     plan = validation_scheduler_experiment.candidate_plan()
     methods = {item["name"]: item for item in plan["methods"]}

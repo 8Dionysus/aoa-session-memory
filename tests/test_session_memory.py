@@ -18414,7 +18414,10 @@ def test_skill_read_query_time_probe_requires_correlation_owned_nonfailure_resul
     tmp_path: Path,
 ) -> None:
     """A SKILL.md read survives stale/missing search only with its own result."""
-    workspace = tmp_path / "AbyssOS"
+    # Keep the fixture under an owner-named directory.  Query-time evidence
+    # must remain correct when a scheduler basetemp contributes
+    # ``aoa-session-memory`` path text to the synthetic command paths.
+    workspace = tmp_path / "aoa-session-memory-path-fixture" / "AbyssOS"
     aoa_root = workspace / ".aoa"
     skill_path = tmp_path / ".codex" / "skills" / "gold-route" / "SKILL.md"
     transcript = tmp_path / "rollout-skill-read-query-time.jsonl"

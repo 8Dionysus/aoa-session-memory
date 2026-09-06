@@ -218,6 +218,7 @@ def _pytest_argv(
     method: Method,
     *,
     junit_path: Path,
+    basetemp: Path,
     nodeids: Sequence[str] | None = None,
     targets: Sequence[str] | None = None,
     collect_only: bool = False,
@@ -235,6 +236,10 @@ def _pytest_argv(
         str(REPO_ROOT),
         "--confcutdir",
         str(REPO_ROOT),
+        # Keep pytest fixture state inside this process's job artifact. xdist
+        # adds one popen-gwN child beneath this path for each worker.
+        "--basetemp",
+        str(basetemp),
         "-p",
         PROBE_MODULE,
     ]
@@ -534,6 +539,7 @@ def _run_static(
         _pytest_argv(
             method,
             junit_path=artifact_root / "unused.xml",
+            basetemp=artifact_root / "pytest-basetemp" / "collection",
             targets=targets,
             collect_only=True,
         ),
@@ -584,6 +590,7 @@ def _run_static(
             _pytest_argv(
                 method,
                 junit_path=artifact_root / f"{step_id}.junit.xml",
+                basetemp=artifact_root / "pytest-basetemp" / step_id,
                 nodeids=shard,
             ),
             env=shard_env,
@@ -647,7 +654,11 @@ def run_trial(args: argparse.Namespace) -> dict[str, Any]:
             ),
         )
     with tempfile.TemporaryDirectory(
-        prefix="aoa-session-memory-pytest-",
+        # Keep the scheduler's temporary path semantically neutral.  Session
+        # memory derives route/session facets from path text, so an owner name
+        # such as ``aoa-session-memory`` here can change the meaning of a
+        # fixture's synthetic command path.
+        prefix="pytest-scheduler-",
         dir=tempfile.gettempdir(),
     ) as temporary_root:
         return _run_trial(
@@ -667,6 +678,9 @@ def _run_trial(
     artifact_root.mkdir(parents=True, exist_ok=True)
     if any(artifact_root.iterdir()):
         raise ExperimentError(f"artifact root must start empty: {artifact_root}")
+    # Pytest creates each process-private basetemp below this shared parent;
+    # the parent must exist before pytest receives --basetemp.
+    (artifact_root / "pytest-basetemp").mkdir()
     experiment = receipt_path is not None
     started_at = dt.datetime.now(dt.UTC)
     started = time.monotonic()
@@ -716,6 +730,7 @@ def _run_trial(
                 _pytest_argv(
                     method,
                     junit_path=artifact_root / "pytest.junit.xml",
+                    basetemp=artifact_root / "pytest-basetemp" / "pytest",
                     targets=targets,
                 ),
                 env=run_env,

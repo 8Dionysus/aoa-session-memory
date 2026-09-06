@@ -196843,6 +196843,7 @@ def skill_session_evidence_probe(
     manifest_cache: dict[str, dict[str, Any]] = {}
     raw_preview_cache: dict[tuple[str, str, str, int], dict[str, Any]] = {}
     hits: dict[str, dict[str, Any]] = {}
+    unverifiable_hits: dict[str, dict[str, Any]] = {}
     admitted_read_entries: list[
         tuple[
             dict[str, Any],
@@ -196967,6 +196968,13 @@ def skill_session_evidence_probe(
             or observation_status in {"failed", "timed_out"}
         ):
             result_failures += 1
+            hit["entity_usage_role_override"] = "context"
+            hit["skill_evidence_state"] = "mentioned"
+            hit["skill_state_admission"] = (
+                "raw_exact_skill_artifact_read_without_"
+                "correlation_owned_nonfailure_result"
+            )
+            unverifiable_hits[str(hit.get("doc_id") or "")] = hit
             continue
         result_hit = session_query_source_hit(
             scan,
@@ -197329,6 +197337,7 @@ def skill_session_evidence_probe(
                 ]
             ),
             "_hits": list(hits.values()),
+            "_unverifiable_hits": list(unverifiable_hits.values()),
         }
     )
     return packet
@@ -200912,6 +200921,11 @@ def entity_usage_audit(
         for hit in skill_query_time_source_probe.pop("_hits", [])
         if isinstance(hit, dict)
     ] if normalized_kind == "skill" else []
+    skill_query_time_source_unverifiable_hits = [
+        hit
+        for hit in skill_query_time_source_probe.pop("_unverifiable_hits", [])
+        if isinstance(hit, dict)
+    ] if normalized_kind == "skill" else []
     if exact_instance_mode:
         mcp_tool_query_time_source_hits = [
             hit
@@ -200990,6 +201004,39 @@ def entity_usage_audit(
             source_hit,
             "session_scoped_query_time_exact_correlation_probe",
         )
+
+    unverifiable_skill_read_doc_ids = {
+        str(hit.get("doc_id") or "")
+        for hit in skill_query_time_source_unverifiable_hits
+        if str(hit.get("doc_id") or "")
+    }
+
+    def demote_unverifiable_skill_read_hit(hit: dict[str, Any]) -> None:
+        """Keep a failed exact read from becoming a heuristic skill read."""
+        if normalized_kind != "skill":
+            return
+        doc_id = str(hit.get("doc_id") or "")
+        if doc_id not in unverifiable_skill_read_doc_ids:
+            return
+        current_state = effective_skill_evidence_state_for_event(
+            compact_usage_event_from_search_hit(hit),
+            anchor=anchor,
+        )
+        if current_state != "skill_read":
+            return
+        hit["entity_usage_role_override"] = "context"
+        hit["skill_evidence_state"] = "mentioned"
+        hit["skill_state_admission"] = (
+            "raw_exact_skill_artifact_read_without_"
+            "correlation_owned_nonfailure_result"
+        )
+
+    def demote_unverifiable_skill_read_hits() -> None:
+        if normalized_kind != "skill":
+            return
+        for hit in merged.values():
+            demote_unverifiable_skill_read_hit(hit)
+
     route_result_summaries: list[dict[str, Any]] = []
     usage_role_fast_path_supported = bool(
         lookup_candidates
@@ -201797,6 +201844,7 @@ def entity_usage_audit(
         return selected, truncated
 
     def merged_route_counts() -> tuple[int, int, int]:
+        demote_unverifiable_skill_read_hits()
         apply_mcp_tool_usage_invocation_admission()
         apply_tool_usage_invocation_admission()
         apply_mcp_usage_invocation_admission()
@@ -201968,6 +202016,7 @@ def entity_usage_audit(
                 skill_dispatch_entity_probe_result_count += len(dispatch_hits)
                 dispatch_candidates: list[tuple[dict[str, Any], dict[str, Any], str]] = []
                 for hit in dispatch_hits:
+                    demote_unverifiable_skill_read_hit(hit)
                     event = compact_usage_event_from_search_hit(hit)
                     state = effective_skill_evidence_state_for_event(
                         event,
@@ -202173,6 +202222,7 @@ def entity_usage_audit(
     route_evidence_satisfies_kind = route_usage_hit_count > 0 or (
         normalized_kind not in ENTITY_USAGE_DIRECT_TRACE_KINDS and route_evidence_hit_count > 0
     )
+    demote_unverifiable_skill_read_hits()
     skill_route_state_counts: Counter[str] = Counter()
     if normalized_kind == "skill":
         for route_hit in merged.values():
@@ -202214,6 +202264,7 @@ def entity_usage_audit(
         )
     if isinstance(skill_prompt_visibility, dict):
         skill_prompt_visibility.pop("_hits", None)
+    demote_unverifiable_skill_read_hits()
     skill_text_fallback_deferred = False
     if (
         not skip_text_search
