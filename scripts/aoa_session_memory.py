@@ -5971,14 +5971,52 @@ DERIVED_TEXT_SENSITIVE_LABEL_PATTERN = (
     r"bearer[_-]?token|session[_-]?token)"
     r"(?:[_-][A-Za-z0-9]+)*"
 )
-# Every named-assignment and sensitive-flag match below necessarily contains
-# one of these label stems.  The cheap prefilter therefore skips only regex
-# work, never a candidate that the admitting expressions could redact.
+# ``str.find`` over the folded source keeps the admission check in C while
+# retaining the exact matchers below for the authoritative rewrite.  The
+# tuple is also the source for the legacy regex fallback, keeping both paths
+# on the same complete set of admissible stems.
+DERIVED_TEXT_SENSITIVE_LABEL_LITERALS = (
+    "apikey",
+    "api_key",
+    "api-key",
+    "secret",
+    "clientsecret",
+    "client_secret",
+    "client-secret",
+    "privatekey",
+    "private_key",
+    "private-key",
+    "password",
+    "passwd",
+    "credential",
+    "access_token",
+    "access-token",
+    "accesstoken",
+    "refresh_token",
+    "refresh-token",
+    "refreshtoken",
+    "auth_token",
+    "auth-token",
+    "authtoken",
+    "bearer_token",
+    "bearer-token",
+    "bearertoken",
+    "session_token",
+    "session-token",
+    "sessiontoken",
+)
 DERIVED_TEXT_SENSITIVE_LABEL_PREFILTER_RE = re.compile(
-    r"(?:api[_-]?key|apikey|secret|client[_-]?secret|private[_-]?key|"
-    r"password|passwd|credential|access[_-]?token|refresh[_-]?token|"
-    r"auth[_-]?token|bearer[_-]?token|session[_-]?token)",
+    "(?:"
+    + "|".join(
+        re.escape(stem) for stem in DERIVED_TEXT_SENSITIVE_LABEL_LITERALS
+    )
+    + ")",
     flags=re.IGNORECASE,
+)
+# Python's case-insensitive ASCII regex admits these Unicode equivalents, but
+# their case-folded positions are not a safe basis for indexing the source.
+DERIVED_TEXT_CASEFOLD_POSITION_UNSAFE_RE = re.compile(
+    "[\u0130\u0131\u017f\u212a]"
 )
 DERIVED_TEXT_SENSITIVE_METADATA_SUFFIX_RE = re.compile(
     r"(?:[_-](?:name|status|state|path|file|filename|id|present|configured|"
@@ -6151,8 +6189,14 @@ def derived_text_looks_like_opaque_credential(
 
 
 def derived_text_named_redaction_required(value: Any) -> bool:
-    """Admit the exact named-value matchers from one cheap stem scan."""
+    """Admit the exact named-value matchers with a bounded stem scan."""
     source = str(value or "")
+    folded = source.casefold()
+    if (
+        len(folded) != len(source)
+        or DERIVED_TEXT_CASEFOLD_POSITION_UNSAFE_RE.search(source)
+    ):
+        folded = None
 
     def label_character(character: str) -> bool:
         return bool(
@@ -6165,14 +6209,14 @@ def derived_text_named_redaction_required(value: Any) -> bool:
             )
         )
 
-    for stem in DERIVED_TEXT_SENSITIVE_LABEL_PREFILTER_RE.finditer(source):
-        run_start = stem.start()
+    def admitted(stem_start: int, stem_end: int) -> bool:
+        run_start = stem_start
         while run_start > 0 and label_character(source[run_start - 1]):
             run_start -= 1
         candidate_starts = {run_start}
         candidate_starts.update(
             index + 1
-            for index in range(run_start, stem.start())
+            for index in range(run_start, stem_start)
             if source[index] == "-"
         )
         for start in sorted(candidate_starts):
@@ -6183,8 +6227,8 @@ def derived_text_named_redaction_required(value: Any) -> bool:
                 match = pattern.match(source, start)
                 if (
                     match is not None
-                    and match.start("label") <= stem.start()
-                    and match.end("label") >= stem.end()
+                    and match.start("label") <= stem_start
+                    and match.end("label") >= stem_end
                     and not derived_text_privacy_named_value_is_safe(
                         str(match.group("label") or ""),
                         str(match.group("value") or ""),
@@ -6199,14 +6243,31 @@ def derived_text_named_redaction_required(value: Any) -> bool:
                 )
                 if (
                     match is not None
-                    and match.start("label") <= stem.start()
-                    and match.end("label") >= stem.end()
+                    and match.start("label") <= stem_start
+                    and match.end("label") >= stem_end
                     and not derived_text_privacy_named_value_is_safe(
                         str(match.group("label") or ""),
                         str(match.group("value") or ""),
                     )
                 ):
                     return True
+        return False
+
+    if folded is None:
+        return any(
+            admitted(stem.start(), stem.end())
+            for stem in DERIVED_TEXT_SENSITIVE_LABEL_PREFILTER_RE.finditer(
+                source
+            )
+        )
+
+    for stem_text in DERIVED_TEXT_SENSITIVE_LABEL_LITERALS:
+        stem_length = len(stem_text)
+        stem_start = folded.find(stem_text)
+        while stem_start >= 0:
+            if admitted(stem_start, stem_start + stem_length):
+                return True
+            stem_start = folded.find(stem_text, stem_start + 1)
     return False
 
 
