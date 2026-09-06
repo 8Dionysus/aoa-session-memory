@@ -25,6 +25,28 @@ python3 scripts/aoa_session_memory.py validate --workspace-root /path/to/workspa
 python3 scripts/aoa_session_memory.py doctor --workspace-root /path/to/workspace --aoa-root /path/to/workspace/.aoa
 ```
 
+For an edit to a standalone producer sibling, run the corresponding focused
+route before the full suite. Use a fresh bytecode prefix outside the checkout
+so a same-size, same-second source edit cannot reuse an older `.pyc`:
+
+```bash
+affected_pycache="$(mktemp -d "${TMPDIR:-/tmp}/aoa-session-memory-affected.XXXXXX")"
+env -u PYTHONDONTWRITEBYTECODE PYTHONPYCACHEPREFIX="$affected_pycache" \
+  python3 -m pytest -q -p no:cacheprovider \
+    tests/test_session_memory_privacy_core.py
+env -u PYTHONDONTWRITEBYTECODE PYTHONPYCACHEPREFIX="$affected_pycache" \
+  python3 -m pytest -q -p no:cacheprovider \
+    tests/test_session_memory_outbox_core.py
+env -u PYTHONDONTWRITEBYTECODE PYTHONPYCACHEPREFIX="$affected_pycache" \
+  python3 -m pytest -q -p no:cacheprovider tests/test_session_memory.py \
+  -k 'generation_identity or loaded_producer_source'
+```
+
+Run the privacy-core command for privacy edits and the outbox-core command
+for outbox edits; retain the source-identity regression for either sibling.
+The real portable CLI/copy/install checks and the full source suite remain
+separate integration gates.
+
 The bytecode prefix must remain outside the checkout. Pytest assertion
 rewriting remains enabled for diagnostics. Python's default timestamp/size
 invalidation normally recompiles when a source or test byte length or recorded
