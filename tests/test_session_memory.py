@@ -66597,6 +66597,45 @@ def test_outbox_core_loader_binds_exact_sibling_over_foreign_cached_module(
     assert second is not first
 
 
+def test_import_core_loader_binds_exact_sibling_over_foreign_cached_module(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private_name = "_aoa_session_memory_import_source"
+    fixture_main = tmp_path / "aoa_session_memory.py"
+    fixture_core = tmp_path / "aoa_session_memory_import.py"
+    fixture_main.write_text("# fixture runtime\n", encoding="utf-8")
+    fixture_core.write_bytes(b'VALUE = "v1"\n')
+    initial_mtime_ns = fixture_core.stat().st_mtime_ns
+    foreign_path = tmp_path / "foreign" / "aoa_session_memory_import.py"
+    foreign_path.parent.mkdir()
+    foreign_path.write_bytes(b'VALUE = "foreign"\n')
+    foreign_spec = importlib.util.spec_from_file_location(
+        private_name,
+        foreign_path,
+    )
+    assert foreign_spec is not None and foreign_spec.loader is not None
+    foreign = importlib.util.module_from_spec(foreign_spec)
+    foreign_spec.loader.exec_module(foreign)
+    foreign.VALUE = "foreign"
+    monkeypatch.setattr(module, "__file__", str(fixture_main))
+    monkeypatch.setitem(sys.modules, private_name, foreign)
+
+    first = module._load_import_core_module()
+    assert first is not foreign
+    assert first.VALUE == "v1"
+    assert Path(first.__file__).resolve() == fixture_core.resolve()
+    assert module._load_import_core_module() is first
+
+    # Keep size and mtime stable so a timestamp-based bytecode cache cannot
+    # explain the source-edit reload.
+    fixture_core.write_bytes(b'VALUE = "v2"\n')
+    os.utime(fixture_core, ns=(initial_mtime_ns, initial_mtime_ns))
+    second = module._load_import_core_module()
+    assert second.VALUE == "v2"
+    assert second is not first
+
+
 def test_stage_work_identity_isolates_session_index_change(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
