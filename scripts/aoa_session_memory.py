@@ -132727,16 +132727,16 @@ def _search_sessions_with_isolated_generated_reader(
     timed_out = False
     deadline = started + (effective_timeout_ms / 1000.0)
     try:
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            timed_out = True
+        else:
+            process.join(timeout=remaining)
+            if process.is_alive():
                 timed_out = True
-                break
-            if not process.is_alive():
+            else:
                 process.join(timeout=0)
                 message = _read_search_generated_reader_message(output_path)
-                break
-            time.sleep(min(remaining, 0.05))
 
         if timed_out:
             cleanup = _stop_search_reader_process(
