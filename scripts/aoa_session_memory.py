@@ -132795,12 +132795,18 @@ def _search_sessions_with_isolated_generated_reader(
                 payload["cost_profile"]["generated_storage_attempt"] = payload[
                     "generated_storage_attempt"
                 ]
-                return _search_generated_reader_fallback(
+                payload = _search_generated_reader_fallback(
                     payload,
                     search_kwargs,
                     failure_kind="index_unavailable",
                     failure_scope="fts" if query_is_fts else "structured_filter",
                 )
+                if not cleanup.get("verified"):
+                    payload["ok"] = False
+                    payload.setdefault("diagnostics", []).append(
+                        "generated_search_reader_cleanup_unverified"
+                    )
+                return payload
             attempt = {
                 "status": "completed" if cleanup.get("verified") else "cleanup_unverified",
                 "enforcement": "isolated_generated_reader_process",
@@ -132815,14 +132821,14 @@ def _search_sessions_with_isolated_generated_reader(
                 "fallback_independent_of_reader": True,
                 "mutates": False,
             }
-        payload["generated_storage_attempt"] = attempt
-        payload.setdefault("cost_profile", {})["generated_storage_attempt"] = attempt
-        if not cleanup.get("verified"):
-            payload.setdefault("diagnostics", []).append(
-                "generated_search_reader_cleanup_unverified"
-            )
-            payload["ok"] = False
-        return payload
+            payload["generated_storage_attempt"] = attempt
+            payload.setdefault("cost_profile", {})["generated_storage_attempt"] = attempt
+            if not cleanup.get("verified"):
+                payload.setdefault("diagnostics", []).append(
+                    "generated_search_reader_cleanup_unverified"
+                )
+                payload["ok"] = False
+            return payload
 
         cleanup = _stop_search_reader_process(
             process,
@@ -132859,12 +132865,15 @@ def _search_sessions_with_isolated_generated_reader(
         payload["cost_profile"]["generated_storage_attempt"] = payload[
             "generated_storage_attempt"
         ]
-        return _search_generated_reader_fallback(
+        payload = _search_generated_reader_fallback(
             payload,
             search_kwargs,
             failure_kind="index_unavailable",
             failure_scope="fts" if query_is_fts else "structured_filter",
         )
+        if not cleanup.get("verified"):
+            payload["ok"] = False
+        return payload
     finally:
         _remove_search_generated_reader_output(output_path)
 
