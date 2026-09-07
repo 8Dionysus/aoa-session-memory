@@ -28,6 +28,13 @@ Foreground hooks are bounded and fail-open. A hook failure produces a receipt
 or incident that later recovery can inspect; it does not make the active agent
 session depend on archive health.
 
+Historical Codex import uses the small standard-library
+`scripts/aoa_session_memory_import.py` core for read-only transcript discovery,
+date-window selection, activity-mtime supplements, and optional size-lane
+prefiltering. The producer retains the richer title, lineage, and archive
+enrichment probe; the core stats current files on each invocation and keeps no
+result cache, so a same-size or same-mtime source edit is not silently reused.
+
 The generated Codex command first enters a small standard-library adapter. It
 atomically persists the exact private hook bytes, byte count, digest, selected
 roots, event kind, and signal count before returning schema-limited output.

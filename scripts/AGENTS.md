@@ -13,6 +13,8 @@ blast radius.
 - `aoa_session_memory.py` implements archive generation, hook handling,
   indexing, naming, distillation, validation, export, install, audit, and
   doctor checks.
+- `aoa_session_memory_import.py` owns the bounded, read-only Codex transcript
+  discovery and date/size selection core used by the producer.
 - `aoa_epistemic_action_event_chain.py` implements the portable append-only
   prediction/action/observation chain, replay and concurrency guards, typed
   discrepancy states, and shadow-only candidate inspection. It is re-exported

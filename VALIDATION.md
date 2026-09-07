@@ -39,11 +39,17 @@ outbox_core_pycache="$(mktemp -d "${TMPDIR:-/tmp}/aoa-session-memory-outbox.XXXX
 env -u PYTHONDONTWRITEBYTECODE PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPYCACHEPREFIX="$outbox_core_pycache" \
   python3 -m pytest -q -p no:cacheprovider --rootdir=. --confcutdir=. \
     tests/test_session_memory_outbox_core.py
+# Transcript-import sibling edit:
+import_core_pycache="$(mktemp -d "${TMPDIR:-/tmp}/aoa-session-memory-import.XXXXXX")"
+env -u PYTHONDONTWRITEBYTECODE PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPYCACHEPREFIX="$import_core_pycache" \
+  python3 -m pytest -q -p no:cacheprovider --rootdir=. --confcutdir=. \
+    tests/test_session_memory_import_core.py
 ```
 
-Use the privacy-core command for privacy edits and the outbox-core command
-for outbox edits. When changing the loader, source identity, or wiring around
-either sibling, add the monolith identity regression:
+Use the privacy-core command for privacy edits, the outbox-core command for
+outbox edits, and the transcript-import command for transcript discovery or
+selection edits. When changing the loader, source identity, or wiring around
+any sibling, add the monolith identity regression:
 
 ```bash
 identity_pycache="$(mktemp -d "${TMPDIR:-/tmp}/aoa-session-memory-identity.XXXXXX")"

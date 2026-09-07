@@ -108,6 +108,62 @@ def _load_outbox_core_module() -> Any:
 
 _OUTBOX_CORE = _load_outbox_core_module()
 
+
+def _load_import_core_module() -> Any:
+    """Load the bounded Codex transcript import core from this exact sibling."""
+    module_name = "_aoa_session_memory_import_source"
+    source_digest_attr = "__aoa_session_memory_import_source_sha256__"
+    source_path = Path(__file__).resolve().with_name(
+        "aoa_session_memory_import.py"
+    )
+    try:
+        source_bytes = source_path.read_bytes()
+    except OSError:
+        source_bytes = None
+    source_sha256 = (
+        hashlib.sha256(source_bytes).hexdigest()
+        if source_bytes is not None
+        else ""
+    )
+    loaded = sys.modules.get(module_name)
+    loaded_path = getattr(loaded, "__file__", None)
+    if (
+        loaded is not None
+        and loaded_path is not None
+        and Path(loaded_path).resolve() == source_path
+        and source_sha256
+        and getattr(loaded, source_digest_attr, None) == source_sha256
+    ):
+        return loaded
+    spec = importlib.util.spec_from_file_location(module_name, source_path)
+    if spec is None or spec.loader is None:
+        raise ImportError("aoa session-memory import core source is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    missing = object()
+    previous = sys.modules.get(module_name, missing)
+    sys.modules[module_name] = module
+    try:
+        if source_bytes is not None and isinstance(
+            spec.loader,
+            SourceFileLoader,
+        ):
+            # Compile the exact bytes read above so a stale same-path pyc cannot
+            # satisfy a rapid source edit.
+            exec(
+                compile(source_bytes, str(source_path), "exec"),
+                module.__dict__,
+            )
+        else:
+            spec.loader.exec_module(module)
+        setattr(module, source_digest_attr, source_sha256)
+    except BaseException:
+        if previous is missing:
+            sys.modules.pop(module_name, None)
+        else:
+            sys.modules[module_name] = previous
+        raise
+    return module
+
 PROJECTION_OUTBOX_CONSUMER_MAX_ATTEMPTS = (
     _OUTBOX_CORE.PROJECTION_OUTBOX_CONSUMER_MAX_ATTEMPTS
 )
@@ -283,6 +339,12 @@ def _load_privacy_core_module() -> Any:
 _EPISTEMIC_ACTION_EVENT_CHAIN = _load_epistemic_action_event_chain_module()
 _ENTITY_USAGE_PARSERS = _load_entity_usage_parsers_module()
 _PRIVACY_CORE = _load_privacy_core_module()
+_IMPORT_CORE = _load_import_core_module()
+
+parse_date_arg = _IMPORT_CORE.parse_date_arg
+parse_timestamp_arg = _IMPORT_CORE.parse_timestamp_arg
+since_date_from_args = _IMPORT_CORE.since_date_from_args
+transcript_path_date_hint = _IMPORT_CORE.transcript_path_date_hint
 
 for _privacy_name in _PRIVACY_CORE.__all__:
     globals()[_privacy_name] = getattr(_PRIVACY_CORE, _privacy_name)
@@ -868,11 +930,17 @@ SESSION_MEMORY_LOADED_PRIVACY_CORE_PATH = (
         "aoa_session_memory_privacy.py"
     )
 )
+SESSION_MEMORY_LOADED_IMPORT_CORE_PATH = (
+    SESSION_MEMORY_LOADED_PRODUCER_PATH.with_name(
+        "aoa_session_memory_import.py"
+    )
+)
 SESSION_MEMORY_LOADED_PRODUCER_SOURCE_PATHS = (
     SESSION_MEMORY_LOADED_PRODUCER_PATH,
     SESSION_MEMORY_LOADED_ENTITY_USAGE_PARSER_PATH,
     SESSION_MEMORY_LOADED_OUTBOX_CORE_PATH,
     SESSION_MEMORY_LOADED_PRIVACY_CORE_PATH,
+    SESSION_MEMORY_LOADED_IMPORT_CORE_PATH,
 )
 
 
@@ -900,6 +968,9 @@ try:
     )
     _session_memory_loaded_privacy_core_bytes = (
         SESSION_MEMORY_LOADED_PRIVACY_CORE_PATH.read_bytes()
+    )
+    _session_memory_loaded_import_core_bytes = (
+        SESSION_MEMORY_LOADED_IMPORT_CORE_PATH.read_bytes()
     )
 except OSError:
     SESSION_MEMORY_LOADED_PRODUCER_SHA256 = ""
@@ -930,6 +1001,12 @@ else:
                     _session_memory_loaded_privacy_core_bytes
                 ).hexdigest(),
             ),
+            (
+                SESSION_MEMORY_LOADED_IMPORT_CORE_PATH,
+                hashlib.sha256(
+                    _session_memory_loaded_import_core_bytes
+                ).hexdigest(),
+            ),
         )
     )
     SESSION_MEMORY_LOADED_PROJECTION_PRODUCER_CONTRACTS = {
@@ -944,6 +1021,7 @@ finally:
     _session_memory_loaded_entity_usage_parser_bytes = b""
     _session_memory_loaded_outbox_core_bytes = b""
     _session_memory_loaded_privacy_core_bytes = b""
+    _session_memory_loaded_import_core_bytes = b""
 
 if "SESSION_MEMORY_LOADED_PROJECTION_PRODUCER_CONTRACTS" not in globals():
     SESSION_MEMORY_LOADED_PROJECTION_PRODUCER_CONTRACTS: dict[
@@ -18554,60 +18632,6 @@ def transcript_size_prefilter_record(
     }
 
 
-def parse_date_arg(value: str | None) -> str | None:
-    if not value:
-        return None
-    match = re.search(r"(20\d{2})[-_]?([01]\d)[-_]?([0-3]\d)", value)
-    if not match:
-        raise ValueError(f"expected date like YYYY-MM-DD, got {value!r}")
-    return f"{match.group(1)}-{match.group(2)}-{match.group(3)}"
-
-
-def parse_timestamp_arg(value: str | None) -> str | None:
-    if not value:
-        return None
-    candidate = str(value).strip()
-    if re.fullmatch(r"20\d{2}-[01]\d-[0-3]\d", candidate):
-        candidate = f"{candidate}T00:00:00Z"
-    normalized = candidate[:-1] + "+00:00" if candidate.endswith("Z") else candidate
-    try:
-        parsed = datetime.fromisoformat(normalized)
-    except ValueError as exc:
-        raise ValueError(f"expected ISO-8601 timestamp, got {value!r}") from exc
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
-
-
-def since_date_from_args(since: str | None, since_days: int | None) -> str | None:
-    explicit = parse_date_arg(since)
-    if explicit:
-        return explicit
-    if since_days is None:
-        return None
-    return (datetime.now(timezone.utc) - timedelta(days=since_days)).strftime("%Y-%m-%d")
-
-
-def transcript_path_date_hint(raw_path: Path, source_root: Path) -> str | None:
-    try:
-        parts = raw_path.relative_to(source_root).parts
-    except ValueError:
-        parts = raw_path.parts
-    for index in range(max(0, len(parts) - 2)):
-        year, month, day = parts[index : index + 3]
-        if not (re.fullmatch(r"20\d{2}", year) and re.fullmatch(r"[01]\d", month) and re.fullmatch(r"[0-3]\d", day)):
-            continue
-        try:
-            datetime(int(year), int(month), int(day), tzinfo=timezone.utc)
-        except ValueError:
-            continue
-        return f"{year}-{month}-{day}"
-    try:
-        return parse_date_arg(raw_path.name)
-    except ValueError:
-        return None
-
-
 def discover_codex_transcripts(
     *,
     source_root: Path,
@@ -18617,71 +18641,24 @@ def discover_codex_transcripts(
     min_raw_bytes: int | None = None,
     max_raw_bytes: int | None = None,
 ) -> list[dict[str, Any]]:
-    source_root = source_root.expanduser()
-    if not source_root.exists():
-        return []
-    since_date = parse_date_arg(since)
-    until_date = parse_date_arg(until)
-    records: list[dict[str, Any]] = []
-    for raw_path in sorted(source_root.rglob("*.jsonl")):
-        if not raw_path.is_file():
-            continue
-        try:
-            source_stat = raw_path.stat()
-        except OSError:
-            continue
-        activity_window_match = bool(
-            activity_since_epoch is not None
-            and source_stat.st_mtime >= float(activity_since_epoch)
-        )
-        path_date = transcript_path_date_hint(raw_path, source_root)
-        path_date_outside_window = False
-        if path_date:
-            if since_date and path_date < since_date:
-                path_date_outside_window = True
-            if until_date and path_date > until_date:
-                path_date_outside_window = True
-            if path_date_outside_window and not activity_window_match:
-                continue
-        outside_size_lane = bool(
-            (
-                min_raw_bytes is not None
-                and source_stat.st_size < int(min_raw_bytes)
-            )
-            or (
-                max_raw_bytes is not None
-                and source_stat.st_size > int(max_raw_bytes)
-            )
-        )
-        if outside_size_lane:
-            record = transcript_size_prefilter_record(
+    return _IMPORT_CORE.discover_codex_transcripts(
+        source_root=source_root,
+        since=since,
+        until=until,
+        activity_since_epoch=activity_since_epoch,
+        min_raw_bytes=min_raw_bytes,
+        max_raw_bytes=max_raw_bytes,
+        # Keep the producer's richer metadata/title/lineage probe while the
+        # bounded core owns traversal, date windows, and stat-based selection.
+        transcript_probe=transcript_probe,
+        transcript_size_prefilter_record=(
+            lambda raw_path, source_stat, path_date: transcript_size_prefilter_record(
                 raw_path,
                 source_stat=source_stat,
                 path_date=path_date,
             )
-        else:
-            record = transcript_probe(raw_path)
-        session_date = str(record.get("session_date") or "")
-        session_date_outside_window = bool(
-            (since_date and session_date < since_date)
-            or (until_date and session_date > until_date)
-        )
-        if session_date_outside_window and not activity_window_match:
-            continue
-        activity_supplement = bool(
-            activity_window_match
-            and (path_date_outside_window or session_date_outside_window)
-        )
-        record["source_mtime_epoch"] = source_stat.st_mtime
-        record["selection_source"] = (
-            "activity_mtime_supplement"
-            if activity_supplement
-            else "date_window"
-        )
-        record["activity_window_match"] = activity_window_match
-        records.append(record)
-    records.sort(key=lambda item: (str(item.get("session_date") or ""), str(item.get("timestamp") or ""), str(item.get("transcript_path") or "")))
-    return records
+        ),
+    )
 
 
 def existing_archive_by_session_id(aoa_root: Path) -> dict[str, dict[str, Any]]:
@@ -224784,6 +224761,7 @@ def command_audit(args: argparse.Namespace) -> int:
 REQUIRED_TEST_ROOT_FILES = [
     "tests/AGENTS.md",
     "tests/test_session_memory.py",
+    "tests/test_session_memory_import_core.py",
     "tests/session_memory_test_support.py",
     "tests/test_session_memory_doctor.py",
     "tests/test_session_memory_outbox.py",
@@ -224893,6 +224871,7 @@ REQUIRED_ROOT_FILES = [
     "scripts/aoa_session_memory_entity_usage_parsers.py",
     "scripts/aoa_session_memory_outbox.py",
     "scripts/aoa_session_memory_privacy.py",
+    "scripts/aoa_session_memory_import.py",
     "scripts/validate_local_stats_port.py",
     "sessions/AGENTS.md",
     "skills/AGENTS.md",
