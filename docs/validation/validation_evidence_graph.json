@@ -79,11 +79,13 @@
         "scripts/validation_scheduler_experiment.py",
         "scripts/pytest_scheduler_experiment.py",
         "scripts/pytest_scheduler_probe.py",
+        "scripts/pytest_checked_hash_core.py",
         "scripts/release_check.py",
         "scripts/validate_release_artifacts.py",
         ".github/workflows/**",
         "tests/test_validation_evidence_graph.py",
-        "tests/test_validation_scheduler_experiment.py"
+        "tests/test_validation_scheduler_experiment.py",
+        "tests/test_pytest_checked_hash_core.py"
       ],
       "claims": [
         "validation-graph-integrity",
@@ -185,10 +187,12 @@
         "scripts/validation_scheduler_experiment.py",
         "scripts/pytest_scheduler_experiment.py",
         "scripts/pytest_scheduler_probe.py",
+        "scripts/pytest_checked_hash_core.py",
         "scripts/release_check.py",
         "scripts/validate_release_artifacts.py",
         "tests/test_validation_evidence_graph.py",
-        "tests/test_validation_scheduler_experiment.py"
+        "tests/test_validation_scheduler_experiment.py",
+        "tests/test_pytest_checked_hash_core.py"
       ],
       "steps": [
         {
@@ -201,7 +205,8 @@
             "-p",
             "no:cacheprovider",
             "tests/test_validation_evidence_graph.py",
-            "tests/test_validation_scheduler_experiment.py"
+            "tests/test_validation_scheduler_experiment.py",
+            "tests/test_pytest_checked_hash_core.py"
           ]
         }
       ]

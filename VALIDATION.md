@@ -59,17 +59,43 @@ env -u PYTHONDONTWRITEBYTECODE PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPYCACHEPRE
   -k 'generation_identity or loaded_producer_source'
 ```
 
+For repeated local feedback on one focused core, the opt-in checked-hash
+runner keeps one dedicated external prefix shared by the three focused cores.
+Invoke it with `python3 -B`:
+
+```bash
+python3 -B scripts/pytest_checked_hash_core.py --core privacy
+python3 -B scripts/pytest_checked_hash_core.py --core outbox
+python3 -B scripts/pytest_checked_hash_core.py --core import
+```
+
+Each invocation runs exactly one focused test through `pytest.main()` in the
+initializer process. On the first invocation, an empty prefix is bound before
+pytest is imported; after the test, the runner primes checked-hash bytecode
+from sources in `sys.modules` plus the selected product-core source and the
+selected test, using Python's bytecode API. The shared prefix is therefore
+safe across later core selections even when their source has not been primed:
+Python validates an available cache per file and otherwise falls back to
+source. Later invocations only run the focused test. `-B` (also enforced
+in-process) preserves
+pytest assertion rewriting for ordinary failure diagnostics while preventing
+a persistent `*-pytest-*.pyc` cache. The runner rejects a prefix containing
+timestamp-based or pytest-rewrite bytecode, so do not point it at an ordinary
+or previously reused prefix. It disables pytest's result cache and creates
+only a local external bytecode cache; it does not install a runtime, change
+global configuration, or write a receipt or registry. This is an owner-local
+feedback route, not CI, release, installed-protocol, or runtime acceptance
+evidence.
+
 The real portable CLI/copy/install checks and the full source suite remain
 separate integration gates.
 
-The bytecode prefix must remain outside the checkout. Pytest assertion
-rewriting remains enabled for diagnostics. Python's default timestamp/size
-invalidation normally recompiles when a source or test byte length or recorded
-timestamp changes. The standard `.pyc` timestamp has one-second precision, so a
-rapid same-size edit within the same timestamp second can reuse stale external
-bytecode even when `st_mtime_ns` changes; preserving both stored fields has the
-same limit. Rotate or clear the prefix when metadata-preserving or rapid
-same-second edits are possible. CI's `runner.temp` prefix is fresh per job.
+The checked-hash bytecode prefix must remain outside the checkout. Pytest
+assertion rewriting remains enabled for diagnostics. The ordinary direct
+commands above still use Python's default timestamp/size invalidation; a rapid
+same-size edit within one timestamp second can reuse stale bytecode there, so
+use a fresh prefix for those commands when needed. The checked-hash runner
+validates source contents per file. CI's `runner.temp` prefix is fresh per job.
 
 ## Decisions
 
