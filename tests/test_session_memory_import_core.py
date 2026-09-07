@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -53,6 +54,21 @@ def epoch(value: str) -> float:
     return datetime.fromisoformat(value).replace(tzinfo=timezone.utc).timestamp()
 
 
+def candidate_record(path: Path) -> dict[str, object]:
+    """Records for these synthetic fixtures, not another production parser."""
+    payload = json.loads(path.read_text().splitlines()[0])["payload"]
+    return {
+        "session_id": payload["id"],
+        "transcript_path": str(path),
+        "session_date": payload["timestamp"][:10],
+        "timestamp": payload["timestamp"],
+    }
+
+
+def unexpected_size_prefilter(*_args: object) -> dict[str, object]:
+    pytest.fail("a transcript inside the size lane must use the producer probe")
+
+
 def test_date_helpers_keep_bounded_normalization_and_reject_invalid_values() -> None:
     assert module.parse_date_arg("rollout_2026-09-07.jsonl") == "2026-09-07"
     assert module.parse_date_arg("20260907") == "2026-09-07"
@@ -102,6 +118,8 @@ def test_discovery_applies_date_and_activity_windows_with_deterministic_order(
 
     records = module.discover_codex_transcripts(
         source_root=source_root,
+        transcript_probe=candidate_record,
+        transcript_size_prefilter_record=unexpected_size_prefilter,
         since="2026-09-07",
         activity_since_epoch=epoch("2026-09-08T00:00:00"),
     )
@@ -185,6 +203,7 @@ def test_discovery_reads_current_bytes_on_same_size_and_mtime_mutation(
     first = module.discover_codex_transcripts(
         source_root=source_root,
         transcript_probe=probe,
+        transcript_size_prefilter_record=unexpected_size_prefilter,
     )
     assert first[0]["session_id"] == "alpha"
 
@@ -200,6 +219,7 @@ def test_discovery_reads_current_bytes_on_same_size_and_mtime_mutation(
     second = module.discover_codex_transcripts(
         source_root=source_root,
         transcript_probe=probe,
+        transcript_size_prefilter_record=unexpected_size_prefilter,
     )
     assert second[0]["session_id"] == "bravo"
     assert len(seen) == 2

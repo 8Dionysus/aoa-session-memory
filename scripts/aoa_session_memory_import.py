@@ -1,15 +1,14 @@
-"""Small, source-only boundary for Codex transcript candidate collection.
+"""Small, read-only boundary for Codex transcript candidate selection.
 
 The session-memory producer owns enrichment and archive synchronization.  This
-module owns only the bounded, read-only part of historical import selection so
+module owns only the read-only part of historical import selection so
 that collection policy can be tested without importing the full producer.
-Callbacks let the producer keep its richer title/lineage probe while the
-standalone route remains useful with its conservative metadata probe.
+Required callbacks keep metadata, title, and lineage parsing with the producer;
+this module does not introduce a second transcript parser.
 """
 
 from __future__ import annotations
 
-import json
 import os
 import re
 from datetime import datetime, timedelta, timezone
@@ -88,154 +87,23 @@ def transcript_path_date_hint(raw_path: Path, source_root: Path) -> str | None:
         return None
 
 
-def _default_metadata_probe(
-    raw_path: Path,
-    *,
-    source_root: Path | None = None,
-) -> dict[str, Any]:
-    """Conservatively identify a transcript without importing the producer."""
-
-    event: dict[str, Any] = {"transcript_path": str(raw_path)}
-    try:
-        with raw_path.open("r", encoding="utf-8", errors="replace") as handle:
-            for line_no, line in enumerate(handle, start=1):
-                if line_no > 40:
-                    break
-                try:
-                    parsed = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(parsed, dict) or parsed.get("type") != "session_meta":
-                    continue
-                payload = parsed.get("payload")
-                if not isinstance(payload, dict):
-                    continue
-                for key in (
-                    "id",
-                    "cwd",
-                    "timestamp",
-                    "model",
-                    "model_provider",
-                    "cli_version",
-                ):
-                    if payload.get(key):
-                        event[key] = payload[key]
-                break
-    except OSError:
-        pass
-    source_stat = raw_path.stat()
-    path_date = transcript_path_date_hint(
-        raw_path,
-        source_root if source_root is not None else raw_path.parent,
-    )
-    timestamp = str(event.get("timestamp") or "")
-    try:
-        session_date = parse_date_arg(timestamp)
-    except ValueError:
-        session_date = None
-    session_id = str(event.get("id") or raw_path.stem)
-    return {
-        "session_id": session_id,
-        "transcript_path": str(raw_path),
-        "session_date": session_date or path_date or datetime.fromtimestamp(
-            source_stat.st_mtime, timezone.utc
-        ).strftime("%Y-%m-%d"),
-        "title": raw_path.stem,
-        "title_source": "transcript_path_metadata_probe",
-        "cwd": event.get("cwd"),
-        "timestamp": event.get("timestamp"),
-        "model": event.get("model"),
-        "model_provider": event.get("model_provider"),
-        "cli_version": event.get("cli_version"),
-        "lineage": {},
-        "bytes": source_stat.st_size,
-        "mtime": datetime.fromtimestamp(
-            source_stat.st_mtime, timezone.utc
-        ).strftime("%Y-%m-%dT%H:%M:%SZ"),
-    }
-
-
-def _default_size_prefilter(
-    raw_path: Path,
-    source_stat: os.stat_result,
-    path_date: str | None,
-) -> dict[str, Any]:
-    """Read only the identity prefix for a transcript outside the size lane."""
-
-    event: dict[str, Any] = {"transcript_path": str(raw_path)}
-    try:
-        with raw_path.open("r", encoding="utf-8", errors="replace") as handle:
-            for line_no, line in enumerate(handle, start=1):
-                if line_no > 40:
-                    break
-                try:
-                    parsed = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                payload = (
-                    parsed.get("payload")
-                    if isinstance(parsed, dict)
-                    and isinstance(parsed.get("payload"), dict)
-                    else {}
-                )
-                if not isinstance(parsed, dict) or parsed.get("type") != "session_meta":
-                    continue
-                if payload.get("id"):
-                    event["id"] = payload["id"]
-                for key in (
-                    "cwd",
-                    "timestamp",
-                    "model",
-                    "model_provider",
-                    "cli_version",
-                ):
-                    if payload.get(key):
-                        event[key] = payload[key]
-                break
-    except OSError:
-        pass
-    try:
-        timestamp_date = parse_date_arg(str(event.get("timestamp") or ""))
-    except ValueError:
-        timestamp_date = None
-    return {
-        "session_id": str(event.get("id") or raw_path.stem),
-        "transcript_path": str(raw_path),
-        "session_date": timestamp_date or path_date or datetime.fromtimestamp(
-            source_stat.st_mtime, timezone.utc
-        ).strftime("%Y-%m-%d"),
-        "title": raw_path.stem,
-        "title_source": "transcript_path_size_prefilter",
-        "cwd": event.get("cwd"),
-        "timestamp": event.get("timestamp"),
-        "model": event.get("model"),
-        "model_provider": event.get("model_provider"),
-        "cli_version": event.get("cli_version"),
-        "lineage": {},
-        "bytes": source_stat.st_size,
-        "mtime": datetime.fromtimestamp(
-            source_stat.st_mtime, timezone.utc
-        ).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "metadata_probe_status": "identity_only_size_prefilter",
-    }
-
-
 def discover_codex_transcripts(
     *,
     source_root: Path,
+    transcript_probe: TranscriptProbe,
+    transcript_size_prefilter_record: SizePrefilter,
     since: str | None = None,
     until: str | None = None,
     activity_since_epoch: float | None = None,
     min_raw_bytes: int | None = None,
     max_raw_bytes: int | None = None,
-    transcript_probe: TranscriptProbe | None = None,
-    transcript_size_prefilter_record: SizePrefilter | None = None,
 ) -> list[dict[str, Any]]:
-    """Collect candidate transcripts using only bounded source metadata.
+    """Select candidate transcripts from current paths, stats, and probe records.
 
     No result cache is consulted.  Every invocation stats the current files,
     and the supplied callbacks are called after that stat, preserving the
-    producer's richer source/title/lineage behavior when it is available.
+    producer's source/title/lineage behavior. Discovery walks the complete
+    source tree; this extraction adds no file-count or transcript-byte budget.
     """
 
     source_root = source_root.expanduser()
@@ -243,13 +111,6 @@ def discover_codex_transcripts(
         return []
     since_date = parse_date_arg(since)
     until_date = parse_date_arg(until)
-    probe = transcript_probe or (
-        lambda raw_path: _default_metadata_probe(
-            raw_path,
-            source_root=source_root,
-        )
-    )
-    size_prefilter = transcript_size_prefilter_record or _default_size_prefilter
     records: list[dict[str, Any]] = []
     for raw_path in sorted(source_root.rglob("*.jsonl")):
         if not raw_path.is_file():
@@ -282,9 +143,9 @@ def discover_codex_transcripts(
             )
         )
         if outside_size_lane:
-            record = size_prefilter(raw_path, source_stat, path_date)
+            record = transcript_size_prefilter_record(raw_path, source_stat, path_date)
         else:
-            record = probe(raw_path)
+            record = transcript_probe(raw_path)
         session_date = str(record.get("session_date") or "")
         session_date_outside_window = bool(
             (since_date and session_date < since_date)
