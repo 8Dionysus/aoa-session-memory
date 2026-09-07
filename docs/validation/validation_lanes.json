@@ -41,7 +41,8 @@
           "-p",
           "no:cacheprovider",
           "tests/test_validation_evidence_graph.py",
-          "tests/test_validation_scheduler_experiment.py"
+          "tests/test_validation_scheduler_experiment.py",
+          "tests/test_pytest_checked_hash_core.py"
         ]
       },
       {
