@@ -137,7 +137,7 @@ nodes:
 
   - id: skill.aoa-session-memory-global-route
     title: Global session-memory router
-    description: Use in any Codex session when the user mentions `.aoa`, session memory, Codex transcripts, compaction, prior session rehydration, hook failures, or AoA session-memory validation.
+    description: "Use when an agent needs to route `.aoa` session-memory work: evidence retrieval, archive lookup, rehydration, projection, validation, or an adapter-specific transcript, hook, or compaction operation."
     purpose: Select the narrowest owner capability and preserve source, runtime, and proof boundaries.
     kind: skill
     contract_level: executable
@@ -148,7 +148,7 @@ nodes:
       authority: authored
     lifecycle:
       state: experimental
-      version: 1.0.0
+      version: 1.0.1
       visibility: advertised
       evidence_state: manual-baseline
       health: challenger
@@ -203,7 +203,7 @@ nodes:
       authority: authored
     lifecycle: &advertised_lifecycle
       state: experimental
-      version: 1.0.0
+      version: 1.0.1
       visibility: advertised
       evidence_state: manual-baseline
       health: challenger

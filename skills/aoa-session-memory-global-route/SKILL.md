@@ -1,6 +1,6 @@
 ---
 name: aoa-session-memory-global-route
-description: Use in any Codex session when the user mentions `.aoa`, session memory, Codex transcripts, compaction, prior session rehydration, hook failures, or AoA session-memory validation.
+description: "Use when an agent needs to route `.aoa` session-memory work: evidence retrieval, archive lookup, rehydration, projection, validation, or an adapter-specific transcript, hook, or compaction operation."
 license: Apache-2.0
 metadata:
   aoa_scope: session-memory
@@ -22,16 +22,29 @@ Resolve three logical roots before acting:
 
 Concrete paths are runtime bindings, not portable skill identity.
 
+## Required Capabilities
+
+Selection needs readable owner guidance and the capability router. Execution
+needs the selected operation's actual inputs, permissions, and an available
+read-only MCP or owner CLI binding. A filesystem read, a query response, and
+an adapter lifecycle event are different capabilities; availability of one
+does not imply the others.
+
+Use the same evidence and scope contract for every consumer. Model and
+reasoning settings are execution configuration, not role identity, authority,
+or a different acceptance rule. The home-port's consumer exposure declares
+eligibility only; it does not install or activate a runtime.
+
 ## Trigger Boundary
 
-Use this skill in any Codex session when the task touches:
+Use this skill when the task touches:
 
 - `.aoa` session memory
-- Codex raw transcript JSONL
-- context compaction or compaction intervals
+- preserved session evidence or raw transcripts
+- context continuity or archived compaction intervals
 - prior-session resume, rehydration, or session archive lookup
-- AoA hooks for `SessionStart`, `UserPromptSubmit`, `PreCompact`,
-  `PostCompact`, or `Stop`
+- capture hooks, including the Codex adapter's `SessionStart`,
+  `UserPromptSubmit`, `PreCompact`, `PostCompact`, or `Stop`
 - `raw_unavailable` incidents
 - `stress-pass`, `audit`, `doctor`, `codex-hooks-status`, or
   `codex-compact-probe`
@@ -65,7 +78,11 @@ Use this skill in any Codex session when the task touches:
    [references/capability-router.md](references/capability-router.md), verify
    its source hash against the generated graph when composition matters, and
    choose the smallest applicable bundle.
-4. Use `<aoa-root>/scripts/aoa_session_memory.py` for commands.
+4. Bind the selected operation to an actually available read-only MCP tool or
+   `<aoa-root>/scripts/aoa_session_memory.py` CLI command. For Codex hooks,
+   transcript import, app-server or live compaction, select `adapters.codex`
+   and its exact requirements. Missing adapter capabilities block that
+   operation; they do not block an independent authorized archive read.
 5. Keep historical raw/session material intact unless the user explicitly asks
    for a repair.
 6. If the task changes portable behavior, export to

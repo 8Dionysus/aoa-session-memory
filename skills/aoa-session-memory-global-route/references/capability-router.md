@@ -2,13 +2,13 @@
 
 Generated from owner capability contracts. This card is a retrieval read model, not procedure or proof authority.
 
-Source graph hash: `f6d51e2a0f348f2444f337fa652440d931296924119cd3b503d3d25da1c3a74a`
+Source graph hash: `8e0659361a4ff83f8b7bbcaea696e4dadfb41b3871bdec37b81a0825fd6a9fd7`
 Federation: `aoa-session-memory` specializes `aoa-skills:sessions`.
 
 | skill | visibility | use when | do not use when | version | fingerprint |
 |---|---|---|---|---|---|
-| `aoa-session-memory-evidence-route` | advertised | The answer depends on what happened in prior .aoa sessions and must carry resolvable raw or segment refs. | Current repository or runtime state is the stronger source and no historical behavior question remains. | 1.0.0 | `383667122ea265f7` |
-| `aoa-session-memory-global-route` | advertised | The request names session memory; .aoa; transcripts; compaction; rehydration; hooks; or session-memory validation. | A narrower non-session-memory owner is already known and no session evidence or session-memory operation is required. | 1.0.0 | `f459356ad356a679` |
+| `aoa-session-memory-evidence-route` | advertised | The answer depends on what happened in prior .aoa sessions and must carry resolvable raw or segment refs. | Current repository or runtime state is the stronger source and no historical behavior question remains. | 1.0.1 | `2adca52eea64742a` |
+| `aoa-session-memory-global-route` | advertised | The request names session memory; .aoa; transcripts; compaction; rehydration; hooks; or session-memory validation. | A narrower non-session-memory owner is already known and no session evidence or session-memory operation is required. | 1.0.1 | `d0e36e745baafe44` |
 | `aoa-codex-compact-probe` | deferred | The live Codex pre/post-compaction hook path requires an explicit behavioral probe. | Static hook registry inspection is sufficient and no behavioral probe is requested.; The runtime is not Codex. | 1.0.0 | `ef1990131b253144` |
 | `aoa-codex-hooks-status` | deferred | Native Codex hook registration or trust must be inspected for one selected root. | The runtime is not Codex or the question concerns archive content rather than hook state. | 1.0.0 | `adc1e110880d28ee` |
 | `aoa-codex-session-segment-archive` | deferred | A concrete Codex transcript must be archived or a missed archive event must be replayed. | The source is not a Codex transcript or the raw source cannot be read and verified. | 1.0.0 | `06f718756dbb22dd` |

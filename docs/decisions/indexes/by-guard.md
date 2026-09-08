@@ -254,6 +254,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0017 Bounded Temporal Interval Reading Before Answer Admission](../AOA-SM-D-0017-bounded-temporal-interval-reading-before-answer-admission.md) | 2026-07-18 | Accepted | `docs/decisions/AOA-SM-D-0017-bounded-temporal-interval-reading-before-answer-admission.md` |
 
+## bounded mutation
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0102 Independent Skill Interface Delivery](../AOA-SM-D-0102-independent-skill-interface-delivery.md) | 2026-09-08 | Accepted | `docs/decisions/AOA-SM-D-0102-independent-skill-interface-delivery.md` |
+
 ## bounded producer contract
 
 | Decision | Date | Status | Path |
@@ -1217,6 +1223,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0070 Coalesced Hook Intent and Contention-Neutral Retry](../AOA-SM-D-0070-coalesced-hook-intent-and-contention-neutral-retry.md) | 2026-08-13 | Accepted | `docs/decisions/AOA-SM-D-0070-coalesced-hook-intent-and-contention-neutral-retry.md` |
 
+## kernel preservation
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0102 Independent Skill Interface Delivery](../AOA-SM-D-0102-independent-skill-interface-delivery.md) | 2026-09-08 | Accepted | `docs/decisions/AOA-SM-D-0102-independent-skill-interface-delivery.md` |
+
 ## last-good fallback
 
 | Decision | Date | Status | Path |
@@ -1403,6 +1415,7 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0018 Owner Capability Home And Skill Evidence Lifecycle](../AOA-SM-D-0018-owner-capability-home-and-skill-evidence-lifecycle.md) | 2026-07-18 | Accepted | `docs/decisions/AOA-SM-D-0018-owner-capability-home-and-skill-evidence-lifecycle.md` |
+| [AOA-SM-D-0102 Independent Skill Interface Delivery](../AOA-SM-D-0102-independent-skill-interface-delivery.md) | 2026-09-08 | Accepted | `docs/decisions/AOA-SM-D-0102-independent-skill-interface-delivery.md` |
 
 ## parent-death
 
@@ -1839,6 +1852,7 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0023 Manifest-Committed Graph Sidecar Publication](../AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md) | 2026-07-19 | Accepted | `docs/decisions/AOA-SM-D-0023-manifest-committed-graph-sidecar-publication.md` |
+| [AOA-SM-D-0102 Independent Skill Interface Delivery](../AOA-SM-D-0102-independent-skill-interface-delivery.md) | 2026-09-08 | Accepted | `docs/decisions/AOA-SM-D-0102-independent-skill-interface-delivery.md` |
 
 ## round-robin fairness
 
@@ -1989,6 +2003,7 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0028 Authoritative Registry Rebuild Excludes Generated History](../AOA-SM-D-0028-authoritative-registry-rebuild-excludes-generated-history.md) | 2026-07-20 | Accepted | `docs/decisions/AOA-SM-D-0028-authoritative-registry-rebuild-excludes-generated-history.md` |
+| [AOA-SM-D-0102 Independent Skill Interface Delivery](../AOA-SM-D-0102-independent-skill-interface-delivery.md) | 2026-09-08 | Accepted | `docs/decisions/AOA-SM-D-0102-independent-skill-interface-delivery.md` |
 
 ## source epoch
 

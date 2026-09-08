@@ -22,6 +22,14 @@ Architecture belongs to `DESIGN.md`. Commands and recovery procedures belong
 to `PIPELINE.md`. Naming belongs to `NAMING.md`. Current status belongs to
 live diagnostics.
 
+The two advertised skill routers describe operations and required
+capabilities. `skills/port.manifest.json` keeps admitted owner packages
+separate from consumer exposures; the current Codex user profile is one
+explicit exposure. A reader may inspect a neutral package without installing
+it. Model or reasoning configuration does not change its evidence, authority,
+or result contract. Codex hook events, JSONL ingress, app-server calls, and
+live compaction remain under `session-memory.adapters.codex`.
+
 ## Agent Access Thesis
 
 An agent should receive the smallest evidence-bearing packet that can answer

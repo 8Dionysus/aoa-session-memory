@@ -4,6 +4,7 @@
 
 | Date | Decision | Status | Path |
 | --- | --- | --- | --- |
+| 2026-09-08 | [AOA-SM-D-0102 Independent Skill Interface Delivery](../AOA-SM-D-0102-independent-skill-interface-delivery.md) | Accepted | `docs/decisions/AOA-SM-D-0102-independent-skill-interface-delivery.md` |
 | 2026-08-26 | [AOA-SM-D-0100 Bounded Fair Consumer Retirement Admission](../AOA-SM-D-0100-bounded-fair-consumer-retirement-admission.md) | Accepted | `docs/decisions/AOA-SM-D-0100-bounded-fair-consumer-retirement-admission.md` |
 | 2026-08-26 | [AOA-SM-D-0099 Terminal Outbox Retirement and Staged Freshness Retry](../AOA-SM-D-0099-terminal-outbox-retirement-and-staged-freshness-retry.md) | Accepted | `docs/decisions/AOA-SM-D-0099-terminal-outbox-retirement-and-staged-freshness-retry.md` |
 | 2026-08-26 | [AOA-SM-D-0098 Bounded Generated-Reader Process Boundary](../AOA-SM-D-0098-bounded-generated-reader-process-boundary.md) | Accepted | `docs/decisions/AOA-SM-D-0098-bounded-generated-reader-process-boundary.md` |
