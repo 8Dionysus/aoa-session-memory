@@ -512,7 +512,9 @@ nodes:
     contract_level: executable
     primary_parent: session-memory.stewardship.project
     owner: {repo: aoa-session-memory, surface: skills/aoa-session-reindex/SKILL.md, authority: authored}
-    lifecycle: *deferred_lifecycle
+    lifecycle:
+      <<: *deferred_lifecycle
+      version: 1.0.1
     applicability:
       use_when: [Preserved archives require projection rebuild after source-owned classifier, schema, taxonomy, or relation changes.]
       do_not_use_when: [Raw evidence itself is missing or the request only needs a query against a current index.]
@@ -596,7 +598,9 @@ nodes:
     contract_level: executable
     primary_parent: session-memory.stewardship.curate
     owner: {repo: aoa-session-memory, surface: skills/aoa-session-batch-distill/SKILL.md, authority: authored}
-    lifecycle: *deferred_lifecycle
+    lifecycle:
+      <<: *deferred_lifecycle
+      version: 1.0.1
     applicability:
       use_when: [A reviewed set of indexed sessions needs a bounded provisional distillation wave.]
       do_not_use_when: [Exactly one indexed session is in scope; use first-pass distill., The operator expects automatic promotion.]
@@ -774,7 +778,9 @@ nodes:
     contract_level: executable
     primary_parent: session-memory.stewardship.name
     owner: {repo: aoa-session-memory, surface: skills/aoa-session-phase-discovery/SKILL.md, authority: authored}
-    lifecycle: *deferred_lifecycle
+    lifecycle:
+      <<: *deferred_lifecycle
+      version: 1.0.1
     applicability:
       use_when: [A long or multi-topic session needs phase candidates before semantic naming.]
       do_not_use_when: [A short session already has one reviewed semantic name.]

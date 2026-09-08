@@ -23,6 +23,17 @@ truth.
 
 ## Procedure
 
+Batch distillation is set-oriented and has no positional session argument.
+Declare a bounded set with `--since`, `--since-days`, `--until`, and/or
+`--limit`, then carry the same predicate through any separately authorized
+follow-on route. The current batch and title-repair implementations use the
+same chronological registry selector, but a report is the binding set: before
+any follow-on apply, compare its selected session IDs with the prior report.
+Stop on any mismatch and re-plan that changed set under explicit scope
+authorization. An archive-wide `all` selector in a maintenance command is a
+new scope decision; it is never implied by processing one session or one
+bounded batch.
+
 Start with a planning report:
 
 ```bash
@@ -30,6 +41,7 @@ python3 scripts/aoa_session_memory.py batch-distill \
   --workspace-root <workspace-root> \
   --aoa-root <aoa-root> \
   --since-days 21 \
+  --limit 10 \
   --write-report
 ```
 
@@ -47,13 +59,15 @@ Inspect owner quality before applying a broad pass. Each profile contains
 `project_grounding` and `owner_resolution`; fallback grounding is not the same
 as a resolved owner.
 
-Repair weak imported titles before a broad manual review wave:
+If title repair is separately authorized for this same bounded set, repair
+weak imported titles before a broad manual review wave:
 
 ```bash
 python3 scripts/aoa_session_memory.py repair-session-titles all \
   --workspace-root <workspace-root> \
   --aoa-root <aoa-root> \
   --since-days 21 \
+  --limit 10 \
   --write-report
 ```
 
@@ -66,6 +80,7 @@ python3 scripts/aoa_session_memory.py batch-distill \
   --workspace-root <workspace-root> \
   --aoa-root <aoa-root> \
   --since-days 21 \
+  --limit 10 \
   --apply \
   --write-report
 ```
@@ -93,8 +108,11 @@ promoted claims and samples, not carry the entire archive in active attention.
 
 After each batch, inspect `improvement_candidates` in the report. If the queue
 shows recurring parser misses, noisy names, missing indexes, hook gaps, or
-repeatable command patterns, improve the bundle itself with a narrow patch and
-rerun `doctor`, `audit`, and tests.
+repeatable command patterns, emit the candidate as a provisional owner-routed
+handoff. Do not patch, retrain, change hooks or CLI behavior, or rerun a repair
+inside the data-processing batch. A separately authorized owner task may
+inspect the candidate, make a narrow source change, run its owner checks, and
+start a new bounded batch after review.
 
 ## Verification
 
@@ -103,6 +121,8 @@ rerun `doctor`, `audit`, and tests.
 - All produced artifacts remain explicitly provisional.
 - Owner resolution and evidence refs are present before project-specific
   interpretation.
+- Mechanics candidates remain owner-routed handoffs; the batch does not change
+  the bundle or its processing mechanism.
 - No claim, skill change, automation, or durable lesson was promoted.
 
 ## Stop Line
