@@ -37,12 +37,18 @@ python3 scripts/aoa_session_memory.py phase-discovery <session-label-or-id> \
 Then refresh the indexes:
 
 ```bash
-python3 scripts/aoa_session_memory.py naming-readiness all \
+python3 scripts/aoa_session_memory.py naming-readiness <session-label-or-id> \
   --workspace-root <workspace-root> \
   --aoa-root <aoa-root> \
   --refresh-indexes \
   --write-report
 ```
+
+Keep the same session selector through this follow-on route. The refresh may
+rewrite shared naming maps as a generated dependency, but `all` is a separate
+scope choice: use it only when that scope is explicitly authorized and a
+shared index dependency makes it necessary. Discovery never widens one
+selected session into an archive-wide naming pass by itself.
 
 ## Reading The Artifact
 

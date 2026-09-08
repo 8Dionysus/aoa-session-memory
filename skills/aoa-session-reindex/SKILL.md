@@ -21,25 +21,33 @@ need to be regenerated under the current classifier.
 
 ## Procedure
 
-Start with a dry run:
+Start with a dry run for the selected session:
 
 ```bash
-python3 scripts/aoa_session_memory.py reindex-sessions all \
+python3 scripts/aoa_session_memory.py reindex-sessions <session-label-or-id> \
   --workspace-root <workspace-root> \
   --aoa-root <aoa-root> \
   --dry-run \
   --write-report
 ```
 
-For a bounded smoke pass:
+For an explicitly authorized bounded batch with a shared projection
+dependency, use `all` with the same declared window and limit in every batch
+command:
 
 ```bash
 python3 scripts/aoa_session_memory.py reindex-sessions all \
   --workspace-root <workspace-root> \
   --aoa-root <aoa-root> \
+  --since-days 21 \
   --limit 10 \
   --write-report
 ```
+
+`all` is never an automatic companion to a one-session trial. Carry the
+selected session or the exact bounded batch predicate into each follow-on
+route, and obtain separate scope plus a shared-dependency reason when moving
+from one session to `all`.
 
 For one target session:
 
@@ -51,12 +59,25 @@ python3 scripts/aoa_session_memory.py reindex-sessions <session-label-or-id> \
 ```
 
 After a classifier or schema reindex, refresh generated projections through the
-named catch-up route:
+named catch-up route for the same selected session:
+
+```bash
+python3 scripts/aoa_session_memory.py projection-catchup <session-label-or-id> \
+  --workspace-root <workspace-root> \
+  --aoa-root <aoa-root> \
+  --apply \
+  --write-report
+```
+
+For a separately authorized bounded batch, repeat the same `all` selector and
+window explicitly:
 
 ```bash
 python3 scripts/aoa_session_memory.py projection-catchup all \
   --workspace-root <workspace-root> \
   --aoa-root <aoa-root> \
+  --since-days 21 \
+  --limit 10 \
   --apply \
   --write-report
 ```
