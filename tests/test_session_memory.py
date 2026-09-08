@@ -27371,6 +27371,130 @@ def test_graph_related_cli_parser_contracts_bind_commands_and_flags() -> None:
     ).kind == "mcp_service"
 
 
+def test_literal_query_plan_preserves_typed_positive_route_contracts(
+    tmp_path: Path,
+) -> None:
+    """Keep direct planner positives independent from graph fixture setup."""
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir()
+    cases = [
+        {
+            "name": "error_text",
+            "query": "Traceback ValueError literal-query planner failed",
+            "kwargs": {"doc_type": "event", "date_from": "2026-05-01"},
+            "primary": "error_text",
+            "primary_route_ids": {"scoped_shard_full_text", "monolith_raw_text_fallback"},
+            "structured_first": False,
+        },
+        {
+            "name": "hook_receipt",
+            "query": "typing_prompt_bridge_failed",
+            "kwargs": {"doc_type": "event"},
+            "primary": "hook_receipt",
+            "primary_route_ids": {"hook_receipts"},
+            "structured_first": True,
+        },
+        {
+            "name": "noisy_hook_receipt",
+            "query": "aoa session memory hook failure raw_unavailable",
+            "kwargs": {"doc_type": "event"},
+            "primary": "hook_receipt",
+            "primary_route_ids": {"hook_receipts"},
+            "structured_first": True,
+            "structured_route_signal": "hook_health:raw_unavailable",
+        },
+        {
+            "name": "raw_ref",
+            "query": "raw:line:10",
+            "kwargs": {},
+            "primary": "raw_ref",
+            "primary_route_ids": {"raw_ref_scoped_verification"},
+            "structured_first": True,
+        },
+        {
+            "name": "broad_mcp_usage",
+            "query": "найди все MCP которые агент использовал и ошибки рядом",
+            "kwargs": {"doc_type": "event"},
+            "primary": "entity_class",
+            "primary_route_ids": {"entity_inventory"},
+            "structured_first": True,
+            "route_anchor": "mcp",
+            "route_anchor_source": "broad_entity_class_query",
+            "broad_layer": "mcp",
+            "broad_usage_intent": True,
+            "ordered_route_prefix": [
+                "entity_inventory",
+                "entity_registry_class",
+                "entity_usage_scenario_audit",
+            ],
+        },
+        {
+            "name": "broad_skill_inventory",
+            "query": "какие skills есть в системе",
+            "kwargs": {"doc_type": "event"},
+            "primary": "entity_class",
+            "primary_route_ids": {"entity_registry_class"},
+            "structured_first": True,
+            "route_anchor": "skill",
+            "route_anchor_source": "broad_entity_class_query",
+            "broad_layer": "skill",
+            "broad_usage_intent": False,
+        },
+    ]
+
+    for case in cases:
+        plan = module.literal_query_plan(
+            aoa_root=aoa_root,
+            query=case["query"],
+            **case["kwargs"],
+        )
+        assert plan["ok"] is True, case["name"]
+        assert plan["query_shape"]["primary"] == case["primary"], case["name"]
+        assert plan["literal_route_strategy"]["query_class"] == case["primary"], case["name"]
+        assert plan["primary_route"]["route_id"] in case["primary_route_ids"], case["name"]
+        assert plan["cost_profile"]["structured_first"] is case["structured_first"], case["name"]
+        if case["name"] == "error_text":
+            assert plan["literal_route_strategy"]["class_contract"]["cheapest_first_routes"][0] == "route_signal_structured_search"
+            assert plan["literal_route_strategy"]["fallback_route_id"] in {
+                "scoped_shard_full_text",
+                "monolith_raw_text_fallback",
+            }
+            assert plan["cost_profile"]["exact_recall_preserved_by_fallback"] is False
+        elif case["name"] == "hook_receipt":
+            assert "aoa_session_hook_receipts" in plan["next_command"]
+            assert "signal='typing_prompt_bridge_failed'" in plan["next_command"]
+            assert plan["literal_route_strategy"]["monolith_fallback_first"] is False
+        elif case["name"] == "noisy_hook_receipt":
+            assert plan["structured_route_signal_candidates"][0]["route_signal"] == case["structured_route_signal"]
+            assert plan["cost_profile"]["uses_fts_first"] is False
+            assert plan["cost_profile"]["exact_recall_preserved_by_fallback"] is False
+            assert "event_name='*'" in plan["next_command"]
+            assert "signal='raw_unavailable'" in plan["next_command"]
+            assert "only_errors=True" not in plan["next_command"]
+            assert plan["literal_route_strategy"]["primary_route_id"] == "hook_receipts"
+            assert plan["literal_route_strategy"]["uses_structured_first"] is True
+            assert plan["literal_route_strategy"]["monolith_fallback_position"] > 1
+            assert plan["literal_route_strategy"]["fallback_preserves_exact_recall"] is False
+            assert plan["literal_route_strategy"]["monolith_fallback_first"] is False
+            assert plan["ordered_routes"][-1]["route_id"] in {
+                "scoped_shard_full_text",
+                "monolith_raw_text_fallback",
+            }
+        elif case["name"] == "raw_ref":
+            assert "aoa_session_freshness_check" in plan["next_command"]
+            assert plan["literal_route_strategy"]["monolith_fallback_first"] is False
+        else:
+            assert plan["route_anchor"] == case["route_anchor"]
+            assert plan["route_anchor_source"] == case["route_anchor_source"]
+            assert plan["broad_entity_class"]["layer"] == case["broad_layer"]
+            assert plan["broad_entity_class"]["usage_intent"] is case["broad_usage_intent"]
+            assert plan["literal_route_strategy"]["monolith_fallback_first"] is False
+            if case["name"] == "broad_mcp_usage":
+                assert [
+                    route["route_id"] for route in plan["ordered_routes"][:3]
+                ] == case["ordered_route_prefix"]
+
+
 def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(
     tmp_path: Path,
     monkeypatch: Any,
@@ -27582,6 +27706,16 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(
         anchor="aoa_decisions_search",
         kind="tool",
     )
+    registry_kind_timeline = module.graph_timeline(
+        aoa_root=aoa_root,
+        anchor="aoa-session-memory-mcp",
+        kind="mcp_service",
+    )
+    registry_tool_timeline = module.graph_timeline(
+        aoa_root=aoa_root,
+        anchor="aoa_decisions_search",
+        kind="mcp_tool",
+    )
     typo_mcp_trace = module.trace_route(
         aoa_root=aoa_root,
         anchor="aoa-decsions-mcp",
@@ -27650,6 +27784,15 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(
     assert exact_tool_timeline["resolved"]["start_node_ids"] == ["route:tool:tool:aoa_decisions_search"]
     assert any(event.get("title") == "Tool call: aoa_decisions_search" for event in exact_tool_timeline["events"])
     assert all(event.get("title") != "Tool call: spawn_agent" for event in exact_tool_timeline["events"])
+    assert registry_kind_timeline["kind"] == "mcp"
+    assert registry_kind_timeline["requested_kind"] == "mcp_service"
+    assert registry_kind_timeline["events"]
+    assert registry_tool_timeline["kind"] == "tool"
+    assert registry_tool_timeline["requested_kind"] == "mcp_tool"
+    assert any(
+        event.get("title") == "Tool call: aoa_decisions_search"
+        for event in registry_tool_timeline["events"]
+    )
     typo_routes = {
         f"{item.get('layer')}:{item.get('key')}"
         for item in typo_mcp_trace.get("route_candidates", [])
