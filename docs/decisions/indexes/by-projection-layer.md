@@ -88,6 +88,12 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0013 Indexed Graph Seed Before Retrieval Fallback](../AOA-SM-D-0013-indexed-graph-seed-before-retrieval-fallback.md) | 2026-07-17 | Accepted | `docs/decisions/AOA-SM-D-0013-indexed-graph-seed-before-retrieval-fallback.md` |
 
+## capability graph
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0102 Independent Skill Interface Delivery](../AOA-SM-D-0102-independent-skill-interface-delivery.md) | 2026-09-08 | Accepted | `docs/decisions/AOA-SM-D-0102-independent-skill-interface-delivery.md` |
+
 ## capture-time envelope adapter
 
 | Decision | Date | Status | Path |
@@ -118,6 +124,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0040 Served-Request Health Is Distinct from Provider Availability](../AOA-SM-D-0040-served-request-health-is-distinct-from-provider-availability.md) | 2026-07-31 | Accepted | `docs/decisions/AOA-SM-D-0040-served-request-health-is-distinct-from-provider-availability.md` |
+
+## component install receipt
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0102 Independent Skill Interface Delivery](../AOA-SM-D-0102-independent-skill-interface-delivery.md) | 2026-09-08 | Accepted | `docs/decisions/AOA-SM-D-0102-independent-skill-interface-delivery.md` |
 
 ## component-delta outbox
 
@@ -1143,6 +1155,12 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0014 Session-Scoped Structured Prompt-Visibility Probe](../AOA-SM-D-0014-session-scoped-structured-prompt-visibility-probe.md) | 2026-07-17 | Accepted | `docs/decisions/AOA-SM-D-0014-session-scoped-structured-prompt-visibility-probe.md` |
+
+## skill router
+
+| Decision | Date | Status | Path |
+| --- | --- | --- | --- |
+| [AOA-SM-D-0102 Independent Skill Interface Delivery](../AOA-SM-D-0102-independent-skill-interface-delivery.md) | 2026-09-08 | Accepted | `docs/decisions/AOA-SM-D-0102-independent-skill-interface-delivery.md` |
 
 ## stable session projection
 

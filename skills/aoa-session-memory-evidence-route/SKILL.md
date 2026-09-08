@@ -19,6 +19,9 @@ The route finds and qualifies evidence. It never upgrades mention, prompt
 visibility, selection, loading, or a `SKILL.md` read into invocation or
 effectiveness.
 
+Bind bounded queries through the available MCP or owner CLI. Archive reads
+preserve the same evidence contract across models and do not verify live hooks.
+
 ## Procedure
 
 1. Resolve the logical `<aoa-root>` and the entity kind. Start with the

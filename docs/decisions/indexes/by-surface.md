@@ -526,6 +526,7 @@
 | [AOA-SM-D-0094 Logical Registry Coverage and Capture-Only Ingress Separation](../AOA-SM-D-0094-logical-registry-coverage-and-capture-only-ingress.md) | 2026-08-22 | Accepted | `docs/decisions/AOA-SM-D-0094-logical-registry-coverage-and-capture-only-ingress.md` |
 | [AOA-SM-D-0096 Source-Owned Persistent Retry Dispatch Activation](../AOA-SM-D-0096-source-owned-persistent-retry-dispatch-activation.md) | 2026-08-24 | Accepted | `docs/decisions/AOA-SM-D-0096-source-owned-persistent-retry-dispatch-activation.md` |
 | [AOA-SM-D-0097 Source Install Provenance and Bounded Global Exact Recovery](../AOA-SM-D-0097-source-install-provenance-and-bounded-global-exact-recovery.md) | 2026-08-25 | Accepted | `docs/decisions/AOA-SM-D-0097-source-install-provenance-and-bounded-global-exact-recovery.md` |
+| [AOA-SM-D-0102 Independent Skill Interface Delivery](../AOA-SM-D-0102-independent-skill-interface-delivery.md) | 2026-09-08 | Accepted | `docs/decisions/AOA-SM-D-0102-independent-skill-interface-delivery.md` |
 
 ## instrumentation
 
@@ -670,6 +671,7 @@
 | --- | --- | --- | --- |
 | [AOA-SM-D-0018 Owner Capability Home And Skill Evidence Lifecycle](../AOA-SM-D-0018-owner-capability-home-and-skill-evidence-lifecycle.md) | 2026-07-18 | Accepted | `docs/decisions/AOA-SM-D-0018-owner-capability-home-and-skill-evidence-lifecycle.md` |
 | [AOA-SM-D-0054 Native-Assisted Portable SHA-256 Continuation](../AOA-SM-D-0054-native-assisted-portable-sha256-continuation.md) | 2026-08-11 | Accepted | `docs/decisions/AOA-SM-D-0054-native-assisted-portable-sha256-continuation.md` |
+| [AOA-SM-D-0102 Independent Skill Interface Delivery](../AOA-SM-D-0102-independent-skill-interface-delivery.md) | 2026-09-08 | Accepted | `docs/decisions/AOA-SM-D-0102-independent-skill-interface-delivery.md` |
 
 ## portable export
 
@@ -1075,12 +1077,14 @@
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0018 Owner Capability Home And Skill Evidence Lifecycle](../AOA-SM-D-0018-owner-capability-home-and-skill-evidence-lifecycle.md) | 2026-07-18 | Accepted | `docs/decisions/AOA-SM-D-0018-owner-capability-home-and-skill-evidence-lifecycle.md` |
+| [AOA-SM-D-0102 Independent Skill Interface Delivery](../AOA-SM-D-0102-independent-skill-interface-delivery.md) | 2026-09-08 | Accepted | `docs/decisions/AOA-SM-D-0102-independent-skill-interface-delivery.md` |
 
 ## source lineage
 
 | Decision | Date | Status | Path |
 | --- | --- | --- | --- |
 | [AOA-SM-D-0097 Source Install Provenance and Bounded Global Exact Recovery](../AOA-SM-D-0097-source-install-provenance-and-bounded-global-exact-recovery.md) | 2026-08-25 | Accepted | `docs/decisions/AOA-SM-D-0097-source-install-provenance-and-bounded-global-exact-recovery.md` |
+| [AOA-SM-D-0102 Independent Skill Interface Delivery](../AOA-SM-D-0102-independent-skill-interface-delivery.md) | 2026-09-08 | Accepted | `docs/decisions/AOA-SM-D-0102-independent-skill-interface-delivery.md` |
 
 ## source-aware admission
 

@@ -105,6 +105,64 @@ explicit user-level installation. Other bundle skills stay local as focused
 procedures. User skill links are host state and are not part of portable source
 readiness.
 
+## Scoped session-memory skill interface overlay
+
+When an existing workspace runtime has a valid
+`diagnostics/install-profile.json`, a source checkout may be applied through
+the bounded skill-interface installer. This route updates the capability home,
+generated capability read models, the two advertised session-memory skill
+packages, and their package metadata. It does not run the full kernel installer
+or rewrite the base install profile, sessions, generated runtime stores, maps,
+hooks, systemd files, or user-level skill links.
+
+The source checkout and the external `aoa-skills` contract checkout are named
+explicitly. The source must be a clean Git checkout and pass the owner
+validator before any target path is staged:
+
+```bash
+python3 scripts/install_skill_interface.py check \
+  --source-aoa-root /absolute/path/to/source-checkout \
+  --skills-root /absolute/path/to/aoa-skills \
+  --workspace-root /absolute/path/to/workspace \
+  --aoa-root /absolute/path/to/workspace/.aoa
+```
+
+Review the JSON plan, then authorize replacement of the selected component with
+`install --force` (the `execute` spelling is an alias):
+
+```bash
+python3 scripts/install_skill_interface.py install --force \
+  --source-aoa-root /absolute/path/to/source-checkout \
+  --skills-root /absolute/path/to/aoa-skills \
+  --workspace-root /absolute/path/to/workspace \
+  --aoa-root /absolute/path/to/workspace/.aoa
+```
+
+The default closure contains the global router and evidence route. A further
+graph-declared skill can be added by repeating `--skill <name>`; each selected
+package is copied recursively. The installer records a separate
+`diagnostics/skill-projection-install.json` receipt and a durable bounded
+backup. Its claim is limited to source provenance and selected-byte parity;
+the receipt does not prove prompt selection, invocation, route quality, runtime
+health, or downstream outcomes.
+
+Rollback is an explicit receipt-revalidated operation and remains available
+when the candidate source or `aoa-skills` checkout is unavailable:
+
+```bash
+python3 scripts/install_skill_interface.py rollback \
+  --workspace-root /absolute/path/to/workspace \
+  --aoa-root /absolute/path/to/workspace/.aoa
+```
+
+Rollback verifies the receipt, base profile anchor, selected closed allowlist,
+current after-state, and durable backup before restoring the selected paths and
+the previous component receipt. `--source-aoa-root` and `--skills-root` may be
+supplied for optional receipt identity checks; rollback never re-runs the
+source or external owner validator. It leaves the kernel profile, sessions,
+stores, maps, hooks, systemd files, and user skill links under their existing
+owners.
+
 ## Validation after install
 
 Source validation, installed-root health, and completion audit are different

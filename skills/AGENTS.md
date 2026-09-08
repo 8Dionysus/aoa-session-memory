@@ -2,7 +2,9 @@
 
 ## Purpose
 
-This directory holds Codex skills for deliberate session-memory workflows.
+This directory holds agent skills for deliberate session-memory workflows.
+The common routes use portable operations and evidence contracts. Codex hook,
+transcript, and compaction procedures remain concrete adapter routes.
 
 Skills are route surfaces for agents. They should make recurring work
 repeatable without turning hooks into heavy interpretation.

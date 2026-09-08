@@ -53,6 +53,13 @@ legacy = _load_module(
     "aoa_session_memory_behavioral_source_tests",
     REPO_ROOT / "tests" / "test_session_memory.py",
 )
+doctor_tests = _load_module(
+    "aoa_session_memory_behavioral_doctor_tests",
+    REPO_ROOT / "tests" / "test_session_memory_doctor.py",
+)
+# Reuse the source owner's fixture through pytest's lifecycle, not a direct
+# call to a decorated fixture or another copied install setup.
+compact_install_source = legacy.compact_install_source
 
 
 def corpus() -> dict[str, Any]:
@@ -142,6 +149,7 @@ def run_doctor_install_profile_case(
     *,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
 ) -> None:
     skill_text = (
         REPO_ROOT / "skills" / "aoa-session-memory-doctor" / "SKILL.md"
@@ -160,6 +168,7 @@ def run_doctor_install_profile_case(
         "test_doctor_accepts_runtime_install_without_local_tests",
         tmp_path=tmp_path,
         monkeypatch=monkeypatch,
+        request=request,
     )
 
 
@@ -168,16 +177,28 @@ def run_legacy_case(
     *,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
 ) -> None:
-    function = getattr(legacy, name)
+    source_tests = (
+        doctor_tests
+        if name == "test_doctor_default_skips_deep_segment_index_event_parse"
+        else legacy
+    )
+    function = getattr(source_tests, name)
     parameters = inspect.signature(function).parameters
-    unsupported = set(parameters) - {"tmp_path", "monkeypatch"}
+    unsupported = set(parameters) - {
+        "tmp_path", "monkeypatch", "compact_install_source"
+    }
     assert not unsupported, f"{name} requires unsupported fixtures: {unsupported}"
     kwargs: dict[str, Any] = {}
     if "tmp_path" in parameters:
         kwargs["tmp_path"] = tmp_path
     if "monkeypatch" in parameters:
         kwargs["monkeypatch"] = monkeypatch
+    if "compact_install_source" in parameters:
+        kwargs["compact_install_source"] = request.getfixturevalue(
+            "compact_install_source"
+        )
     function(**kwargs)
 
 
@@ -219,6 +240,7 @@ def test_controlled_skill_behavior_case(
     case: dict[str, Any],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
 ) -> None:
     sandbox_home = tmp_path / "home"
     sandbox_home.mkdir()
@@ -243,6 +265,7 @@ def test_controlled_skill_behavior_case(
         run_doctor_install_profile_case(
             tmp_path=tmp_path,
             monkeypatch=monkeypatch,
+            request=request,
         )
     else:
         prefix = "legacy:"
@@ -251,6 +274,7 @@ def test_controlled_skill_behavior_case(
             runner.removeprefix(prefix),
             tmp_path=tmp_path,
             monkeypatch=monkeypatch,
+            request=request,
         )
 
     assert sandbox_home.is_dir()
