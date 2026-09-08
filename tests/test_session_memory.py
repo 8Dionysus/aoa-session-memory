@@ -78967,6 +78967,61 @@ def test_structured_search_timeout_returns_bounded_route_packet(tmp_path: Path, 
     assert fake_conn.closed is True
 
 
+@pytest.mark.parametrize("failure", ["error", "exit", "invalid_result"])
+@pytest.mark.parametrize("cleanup_verified", [True, False])
+def test_generated_search_reader_failure_reaps_child_and_reaches_fallback(
+    tmp_path: Path,
+    monkeypatch: Any,
+    failure: str,
+    cleanup_verified: bool,
+) -> None:
+    """Every terminal child failure reaches the parent-owned fallback."""
+
+    def failed_reader(**_kwargs: Any) -> Any:
+        if failure == "error":
+            raise RuntimeError("fixture reader failure")
+        if failure == "exit":
+            os._exit(7)
+        return "not a result object"
+
+    fallback_calls: list[dict[str, Any]] = []
+
+    def fallback(payload: dict[str, Any], _kwargs: Any, **route: Any) -> dict[str, Any]:
+        fallback_calls.append(route)
+        if not cleanup_verified:
+            # Even a usable raw fallback cannot hide unverified child cleanup.
+            payload["ok"] = True
+        return payload
+
+    stop_reader = module._stop_search_reader_process
+
+    def stop(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        cleanup = stop_reader(*args, **kwargs)
+        assert cleanup["verified"] is True
+        return {**cleanup, "verified": cleanup_verified}
+
+    monkeypatch.setattr(module, "_search_sessions_in_process", failed_reader)
+    monkeypatch.setattr(module, "_search_generated_reader_fallback", fallback)
+    monkeypatch.setattr(module, "_stop_search_reader_process", stop)
+    payload = module.search_sessions(
+        aoa_root=tmp_path / ".aoa",
+        query="reader failure anchor",
+        query_timeout_ms=1000,
+        include_archived_raw_fallback=False,
+    )
+
+    assert payload["ok"] is False
+    attempt = payload["generated_storage_attempt"]
+    assert attempt["status"] == "failed"
+    assert attempt["cleanup"]["verified"] is cleanup_verified
+    assert attempt["fallback_independent_of_reader"] is True
+    assert fallback_calls == [{"failure_kind": "index_unavailable", "failure_scope": "fts"}]
+    if failure == "error":
+        assert any("RuntimeError:fixture reader failure" in item for item in payload["diagnostics"])
+    if not cleanup_verified:
+        assert "generated_search_reader_cleanup_unverified" in payload["diagnostics"]
+
+
 def test_generated_search_reader_hard_deadline_reaps_noncooperative_reader(
     tmp_path: Path,
     monkeypatch: Any,
