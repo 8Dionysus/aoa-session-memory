@@ -53,6 +53,13 @@ jobs:
         if: github.event.repository.visibility == 'public' && matrix.python-version == '3.11'
         run: python scripts/audit_git_history.py --repo . --fail-on none
 
+      - name: Run validation-plane contract tests
+        run: >-
+          python -m pytest -q -p no:cacheprovider
+          tests/test_validation_evidence_graph.py
+          tests/test_validation_scheduler_experiment.py
+          tests/test_pytest_checked_hash_core.py
+
       - name: Run portable source tests
         run: python scripts/pytest_scheduler_experiment.py --method static2
 
