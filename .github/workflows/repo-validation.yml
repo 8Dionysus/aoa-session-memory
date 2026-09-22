@@ -162,6 +162,8 @@ jobs:
 
       - name: Run three paired scheduler triplets
         id: scheduler_triplets
+        # Leave time inside the job deadline to upload partial evidence on timeout.
+        timeout-minutes: 50
         run: |
           set +e
           set -u -o pipefail

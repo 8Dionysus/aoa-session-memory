@@ -66,6 +66,8 @@ def test_hosted_scheduler_workflow_is_opt_in_and_preserves_ordinary_route() -> N
     assert ordinary["run"] == "python scripts/pytest_scheduler_experiment.py --method static2"
     hosted = workflow["jobs"]["hosted_scheduler_trials"]
     assert "workflow_dispatch" in hosted["if"]
+    trials = next(step for step in hosted["steps"] if step.get("id") == "scheduler_triplets")
+    assert 0 < trials["timeout-minutes"] < hosted["timeout-minutes"]
     upload = next(step for step in hosted["steps"] if "upload-artifact@" in step.get("uses", ""))
     assert upload["if"] == "always()"
     assert upload["with"]["path"].splitlines()[0].startswith("${{ steps.")
