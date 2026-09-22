@@ -222,10 +222,17 @@ def _resource_evidence_is_valid(receipt: Any) -> bool:
             return False
     if "forced" in envelope and not isinstance(envelope["forced"], bool):
         return False
-    return all(
+    if not all(
         isinstance(binding.get(key), str) and bool(binding[key])
         for key in ("trial_sha256", "launch_sha256")
-    )
+    ):
+        return False
+    if envelope["source_sha256"] != binding["launch_sha256"]:
+        return False
+    trial = dict(receipt)
+    trial.pop("resource_envelope", None)
+    trial.pop("resource_binding", None)
+    return binding["trial_sha256"] == validation_identity.canonical_sha256(trial)
 
 
 def bind_resource_envelope(
@@ -345,13 +352,6 @@ def compare_receipts(receipts: Sequence[dict[str, Any]]) -> dict[str, Any]:
             len(hosted) >= MIN_PAIRED_RUNS
             and hosted_material_count >= MIN_MATERIAL_PAIRS
         )
-        resource_pair_count_all = sum(
-            1 for pair in valid if _resource_pair(pair, pairs, BASELINE_METHOD, candidate)
-        )
-        resource_pair_count = sum(
-            1 for pair in hosted if _resource_pair(pair, pairs, BASELINE_METHOD, candidate)
-        )
-
         incumbent_required = candidate != INCUMBENT_METHOD
         incumbent_valid = [
             pair
@@ -375,15 +375,28 @@ def compare_receipts(receipts: Sequence[dict[str, Any]]) -> dict[str, Any]:
             if pair["pair_id"] in hosted_pair_ids
             and _hosted_pair(pair, pairs, INCUMBENT_METHOD, candidate)
         ]
-        incumbent_resource_pair_count_all = sum(
-            1
+        serial_resource_pair_ids = {
+            pair["pair_id"]
+            for pair in valid
+            if _resource_pair(pair, pairs, BASELINE_METHOD, candidate)
+        }
+        incumbent_resource_pair_ids = {
+            pair["pair_id"]
             for pair in incumbent_valid
             if _resource_pair(pair, pairs, INCUMBENT_METHOD, candidate)
+        }
+        resource_cohort_pair_ids = (
+            serial_resource_pair_ids
+            if not incumbent_required
+            else serial_resource_pair_ids & incumbent_resource_pair_ids
         )
-        incumbent_resource_pair_count = sum(
-            1
-            for pair in incumbent_hosted
-            if _resource_pair(pair, pairs, INCUMBENT_METHOD, candidate)
+        resource_pair_count = len(resource_cohort_pair_ids)
+        resource_pair_count_all = len(serial_resource_pair_ids)
+        resource_hosted_pair_count = len(resource_cohort_pair_ids & hosted_pair_ids)
+        incumbent_resource_pair_count = len(resource_cohort_pair_ids)
+        incumbent_resource_pair_count_all = len(incumbent_resource_pair_ids)
+        incumbent_resource_hosted_pair_count = len(
+            incumbent_resource_pair_ids & hosted_pair_ids
         )
         incumbent_all_median = (
             statistics.median(
@@ -413,9 +426,14 @@ def compare_receipts(receipts: Sequence[dict[str, Any]]) -> dict[str, Any]:
             if incumbent_hosted
             else None
         )
+        incumbent_pair_benefits = [
+            pair["reduction_seconds"]
+            for pair in incumbent_hosted
+            if pair["reduction_seconds"] is not None
+        ]
         incumbent_benefit_seconds = (
-            incumbent_median - candidate_incumbent_median
-            if incumbent_median is not None and candidate_incumbent_median is not None
+            statistics.median(incumbent_pair_benefits)
+            if incumbent_pair_benefits
             else None
         )
         incumbent_benefit_positive = (
@@ -497,6 +515,8 @@ def compare_receipts(receipts: Sequence[dict[str, Any]]) -> dict[str, Any]:
                 "resource_evidence_complete": resource_evidence,
                 "resource_pair_count": resource_pair_count,
                 "resource_pair_count_all_pairs": resource_pair_count_all,
+                "resource_hosted_pair_count": resource_hosted_pair_count,
+                "resource_cohort_pair_ids": sorted(resource_cohort_pair_ids),
                 "candidate_trial_count": len(candidate_pair_ids),
                 "candidate_comparison_complete": candidate_comparison_complete,
                 "candidate_blockers": candidate_blockers,
@@ -507,6 +527,7 @@ def compare_receipts(receipts: Sequence[dict[str, Any]]) -> dict[str, Any]:
                 "incumbent_local_pair_count": len(incumbent_valid) - len(incumbent_hosted),
                 "incumbent_resource_pair_count": incumbent_resource_pair_count,
                 "incumbent_resource_pair_count_all_pairs": incumbent_resource_pair_count_all,
+                "incumbent_resource_hosted_pair_count": incumbent_resource_hosted_pair_count,
                 "incumbent_comparison_complete": incumbent_comparison_complete,
                 "incumbent_median_wall_seconds": (
                     round(incumbent_median, 6) if incumbent_median is not None else None
@@ -530,6 +551,9 @@ def compare_receipts(receipts: Sequence[dict[str, Any]]) -> dict[str, Any]:
                     round(incumbent_benefit_seconds, 6)
                     if incumbent_benefit_seconds is not None
                     else None
+                ),
+                "incumbent_benefit_basis": (
+                    "median_of_paired_deltas" if incumbent_required else None
                 ),
                 "incumbent_benefit_positive": incumbent_benefit_positive,
                 "incumbent_blockers": incumbent_blockers,
