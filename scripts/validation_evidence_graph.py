@@ -40,6 +40,7 @@ SERIAL_SOURCE_COMMAND = (
     "tests/test_session_memory_episode_temporal.py",
     "tests/test_session_memory_capture.py",
     "tests/test_session_memory_sweep.py",
+    "tests/test_install_skill_interface.py",
     "tests/test_public_tree_audit.py",
     "tests/test_git_history_audit.py",
 )

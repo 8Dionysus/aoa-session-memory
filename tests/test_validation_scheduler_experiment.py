@@ -184,6 +184,7 @@ def test_scheduler_plan_keeps_all_candidates_in_shadow() -> None:
     methods = {item["name"]: item for item in plan["methods"]}
 
     assert plan["baseline"] == "serial"
+    assert plan["incumbent"] == "static2"
     assert {
         "serial-plain",
         "xdist2-loadfile",
@@ -257,8 +258,13 @@ def _receipt(
     *,
     ok: bool = True,
     identity: str = "same",
+    hosted: bool = False,
+    resource: bool = False,
 ) -> dict[str, object]:
-    return {
+    environment: dict[str, object] = {"identity_sha256": "environment"}
+    if hosted:
+        environment["runtime"] = {"github_actions": True}
+    payload: dict[str, object] = {
         "schema_version": "aoa_session_memory_pytest_scheduler_trial_v1",
         "method": {"name": method},
         "pair_id": pair_id,
@@ -268,11 +274,47 @@ def _receipt(
             "before": {"identity_sha256": identity},
             "stable": True,
         },
-        "environment_identity": {"identity_sha256": "environment"},
+        "environment_identity": environment,
         "cache": {"observed_state_before": "disabled"},
         "corpus": {"set_sha256": "corpus"},
         "execution": {"coverage_complete": True},
     }
+    if not resource:
+        return payload
+    receipt_path = Path(f"/tmp/aoa-{pair_id}-{method}.json")
+    payload["receipt_path"] = str(receipt_path)
+    launch = {
+        "schema": "abyss_machine_resource_launch_v1",
+        "request": {
+            "command": [
+                "python",
+                "scripts/pytest_scheduler_experiment.py",
+                "--method",
+                method,
+                "--receipt",
+                str(receipt_path),
+            ],
+            "memory_demand_mib": 1,
+            "force": False,
+        },
+        "plan": {"decision": "allow"},
+        "execution": {
+            "returncode": 0 if ok else 1,
+            "systemd": {"service_runtime": "1s", "cpu_time_consumed": "1s"},
+        },
+        "startup_admission": {
+            "demand_observation": {
+                "peaks": {
+                    "ok": True,
+                    "unit": "trial.service",
+                    "memory_peak_mib": 1.0,
+                    "memory_swap_peak_mib": 0.0,
+                    "footprint_peak_mib": 1.0,
+                }
+            }
+        },
+    }
+    return validation_scheduler_experiment.bind_resource_envelope(payload, launch)
 
 
 def test_comparison_never_promotes_from_one_fast_pair() -> None:
@@ -299,6 +341,273 @@ def test_comparison_rejects_incomparable_or_red_pairs() -> None:
     candidate = result["candidates"][0]
     assert candidate["valid_pair_count"] == 0
     assert candidate["admission_ready"] is False
+
+
+def test_static2_keeps_serial_admission_without_self_comparison() -> None:
+    receipts = [
+        receipt
+        for pair_id in ("pair-1", "pair-2", "pair-3")
+        for receipt in (
+            _receipt("serial", pair_id, 100, hosted=True, resource=True),
+            _receipt("static2", pair_id, 40, hosted=True, resource=True),
+        )
+    ]
+
+    result = validation_scheduler_experiment.compare_receipts(receipts)
+    static2 = next(item for item in result["candidates"] if item["candidate"] == "static2")
+
+    assert static2["incumbent_comparison_required"] is False
+    assert static2["incumbent_comparison_complete"] is True
+    assert static2["admission_ready"] is True
+
+
+def test_contender_requires_positive_paired_median_benefit_over_static2() -> None:
+    receipts = [
+        receipt
+        for pair_id in ("pair-1", "pair-2", "pair-3")
+        for receipt in (
+            _receipt("serial", pair_id, 200, hosted=True, resource=True),
+            _receipt("static2", pair_id, 100, hosted=True, resource=True),
+            _receipt("static2-balanced", pair_id, 110, hosted=True, resource=True),
+        )
+    ]
+
+    result = validation_scheduler_experiment.compare_receipts(receipts)
+    contender = next(
+        item for item in result["candidates"] if item["candidate"] == "static2-balanced"
+    )
+
+    assert contender["latency_rule_passed"] is True
+    assert contender["incumbent_comparison_complete"] is True
+    assert contender["incumbent_benefit_seconds"] == -10.0
+    assert contender["incumbent_benefit_positive"] is False
+    assert contender["admission_ready"] is False
+    assert any("positive median benefit" in item for item in contender["incumbent_blockers"])
+
+
+def test_contender_reports_complete_static2_comparison_before_admission() -> None:
+    receipts = [
+        receipt
+        for pair_id in ("pair-1", "pair-2", "pair-3")
+        for receipt in (
+            _receipt("serial", pair_id, 200, hosted=True, resource=True),
+            _receipt("static2", pair_id, 100, hosted=True, resource=True),
+            _receipt("static2-balanced", pair_id, 40, hosted=True, resource=True),
+        )
+    ]
+
+    result = validation_scheduler_experiment.compare_receipts(receipts)
+    contender = next(
+        item for item in result["candidates"] if item["candidate"] == "static2-balanced"
+    )
+
+    assert contender["incumbent"] == "static2"
+    assert contender["incumbent_valid_pair_count"] == 3
+    assert contender["incumbent_hosted_pair_count"] == 3
+    assert contender["incumbent_comparison_complete"] is True
+    assert contender["incumbent_benefit_seconds"] == 60.0
+    assert contender["resource_evidence_complete"] is True
+    assert contender["admission_ready"] is True
+
+
+def _balanced_triplet(
+    pair_id: str,
+    serial_wall: float,
+    incumbent_wall: float,
+    contender_wall: float,
+    *,
+    hosted: bool,
+    contender_ok: bool = True,
+    resource: bool = True,
+) -> tuple[dict[str, object], ...]:
+    return (
+        _receipt("serial", pair_id, serial_wall, hosted=hosted, resource=resource),
+        _receipt("static2", pair_id, incumbent_wall, hosted=hosted, resource=resource),
+        _receipt(
+            "static2-balanced",
+            pair_id,
+            contender_wall,
+            ok=contender_ok,
+            hosted=hosted,
+            resource=resource,
+        ),
+    )
+
+
+@pytest.mark.parametrize("failure_kind", ("candidate_failure", "nonfinite_incumbent"))
+def test_all_supplied_candidate_trials_stay_in_the_admission_denominator(
+    failure_kind: str,
+) -> None:
+    receipts = [
+        receipt
+        for pair_id in ("pair-1", "pair-2", "pair-3")
+        for receipt in _balanced_triplet(
+            pair_id, 200, 100, 40, hosted=True
+        )
+    ]
+    if failure_kind == "candidate_failure":
+        receipts.extend(_balanced_triplet("pair-4", 200, 100, 40, hosted=True, contender_ok=False))
+    else:
+        extra = list(_balanced_triplet("pair-4", 200, 100, 40, hosted=True))
+        extra[1]["wall_seconds"] = float("inf")
+        receipts.extend(extra)
+
+    result = validation_scheduler_experiment.compare_receipts(receipts)
+    contender = next(
+        item for item in result["candidates"] if item["candidate"] == "static2-balanced"
+    )
+
+    assert contender["candidate_trial_count"] == 4
+    assert contender["candidate_comparison_complete"] is False
+    assert contender["admission_ready"] is False
+
+
+def test_incumbent_benefit_uses_hosted_cohort_and_reports_local_separately() -> None:
+    receipts = [
+        receipt
+        for pair_id in ("hosted-1", "hosted-2", "hosted-3")
+        for receipt in _balanced_triplet(
+            pair_id, 200, 100, 110, hosted=True
+        )
+    ]
+    receipts.extend(
+        receipt
+        for pair_id in ("local-1", "local-2", "local-3")
+        for receipt in _balanced_triplet(
+            pair_id, 200, 180, 1, hosted=False
+        )
+    )
+
+    result = validation_scheduler_experiment.compare_receipts(receipts)
+    contender = next(
+        item for item in result["candidates"] if item["candidate"] == "static2-balanced"
+    )
+
+    assert contender["incumbent_hosted_pair_count"] == 3
+    assert contender["incumbent_local_pair_count"] == 3
+    assert contender["incumbent_benefit_seconds"] == -10.0
+    assert contender["incumbent_benefit_positive"] is False
+    assert contender["admission_ready"] is False
+
+
+def test_incumbent_benefit_uses_median_of_paired_deltas() -> None:
+    receipts = [
+        receipt
+        for pair_id, values in (
+            ("pair-1", (500, 10, 11)),
+            ("pair-2", (500, 100, 99)),
+            ("pair-3", (500, 101, 102)),
+        )
+        for receipt in _balanced_triplet(pair_id, *values, hosted=True)
+    ]
+
+    result = validation_scheduler_experiment.compare_receipts(receipts)
+    contender = next(
+        item for item in result["candidates"] if item["candidate"] == "static2-balanced"
+    )
+
+    assert contender["incumbent_median_wall_seconds"] == 100.0
+    assert contender["median_candidate_vs_incumbent_wall_seconds"] == 99.0
+    assert contender["incumbent_benefit_seconds"] == -1.0
+    assert contender["incumbent_benefit_basis"] == "median_of_paired_deltas"
+    assert contender["incumbent_benefit_positive"] is False
+    assert contender["admission_ready"] is False
+
+
+def test_local_resource_cohort_can_support_hosted_latency_admission() -> None:
+    receipts = [
+        receipt
+        for pair_id in ("hosted-1", "hosted-2", "hosted-3")
+        for receipt in _balanced_triplet(
+            pair_id, 200, 100, 40, hosted=True, resource=False
+        )
+    ]
+    receipts.extend(
+        receipt
+        for pair_id in ("local-1", "local-2", "local-3")
+        for receipt in _balanced_triplet(
+            pair_id, 200, 100, 40, hosted=False, resource=True
+        )
+    )
+
+    result = validation_scheduler_experiment.compare_receipts(receipts)
+    contender = next(
+        item for item in result["candidates"] if item["candidate"] == "static2-balanced"
+    )
+
+    assert contender["hosted_pair_count"] == 3
+    assert contender["resource_pair_count"] == 3
+    assert contender["resource_hosted_pair_count"] == 0
+    assert contender["resource_evidence_complete"] is True
+    assert contender["admission_ready"] is True
+
+
+def test_truthy_non_resource_shape_is_not_resource_evidence() -> None:
+    receipts = [
+        receipt
+        for pair_id in ("pair-1", "pair-2", "pair-3")
+        for receipt in _balanced_triplet(
+            pair_id, 200, 100, 40, hosted=True
+        )
+    ]
+    for receipt in receipts:
+        if receipt["method"]["name"] != "serial":
+            receipt["resource_envelope"] = "present-but-not-a-binding"
+
+    result = validation_scheduler_experiment.compare_receipts(receipts)
+    contender = next(
+        item for item in result["candidates"] if item["candidate"] == "static2-balanced"
+    )
+
+    assert contender["resource_evidence_complete"] is False
+    assert contender["admission_ready"] is False
+
+
+def test_generated_resource_binding_rejects_tampered_trial() -> None:
+    bound = _receipt("static2", "pair-1", 100, resource=True)
+
+    assert validation_scheduler_experiment._resource_evidence_is_valid(bound) is True
+    bound["wall_seconds"] = 101
+    assert validation_scheduler_experiment._resource_evidence_is_valid(bound) is False
+
+
+def test_contender_missing_static2_pair_fails_closed() -> None:
+    receipts = [
+        receipt
+        for pair_id in ("pair-1", "pair-2", "pair-3")
+        for receipt in (
+            _receipt("serial", pair_id, 200, hosted=True, resource=True),
+            _receipt("static2-balanced", pair_id, 40, hosted=True, resource=True),
+        )
+    ]
+
+    result = validation_scheduler_experiment.compare_receipts(receipts)
+    contender = next(
+        item for item in result["candidates"] if item["candidate"] == "static2-balanced"
+    )
+
+    assert contender["incumbent_comparison_complete"] is False
+    assert contender["incumbent_benefit_positive"] is False
+    assert contender["admission_ready"] is False
+    assert any("static2 comparison is missing" in item for item in contender["incumbent_blockers"])
+
+
+def test_malformed_duplicate_receipt_blocks_admission() -> None:
+    receipts = [
+        receipt
+        for pair_id in ("pair-1", "pair-2", "pair-3")
+        for receipt in (
+            _receipt("serial", pair_id, 200, hosted=True, resource=True),
+            _receipt("static2", pair_id, 100, hosted=True, resource=True),
+            _receipt("static2-balanced", pair_id, 40, hosted=True, resource=True),
+        )
+    ]
+    receipts.append({"pair_id": "pair-1", "method": {"name": "serial"}})
+
+    result = validation_scheduler_experiment.compare_receipts(receipts)
+
+    assert any("duplicate serial" in blocker for blocker in result["blockers"])
+    assert result["any_admission_ready"] is False
 
 
 def test_resource_binding_requires_exact_method_and_receipt_path(tmp_path: Path) -> None:
