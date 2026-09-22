@@ -184,6 +184,7 @@ def test_scheduler_plan_keeps_all_candidates_in_shadow() -> None:
     methods = {item["name"]: item for item in plan["methods"]}
 
     assert plan["baseline"] == "serial"
+    assert plan["incumbent"] == "static2"
     assert {
         "serial-plain",
         "xdist2-loadfile",
@@ -257,7 +258,12 @@ def _receipt(
     *,
     ok: bool = True,
     identity: str = "same",
+    hosted: bool = False,
+    resource: bool = False,
 ) -> dict[str, object]:
+    environment: dict[str, object] = {"identity_sha256": "environment"}
+    if hosted:
+        environment["runtime"] = {"github_actions": True}
     return {
         "schema_version": "aoa_session_memory_pytest_scheduler_trial_v1",
         "method": {"name": method},
@@ -268,10 +274,11 @@ def _receipt(
             "before": {"identity_sha256": identity},
             "stable": True,
         },
-        "environment_identity": {"identity_sha256": "environment"},
+        "environment_identity": environment,
         "cache": {"observed_state_before": "disabled"},
         "corpus": {"set_sha256": "corpus"},
         "execution": {"coverage_complete": True},
+        **({"resource_envelope": {"footprint_peak_mib": 1.0}} if resource else {}),
     }
 
 
@@ -299,6 +306,112 @@ def test_comparison_rejects_incomparable_or_red_pairs() -> None:
     candidate = result["candidates"][0]
     assert candidate["valid_pair_count"] == 0
     assert candidate["admission_ready"] is False
+
+
+def test_static2_keeps_serial_admission_without_self_comparison() -> None:
+    receipts = [
+        receipt
+        for pair_id in ("pair-1", "pair-2", "pair-3")
+        for receipt in (
+            _receipt("serial", pair_id, 100, hosted=True, resource=True),
+            _receipt("static2", pair_id, 40, hosted=True, resource=True),
+        )
+    ]
+
+    result = validation_scheduler_experiment.compare_receipts(receipts)
+    static2 = next(item for item in result["candidates"] if item["candidate"] == "static2")
+
+    assert static2["incumbent_comparison_required"] is False
+    assert static2["incumbent_comparison_complete"] is True
+    assert static2["admission_ready"] is True
+
+
+def test_contender_requires_positive_paired_median_benefit_over_static2() -> None:
+    receipts = [
+        receipt
+        for pair_id in ("pair-1", "pair-2", "pair-3")
+        for receipt in (
+            _receipt("serial", pair_id, 200, hosted=True, resource=True),
+            _receipt("static2", pair_id, 100, hosted=True, resource=True),
+            _receipt("static2-balanced", pair_id, 110, hosted=True, resource=True),
+        )
+    ]
+
+    result = validation_scheduler_experiment.compare_receipts(receipts)
+    contender = next(
+        item for item in result["candidates"] if item["candidate"] == "static2-balanced"
+    )
+
+    assert contender["latency_rule_passed"] is True
+    assert contender["incumbent_comparison_complete"] is True
+    assert contender["incumbent_benefit_seconds"] == -10.0
+    assert contender["incumbent_benefit_positive"] is False
+    assert contender["admission_ready"] is False
+    assert any("positive median benefit" in item for item in contender["incumbent_blockers"])
+
+
+def test_contender_reports_complete_static2_comparison_before_admission() -> None:
+    receipts = [
+        receipt
+        for pair_id in ("pair-1", "pair-2", "pair-3")
+        for receipt in (
+            _receipt("serial", pair_id, 200, hosted=True, resource=True),
+            _receipt("static2", pair_id, 100, hosted=True, resource=True),
+            _receipt("static2-balanced", pair_id, 40, hosted=True, resource=True),
+        )
+    ]
+
+    result = validation_scheduler_experiment.compare_receipts(receipts)
+    contender = next(
+        item for item in result["candidates"] if item["candidate"] == "static2-balanced"
+    )
+
+    assert contender["incumbent"] == "static2"
+    assert contender["incumbent_valid_pair_count"] == 3
+    assert contender["incumbent_hosted_pair_count"] == 3
+    assert contender["incumbent_comparison_complete"] is True
+    assert contender["incumbent_benefit_seconds"] == 60.0
+    assert contender["resource_evidence_complete"] is True
+    assert contender["admission_ready"] is True
+
+
+def test_contender_missing_static2_pair_fails_closed() -> None:
+    receipts = [
+        receipt
+        for pair_id in ("pair-1", "pair-2", "pair-3")
+        for receipt in (
+            _receipt("serial", pair_id, 200, hosted=True, resource=True),
+            _receipt("static2-balanced", pair_id, 40, hosted=True, resource=True),
+        )
+    ]
+
+    result = validation_scheduler_experiment.compare_receipts(receipts)
+    contender = next(
+        item for item in result["candidates"] if item["candidate"] == "static2-balanced"
+    )
+
+    assert contender["incumbent_comparison_complete"] is False
+    assert contender["incumbent_benefit_positive"] is False
+    assert contender["admission_ready"] is False
+    assert any("static2 comparison is missing" in item for item in contender["incumbent_blockers"])
+
+
+def test_malformed_duplicate_receipt_blocks_admission() -> None:
+    receipts = [
+        receipt
+        for pair_id in ("pair-1", "pair-2", "pair-3")
+        for receipt in (
+            _receipt("serial", pair_id, 200, hosted=True, resource=True),
+            _receipt("static2", pair_id, 100, hosted=True, resource=True),
+            _receipt("static2-balanced", pair_id, 40, hosted=True, resource=True),
+        )
+    ]
+    receipts.append({"pair_id": "pair-1", "method": {"name": "serial"}})
+
+    result = validation_scheduler_experiment.compare_receipts(receipts)
+
+    assert any("duplicate serial" in blocker for blocker in result["blockers"])
+    assert result["any_admission_ready"] is False
 
 
 def test_resource_binding_requires_exact_method_and_receipt_path(tmp_path: Path) -> None:
