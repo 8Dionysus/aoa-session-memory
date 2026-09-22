@@ -27250,6 +27250,368 @@ def test_graph_materializes_observed_agent_lineage_with_source_evidence(
     assert graph_index["source_count"] == physical_source_count
 
 
+def test_graph_related_cli_parser_contracts_bind_commands_and_flags() -> None:
+    """Keep CLI binding checks independent from graph fixture construction."""
+    parser = module.build_parser()
+    assert parser.parse_args(
+        ["entity-usage-audit", "aoa-decisions-mcp", "--kind", "mcp_service"]
+    ).kind == "mcp_service"
+    usage_chain_args = parser.parse_args(
+        ["usage-chain", "aoa-decisions-mcp", "--kind", "mcp_service", "--limit", "2"]
+    )
+    assert usage_chain_args.func == module.command_entity_usage_chain
+    assert usage_chain_args.kind == "mcp_service"
+    assert usage_chain_args.limit == 2
+    assert parser.parse_args(
+        ["entity-usage-chain", "aoa-decisions-mcp", "--kind", "mcp_service"]
+    ).func == module.command_entity_usage_chain
+    assert parser.parse_args(
+        ["graph-timeline", "aoa_decisions_search", "--kind", "mcp_tool"]
+    ).kind == "mcp_tool"
+    assert parser.parse_args(
+        ["graph-neighborhood", "aoa-session-memory-mcp", "--edge-limit", "5"]
+    ).edge_limit == 5
+    high_fanout_args = parser.parse_args(
+        ["graph-high-fanout-policy", "--limit", "7"]
+    )
+    assert high_fanout_args.func == module.command_graph_high_fanout_policy
+    assert high_fanout_args.limit == 7
+    high_fanout_cardinality_args = parser.parse_args(
+        [
+            "graph-high-fanout-cardinality-comparison",
+            "--limit",
+            "9",
+            "--write-report",
+        ]
+    )
+    assert (
+        high_fanout_cardinality_args.func
+        == module.command_graph_high_fanout_cardinality_comparison
+    )
+    assert high_fanout_cardinality_args.limit == 9
+    assert high_fanout_cardinality_args.write_report is True
+    posting_cardinality_args = parser.parse_args(
+        [
+            "episode-posting-cardinality-refresh",
+            "--limit",
+            "3",
+            "--budget-seconds",
+            "15",
+            "--write-report",
+        ]
+    )
+    assert (
+        posting_cardinality_args.func
+        == module.command_episode_posting_cardinality_refresh
+    )
+    assert posting_cardinality_args.limit == 3
+    assert posting_cardinality_args.budget_seconds == 15
+    assert posting_cardinality_args.write_report is True
+    replacement_proof_args = parser.parse_args(
+        [
+            "graph-entity-usage-replacement-proof",
+            "aoa-session-memory-mcp",
+            "--kind",
+            "mcp",
+            "--sample-limit",
+            "4",
+        ]
+    )
+    assert (
+        replacement_proof_args.func
+        == module.command_graph_entity_usage_replacement_proof
+    )
+    assert replacement_proof_args.kind == "mcp"
+    assert replacement_proof_args.sample_limit == 4
+    parsed_bridge = parser.parse_args(
+        [
+            "graph-bridge",
+            "aoa-session-memory-mcp",
+            "exec_command",
+            "--source-kind",
+            "mcp",
+            "--target-kind",
+            "tool",
+        ]
+    )
+    assert parsed_bridge.source_kind == "mcp"
+    assert parsed_bridge.target_kind == "tool"
+    assert parser.parse_args(
+        ["agent-responses", "--agent-event", "assistant_answer"]
+    ).use_shards is True
+    assert parser.parse_args(
+        ["agent-responses", "--agent-event", "assistant_answer", "--no-shards"]
+    ).use_shards is False
+    assert parser.parse_args(
+        ["answer-neighborhood", "--session", "latest"]
+    ).use_shards is True
+    assert parser.parse_args(
+        ["answer-neighborhood", "--session", "latest", "--no-explain"]
+    ).explain is False
+    assert parser.parse_args(
+        ["agent-reasoning-windows", "--session", "latest", "--no-shards"]
+    ).use_shards is False
+    assert parser.parse_args(
+        ["agent-reasoning-windows", "--session", "latest", "--explain"]
+    ).explain is True
+    assert parser.parse_args(
+        ["agent-reasoning-windows", "--session", "latest", "--no-explain"]
+    ).explain is False
+    assert parser.parse_args(
+        ["search-hotset-audit", "--shard", "month/2026-06"]
+    ).shard == "month/2026-06"
+    assert parser.parse_args(
+        ["search-hotset-audit", "--followup-mode", "deep"]
+    ).followup_mode == module.SEARCH_HOTSET_AUDIT_FOLLOWUP_MODE_DEEP
+    assert parser.parse_args(
+        ["search-operational-projection-plan", "--shard", "month/2026-06"]
+    ).shard == "month/2026-06"
+    assert parser.parse_args(
+        ["literal-query-plan", "aoa-decisions-mcp", "--kind", "mcp_service"]
+    ).kind == "mcp_service"
+
+
+def test_literal_query_plan_preserves_typed_positive_route_contracts(
+    tmp_path: Path,
+) -> None:
+    """Keep direct planner positives independent from graph fixture setup."""
+    aoa_root = tmp_path / ".aoa"
+    aoa_root.mkdir()
+    cases = [
+        {
+            "name": "error_text",
+            "query": "Traceback ValueError literal-query planner failed",
+            "kwargs": {"doc_type": "event", "date_from": "2026-05-01"},
+            "primary": "error_text",
+            "primary_route_ids": {"scoped_shard_full_text", "monolith_raw_text_fallback"},
+            "structured_first": False,
+        },
+        {
+            "name": "hook_receipt",
+            "query": "typing_prompt_bridge_failed",
+            "kwargs": {"doc_type": "event"},
+            "primary": "hook_receipt",
+            "primary_route_ids": {"hook_receipts"},
+            "structured_first": True,
+        },
+        {
+            "name": "noisy_hook_receipt",
+            "query": "aoa session memory hook failure raw_unavailable",
+            "kwargs": {"doc_type": "event"},
+            "primary": "hook_receipt",
+            "primary_route_ids": {"hook_receipts"},
+            "structured_first": True,
+            "structured_route_signal": "hook_health:raw_unavailable",
+        },
+        {
+            "name": "raw_ref",
+            "query": "raw:line:10",
+            "kwargs": {},
+            "primary": "raw_ref",
+            "primary_route_ids": {"raw_ref_scoped_verification"},
+            "structured_first": True,
+        },
+        {
+            "name": "broad_mcp_usage",
+            "query": "найди все MCP которые агент использовал и ошибки рядом",
+            "kwargs": {"doc_type": "event"},
+            "primary": "entity_class",
+            "primary_route_ids": {"entity_inventory"},
+            "structured_first": True,
+            "route_anchor": "mcp",
+            "route_anchor_source": "broad_entity_class_query",
+            "broad_layer": "mcp",
+            "broad_usage_intent": True,
+            "ordered_route_prefix": [
+                "entity_inventory",
+                "entity_registry_class",
+                "entity_usage_scenario_audit",
+            ],
+        },
+        {
+            "name": "broad_skill_inventory",
+            "query": "какие skills есть в системе",
+            "kwargs": {"doc_type": "event"},
+            "primary": "entity_class",
+            "primary_route_ids": {"entity_registry_class"},
+            "structured_first": True,
+            "route_anchor": "skill",
+            "route_anchor_source": "broad_entity_class_query",
+            "broad_layer": "skill",
+            "broad_usage_intent": False,
+        },
+    ]
+
+    for case in cases:
+        plan = module.literal_query_plan(
+            aoa_root=aoa_root,
+            query=case["query"],
+            **case["kwargs"],
+        )
+        assert plan["ok"] is True, case["name"]
+        assert plan["query_shape"]["primary"] == case["primary"], case["name"]
+        assert plan["literal_route_strategy"]["query_class"] == case["primary"], case["name"]
+        assert plan["primary_route"]["route_id"] in case["primary_route_ids"], case["name"]
+        assert plan["cost_profile"]["structured_first"] is case["structured_first"], case["name"]
+        if case["name"] == "error_text":
+            assert plan["literal_route_strategy"]["class_contract"]["cheapest_first_routes"][0] == "route_signal_structured_search"
+            assert plan["literal_route_strategy"]["fallback_route_id"] in {
+                "scoped_shard_full_text",
+                "monolith_raw_text_fallback",
+            }
+            assert plan["cost_profile"]["exact_recall_preserved_by_fallback"] is False
+        elif case["name"] == "hook_receipt":
+            assert "aoa_session_hook_receipts" in plan["next_command"]
+            assert "signal='typing_prompt_bridge_failed'" in plan["next_command"]
+            assert plan["literal_route_strategy"]["monolith_fallback_first"] is False
+        elif case["name"] == "noisy_hook_receipt":
+            assert plan["structured_route_signal_candidates"][0]["route_signal"] == case["structured_route_signal"]
+            assert plan["cost_profile"]["uses_fts_first"] is False
+            assert plan["cost_profile"]["exact_recall_preserved_by_fallback"] is False
+            assert "event_name='*'" in plan["next_command"]
+            assert "signal='raw_unavailable'" in plan["next_command"]
+            assert "only_errors=True" not in plan["next_command"]
+            assert plan["literal_route_strategy"]["primary_route_id"] == "hook_receipts"
+            assert plan["literal_route_strategy"]["uses_structured_first"] is True
+            assert plan["literal_route_strategy"]["monolith_fallback_position"] > 1
+            assert plan["literal_route_strategy"]["fallback_preserves_exact_recall"] is False
+            assert plan["literal_route_strategy"]["monolith_fallback_first"] is False
+            assert plan["ordered_routes"][-1]["route_id"] in {
+                "scoped_shard_full_text",
+                "monolith_raw_text_fallback",
+            }
+        elif case["name"] == "raw_ref":
+            assert "aoa_session_freshness_check" in plan["next_command"]
+            assert plan["literal_route_strategy"]["monolith_fallback_first"] is False
+        else:
+            assert plan["route_anchor"] == case["route_anchor"]
+            assert plan["route_anchor_source"] == case["route_anchor_source"]
+            assert plan["broad_entity_class"]["layer"] == case["broad_layer"]
+            assert plan["broad_entity_class"]["usage_intent"] is case["broad_usage_intent"]
+            assert plan["literal_route_strategy"]["monolith_fallback_first"] is False
+            if case["name"] == "broad_mcp_usage":
+                assert [
+                    route["route_id"] for route in plan["ordered_routes"][:3]
+                ] == case["ordered_route_prefix"]
+
+
+def test_literal_query_plan_preserves_noisy_entity_validator_session_and_event_routes(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """Keep distinct positive planner lanes without restoring the old snapshot."""
+    aoa_root = tmp_path / ".aoa"
+    empty_codex_home = tmp_path / "empty-codex-home"
+    empty_mcp_services_root = tmp_path / "empty-mcp-services"
+    empty_codex_home.mkdir()
+    empty_mcp_services_root.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(empty_codex_home))
+    monkeypatch.setenv(
+        "AOA_ENTITY_REGISTRY_MCP_SERVICES_ROOTS",
+        str(empty_mcp_services_root),
+    )
+    registry_path = aoa_root / module.ENTITY_REGISTRY_PATH
+    write_json(
+        registry_path,
+        {
+            "schema_version": module.ENTITY_REGISTRY_SCHEMA_VERSION,
+            "artifact_type": "entity_registry_snapshot",
+            "generated_at": "2999-01-01T00:00:00Z",
+            "generated_at_epoch": 32472144000.0,
+            "ok": True,
+            "aoa_root": str(aoa_root),
+            "registry_path": str(registry_path),
+            "source_surfaces": ["minimal_planner_regression_fixture"],
+            "counts_by_kind": {"mcp_service": 1},
+            "counts_by_status": {"active": 1},
+            "entries": [
+                {
+                    "entity_id": "mcp_service:aoa_decisions_mcp",
+                    "kind": "mcp_service",
+                    "canonical_key": "aoa_decisions_mcp",
+                    "aliases": ["aoa-decisions-mcp", "aoa_decisions_mcp"],
+                    "status": "active",
+                    "source_surface": "minimal_planner_regression_fixture",
+                    "source_refs": [],
+                }
+            ],
+        },
+    )
+
+    noisy_entity = module.literal_query_plan(
+        aoa_root=aoa_root,
+        query="найди как aoa-decisions-mcp возвращал Transport closed",
+    )
+    assert noisy_entity["query_shape"]["primary"] == "entity_anchor"
+    assert noisy_entity["route_anchor"] == "aoa_decisions_mcp"
+    assert noisy_entity["route_anchor_source"] == "embedded_entity_registry"
+    assert noisy_entity["route_anchor_kind"] == "mcp"
+    embedded_entity = noisy_entity["embedded_entity_anchor"]
+    assert embedded_entity["anchor"] == "aoa_decisions_mcp"
+    assert embedded_entity["kind"] == "mcp"
+    assert embedded_entity["registry_kind"] == "mcp_service"
+    assert embedded_entity["entity_id"] == "mcp_service:aoa_decisions_mcp"
+    assert embedded_entity["match_relation"] == "embedded"
+    assert embedded_entity["source_surface"] == "minimal_planner_regression_fixture"
+    assert noisy_entity["query_shape"]["suppressed_broad_entity_class"]["layer"] == "mcp"
+    assert noisy_entity["primary_route"]["route_id"] == "entity_usage_chain"
+    assert noisy_entity["next_command"].startswith(
+        "python3 scripts/aoa_session_memory.py usage-chain aoa_decisions_mcp"
+    )
+    assert noisy_entity["ordered_routes"][-1]["route_id"] in {
+        "scoped_shard_full_text",
+        "monolith_raw_text_fallback",
+    }
+
+    validator_path = module.literal_query_plan(
+        aoa_root=aoa_root,
+        query="как агент использовал validate_session_memory_mcp.py и что потом сломалось",
+    )
+    assert validator_path["query_shape"]["primary"] == "path"
+    assert validator_path["query_shape"]["path_anchor"] == "validate_session_memory_mcp.py"
+    assert validator_path["route_anchor"] == "validate_session_memory_mcp.py"
+    assert validator_path["route_anchor_source"] == "path_anchor"
+    assert validator_path["primary_route"]["route_id"] == "route_signal_structured_search"
+    assert "--route-signal validator:validate_session_memory_mcp_py" in (
+        validator_path["next_command"]
+    )
+    assert validator_path["ordered_routes"][1]["route_id"] == "entity_usage_chain"
+    assert validator_path["ordered_routes"][-1]["route_id"] in {
+        "scoped_shard_full_text",
+        "monolith_raw_text_fallback",
+    }
+
+    session_answer = module.literal_query_plan(
+        aoa_root=aoa_root,
+        query="найди ответы агента по сессии 2026-07-07__003__ноут-показывал-13-заряда-затем-резко",
+    )
+    assert session_answer["query_shape"]["primary"] == "session_id"
+    assert session_answer["query_shape"]["session_target"] == (
+        "2026-07-07__003__ноут-показывал-13-заряда-затем-резко"
+    )
+    assert session_answer["query_shape"]["inferred_agent_event"] == "assistant_answer"
+    assert session_answer["primary_route"]["route_id"] == "agent_event_route"
+    assert "--agent-event assistant_answer" in session_answer["next_command"]
+    assert f"--session {shlex.quote(session_answer['query_shape']['session_target'])}" in (
+        session_answer["next_command"]
+    )
+    assert session_answer["ordered_routes"][-1]["route_id"] == (
+        "monolith_raw_text_fallback"
+    )
+
+    explicit_agent_event = module.literal_query_plan(
+        aoa_root=aoa_root,
+        query="",
+        agent_event="assistant_answer",
+    )
+    assert explicit_agent_event["primary_route"]["route_id"] == "agent_event_route"
+    assert explicit_agent_event["primary_route"]["command"].startswith(
+        "python3 scripts/aoa_session_memory.py agent-responses"
+    )
+    assert "--agent-event assistant_answer" in explicit_agent_event["next_command"]
+    assert explicit_agent_event["cost_profile"]["uses_fts_first"] is False
+
+
 def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(
     tmp_path: Path,
     monkeypatch: Any,
@@ -27261,6 +27623,8 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(
     aoa_root = workspace / ".aoa"
 
     def local_skill_roots(root: Path) -> list[tuple[Path, str, str]]:
+        # Keep entity discovery scoped to this fixture; this path intentionally
+        # does not materialize skill rows for the graph evidence scenario.
         skill_root = root / "skills"
         if not skill_root.exists():
             return []
@@ -27332,6 +27696,25 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(
                 },
             },
             {
+                "timestamp": "2026-05-26T00:00:03.175Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "mcp__aoa_decisions__aoa_decisions_search",
+                    "call_id": "call-decision-search-mcp",
+                    "arguments": json.dumps({"query": "aoa-decision skill MCP usage"}),
+                },
+            },
+            {
+                "timestamp": "2026-05-26T00:00:03.185Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call-decision-search-mcp",
+                    "output": json.dumps({"ok": True, "refs": ["docs/decisions/README.md"]}),
+                },
+            },
+            {
                 "timestamp": "2026-05-26T00:00:03.200Z",
                 "type": "response_item",
                 "payload": {
@@ -27364,25 +27747,6 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(
         workspace_root=workspace,
         aoa_root=aoa_root,
     )
-    skill_dir = aoa_root / "skills" / "aoa-session-memory-evidence-route"
-    skill_dir.mkdir(parents=True)
-    (skill_dir / "SKILL.md").write_text(
-        "---\n"
-        "name: aoa-session-memory-evidence-route\n"
-        "description: Route prior session evidence for recurring operational entities.\n"
-        "---\n",
-        encoding="utf-8",
-    )
-    decision_skill_dir = aoa_root / "skills" / "aoa-decision"
-    decision_skill_dir.mkdir(parents=True)
-    (decision_skill_dir / "SKILL.md").write_text(
-        "---\n"
-        "name: aoa-decision\n"
-        "description: Route durable repository decision evidence.\n"
-        "---\n",
-        encoding="utf-8",
-    )
-    archived_session_label = next(path.name for path in (aoa_root / "sessions").iterdir() if path.is_dir())
     search_index = module.search_index_sessions(aoa_root=aoa_root, target="all")
     graph = module.build_session_graph(
         aoa_root=aoa_root,
@@ -27390,7 +27754,6 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(
         write=True,
         include_rows=False,
     )
-    atlas = module.build_agent_atlas(aoa_root=aoa_root, target="all", clean=True)
     conn = sqlite3.connect(str(module.search_db_path(aoa_root)))
     conn.execute("UPDATE meta SET value = ? WHERE key = ?", ("2999-01-01T00:00:00Z", "generated_at"))
     conn.commit()
@@ -27409,7 +27772,6 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(
         graph["edges"] = graph_store.all_payloads("edges")
     finally:
         graph_store.close()
-    assert atlas["ok"] is True
     assert (aoa_root / "graph" / "nodes.jsonl").exists()
     assert (aoa_root / "graph" / "edges.jsonl").exists()
     assert (aoa_root / "graph" / "graph.sqlite3").exists()
@@ -27470,11 +27832,26 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(
         limit=3,
         edge_limit=5,
     )
-    timeline = module.graph_timeline(aoa_root=aoa_root, anchor="aoa-session-memory-mcp", kind="mcp")
-    config_alias_timeline = module.graph_timeline(aoa_root=aoa_root, anchor="mcp_servers.aoa_session_memory", kind="mcp")
-    exact_tool_timeline = module.graph_timeline(aoa_root=aoa_root, anchor="aoa_decisions_search", kind="tool")
-    registry_kind_timeline = module.graph_timeline(aoa_root=aoa_root, anchor="aoa-session-memory-mcp", kind="mcp_service")
-    registry_tool_timeline = module.graph_timeline(aoa_root=aoa_root, anchor="aoa_decisions_search", kind="mcp_tool")
+    config_alias_timeline = module.graph_timeline(
+        aoa_root=aoa_root,
+        anchor="mcp_servers.aoa_session_memory",
+        kind="mcp",
+    )
+    exact_tool_timeline = module.graph_timeline(
+        aoa_root=aoa_root,
+        anchor="aoa_decisions_search",
+        kind="tool",
+    )
+    registry_kind_timeline = module.graph_timeline(
+        aoa_root=aoa_root,
+        anchor="aoa-session-memory-mcp",
+        kind="mcp_service",
+    )
+    registry_tool_timeline = module.graph_timeline(
+        aoa_root=aoa_root,
+        anchor="aoa_decisions_search",
+        kind="mcp_tool",
+    )
     usage_audit = module.entity_usage_audit(
         aoa_root=aoa_root,
         anchor="aoa-decisions-mcp",
@@ -27495,36 +27872,8 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(
         aoa_root=aoa_root,
         anchor="aoa-decisions-mcp",
         kind="mcp",
-        limit=2,
-        per_route_limit=8,
-        before=1,
-        after=4,
-        raw_preview_chars=500,
-    )
-    registry_kind_usage_neighborhood = module.entity_usage_neighborhood(
-        aoa_root=aoa_root,
-        anchor="aoa-decisions-mcp",
-        kind="mcp_service",
         limit=1,
         per_route_limit=8,
-        before=1,
-        after=4,
-        raw_preview_chars=500,
-    )
-    narrow_usage_audit = module.entity_usage_audit(
-        aoa_root=aoa_root,
-        anchor="aoa-decisions-mcp",
-        kind="mcp",
-        limit=1,
-        per_route_limit=8,
-        consequence_window=4,
-    )
-    narrow_usage_neighborhood = module.entity_usage_neighborhood(
-        aoa_root=aoa_root,
-        anchor="aoa-decisions-mcp",
-        kind="mcp",
-        limit=1,
-        per_route_limit=1,
         before=1,
         after=4,
         raw_preview_chars=500,
@@ -27539,111 +27888,20 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(
         consequence_window=4,
         raw_preview_limit=2,
     )
-    typed_literal_plan = module.literal_query_plan(
+    typo_mcp_trace = module.trace_route(
         aoa_root=aoa_root,
-        query="aoa-decisions-mcp",
+        anchor="aoa-decsions-mcp",
         kind="mcp",
-        doc_type="event",
+        limit=20,
+        per_route_limit=5,
     )
-    error_literal_plan = module.literal_query_plan(
-        aoa_root=aoa_root,
-        query="Traceback ValueError literal-query planner failed",
-        doc_type="event",
-        date_from="2026-05-01",
-    )
-    noisy_route_signal_literal_plan = module.literal_query_plan(
-        aoa_root=aoa_root,
-        query="aoa session memory hook failure raw_unavailable",
-        doc_type="event",
-    )
-    embedded_skill_literal_plan = module.literal_query_plan(
-        aoa_root=aoa_root,
-        query="как агент использовал aoa-decision",
-        doc_type="event",
-    )
-    broad_mcp_usage_literal_plan = module.literal_query_plan(
-        aoa_root=aoa_root,
-        query="найди все MCP которые агент использовал и ошибки рядом",
-        doc_type="event",
-    )
-    broad_skill_inventory_literal_plan = module.literal_query_plan(
-        aoa_root=aoa_root,
-        query="какие skills есть в системе",
-        doc_type="event",
-    )
-    concrete_mcp_literal_plan = module.literal_query_plan(
-        aoa_root=aoa_root,
-        query="как агент использовал aoa-session-memory-mcp и к чему это привело",
-        doc_type="event",
-    )
-    noisy_concrete_mcp_literal_plan = module.literal_query_plan(
-        aoa_root=aoa_root,
-        query="найди как aoa-session-memory-mcp возвращал Transport closed",
-        doc_type="event",
-    )
-    overlapping_exact_skill_literal_plan = module.literal_query_plan(
-        aoa_root=aoa_root,
-        query="aoa-session-memory-evidence-route",
-        doc_type="event",
-    )
-    single_token_tool_literal_plan = module.literal_query_plan(
-        aoa_root=aoa_root,
-        query="search-hotset-audit",
-        doc_type="event",
-    )
-    single_token_error_literal_plan = module.literal_query_plan(
-        aoa_root=aoa_root,
-        query="sqlite_query_timeout",
-        doc_type="event",
-    )
-    structured_literal_plan = module.literal_query_plan(
-        aoa_root=aoa_root,
-        query="",
-        doc_type="event",
-        agent_event="assistant_answer",
-    )
-    raw_ref_literal_plan = module.literal_query_plan(
-        aoa_root=aoa_root,
-        query="raw:line:10",
-        session=archived_session_label,
-    )
-    hook_receipt_literal_plan = module.literal_query_plan(
-        aoa_root=aoa_root,
-        query="typing_prompt_bridge_failed",
-        date_from="2026-06-01",
-    )
-    command_literal_plan = module.literal_query_plan(
-        aoa_root=aoa_root,
-        query="python3 scripts/aoa_session_memory.py agent-event-audit latest --probe-routes",
-        doc_type="event",
-    )
-    session_id_literal_plan = module.literal_query_plan(
-        aoa_root=aoa_root,
-        query=graph_session_id,
-        doc_type="event",
-    )
-    session_answer_literal_plan = module.literal_query_plan(
-        aoa_root=aoa_root,
-        query=f"найди ответы агента по сессии {archived_session_label}",
-        doc_type="event",
-    )
-    unresolved_session_answer_literal_plan = module.literal_query_plan(
-        aoa_root=aoa_root,
-        query=(
-            "найди ответы агента по сессии "
-            "2026-07-07__003__ноут-показывал-13-заряда-затем-резко"
-        ),
-        doc_type="event",
-    )
-    path_phrase_literal_plan = module.literal_query_plan(
-        aoa_root=aoa_root,
-        query="как агент использовал validate_session_memory_mcp.py и что потом сломалось",
-        doc_type="event",
-    )
-    typo_mcp_trace = module.trace_route(aoa_root=aoa_root, anchor="aoa-decsions-mcp", kind="mcp", limit=20, per_route_limit=5)
     query_state = module.graph_store_query_state(aoa_root)
-    storage = module.storage_audit(aoa_root=aoa_root, deep_dbstat=True, row_counts=True, write_report=True)
-    cooccurrence = module.graph_cooccurrence(aoa_root=aoa_root, anchor="exec_command", kind="tool")
+    storage = module.storage_audit(
+        aoa_root=aoa_root,
+        deep_dbstat=True,
+        row_counts=True,
+        write_report=True,
+    )
     bridge = module.graph_bridge(
         aoa_root=aoa_root,
         source_anchor="aoa-session-memory-mcp",
@@ -27692,9 +27950,6 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(
     assert "graph-neighborhood" in compact_neighborhood["next_expansion_command"]
     assert "--depth 3" in compact_neighborhood["next_expansion_command"]
     assert "--edge-limit" in compact_neighborhood["next_expansion_command"]
-    assert timeline["events"]
-    assert "graph-timeline" in timeline["next_command"]
-    assert "graph-timeline" in timeline["next_expansion_command"]
     assert config_alias_timeline["events"]
     assert "aoa_session_memory_mcp" in config_alias_timeline["resolved"]["aliases"]
     assert config_alias_timeline["resolved"]["resolver_strategy"] == "exact_route_node"
@@ -27706,362 +27961,69 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(
     assert registry_kind_timeline["events"]
     assert registry_tool_timeline["kind"] == "tool"
     assert registry_tool_timeline["requested_kind"] == "mcp_tool"
-    assert any(event.get("title") == "Tool call: aoa_decisions_search" for event in registry_tool_timeline["events"])
-    assert usage_audit["artifact_type"] == "session_memory_entity_usage_audit"
+    assert any(
+        event.get("title") == "Tool call: aoa_decisions_search"
+        for event in registry_tool_timeline["events"]
+    )
     assert usage_audit["ok"] is True
     assert usage_audit["usage_event_count"] >= 1
-    assert any(event.get("title") == "Tool call: aoa_decisions_search" for event in usage_audit["usage_events"])
-    assert all(event.get("title") != "Tool call: spawn_agent" for event in usage_audit["usage_events"])
-    assert registry_kind_usage_audit["kind"] == "mcp"
-    assert registry_kind_usage_audit["requested_kind"] == "mcp_service"
-    assert registry_kind_usage_audit["ok"] is True
-    assert registry_kind_usage_audit["usage_event_count"] >= 1
-    assert any(event.get("title") == "Tool call: aoa_decisions_search" for event in registry_kind_usage_audit["usage_events"])
+    assert any(
+        event.get("title")
+        == "Tool call: mcp__aoa_decisions__aoa_decisions_search"
+        for event in usage_audit["usage_events"]
+    )
     assert usage_audit["consequence_event_count"] >= 1
     assert any(
-        item.get("kind") == "mentioned_path" and item.get("value") == "docs/decisions/README.md"
+        item.get("kind") == "mentioned_path"
+        and item.get("value") == "docs/decisions/README.md"
         for item in usage_audit["document_refs"]
     )
     assert usage_audit["quality"]["search_has_route_index"] is True
     assert usage_audit["quality"]["search_has_route_terms"] is True
     assert usage_audit["quality"]["fresh_event_count"] >= usage_audit["usage_event_count"]
     assert usage_audit["quality"]["stale_event_count"] == 0
-    assert usage_audit["sessions"][0]["fresh_event_count"] >= usage_audit["usage_event_count"]
-    assert usage_audit["sessions"][0]["stale_event_count"] == 0
-    assert narrow_usage_audit["ok"] is True
-    assert narrow_usage_audit["event_count"] == 1
-    assert narrow_usage_audit["usage_event_count"] == 1
-    assert narrow_usage_audit["usage_events"][0]["title"] == "Tool call: aoa_decisions_search"
-    assert narrow_usage_audit["quality"]["candidate_usage_event_count"] >= 1
-    assert usage_neighborhood["artifact_type"] == "session_memory_entity_usage_neighborhood"
+    first_usage_ref = usage_audit["usage_events"][0]["refs"]
+    assert first_usage_ref["raw"] == "raw:line:7"
+    assert first_usage_ref["segment"]
+    assert first_usage_ref["session"]
+    assert registry_kind_usage_audit["kind"] == "mcp"
+    assert registry_kind_usage_audit["requested_kind"] == "mcp_service"
+    assert registry_kind_usage_audit["usage_event_count"] >= 1
+    assert registry_kind_usage_audit["usage_events"][0]["event_id"] == (
+        usage_audit["usage_events"][0]["event_id"]
+    )
     assert usage_neighborhood["ok"] is True
-    assert usage_neighborhood["quality"]["usage_neighborhood_present"] is True
-    assert usage_neighborhood["quality"]["consequence_present"] is True
-    assert usage_neighborhood["quality"]["raw_preview_available"] is True
-    assert usage_neighborhood["quality"]["audit_usage_role_fast_path_supported"] is True
-    assert usage_neighborhood["quality"]["audit_usage_role_fast_path_applied"] is True
-    assert "audit_usage_role_fast_path_broad_route_search_skipped" in usage_neighborhood["quality"]
-    assert usage_neighborhood["source_audit"]["usage_role_fast_path_applied"] is True
-    assert usage_neighborhood["source_audit"]["usage_role_fast_path_broad_route_search_skipped"] == usage_neighborhood["quality"]["audit_usage_role_fast_path_broad_route_search_skipped"]
-    assert "text_search_skipped" in usage_neighborhood["source_audit"]
+    assert usage_neighborhood["neighborhoods"]
     first_neighborhood = usage_neighborhood["neighborhoods"][0]
-    assert first_neighborhood["source_usage_event"]["title"] == "Tool call: aoa_decisions_search"
-    assert first_neighborhood["source_usage_event"]["raw_preview"]["status"] == "available"
-    assert isinstance(first_neighborhood["source_usage_event"]["route_signals"], list)
-    assert first_neighborhood["source_usage_event"]["route_signal_count"] >= len(first_neighborhood["source_usage_event"]["route_signals"])
-    assert any(event.get("relation") == "same_correlation_id" for event in first_neighborhood["consequence_events"])
-    assert any(event.get("event_type") == "ASSISTANT_MESSAGE" for event in first_neighborhood["consequence_events"])
-    assert any(
-        item.get("kind") == "mentioned_path" and item.get("value") == "docs/decisions/README.md"
-        for item in usage_neighborhood["document_refs"]
+    assert first_neighborhood["source_usage_event"]["title"] == (
+        "Tool call: mcp__aoa_decisions__aoa_decisions_search"
     )
-    assert narrow_usage_neighborhood["ok"] is True
-    assert narrow_usage_neighborhood["quality"]["requested_usage_limit"] == 1
-    assert narrow_usage_neighborhood["quality"]["audit_per_route_limit"] > 1
-    assert narrow_usage_neighborhood["quality"]["usage_neighborhood_present"] is True
-    assert narrow_usage_neighborhood["quality"]["raw_preview_available"] is True
-    assert narrow_usage_neighborhood["source_audit"]["usage_event_count"] >= 1
-    assert narrow_usage_neighborhood["neighborhoods"][0]["source_usage_event"]["title"] == "Tool call: aoa_decisions_search"
-    assert registry_kind_usage_neighborhood["kind"] == "mcp"
-    assert registry_kind_usage_neighborhood["requested_kind"] == "mcp_service"
-    assert registry_kind_usage_neighborhood["ok"] is True
-    assert registry_kind_usage_neighborhood["neighborhoods"][0]["source_usage_event"]["title"] == "Tool call: aoa_decisions_search"
-    parser = module.build_parser()
-    assert parser.parse_args(["entity-usage-audit", "aoa-decisions-mcp", "--kind", "mcp_service"]).kind == "mcp_service"
-    usage_chain_args = parser.parse_args(["usage-chain", "aoa-decisions-mcp", "--kind", "mcp_service", "--limit", "2"])
-    assert usage_chain_args.func == module.command_entity_usage_chain
-    assert usage_chain_args.kind == "mcp_service"
-    assert usage_chain_args.limit == 2
-    assert parser.parse_args(["entity-usage-chain", "aoa-decisions-mcp", "--kind", "mcp_service"]).func == module.command_entity_usage_chain
-    assert parser.parse_args(["graph-timeline", "aoa_decisions_search", "--kind", "mcp_tool"]).kind == "mcp_tool"
-    assert parser.parse_args(["graph-neighborhood", "aoa-session-memory-mcp", "--edge-limit", "5"]).edge_limit == 5
-    high_fanout_args = parser.parse_args(["graph-high-fanout-policy", "--limit", "7"])
-    assert high_fanout_args.func == module.command_graph_high_fanout_policy
-    assert high_fanout_args.limit == 7
-    high_fanout_cardinality_args = parser.parse_args(
-        ["graph-high-fanout-cardinality-comparison", "--limit", "9", "--write-report"]
-    )
-    assert high_fanout_cardinality_args.func == module.command_graph_high_fanout_cardinality_comparison
-    assert high_fanout_cardinality_args.limit == 9
-    assert high_fanout_cardinality_args.write_report is True
-    posting_cardinality_args = parser.parse_args(
-        ["episode-posting-cardinality-refresh", "--limit", "3", "--budget-seconds", "15", "--write-report"]
-    )
-    assert posting_cardinality_args.func == module.command_episode_posting_cardinality_refresh
-    assert posting_cardinality_args.limit == 3
-    assert posting_cardinality_args.budget_seconds == 15
-    assert posting_cardinality_args.write_report is True
-    replacement_proof_args = parser.parse_args(
-        ["graph-entity-usage-replacement-proof", "aoa-session-memory-mcp", "--kind", "mcp", "--sample-limit", "4"]
-    )
-    assert replacement_proof_args.func == module.command_graph_entity_usage_replacement_proof
-    assert replacement_proof_args.kind == "mcp"
-    assert replacement_proof_args.sample_limit == 4
-    parsed_bridge = parser.parse_args(["graph-bridge", "aoa-session-memory-mcp", "exec_command", "--source-kind", "mcp", "--target-kind", "tool"])
-    assert parsed_bridge.source_kind == "mcp"
-    assert parsed_bridge.target_kind == "tool"
-    assert parser.parse_args(["agent-responses", "--agent-event", "assistant_answer"]).use_shards is True
-    assert parser.parse_args(["agent-responses", "--agent-event", "assistant_answer", "--no-shards"]).use_shards is False
-    assert parser.parse_args(["answer-neighborhood", "--session", "latest"]).use_shards is True
-    assert parser.parse_args(["answer-neighborhood", "--session", "latest", "--no-explain"]).explain is False
-    assert parser.parse_args(["agent-reasoning-windows", "--session", "latest", "--no-shards"]).use_shards is False
-    assert parser.parse_args(["agent-reasoning-windows", "--session", "latest", "--explain"]).explain is True
-    assert parser.parse_args(["agent-reasoning-windows", "--session", "latest", "--no-explain"]).explain is False
-    assert parser.parse_args(["search-hotset-audit", "--shard", "month/2026-06"]).shard == "month/2026-06"
+    assert first_neighborhood["consequence_event_count"] >= 1
+    assert first_neighborhood["source_usage_event"]["refs"]["raw"] == "raw:line:7"
     assert (
-        parser.parse_args(["search-hotset-audit", "--followup-mode", "deep"]).followup_mode
-        == module.SEARCH_HOTSET_AUDIT_FOLLOWUP_MODE_DEEP
+        first_neighborhood["source_usage_event"]["raw_preview"]["status"]
+        == "available"
     )
-    assert (
-        parser.parse_args(["search-operational-projection-plan", "--shard", "month/2026-06"]).shard
-        == "month/2026-06"
-    )
-    assert parser.parse_args(["literal-query-plan", "aoa-decisions-mcp", "--kind", "mcp_service"]).kind == "mcp_service"
-    assert scenario_audit["artifact_type"] == "session_memory_entity_usage_scenario_audit"
     assert scenario_audit["ok"] is True
-    assert scenario_audit["quality"]["sample_count"] == 2
-    assert scenario_audit["quality"]["failed_count"] == 0
-    assert scenario_audit["quality"]["raw_preview_counts"].get("available", 0) >= 1
-    assert typed_literal_plan["artifact_type"] == "session_memory_literal_query_plan"
-    assert typed_literal_plan["ok"] is True
-    assert typed_literal_plan["primary_route"]["route_id"] == "entity_usage_chain"
-    assert typed_literal_plan["cost_profile"]["structured_first"] is True
-    assert typed_literal_plan["classifications"]["primary"] == "entity_anchor"
-    assert typed_literal_plan["fallback_plan"]["route_id"] in {"scoped_shard_full_text", "monolith_raw_text_fallback"}
-    typed_strategy = typed_literal_plan["literal_route_strategy"]
-    assert typed_strategy["query_class"] == "entity_anchor"
-    assert typed_strategy["primary_route_id"] == "entity_usage_chain"
-    assert typed_strategy["uses_structured_first"] is True
-    assert typed_strategy["uses_fts_first"] is False
-    assert typed_strategy["fallback_route_id"] in {"scoped_shard_full_text", "monolith_raw_text_fallback"}
-    assert typed_strategy["monolith_is_fallback_only"] is True
-    assert typed_strategy["exact_recall_preserved_by_fallback"] is False
-    assert typed_strategy["exact_recall_fallback_available"] is True
-    assert typed_strategy["exact_recall_proof_status"] == "requires_complete_verified_fallback_execution"
-    assert typed_strategy["route_sequence"][0]["route_id"] == "entity_usage_chain"
-    assert typed_strategy["class_contract"]["cheapest_first_routes"][0] == "entity_usage_chain"
-    assert typed_literal_plan["literal_class_contracts"]["command"]["cheapest_first_routes"][0] == "exact_literal_postings_search"
-    assert typed_literal_plan["next_expansion"]["route_id"] == "entity_usage_audit"
-    assert typed_literal_plan["next_expansion_command"]
-    assert typed_literal_plan["cost_profile"]["monolith_fallback_first"] is False
+    assert scenario_audit["samples"]
     assert any(
-        item.get("route_signal") == "mcp:aoa_decisions_mcp"
-        for item in typed_literal_plan["route_candidates"]
-    )
-    assert error_literal_plan["primary_route"]["route_id"] in {"scoped_shard_full_text", "monolith_raw_text_fallback"}
-    assert error_literal_plan["query_shape"]["primary"] == "error_text"
-    assert error_literal_plan["cost_profile"]["exact_recall_preserved_by_fallback"] is False
-    assert error_literal_plan["cost_profile"]["structured_first"] is False
-    assert error_literal_plan["literal_route_strategy"]["query_class"] == "error_text"
-    assert error_literal_plan["literal_route_strategy"]["fallback_route_id"] in {"scoped_shard_full_text", "monolith_raw_text_fallback"}
-    assert error_literal_plan["literal_route_strategy"]["exact_recall_preserved_by_fallback"] is False
-    assert error_literal_plan["literal_route_strategy"]["class_contract"]["cheapest_first_routes"][0] == "route_signal_structured_search"
-    assert noisy_route_signal_literal_plan["query_shape"]["primary"] == "hook_receipt"
-    assert noisy_route_signal_literal_plan["primary_route"]["route_id"] == "hook_receipts"
-    assert noisy_route_signal_literal_plan["cost_profile"]["structured_first"] is True
-    assert noisy_route_signal_literal_plan["cost_profile"]["uses_fts_first"] is False
-    assert noisy_route_signal_literal_plan["cost_profile"]["monolith_fallback_first"] is False
-    assert noisy_route_signal_literal_plan["cost_profile"]["exact_recall_preserved_by_fallback"] is False
-    noisy_strategy = noisy_route_signal_literal_plan["literal_route_strategy"]
-    assert noisy_strategy["query_class"] == "hook_receipt"
-    assert noisy_strategy["primary_route_id"] == "hook_receipts"
-    assert noisy_strategy["uses_structured_first"] is True
-    assert noisy_strategy["monolith_fallback_position"] > 1
-    assert noisy_strategy["fallback_preserves_exact_recall"] is False
-    assert noisy_route_signal_literal_plan["structured_route_signal_candidates"][0]["route_signal"] == "hook_health:raw_unavailable"
-    assert "aoa_session_hook_receipts" in noisy_route_signal_literal_plan["next_command"]
-    assert "event_name='*'" in noisy_route_signal_literal_plan["next_command"]
-    assert "signal='raw_unavailable'" in noisy_route_signal_literal_plan["next_command"]
-    assert "only_errors=True" not in noisy_route_signal_literal_plan["next_command"]
-    assert noisy_route_signal_literal_plan["ordered_routes"][-1]["route_id"] in {"scoped_shard_full_text", "monolith_raw_text_fallback"}
-    assert embedded_skill_literal_plan["query_shape"]["primary"] == "entity_anchor"
-    assert embedded_skill_literal_plan["route_anchor"] == "aoa_decision"
-    assert embedded_skill_literal_plan["route_anchor_source"] == "embedded_entity_registry"
-    assert embedded_skill_literal_plan["route_anchor_kind"] == "skill"
-    assert embedded_skill_literal_plan["embedded_entity_anchor"]["registry_kind"] == "skill"
-    assert (
-        embedded_skill_literal_plan["embedded_entity_anchor"]["source_surface"]
-        == "aoa_session_memory_source_skills"
-    )
-    assert embedded_skill_literal_plan["primary_route"]["route_id"] == "entity_usage_chain"
-    assert embedded_skill_literal_plan["cost_profile"]["structured_first"] is True
-    assert embedded_skill_literal_plan["cost_profile"]["uses_fts_first"] is False
-    assert embedded_skill_literal_plan["cost_profile"]["monolith_fallback_first"] is False
-    assert embedded_skill_literal_plan["cost_profile"]["exact_recall_preserved_by_fallback"] is False
-    assert "usage-chain aoa_decision" in embedded_skill_literal_plan["next_command"]
-    assert "--kind skill" in embedded_skill_literal_plan["next_command"]
-    assert embedded_skill_literal_plan["ordered_routes"][-1]["route_id"] in {"scoped_shard_full_text", "monolith_raw_text_fallback"}
-    assert "как агент использовал aoa-decision" in embedded_skill_literal_plan["ordered_routes"][-1]["command"]
-    assert broad_mcp_usage_literal_plan["query_shape"]["primary"] == "entity_class"
-    assert broad_mcp_usage_literal_plan["route_anchor_source"] == "broad_entity_class_query"
-    assert broad_mcp_usage_literal_plan["broad_entity_class"]["layer"] == "mcp"
-    assert broad_mcp_usage_literal_plan["broad_entity_class"]["usage_intent"] is True
-    assert broad_mcp_usage_literal_plan["primary_route"]["route_id"] == "entity_inventory"
-    assert broad_mcp_usage_literal_plan["cost_profile"]["structured_first"] is True
-    assert broad_mcp_usage_literal_plan["cost_profile"]["uses_fts_first"] is False
-    assert broad_mcp_usage_literal_plan["cost_profile"]["monolith_fallback_first"] is False
-    assert broad_mcp_usage_literal_plan["literal_route_strategy"]["query_class"] == "entity_class"
-    assert broad_mcp_usage_literal_plan["literal_route_strategy"]["primary_route_id"] == "entity_inventory"
-    assert broad_mcp_usage_literal_plan["literal_route_strategy"]["route_sequence"][0]["route_id"] == "entity_inventory"
-    assert [route["route_id"] for route in broad_mcp_usage_literal_plan["ordered_routes"][:3]] == [
-        "entity_inventory",
-        "entity_registry_class",
-        "entity_usage_scenario_audit",
-    ]
-    assert broad_mcp_usage_literal_plan["ordered_routes"][-1]["route_id"] in {"scoped_shard_full_text", "monolith_raw_text_fallback"}
-    assert broad_skill_inventory_literal_plan["query_shape"]["primary"] == "entity_class"
-    assert broad_skill_inventory_literal_plan["route_anchor"] == "skill"
-    assert broad_skill_inventory_literal_plan["broad_entity_class"]["layer"] == "skill"
-    assert broad_skill_inventory_literal_plan["broad_entity_class"]["usage_intent"] is False
-    assert broad_skill_inventory_literal_plan["primary_route"]["route_id"] == "entity_registry_class"
-    assert "--kind skill" in broad_skill_inventory_literal_plan["next_command"]
-    assert broad_skill_inventory_literal_plan["cost_profile"]["monolith_fallback_first"] is False
-    assert broad_skill_inventory_literal_plan["literal_route_strategy"]["query_class"] == "entity_class"
-    assert broad_skill_inventory_literal_plan["literal_route_strategy"]["primary_route_id"] == "entity_registry_class"
-    assert broad_skill_inventory_literal_plan["literal_route_strategy"]["monolith_is_fallback_only"] is True
-    assert concrete_mcp_literal_plan["query_shape"]["primary"] == "entity_anchor"
-    assert concrete_mcp_literal_plan["route_anchor"] == "aoa_session_memory_mcp"
-    assert concrete_mcp_literal_plan["route_anchor_source"] == "embedded_entity_registry"
-    assert concrete_mcp_literal_plan["broad_entity_class"] == {}
-    assert concrete_mcp_literal_plan["primary_route"]["route_id"] == "entity_usage_chain"
-    assert noisy_concrete_mcp_literal_plan["query_shape"]["primary"] == "entity_anchor"
-    assert noisy_concrete_mcp_literal_plan["route_anchor"] == "aoa_session_memory_mcp"
-    assert noisy_concrete_mcp_literal_plan["route_anchor_source"] == "embedded_entity_registry"
-    assert noisy_concrete_mcp_literal_plan["route_anchor_kind"] == "mcp"
-    assert noisy_concrete_mcp_literal_plan["broad_entity_class"] == {}
-    assert noisy_concrete_mcp_literal_plan["query_shape"]["suppressed_broad_entity_class"]["layer"] == "mcp"
-    assert noisy_concrete_mcp_literal_plan["embedded_entity_anchor"]["registry_kind"] == "mcp_service"
-    assert noisy_concrete_mcp_literal_plan["embedded_entity_anchor"]["match_relation"] == "embedded"
-    assert noisy_concrete_mcp_literal_plan["primary_route"]["route_id"] == "entity_usage_chain"
-    assert noisy_concrete_mcp_literal_plan["cost_profile"]["structured_first"] is True
-    assert noisy_concrete_mcp_literal_plan["cost_profile"]["monolith_fallback_first"] is False
-    assert noisy_concrete_mcp_literal_plan["ordered_routes"][-1]["route_id"] in {"scoped_shard_full_text", "monolith_raw_text_fallback"}
-    assert "usage-chain aoa_session_memory_mcp" in noisy_concrete_mcp_literal_plan["next_command"]
-    assert overlapping_exact_skill_literal_plan["query_shape"]["primary"] == "entity_anchor"
-    assert overlapping_exact_skill_literal_plan["route_anchor"] == "aoa_session_memory_evidence_route"
-    assert overlapping_exact_skill_literal_plan["route_anchor_source"] == "embedded_entity_registry"
-    assert overlapping_exact_skill_literal_plan["route_anchor_kind"] == "skill"
-    assert overlapping_exact_skill_literal_plan["embedded_entity_anchor"]["registry_kind"] == "skill"
-    assert overlapping_exact_skill_literal_plan["embedded_entity_anchor"]["match_relation"] == "exact"
-    assert "usage-chain aoa_session_memory_evidence_route" in overlapping_exact_skill_literal_plan["next_command"]
-    assert "--kind skill" in overlapping_exact_skill_literal_plan["next_command"]
-    assert single_token_tool_literal_plan["query_shape"]["primary"] == "entity_anchor"
-    assert single_token_tool_literal_plan["route_anchor"] == "search_hotset_audit"
-    assert single_token_tool_literal_plan["route_anchor_source"] == "embedded_entity_registry"
-    assert single_token_tool_literal_plan["route_anchor_kind"] == "tool"
-    assert single_token_tool_literal_plan["embedded_entity_anchor"]["registry_kind"] == "tool"
-    assert single_token_tool_literal_plan["embedded_entity_anchor"]["match_relation"] == "exact"
-    assert single_token_tool_literal_plan["primary_route"]["route_id"] == "entity_usage_chain"
-    assert "usage-chain search_hotset_audit" in single_token_tool_literal_plan["next_command"]
-    assert "usage-chain search " not in single_token_tool_literal_plan["next_command"]
-    assert single_token_error_literal_plan["query_shape"]["primary"] == "error_text"
-    assert single_token_error_literal_plan["route_anchor"] == "sqlite_query_timeout"
-    assert single_token_error_literal_plan["route_anchor_source"] == "query"
-    assert single_token_error_literal_plan["primary_route"]["route_id"] == "route_signal_structured_search"
-    assert "--route-signal failure_mode:sqlite_query_timeout" in single_token_error_literal_plan["next_command"]
-    assert "usage-chain timeout " not in single_token_error_literal_plan["next_command"]
-    assert structured_literal_plan["primary_route"]["route_id"] == "agent_event_route"
-    assert structured_literal_plan["cost_profile"]["uses_fts_first"] is False
-    assert raw_ref_literal_plan["query_shape"]["primary"] == "raw_ref"
-    assert raw_ref_literal_plan["primary_route"]["route_id"] == "raw_ref_scoped_verification"
-    assert raw_ref_literal_plan["cost_profile"]["structured_first"] is True
-    assert raw_ref_literal_plan["cost_profile"]["monolith_fallback_first"] is False
-    assert "aoa_session_freshness_check" in raw_ref_literal_plan["next_command"]
-    assert hook_receipt_literal_plan["query_shape"]["primary"] == "hook_receipt"
-    assert hook_receipt_literal_plan["primary_route"]["route_id"] == "hook_receipts"
-    assert hook_receipt_literal_plan["cost_profile"]["structured_first"] is True
-    assert hook_receipt_literal_plan["cost_profile"]["monolith_fallback_first"] is False
-    assert "aoa_session_hook_receipts" in hook_receipt_literal_plan["next_command"]
-    assert "signal='typing_prompt_bridge_failed'" in hook_receipt_literal_plan["next_command"]
-    assert command_literal_plan["query_shape"]["primary"] == "command"
-    assert command_literal_plan["query_shape"]["command_anchor"] == "scripts/aoa_session_memory.py"
-    assert command_literal_plan["route_anchor"] == "scripts/aoa_session_memory.py"
-    assert command_literal_plan["primary_route"]["route_id"] == "exact_literal_postings_search"
-    assert "--literal-postings-only" in command_literal_plan["next_command"]
-    assert any(
-        candidate.get("route_signal") == "script:aoa_session_memory"
-        for candidate in command_literal_plan["route_candidates"]
-    )
-    assert command_literal_plan["ordered_routes"][1]["route_id"] == "command_structured_search"
-    assert "--route-signal path:scripts_aoa_session_memory_py" in command_literal_plan["ordered_routes"][1]["command"]
-    assert command_literal_plan["ordered_routes"][2]["route_id"] == "entity_usage_chain"
-    assert "usage-chain scripts/aoa_session_memory.py" in command_literal_plan["ordered_routes"][2]["command"]
-    assert command_literal_plan["ordered_routes"][-1]["route_id"] in {"scoped_shard_full_text", "monolith_raw_text_fallback"}
-    assert "agent-event-audit latest --probe-routes" in command_literal_plan["ordered_routes"][-1]["command"]
-    assert command_literal_plan["cost_profile"]["structured_first"] is True
-    assert command_literal_plan["cost_profile"]["uses_fts_first"] is True
-    assert command_literal_plan["cost_profile"]["monolith_fallback_first"] is False
-    command_strategy = command_literal_plan["literal_route_strategy"]
-    assert command_strategy["query_class"] == "command"
-    assert command_strategy["primary_route_id"] == "exact_literal_postings_search"
-    assert command_strategy["route_sequence"][0]["route_id"] == "exact_literal_postings_search"
-    assert command_strategy["class_contract"]["cheapest_first_routes"][0] == "exact_literal_postings_search"
-    assert command_strategy["raw_text_fallback_position"] > 1
-    assert command_strategy["monolith_is_fallback_only"] is True
-    assert session_id_literal_plan["query_shape"]["primary"] == "session_id"
-    assert session_id_literal_plan["classifications"]["primary"] == "session_id"
-    assert session_id_literal_plan["primary_route"]["route_id"] == "session_rehydrate"
-    assert session_id_literal_plan["ordered_routes"][1]["route_id"] == "session_structured_search"
-    assert session_id_literal_plan["fallback_plan"]["route_id"] == "session_archived_raw_exact_fallback"
-    assert "archived-raw-search" in session_id_literal_plan["fallback_plan"]["command"]
-    assert session_id_literal_plan["cost_profile"]["structured_first"] is True
-    assert session_id_literal_plan["cost_profile"]["uses_fts_first"] is False
-    assert session_id_literal_plan["cost_profile"]["monolith_fallback_first"] is False
-    assert "rehydrate" in session_id_literal_plan["next_command"]
-    assert "--session" in session_id_literal_plan["next_expansion_command"]
-    session_strategy = session_id_literal_plan["literal_route_strategy"]
-    assert session_strategy["query_class"] == "session_id"
-    assert session_strategy["primary_route_id"] == "session_rehydrate"
-    assert session_strategy["route_sequence"][0]["route_id"] == "session_rehydrate"
-    assert session_strategy["route_sequence"][1]["route_id"] == "session_structured_search"
-    assert session_strategy["raw_text_fallback_position"] > 1
-    assert session_answer_literal_plan["query_shape"]["primary"] == "session_id"
-    assert session_answer_literal_plan["query_shape"]["session_target"] == archived_session_label
-    assert session_answer_literal_plan["query_shape"]["inferred_agent_event"] == "assistant_answer"
-    assert session_answer_literal_plan["route_anchor"] == archived_session_label
-    assert session_answer_literal_plan["route_anchor_source"] == "session_target"
-    assert session_answer_literal_plan["embedded_entity_anchor"] == {}
-    assert session_answer_literal_plan["primary_route"]["route_id"] == "agent_event_route"
-    assert "agent-responses" in session_answer_literal_plan["next_command"]
-    assert f"--session {shlex.quote(archived_session_label)}" in session_answer_literal_plan["next_command"]
-    assert session_answer_literal_plan["cost_profile"]["uses_fts_first"] is False
-    assert session_answer_literal_plan["cost_profile"]["monolith_fallback_first"] is False
-    assert session_answer_literal_plan["ordered_routes"][1]["route_id"] == "session_rehydrate"
-    assert session_answer_literal_plan["literal_route_strategy"]["class_contract"]["cheapest_first_routes"][0] == "agent_event_route"
-    assert (
-        unresolved_session_answer_literal_plan["query_shape"]["session_target"]
-        == "2026-07-07__003__ноут-показывал-13-заряда-затем-резко"
-    )
-    assert (
-        unresolved_session_answer_literal_plan["primary_route"]["route_id"]
-        == "agent_event_route"
-    )
-    assert (
-        unresolved_session_answer_literal_plan["cost_profile"]["uses_fts_first"]
-        is False
-    )
-    assert (
-        unresolved_session_answer_literal_plan["cost_profile"][
-            "monolith_fallback_first"
-        ]
-        is False
-    )
-    assert path_phrase_literal_plan["query_shape"]["primary"] == "path"
-    assert path_phrase_literal_plan["query_shape"]["path_anchor"] == "validate_session_memory_mcp.py"
-    assert path_phrase_literal_plan["route_anchor"] == "validate_session_memory_mcp.py"
-    assert path_phrase_literal_plan["route_anchor_source"] == "path_anchor"
-    assert path_phrase_literal_plan["route_anchor_kind"] == "auto"
-    assert path_phrase_literal_plan["embedded_entity_anchor"] == {}
-    assert path_phrase_literal_plan["primary_route"]["route_id"] == "route_signal_structured_search"
-    assert "--route-signal validator:validate_session_memory_mcp_py" in path_phrase_literal_plan["next_command"]
-    assert path_phrase_literal_plan["ordered_routes"][1]["route_id"] == "entity_usage_chain"
-    assert "--kind auto" in path_phrase_literal_plan["ordered_routes"][1]["command"]
-    assert path_phrase_literal_plan["cost_profile"]["uses_fts_first"] is False
-    assert path_phrase_literal_plan["cost_profile"]["monolith_fallback_first"] is False
-    assert not any(
-        item.get("key") == "namespace_tool"
-        for item in exact_tool_timeline["resolved"].get("route_candidates", [])
-        if isinstance(item, dict)
+        sample["candidate"]["layer"] == "mcp"
+        and sample["candidate"]["key"] == "aoa_decisions_mcp"
+        and sample["candidate"]["kind"] == "mcp"
+        and sample["candidate"]["anchor"] == "aoa-decisions-mcp"
+        and sample["usage_event_count"] >= 1
+        and sample["consequence_event_count"] >= 1
+        and sample["first_usage"]["title"]
+        == "Tool call: mcp__aoa_decisions__aoa_decisions_search"
+        and sample["first_usage"]["event_id"]
+        == usage_audit["usage_events"][0]["event_id"]
+        and sample["first_usage"]["refs"]["raw"] == "raw:line:7"
+        and any(
+            str(ref.get("value") or "").startswith("raw:")
+            for ref in sample["evidence_refs"]
+            if isinstance(ref, dict)
+        )
+        for sample in scenario_audit["samples"]
     )
     typo_routes = {
         f"{item.get('layer')}:{item.get('key')}"
@@ -28070,7 +28032,10 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(
     }
     assert "mcp:aoa_decsions_mcp" in typo_routes
     assert "entity:aoa_decsions_mcp" in typo_routes
-    assert not any("unknown_mcp_service_identity:aoa_decsions_mcp" in item for item in typo_mcp_trace["diagnostics"])
+    assert not any(
+        "unknown_mcp_service_identity:aoa_decsions_mcp" in item
+        for item in typo_mcp_trace["diagnostics"]
+    )
     assert (
         query_state["query_scope"]
         == "lightweight_store_generation_availability_not_full_source_dirty_audit"
@@ -28108,9 +28073,6 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(
     search_recommendation = next(item for item in storage["recommendations"] if item.get("id") == "search_hot_store_v3")
     assert search_recommendation["status"] == "bounded_policy_recorded"
     assert Path(storage["report_json"]).exists()
-    assert cooccurrence["artifact_type"] == "session_memory_graph_cooccurrence"
-    assert "graph-cooccurrence" in cooccurrence["next_command"]
-    assert "usage-chain exec_command" in cooccurrence["next_expansion_command"]
     assert bridge["artifact_type"] == "session_memory_graph_bridge"
     assert bridge["ok"] is True
     assert bridge["normalized_entities"]["source"]["kind"] == "mcp"
