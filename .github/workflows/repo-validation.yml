@@ -5,6 +5,21 @@ on:
     branches:
       - main
   pull_request:
+  workflow_dispatch:
+    inputs:
+      scheduler_trials:
+        description: Run three non-authoritative hosted scheduler triplets
+        required: true
+        type: boolean
+        default: false
+      scheduler_python:
+        description: Python version for the opt-in scheduler trials
+        required: true
+        type: choice
+        options:
+          - "3.14"
+          - "3.11"
+        default: "3.14"
 
 permissions:
   contents: read
@@ -106,3 +121,152 @@ jobs:
 
       - name: Re-audit clean checkout
         run: python scripts/audit_public_tree.py --root . --fail-on blocking
+
+  hosted_scheduler_trials:
+    if: github.event_name == 'workflow_dispatch' && inputs.scheduler_trials == true
+    name: Hosted scheduler trials (Python ${{ inputs.scheduler_python }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      SCHEDULER_PYTHON: ${{ inputs.scheduler_python }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: ${{ inputs.scheduler_python }}
+
+      - name: Configure isolated scheduler trial workspace
+        id: trial_workspace
+        run: |
+          trial_root="$(mktemp -d "$RUNNER_TEMP/pytest-scheduler-trials.XXXXXX")"
+          mkdir -p "$trial_root/tmp"
+          echo "SCHEDULER_TRIAL_ROOT=$trial_root" >> "$GITHUB_ENV"
+          echo "TMPDIR=$trial_root/tmp" >> "$GITHUB_ENV"
+          echo "PYTHONDONTWRITEBYTECODE=1" >> "$GITHUB_ENV"
+          echo "trial_root=$trial_root" >> "$GITHUB_OUTPUT"
+
+      - name: Install scheduler trial dependencies
+        run: >-
+          python -m pip install --disable-pip-version-check
+          'mcp>=1.28,<2'
+          'build>=1.3,<2'
+          'jsonschema>=4.25,<5'
+          'pytest>=8,<10'
+          'PyYAML>=6.0,<7.0'
+
+      - name: Run three paired scheduler triplets
+        run: |
+          set +e
+          set -u -o pipefail
+
+          trial_root="$SCHEDULER_TRIAL_ROOT"
+          overall_status=0
+          receipts=()
+          printf 'pair_id\tmethod\tprocess_status\treceipt_status\treceipt\n' \
+            > "$trial_root/trial-status.tsv"
+
+          run_trial() {
+            local pair_id="$1"
+            local trial="$2"
+            local method="$3"
+            local artifact_root="$trial_root/$pair_id/$method"
+            local log_root="$trial_root/invocation-logs/$pair_id/$method"
+            local receipt="$artifact_root/trial.json"
+            local timing_receipt=()
+            local status
+            local receipt_status=2
+
+            mkdir -p "$log_root"
+            if [[ "$method" == "static2-balanced" ]]; then
+              timing_receipt=(
+                --timing-receipt
+                "$trial_root/$pair_id/serial/trial.json"
+              )
+            fi
+
+            python scripts/pytest_scheduler_experiment.py \
+              --method "$method" \
+              --artifact-root "$artifact_root" \
+              --receipt "$receipt" \
+              "${timing_receipt[@]}" \
+              --pair-id "$pair_id" \
+              --trial "$trial" \
+              --json \
+              > "$log_root/runner.stdout.json" \
+              2> "$log_root/runner.stderr.log"
+            status=$?
+            if (( status != 0 )); then
+              overall_status=1
+            fi
+            if [[ -f "$receipt" ]]; then
+              receipts+=("$receipt")
+              python - "$receipt" <<'PY' > /dev/null 2>> "$log_root/runner.stderr.log"
+          import json
+          import sys
+          from pathlib import Path
+
+          payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          if payload.get("ok") is not True:
+              raise SystemExit("scheduler trial receipt is not ok")
+          PY
+              receipt_status=$?
+              if (( receipt_status != 0 )); then
+                overall_status=1
+              fi
+            else
+              overall_status=1
+            fi
+            printf '%s\t%s\t%s\t%s\t%s\n' \
+              "$pair_id" "$method" "$status" "$receipt_status" "$receipt" \
+              >> "$trial_root/trial-status.tsv"
+          }
+
+          for trial in 1 2 3; do
+            pair_id="hosted-py${SCHEDULER_PYTHON//./}-p$(printf '%02d' "$trial")"
+            run_trial "$pair_id" "$trial" serial
+            if (( trial % 2 == 1 )); then
+              run_trial "$pair_id" "$trial" static2
+              run_trial "$pair_id" "$trial" static2-balanced
+            else
+              run_trial "$pair_id" "$trial" static2-balanced
+              run_trial "$pair_id" "$trial" static2
+            fi
+          done
+
+          if (( overall_status == 0 && ${#receipts[@]} == 9 )); then
+            python scripts/validation_scheduler_experiment.py compare \
+              "${receipts[@]}" \
+              --output "$trial_root/comparison.json" \
+              > "$trial_root/comparison.stdout.json" \
+              2> "$trial_root/comparison.stderr.log"
+            compare_status=$?
+            if (( compare_status != 0 )); then
+              overall_status=1
+              printf '{"status":"failed","reason":"comparison command failed","exit_status":%d,"receipt_count":%d}\n' \
+                "$compare_status" "${#receipts[@]}" > "$trial_root/comparison-status.json"
+            fi
+          else
+            printf '{"status":"skipped","reason":"trial failure or missing receipt","receipt_count":%d}\n' \
+              "${#receipts[@]}" > "$trial_root/comparison-status.json"
+          fi
+
+          exit "$overall_status"
+
+      - name: Upload hosted scheduler evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: hosted-scheduler-trials-${{ github.run_id }}-${{ inputs.scheduler_python }}
+          path: |
+            ${{ steps.trial_workspace.outputs.trial_root }}
+            !${{ steps.trial_workspace.outputs.trial_root }}/**/pytest-basetemp/**
+            !${{ steps.trial_workspace.outputs.trial_root }}/**/pycache/**
+            !${{ steps.trial_workspace.outputs.trial_root }}/tmp/**
+          if-no-files-found: warn
+          retention-days: 14
