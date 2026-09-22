@@ -27495,6 +27495,123 @@ def test_literal_query_plan_preserves_typed_positive_route_contracts(
                 ] == case["ordered_route_prefix"]
 
 
+def test_literal_query_plan_preserves_noisy_entity_validator_session_and_event_routes(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """Keep distinct positive planner lanes without restoring the old snapshot."""
+    aoa_root = tmp_path / ".aoa"
+    empty_codex_home = tmp_path / "empty-codex-home"
+    empty_mcp_services_root = tmp_path / "empty-mcp-services"
+    empty_codex_home.mkdir()
+    empty_mcp_services_root.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(empty_codex_home))
+    monkeypatch.setenv(
+        "AOA_ENTITY_REGISTRY_MCP_SERVICES_ROOTS",
+        str(empty_mcp_services_root),
+    )
+    registry_path = aoa_root / module.ENTITY_REGISTRY_PATH
+    write_json(
+        registry_path,
+        {
+            "schema_version": module.ENTITY_REGISTRY_SCHEMA_VERSION,
+            "artifact_type": "entity_registry_snapshot",
+            "generated_at": "2999-01-01T00:00:00Z",
+            "generated_at_epoch": 32472144000.0,
+            "ok": True,
+            "aoa_root": str(aoa_root),
+            "registry_path": str(registry_path),
+            "source_surfaces": ["minimal_planner_regression_fixture"],
+            "counts_by_kind": {"mcp_service": 1},
+            "counts_by_status": {"active": 1},
+            "entries": [
+                {
+                    "entity_id": "mcp_service:aoa_decisions_mcp",
+                    "kind": "mcp_service",
+                    "canonical_key": "aoa_decisions_mcp",
+                    "aliases": ["aoa-decisions-mcp", "aoa_decisions_mcp"],
+                    "status": "active",
+                    "source_surface": "minimal_planner_regression_fixture",
+                    "source_refs": [],
+                }
+            ],
+        },
+    )
+
+    noisy_entity = module.literal_query_plan(
+        aoa_root=aoa_root,
+        query="найди как aoa-decisions-mcp возвращал Transport closed",
+    )
+    assert noisy_entity["query_shape"]["primary"] == "entity_anchor"
+    assert noisy_entity["route_anchor"] == "aoa_decisions_mcp"
+    assert noisy_entity["route_anchor_source"] == "embedded_entity_registry"
+    assert noisy_entity["route_anchor_kind"] == "mcp"
+    embedded_entity = noisy_entity["embedded_entity_anchor"]
+    assert embedded_entity["anchor"] == "aoa_decisions_mcp"
+    assert embedded_entity["kind"] == "mcp"
+    assert embedded_entity["registry_kind"] == "mcp_service"
+    assert embedded_entity["entity_id"] == "mcp_service:aoa_decisions_mcp"
+    assert embedded_entity["match_relation"] == "embedded"
+    assert embedded_entity["source_surface"] == "minimal_planner_regression_fixture"
+    assert noisy_entity["query_shape"]["suppressed_broad_entity_class"]["layer"] == "mcp"
+    assert noisy_entity["primary_route"]["route_id"] == "entity_usage_chain"
+    assert noisy_entity["next_command"].startswith(
+        "python3 scripts/aoa_session_memory.py usage-chain aoa_decisions_mcp"
+    )
+    assert noisy_entity["ordered_routes"][-1]["route_id"] in {
+        "scoped_shard_full_text",
+        "monolith_raw_text_fallback",
+    }
+
+    validator_path = module.literal_query_plan(
+        aoa_root=aoa_root,
+        query="как агент использовал validate_session_memory_mcp.py и что потом сломалось",
+    )
+    assert validator_path["query_shape"]["primary"] == "path"
+    assert validator_path["query_shape"]["path_anchor"] == "validate_session_memory_mcp.py"
+    assert validator_path["route_anchor"] == "validate_session_memory_mcp.py"
+    assert validator_path["route_anchor_source"] == "path_anchor"
+    assert validator_path["primary_route"]["route_id"] == "route_signal_structured_search"
+    assert "--route-signal validator:validate_session_memory_mcp_py" in (
+        validator_path["next_command"]
+    )
+    assert validator_path["ordered_routes"][1]["route_id"] == "entity_usage_chain"
+    assert validator_path["ordered_routes"][-1]["route_id"] in {
+        "scoped_shard_full_text",
+        "monolith_raw_text_fallback",
+    }
+
+    session_answer = module.literal_query_plan(
+        aoa_root=aoa_root,
+        query="найди ответы агента по сессии 2026-07-07__003__ноут-показывал-13-заряда-затем-резко",
+    )
+    assert session_answer["query_shape"]["primary"] == "session_id"
+    assert session_answer["query_shape"]["session_target"] == (
+        "2026-07-07__003__ноут-показывал-13-заряда-затем-резко"
+    )
+    assert session_answer["query_shape"]["inferred_agent_event"] == "assistant_answer"
+    assert session_answer["primary_route"]["route_id"] == "agent_event_route"
+    assert "--agent-event assistant_answer" in session_answer["next_command"]
+    assert f"--session {shlex.quote(session_answer['query_shape']['session_target'])}" in (
+        session_answer["next_command"]
+    )
+    assert session_answer["ordered_routes"][-1]["route_id"] == (
+        "monolith_raw_text_fallback"
+    )
+
+    explicit_agent_event = module.literal_query_plan(
+        aoa_root=aoa_root,
+        query="",
+        agent_event="assistant_answer",
+    )
+    assert explicit_agent_event["primary_route"]["route_id"] == "agent_event_route"
+    assert explicit_agent_event["primary_route"]["command"].startswith(
+        "python3 scripts/aoa_session_memory.py agent-responses"
+    )
+    assert "--agent-event assistant_answer" in explicit_agent_event["next_command"]
+    assert explicit_agent_event["cost_profile"]["uses_fts_first"] is False
+
+
 def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(
     tmp_path: Path,
     monkeypatch: Any,
@@ -27575,6 +27692,25 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(
                 "payload": {
                     "type": "function_call_output",
                     "call_id": "call-decision-search",
+                    "output": json.dumps({"ok": True, "refs": ["docs/decisions/README.md"]}),
+                },
+            },
+            {
+                "timestamp": "2026-05-26T00:00:03.175Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "mcp__aoa_decisions__aoa_decisions_search",
+                    "call_id": "call-decision-search-mcp",
+                    "arguments": json.dumps({"query": "aoa-decision skill MCP usage"}),
+                },
+            },
+            {
+                "timestamp": "2026-05-26T00:00:03.185Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call-decision-search-mcp",
                     "output": json.dumps({"ok": True, "refs": ["docs/decisions/README.md"]}),
                 },
             },
@@ -27716,6 +27852,42 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(
         anchor="aoa_decisions_search",
         kind="mcp_tool",
     )
+    usage_audit = module.entity_usage_audit(
+        aoa_root=aoa_root,
+        anchor="aoa-decisions-mcp",
+        kind="mcp",
+        limit=8,
+        per_route_limit=8,
+        consequence_window=4,
+    )
+    registry_kind_usage_audit = module.entity_usage_audit(
+        aoa_root=aoa_root,
+        anchor="aoa-decisions-mcp",
+        kind="mcp_service",
+        limit=8,
+        per_route_limit=8,
+        consequence_window=4,
+    )
+    usage_neighborhood = module.entity_usage_neighborhood(
+        aoa_root=aoa_root,
+        anchor="aoa-decisions-mcp",
+        kind="mcp",
+        limit=1,
+        per_route_limit=8,
+        before=1,
+        after=4,
+        raw_preview_chars=500,
+    )
+    scenario_audit = module.entity_usage_scenario_audit(
+        aoa_root=aoa_root,
+        sample_size=2,
+        seed="fixture-usage-scenario",
+        layers=["mcp", "tool"],
+        limit=4,
+        per_route_limit=4,
+        consequence_window=4,
+        raw_preview_limit=2,
+    )
     typo_mcp_trace = module.trace_route(
         aoa_root=aoa_root,
         anchor="aoa-decsions-mcp",
@@ -27792,6 +27964,66 @@ def test_graph_sidecar_and_graphrag_packets_preserve_evidence_refs(
     assert any(
         event.get("title") == "Tool call: aoa_decisions_search"
         for event in registry_tool_timeline["events"]
+    )
+    assert usage_audit["ok"] is True
+    assert usage_audit["usage_event_count"] >= 1
+    assert any(
+        event.get("title")
+        == "Tool call: mcp__aoa_decisions__aoa_decisions_search"
+        for event in usage_audit["usage_events"]
+    )
+    assert usage_audit["consequence_event_count"] >= 1
+    assert any(
+        item.get("kind") == "mentioned_path"
+        and item.get("value") == "docs/decisions/README.md"
+        for item in usage_audit["document_refs"]
+    )
+    assert usage_audit["quality"]["search_has_route_index"] is True
+    assert usage_audit["quality"]["search_has_route_terms"] is True
+    assert usage_audit["quality"]["fresh_event_count"] >= usage_audit["usage_event_count"]
+    assert usage_audit["quality"]["stale_event_count"] == 0
+    first_usage_ref = usage_audit["usage_events"][0]["refs"]
+    assert first_usage_ref["raw"] == "raw:line:7"
+    assert first_usage_ref["segment"]
+    assert first_usage_ref["session"]
+    assert registry_kind_usage_audit["kind"] == "mcp"
+    assert registry_kind_usage_audit["requested_kind"] == "mcp_service"
+    assert registry_kind_usage_audit["usage_event_count"] >= 1
+    assert registry_kind_usage_audit["usage_events"][0]["event_id"] == (
+        usage_audit["usage_events"][0]["event_id"]
+    )
+    assert usage_neighborhood["ok"] is True
+    assert usage_neighborhood["neighborhoods"]
+    first_neighborhood = usage_neighborhood["neighborhoods"][0]
+    assert first_neighborhood["source_usage_event"]["title"] == (
+        "Tool call: mcp__aoa_decisions__aoa_decisions_search"
+    )
+    assert first_neighborhood["consequence_event_count"] >= 1
+    assert first_neighborhood["source_usage_event"]["refs"]["raw"] == "raw:line:7"
+    assert (
+        first_neighborhood["source_usage_event"]["raw_preview"]["status"]
+        == "available"
+    )
+    assert scenario_audit["ok"] is True
+    assert scenario_audit["samples"]
+    assert any(
+        sample["candidate"]["layer"] == "mcp"
+        and sample["candidate"]["key"] == "aoa_decisions_mcp"
+        and sample["candidate"]["kind"] == "mcp"
+        and sample["candidate"]["anchor"] == "aoa-decisions-mcp"
+        and sample["usage_event_count"] >= 1
+        and sample["consequence_event_count"] >= 1
+        and sample["first_usage"]["title"]
+        == "Tool call: mcp__aoa_decisions__aoa_decisions_search"
+        and sample["first_usage"]["event_id"]
+        == usage_audit["usage_events"][0]["event_id"]
+        and sample["first_usage"]["refs"]["raw"] == "raw:line:7"
+        and any(
+            str(ref.get("value") or "").startswith("raw:")
+            for ref in sample["evidence_refs"]
+            if isinstance(ref, dict)
+        )
+        for sample in scenario_audit["samples"]
     )
     typo_routes = {
         f"{item.get('layer')}:{item.get('key')}"
