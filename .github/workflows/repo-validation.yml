@@ -161,6 +161,7 @@ jobs:
           'PyYAML>=6.0,<7.0'
 
       - name: Run three paired scheduler triplets
+        id: scheduler_triplets
         run: |
           set +e
           set -u -o pipefail
