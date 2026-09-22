@@ -2,13 +2,19 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
+import stat
+import subprocess
 import sys
+import textwrap
 from pathlib import Path
 
 import pytest
+import yaml
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "repo-validation.yml"
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 pytest_scheduler_experiment = importlib.import_module("pytest_scheduler_experiment")
@@ -30,6 +36,196 @@ def test_scheduler_targets_follow_current_full_lane() -> None:
     targets = step.command[len(prefix) :]
     assert pytest_scheduler_experiment.source_test_targets() == targets
     assert all(target.startswith("tests/") for target in targets)
+
+
+def _hosted_workflow_body() -> str:
+    workflow = yaml.safe_load(WORKFLOW_PATH.read_text(encoding="utf-8"))
+    return next(
+        step["run"]
+        for step in workflow["jobs"]["hosted_scheduler_trials"]["steps"]
+        if step.get("id") == "scheduler_triplets"
+    )
+
+
+def test_hosted_scheduler_workflow_is_opt_in_and_preserves_ordinary_route() -> None:
+    workflow = yaml.safe_load(WORKFLOW_PATH.read_text(encoding="utf-8"))
+    triggers = workflow.get("on", workflow.get(True))
+    inputs = triggers["workflow_dispatch"]["inputs"]
+
+    assert inputs["scheduler_trials"]["type"] == "boolean"
+    assert inputs["scheduler_trials"]["default"] is False
+    assert inputs["scheduler_python"]["type"] == "choice"
+    assert set(inputs["scheduler_python"]["options"]) == {"3.11", "3.14"}
+    assert "push" in triggers and "pull_request" in triggers
+    standalone = workflow["jobs"]["standalone"]
+    ordinary = next(
+        step
+        for step in standalone["steps"]
+        if step.get("run") == "python scripts/pytest_scheduler_experiment.py --method static2"
+    )
+    assert ordinary["run"] == "python scripts/pytest_scheduler_experiment.py --method static2"
+    hosted = workflow["jobs"]["hosted_scheduler_trials"]
+    assert "workflow_dispatch" in hosted["if"]
+    upload = next(step for step in hosted["steps"] if "upload-artifact@" in step.get("uses", ""))
+    assert upload["if"] == "always()"
+    assert upload["with"]["path"].splitlines()[0].startswith("${{ steps.")
+
+
+def _run_hosted_workflow_body(
+    tmp_path: Path, *, failure: str | None = None
+) -> tuple[subprocess.CompletedProcess[str], Path, list[dict[str, object]]]:
+    trial_root = tmp_path / "pytest-scheduler-trials.abc123"
+    (trial_root / "tmp").mkdir(parents=True)
+    calls_path = tmp_path / "shim-calls.jsonl"
+    real_python = Path(sys.executable)
+    shim = tmp_path / "python"
+    shim.write_text(
+        textwrap.dedent(
+            """\
+            #!/usr/bin/env python3
+            import json
+            import os
+            import sys
+            from pathlib import Path
+
+            args = sys.argv[1:]
+            real_python = os.environ["REAL_PYTHON"]
+            if not args or args[0] == "-" or args[0].endswith("validation_scheduler_experiment.py"):
+                os.execv(real_python, [real_python, *args])
+            if not args[0].endswith("pytest_scheduler_experiment.py"):
+                os.execv(real_python, [real_python, *args])
+
+            def value(flag):
+                return args[args.index(flag) + 1]
+
+            method = value("--method")
+            pair_id = value("--pair-id")
+            artifact = Path(value("--artifact-root"))
+            receipt = Path(value("--receipt"))
+            timing = args[args.index("--timing-receipt") + 1] if "--timing-receipt" in args else None
+            record = {
+                "method": method,
+                "pair_id": pair_id,
+                "artifact": str(artifact),
+                "timing": timing,
+                "artifact_nonempty": artifact.exists() and any(artifact.iterdir()),
+                "argv": args,
+            }
+            with Path(os.environ["SHIM_CALLS"]).open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record) + "\\n")
+            if record["artifact_nonempty"]:
+                raise SystemExit("artifact root was not empty")
+            failure = os.environ.get("SHIM_FAILURE", "")
+            mode = failure.split(":")[-1] if failure.startswith(pair_id + ":" + method + ":") else ""
+            artifact.mkdir(parents=True, exist_ok=True)
+            ok = mode != "failed"
+            wall = {"serial": 200.0, "static2": 100.0, "static2-balanced": 40.0}[method]
+            payload = {
+                "schema_version": "aoa_session_memory_pytest_scheduler_trial_v1",
+                "method": {"name": method},
+                "pair_id": pair_id,
+                "trial": int(value("--trial")),
+                "wall_seconds": wall,
+                "ok": ok,
+                "error": None if ok else "injected failure",
+                "repository_identity": {"before": {"identity_sha256": "same"}, "stable": True},
+                "environment_identity": {"identity_sha256": "environment", "runtime": {"github_actions": True}},
+                "cache": {"observed_state_before": "disabled"},
+                "corpus": {"set_sha256": "corpus"},
+                "execution": {"coverage_complete": True},
+                "receipt_path": str(receipt),
+            }
+            receipt.write_text(json.dumps(payload) + "\\n", encoding="utf-8")
+            """
+        ),
+        encoding="utf-8",
+    )
+    shim.chmod(shim.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "PATH": f"{tmp_path}{os.pathsep}{environment['PATH']}",
+            "REAL_PYTHON": str(real_python),
+            "SHIM_CALLS": str(calls_path),
+            "SCHEDULER_TRIAL_ROOT": str(trial_root),
+            "SCHEDULER_PYTHON": "3.14",
+            "TMPDIR": str(trial_root / "tmp"),
+        }
+    )
+    if failure is not None:
+        environment["SHIM_FAILURE"] = failure
+    result = subprocess.run(
+        ["bash", "-c", _hosted_workflow_body()],
+        cwd=REPO_ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    calls = [json.loads(line) for line in calls_path.read_text(encoding="utf-8").splitlines()]
+    return result, trial_root, calls
+
+
+def test_hosted_scheduler_workflow_runs_three_counterbalanced_triplets(tmp_path: Path) -> None:
+    result, trial_root, calls = _run_hosted_workflow_body(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert len(calls) == 9
+    by_pair: dict[str, list[dict[str, object]]] = {}
+    for call in calls:
+        by_pair.setdefault(str(call["pair_id"]), []).append(call)
+        assert call["artifact_nonempty"] is False
+    assert len(by_pair) == 3
+    orders = []
+    for pair_id, pair_calls in sorted(by_pair.items()):
+        assert {str(call["method"]) for call in pair_calls} == {
+            "serial",
+            "static2",
+            "static2-balanced",
+        }
+        assert pair_calls[0]["method"] == "serial"
+        balanced = next(call for call in pair_calls if call["method"] == "static2-balanced")
+        assert Path(str(balanced["timing"])) == Path(str(pair_calls[0]["artifact"])) / "trial.json"
+        orders.append(tuple(str(call["method"]) for call in pair_calls[1:]))
+    assert set(orders) == {
+        ("static2", "static2-balanced"),
+        ("static2-balanced", "static2"),
+    }
+    assert orders[0] != orders[1] and orders[1] != orders[2]
+    comparison = json.loads((trial_root / "comparison.json").read_text(encoding="utf-8"))
+    balanced = next(item for item in comparison["candidates"] if item["candidate"] == "static2-balanced")
+    assert comparison["receipt_count"] == 9
+    assert balanced["resource_evidence_complete"] is False
+    assert balanced["admission_ready"] is False
+
+
+def test_hosted_scheduler_workflow_keeps_failed_trial_evidence_and_fails(
+    tmp_path: Path,
+) -> None:
+    result, trial_root, calls = _run_hosted_workflow_body(
+        tmp_path, failure="hosted-py314-p02:static2-balanced:failed"
+    )
+
+    assert result.returncode != 0
+    assert len(calls) == 9
+    failed_root = trial_root / "hosted-py314-p02" / "static2-balanced"
+    failed_receipt = json.loads(
+        (failed_root / "trial.json").read_text(encoding="utf-8")
+    )
+    assert failed_receipt["ok"] is False
+    status = json.loads((trial_root / "comparison-status.json").read_text())
+    assert status["status"] == "skipped"
+    assert not (trial_root / "comparison.json").exists()
+    failed_status = next(
+        line.split("\t")
+        for line in (trial_root / "trial-status.tsv").read_text(encoding="utf-8").splitlines()[1:]
+        if "hosted-py314-p02\tstatic2-balanced\t" in line
+    )
+    assert failed_status[2] == "0"
+    assert failed_status[3] != "0"
+    stderr = trial_root / "invocation-logs" / "hosted-py314-p02" / "static2-balanced" / "runner.stderr.log"
+    assert stderr.is_file()
+    assert stderr.stat().st_size > 0
 
 
 @pytest.mark.parametrize(

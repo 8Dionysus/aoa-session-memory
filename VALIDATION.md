@@ -97,6 +97,24 @@ same-size edit within one timestamp second can reuse stale bytecode there, so
 use a fresh prefix for those commands when needed. The checked-hash runner
 validates source contents per file. CI's `runner.temp` prefix is fresh per job.
 
+## Hosted scheduler shadow triplets (explicit opt-in)
+
+To collect one hosted comparison without changing the ordinary push or pull
+request gates, dispatch the existing workflow explicitly:
+
+```bash
+gh workflow run repo-validation.yml --ref main \
+  -f scheduler_trials=true -f scheduler_python=3.14
+```
+
+The opt-in job runs exactly three serial/static2/static2-balanced triplets,
+uploads receipts, comparison output, and failure logs, and keeps the result in
+comparison-only status. It does not promote a scheduler, bind hosted resource
+evidence, or replace the ordinary `static2` and release/package gates; the
+comparison must therefore report incomplete resource evidence and remain
+non-admissible. Use `scheduler_python=3.11` only when that interpreter is the
+specific trial under review.
+
 ## Decisions
 
 ```bash
