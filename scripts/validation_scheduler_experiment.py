@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import math
 import os
 import statistics
 import sys
@@ -103,6 +104,15 @@ def _safe_comparison_key(receipt: Any) -> tuple[str, str, str, str] | None:
     return key
 
 
+def _finite_nonnegative_number(value: Any) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+        and value >= 0
+    )
+
+
 def _receipt_is_correct(receipt: Any) -> bool:
     if not isinstance(receipt, dict):
         return False
@@ -118,9 +128,7 @@ def _receipt_is_correct(receipt: Any) -> bool:
         and repository.get("stable") is True
         and isinstance(before, dict)
         and isinstance(before.get("identity_sha256"), str)
-        and isinstance(wall_seconds, (int, float))
-        and not isinstance(wall_seconds, bool)
-        and wall_seconds >= 0
+        and _finite_nonnegative_number(wall_seconds)
         and _safe_comparison_key(receipt) is not None
     )
 
@@ -134,10 +142,7 @@ def _pair_comparison(
     correctness = _receipt_is_correct(reference) and _receipt_is_correct(contender)
     reference_wall = reference.get("wall_seconds")
     contender_wall = contender.get("wall_seconds")
-    valid_wall = all(
-        isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0
-        for value in (reference_wall, contender_wall)
-    )
+    valid_wall = all(_finite_nonnegative_number(value) for value in (reference_wall, contender_wall))
     if not valid_wall:
         correctness = False
     reduction_seconds = (
@@ -190,8 +195,36 @@ def _resource_pair(
     if not pair["comparable"] or not pair["correctness"]:
         return False
     return all(
-        methods[pair["pair_id"]][method].get("resource_envelope")
+        _resource_evidence_is_valid(methods[pair["pair_id"]][method])
         for method in (reference_method, contender)
+    )
+
+
+def _resource_evidence_is_valid(receipt: Any) -> bool:
+    if not isinstance(receipt, dict):
+        return False
+    envelope = receipt.get("resource_envelope")
+    binding = receipt.get("resource_binding")
+    if not isinstance(envelope, dict) or not isinstance(binding, dict):
+        return False
+    if envelope.get("source_schema") != "abyss_machine_resource_launch_v1":
+        return False
+    if not isinstance(envelope.get("source_sha256"), str) or not envelope["source_sha256"]:
+        return False
+    if not isinstance(envelope.get("unit"), str) or not envelope["unit"]:
+        return False
+    if not isinstance(envelope.get("plan_decision"), str) or not envelope["plan_decision"]:
+        return False
+    if not _finite_nonnegative_number(envelope.get("footprint_peak_mib")):
+        return False
+    for key in ("memory_peak_mib", "memory_swap_peak_mib", "requested_demand_mib"):
+        if key in envelope and not _finite_nonnegative_number(envelope[key]):
+            return False
+    if "forced" in envelope and not isinstance(envelope["forced"], bool):
+        return False
+    return all(
+        isinstance(binding.get(key), str) and bool(binding[key])
+        for key in ("trial_sha256", "launch_sha256")
     )
 
 
@@ -293,54 +326,91 @@ def compare_receipts(receipts: Sequence[dict[str, Any]]) -> dict[str, Any]:
                     comparison = _pair_comparison(incumbent, contender, pair_id)
                     comparison["reference_method"] = INCUMBENT_METHOD
                     incumbent_paired.append(comparison)
+        candidate_pair_ids = {
+            pair_id for pair_id, methods in pairs.items() if candidate in methods
+        }
         valid = [pair for pair in paired if pair["comparable"] and pair["correctness"]]
         valid_pair_ids = {pair["pair_id"] for pair in valid}
+        serial_pair_ids = {pair["pair_id"] for pair in paired}
+        serial_comparison_complete = (
+            bool(candidate_pair_ids)
+            and serial_pair_ids == candidate_pair_ids
+            and valid_pair_ids == candidate_pair_ids
+        )
         hosted = [pair for pair in valid if _hosted_pair(pair, pairs, BASELINE_METHOD, candidate)]
+        hosted_pair_ids = {pair["pair_id"] for pair in hosted}
         material_count = sum(bool(pair["material"]) for pair in valid)
         hosted_material_count = sum(bool(pair["material"]) for pair in hosted)
         latency_rule_passed = (
             len(hosted) >= MIN_PAIRED_RUNS
             and hosted_material_count >= MIN_MATERIAL_PAIRS
         )
-        resource_pair_count = sum(
+        resource_pair_count_all = sum(
             1 for pair in valid if _resource_pair(pair, pairs, BASELINE_METHOD, candidate)
+        )
+        resource_pair_count = sum(
+            1 for pair in hosted if _resource_pair(pair, pairs, BASELINE_METHOD, candidate)
         )
 
         incumbent_required = candidate != INCUMBENT_METHOD
         incumbent_valid = [
             pair
             for pair in incumbent_paired
-            if pair["pair_id"] in valid_pair_ids
+            if pair["pair_id"] in candidate_pair_ids
             and pair["comparable"]
             and pair["correctness"]
         ]
         incumbent_valid_pair_ids = {pair["pair_id"] for pair in incumbent_valid}
         incumbent_comparison_complete = (
             not incumbent_required
-            or (bool(valid_pair_ids) and incumbent_valid_pair_ids == valid_pair_ids)
+            or (
+                serial_comparison_complete
+                and incumbent_valid_pair_ids == candidate_pair_ids
+                and {pair["pair_id"] for pair in incumbent_paired} == candidate_pair_ids
+            )
         )
         incumbent_hosted = [
             pair
             for pair in incumbent_valid
-            if _hosted_pair(pair, pairs, INCUMBENT_METHOD, candidate)
+            if pair["pair_id"] in hosted_pair_ids
+            and _hosted_pair(pair, pairs, INCUMBENT_METHOD, candidate)
         ]
-        incumbent_resource_pair_count = sum(
+        incumbent_resource_pair_count_all = sum(
             1
             for pair in incumbent_valid
             if _resource_pair(pair, pairs, INCUMBENT_METHOD, candidate)
         )
-        incumbent_median = (
+        incumbent_resource_pair_count = sum(
+            1
+            for pair in incumbent_hosted
+            if _resource_pair(pair, pairs, INCUMBENT_METHOD, candidate)
+        )
+        incumbent_all_median = (
             statistics.median(
                 pair["baseline_wall_seconds"] for pair in incumbent_valid
             )
             if incumbent_valid
             else None
         )
-        candidate_incumbent_median = (
+        candidate_incumbent_all_median = (
             statistics.median(
                 pair["candidate_wall_seconds"] for pair in incumbent_valid
             )
             if incumbent_valid
+            else None
+        )
+        incumbent_median = (
+            statistics.median(
+                pair["baseline_wall_seconds"] for pair in incumbent_hosted
+            )
+            if incumbent_hosted
+            else None
+        )
+        candidate_incumbent_median = (
+            statistics.median(
+                pair["candidate_wall_seconds"] for pair in incumbent_hosted
+            )
+            if incumbent_hosted
             else None
         )
         incumbent_benefit_seconds = (
@@ -352,12 +422,22 @@ def compare_receipts(receipts: Sequence[dict[str, Any]]) -> dict[str, Any]:
             None
             if not incumbent_required
             else (
-                incumbent_comparison_complete
+                serial_comparison_complete
+                and incumbent_comparison_complete
                 and len(incumbent_hosted) >= MIN_PAIRED_RUNS
                 and incumbent_benefit_seconds is not None
                 and incumbent_benefit_seconds > 0
             )
         )
+        candidate_comparison_complete = (
+            serial_comparison_complete
+            and (not incumbent_required or incumbent_comparison_complete)
+        )
+        candidate_blockers: list[str] = []
+        if not candidate_comparison_complete:
+            candidate_blockers.append(
+                "candidate trials do not all have complete, valid reference counterparts"
+            )
         incumbent_blockers: list[str] = []
         if incumbent_required and not incumbent_comparison_complete:
             incumbent_blockers.append(
@@ -391,6 +471,7 @@ def compare_receipts(receipts: Sequence[dict[str, Any]]) -> dict[str, Any]:
             latency_rule_passed
             and resource_evidence
             and one_source
+            and candidate_comparison_complete
             and incumbent_gate_passed
             and not blockers
         )
@@ -415,11 +496,17 @@ def compare_receipts(receipts: Sequence[dict[str, Any]]) -> dict[str, Any]:
                 "latency_rule_passed": latency_rule_passed,
                 "resource_evidence_complete": resource_evidence,
                 "resource_pair_count": resource_pair_count,
+                "resource_pair_count_all_pairs": resource_pair_count_all,
+                "candidate_trial_count": len(candidate_pair_ids),
+                "candidate_comparison_complete": candidate_comparison_complete,
+                "candidate_blockers": candidate_blockers,
                 "incumbent_comparison_required": incumbent_required,
                 "incumbent_pairs": incumbent_paired,
                 "incumbent_valid_pair_count": len(incumbent_valid),
                 "incumbent_hosted_pair_count": len(incumbent_hosted),
+                "incumbent_local_pair_count": len(incumbent_valid) - len(incumbent_hosted),
                 "incumbent_resource_pair_count": incumbent_resource_pair_count,
+                "incumbent_resource_pair_count_all_pairs": incumbent_resource_pair_count_all,
                 "incumbent_comparison_complete": incumbent_comparison_complete,
                 "incumbent_median_wall_seconds": (
                     round(incumbent_median, 6) if incumbent_median is not None else None
@@ -427,6 +514,16 @@ def compare_receipts(receipts: Sequence[dict[str, Any]]) -> dict[str, Any]:
                 "median_candidate_vs_incumbent_wall_seconds": (
                     round(candidate_incumbent_median, 6)
                     if candidate_incumbent_median is not None
+                    else None
+                ),
+                "incumbent_all_pair_median_wall_seconds": (
+                    round(incumbent_all_median, 6)
+                    if incumbent_all_median is not None
+                    else None
+                ),
+                "median_candidate_vs_incumbent_all_pair_wall_seconds": (
+                    round(candidate_incumbent_all_median, 6)
+                    if candidate_incumbent_all_median is not None
                     else None
                 ),
                 "incumbent_benefit_seconds": (

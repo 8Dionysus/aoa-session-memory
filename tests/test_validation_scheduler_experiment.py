@@ -278,7 +278,29 @@ def _receipt(
         "cache": {"observed_state_before": "disabled"},
         "corpus": {"set_sha256": "corpus"},
         "execution": {"coverage_complete": True},
-        **({"resource_envelope": {"footprint_peak_mib": 1.0}} if resource else {}),
+        **(
+            {
+                "resource_envelope": {
+                    "source_schema": "abyss_machine_resource_launch_v1",
+                    "source_sha256": "launch-sha",
+                    "unit": "trial.service",
+                    "memory_peak_mib": 1.0,
+                    "memory_swap_peak_mib": 0.0,
+                    "footprint_peak_mib": 1.0,
+                    "service_runtime": "1s",
+                    "cpu_time_consumed": "1s",
+                    "requested_demand_mib": 1.0,
+                    "plan_decision": "allow",
+                    "forced": False,
+                },
+                "resource_binding": {
+                    "trial_sha256": "trial-sha",
+                    "launch_sha256": "launch-sha",
+                },
+            }
+            if resource
+            else {}
+        ),
     }
 
 
@@ -373,6 +395,107 @@ def test_contender_reports_complete_static2_comparison_before_admission() -> Non
     assert contender["incumbent_benefit_seconds"] == 60.0
     assert contender["resource_evidence_complete"] is True
     assert contender["admission_ready"] is True
+
+
+def _balanced_triplet(
+    pair_id: str,
+    serial_wall: float,
+    incumbent_wall: float,
+    contender_wall: float,
+    *,
+    hosted: bool,
+    contender_ok: bool = True,
+    resource: bool = True,
+) -> tuple[dict[str, object], ...]:
+    return (
+        _receipt("serial", pair_id, serial_wall, hosted=hosted, resource=resource),
+        _receipt("static2", pair_id, incumbent_wall, hosted=hosted, resource=resource),
+        _receipt(
+            "static2-balanced",
+            pair_id,
+            contender_wall,
+            ok=contender_ok,
+            hosted=hosted,
+            resource=resource,
+        ),
+    )
+
+
+@pytest.mark.parametrize("failure_kind", ("candidate_failure", "nonfinite_incumbent"))
+def test_all_supplied_candidate_trials_stay_in_the_admission_denominator(
+    failure_kind: str,
+) -> None:
+    receipts = [
+        receipt
+        for pair_id in ("pair-1", "pair-2", "pair-3")
+        for receipt in _balanced_triplet(
+            pair_id, 200, 100, 40, hosted=True
+        )
+    ]
+    if failure_kind == "candidate_failure":
+        receipts.extend(_balanced_triplet("pair-4", 200, 100, 40, hosted=True, contender_ok=False))
+    else:
+        extra = list(_balanced_triplet("pair-4", 200, 100, 40, hosted=True))
+        extra[1]["wall_seconds"] = float("inf")
+        receipts.extend(extra)
+
+    result = validation_scheduler_experiment.compare_receipts(receipts)
+    contender = next(
+        item for item in result["candidates"] if item["candidate"] == "static2-balanced"
+    )
+
+    assert contender["candidate_trial_count"] == 4
+    assert contender["candidate_comparison_complete"] is False
+    assert contender["admission_ready"] is False
+
+
+def test_incumbent_benefit_uses_hosted_cohort_and_reports_local_separately() -> None:
+    receipts = [
+        receipt
+        for pair_id in ("hosted-1", "hosted-2", "hosted-3")
+        for receipt in _balanced_triplet(
+            pair_id, 200, 100, 110, hosted=True
+        )
+    ]
+    receipts.extend(
+        receipt
+        for pair_id in ("local-1", "local-2", "local-3")
+        for receipt in _balanced_triplet(
+            pair_id, 200, 180, 1, hosted=False
+        )
+    )
+
+    result = validation_scheduler_experiment.compare_receipts(receipts)
+    contender = next(
+        item for item in result["candidates"] if item["candidate"] == "static2-balanced"
+    )
+
+    assert contender["incumbent_hosted_pair_count"] == 3
+    assert contender["incumbent_local_pair_count"] == 3
+    assert contender["incumbent_benefit_seconds"] == -10.0
+    assert contender["incumbent_benefit_positive"] is False
+    assert contender["admission_ready"] is False
+
+
+def test_truthy_non_resource_shape_is_not_resource_evidence() -> None:
+    receipts = [
+        receipt
+        for pair_id in ("pair-1", "pair-2", "pair-3")
+        for receipt in _balanced_triplet(
+            pair_id, 200, 100, 40, hosted=True
+        )
+    ]
+    for receipt in receipts:
+        if receipt["method"]["name"] != "serial":
+            receipt["resource_envelope"] = "present-but-not-a-binding"
+
+    result = validation_scheduler_experiment.compare_receipts(receipts)
+    contender = next(
+        item for item in result["candidates"] if item["candidate"] == "static2-balanced"
+    )
+
+    assert contender["resource_evidence_complete"] is False
+    assert contender["admission_ready"] is False
 
 
 def test_contender_missing_static2_pair_fails_closed() -> None:
